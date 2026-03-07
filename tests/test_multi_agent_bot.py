@@ -34,6 +34,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
     _matrix_homeserver_startup_timeout_seconds_from_env,
+    _run_auxiliary_task_forever,
     _wait_for_matrix_homeserver,
 )
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -3042,19 +3043,19 @@ class TestMultiAgentOrchestrator:
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
-        async def _configure_knowledge(*_: object, **__: object) -> None:
-            call_order.append("configure_knowledge")
+        async def _schedule_knowledge(*_: object, **__: object) -> None:
+            call_order.append("schedule_knowledge")
 
         with (
             patch("mindroom.orchestrator._wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
-            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure_knowledge),
+            patch.object(orchestrator, "_schedule_knowledge_refresh", side_effect=_schedule_knowledge),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
             patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
         ):
             await orchestrator.start()
 
-        assert call_order == ["wait_for_homeserver", "setup_rooms", "configure_knowledge"]
+        assert call_order == ["wait_for_homeserver", "setup_rooms", "schedule_knowledge"]
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -3209,26 +3210,92 @@ class TestMultiAgentOrchestrator:
             await _wait_for_matrix_homeserver(timeout_seconds=0.01, retry_interval_seconds=0.001)
 
     @pytest.mark.asyncio
-    async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:
-        """Background knowledge failures should be logged and task state reset."""
+    async def test_schedule_knowledge_refresh_retries_until_success(self, tmp_path: Path) -> None:
+        """Background knowledge refresh should keep retrying until it succeeds."""
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         config = MagicMock()
+        attempts = 0
 
-        mock_configure = AsyncMock(side_effect=RuntimeError("boom"))
+        async def _configure(*_: object, **__: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
 
         with (
-            patch.object(orchestrator, "_configure_knowledge", mock_configure),
-            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+            patch.object(orchestrator, "_configure_knowledge", side_effect=_configure),
+            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
         ):
             await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
             task = orchestrator._knowledge_refresh_task
             assert task is not None
-            await asyncio.gather(task, return_exceptions=True)
-            await asyncio.sleep(0)
+            await task
 
         assert orchestrator._knowledge_refresh_task is None
-        assert mock_configure.await_count == 2
-        mock_exception.assert_called_once_with("Background knowledge refresh failed")
+        assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_start_schedules_retry_for_failed_agents(self, tmp_path: Path) -> None:
+        """Startup should keep degraded agents around and retry them in the background."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = MagicMock()
+
+        router_bot = MagicMock()
+        router_bot.agent_name = "router"
+        router_bot.try_start = AsyncMock(return_value=True)
+
+        failing_bot = MagicMock()
+        failing_bot.agent_name = "general"
+        failing_bot.try_start = AsyncMock(return_value=False)
+
+        orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
+
+        with (
+            patch("mindroom.orchestrator._wait_for_matrix_homeserver", new=AsyncMock()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
+            patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await orchestrator.start()
+
+        assert "general" in orchestrator.agent_bots
+        mock_schedule_retry.assert_awaited_once_with("general")
+
+    @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
+        """Auxiliary supervisors should restart tasks that crash."""
+        started = asyncio.Event()
+        calls = 0
+
+        async def _operation() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
+            started.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            _run_auxiliary_task_forever(
+                "test task",
+                _operation,
+                initial_delay_seconds=0,
+                max_delay_seconds=0,
+            ),
+        )
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == 2
 
     @pytest.mark.asyncio
     async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:
@@ -3264,6 +3331,74 @@ class TestMultiAgentOrchestrator:
         assert updated is False
         mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
         mock_configure_knowledge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:
+        """Hot reload should retain failed bots and retry them instead of dropping them."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+
+        old_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+        new_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+                "coach": {
+                    "display_name": "Coach",
+                    "role": "Coaching assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+
+        orchestrator.config = old_config
+        orchestrator.running = True
+
+        router_bot = MagicMock()
+        router_bot.config = old_config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        general_bot = MagicMock()
+        general_bot.config = old_config
+        general_bot.enable_streaming = True
+        general_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+
+        new_bot = MagicMock()
+        new_bot.agent_name = "coach"
+        new_bot.try_start = AsyncMock(return_value=False)
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
+            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is True
+        assert orchestrator.agent_bots["coach"] is new_bot
+        mock_schedule_retry.assert_awaited_once_with("coach")
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop

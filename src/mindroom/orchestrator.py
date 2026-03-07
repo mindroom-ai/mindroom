@@ -39,6 +39,8 @@ from .matrix.users import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
@@ -46,6 +48,19 @@ logger = get_logger(__name__)
 _MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS"
 _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
+_STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
+_STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
+_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
+_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
+_PERMANENT_STARTUP_ERROR_MARKERS = (
+    "M_FORBIDDEN",
+    "M_USER_DEACTIVATED",
+    "M_UNKNOWN_TOKEN",
+    "M_INVALID_USERNAME",
+    "mindroom_user.username cannot be changed after first startup",
+    "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid",
+    "Matrix homeserver requires registration tokens for account creation",
+)
 
 
 def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
@@ -60,6 +75,63 @@ def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
         msg = f"{_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV} must be 0 or a positive integer"
         raise ValueError(msg)
     return timeout_seconds
+
+
+def _retry_delay_seconds(
+    attempt: int,
+    *,
+    initial_delay_seconds: float,
+    max_delay_seconds: float,
+) -> float:
+    """Return capped exponential backoff delay for a retry attempt."""
+    exponent = max(0, attempt - 1)
+    return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
+
+
+def _is_permanent_startup_error(exc: Exception) -> bool:
+    """Return whether a startup exception is clearly non-retryable."""
+    if not isinstance(exc, ValueError):
+        return False
+    error_message = str(exc)
+    return any(marker in error_message for marker in _PERMANENT_STARTUP_ERROR_MARKERS)
+
+
+async def _run_with_retry(
+    step_name: str,
+    operation: Callable[[], Awaitable[None]],
+    *,
+    initial_delay_seconds: float = _STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    max_delay_seconds: float = _STARTUP_RETRY_MAX_DELAY_SECONDS,
+    permanent_error_check: Callable[[Exception], bool] | None = None,
+) -> None:
+    """Run an async startup step until it succeeds or a permanent error occurs."""
+    attempt = 0
+    while True:
+        try:
+            await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if permanent_error_check is not None and permanent_error_check(exc):
+                logger.exception("%s failed with a permanent error", step_name)
+                raise
+            attempt += 1
+            retry_in_seconds = _retry_delay_seconds(
+                attempt,
+                initial_delay_seconds=initial_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+            logger.warning(
+                "%s failed; retrying",
+                step_name,
+                attempt=attempt,
+                retry_in_seconds=retry_in_seconds,
+                exc_info=True,
+            )
+            set_runtime_starting(f"{step_name} failed; retrying in {retry_in_seconds:.0f}s")
+            await asyncio.sleep(retry_in_seconds)
+        else:
+            return
 
 
 async def _wait_for_matrix_homeserver(
@@ -125,6 +197,7 @@ class MultiAgentOrchestrator:
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
+    _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
@@ -217,21 +290,129 @@ class MultiAgentOrchestrator:
         except Exception:
             logger.exception("Background knowledge refresh failed")
 
-    async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
-        """Run one background knowledge refresh with a single retry."""
-        current_task = asyncio.current_task()
+    async def _cancel_bot_start_task(self, entity_name: str) -> None:
+        """Cancel any background start task for one bot."""
+        task = self._bot_start_tasks.pop(entity_name, None)
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _cancel_bot_start_tasks(self) -> None:
+        """Cancel all background bot start tasks."""
+        entity_names = list(self._bot_start_tasks)
+        for entity_name in entity_names:
+            await self._cancel_bot_start_task(entity_name)
+
+    @staticmethod
+    def _log_bot_start_task_result(task: asyncio.Task) -> None:
+        """Log detached bot-start task failures."""
         try:
-            for attempt in range(2):
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Background bot start task failed")
+
+    def _start_sync_task(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
+        """Ensure one sync task exists for a running bot."""
+        existing_task = self._sync_tasks.get(entity_name)
+        if existing_task is not None and not existing_task.done():
+            return
+        self._sync_tasks[entity_name] = asyncio.create_task(
+            _sync_forever_with_restart(bot),
+            name=f"sync_{entity_name}",
+        )
+
+    def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot | TeamBot]:
+        """Return the bots whose room memberships should be reconciled after a background start."""
+        if entity_name == ROUTER_AGENT_NAME:
+            return [bot for bot in self.agent_bots.values() if bot.running]
+        bot = self.agent_bots.get(entity_name)
+        if bot is None:
+            return []
+        return [bot]
+
+    async def _run_bot_start_retry(self, entity_name: str) -> None:
+        """Keep retrying one bot start until it succeeds or the task is cancelled."""
+        current_task = asyncio.current_task()
+        attempt = 0
+        try:
+            while True:
+                bot = self.agent_bots.get(entity_name)
+                if bot is None:
+                    return
+
+                if await bot.try_start():
+                    logger.info("Bot recovered after startup failure", agent_name=entity_name)
+                    bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
+                    if bots_to_setup:
+
+                        async def _setup_operation(
+                            bots_to_setup: list[AgentBot | TeamBot] = bots_to_setup,
+                        ) -> None:
+                            await self._setup_rooms_and_memberships(bots_to_setup)
+
+                        await _run_with_retry(
+                            f"Updating Matrix room memberships for {entity_name}",
+                            _setup_operation,
+                        )
+                    self._start_sync_task(entity_name, bot)
+                    return
+
+                attempt += 1
+                retry_in_seconds = _retry_delay_seconds(
+                    attempt,
+                    initial_delay_seconds=_STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+                    max_delay_seconds=_STARTUP_RETRY_MAX_DELAY_SECONDS,
+                )
+                logger.warning(
+                    "Bot startup failed; retrying in background",
+                    agent_name=entity_name,
+                    attempt=attempt,
+                    retry_in_seconds=retry_in_seconds,
+                )
+                await asyncio.sleep(retry_in_seconds)
+        finally:
+            if self._bot_start_tasks.get(entity_name) is current_task:
+                del self._bot_start_tasks[entity_name]
+
+    async def _schedule_bot_start_retry(self, entity_name: str) -> None:
+        """Schedule background retries for one failed bot startup."""
+        await self._cancel_bot_start_task(entity_name)
+        task = asyncio.create_task(
+            self._run_bot_start_retry(entity_name),
+            name=f"retry_start_{entity_name}",
+        )
+        task.add_done_callback(self._log_bot_start_task_result)
+        self._bot_start_tasks[entity_name] = task
+
+    async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
+        """Run background knowledge refresh until it succeeds or is cancelled."""
+        current_task = asyncio.current_task()
+        attempt = 0
+        try:
+            while True:
                 try:
                     await self._configure_knowledge(config, start_watcher=start_watcher)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    if attempt == 0:
-                        logger.warning("Background knowledge refresh failed; retrying once")
-                        await asyncio.sleep(1)
-                        continue
-                    raise
+                    attempt += 1
+                    retry_in_seconds = _retry_delay_seconds(
+                        attempt,
+                        initial_delay_seconds=_STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+                        max_delay_seconds=_STARTUP_RETRY_MAX_DELAY_SECONDS,
+                    )
+                    logger.warning(
+                        "Background knowledge refresh failed; retrying",
+                        attempt=attempt,
+                        retry_in_seconds=retry_in_seconds,
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(retry_in_seconds)
+                    continue
                 else:
                     return
         finally:
@@ -267,7 +448,12 @@ class MultiAgentOrchestrator:
         load_plugins(config)
 
         # Ensure user account exists first
-        await self._ensure_user_account(config)
+        if config.mindroom_user is not None:
+            await _run_with_retry(
+                "Preparing MindRoom user account",
+                lambda: self._ensure_user_account(config),
+                permanent_error_check=_is_permanent_startup_error,
+            )
         self.config = config
 
         # Create bots for all configured entities
@@ -297,33 +483,65 @@ class MultiAgentOrchestrator:
             set_runtime_failed(str(exc))
             raise
 
-    async def _start_runtime(self) -> None:
-        """Run the startup sequence before handing off to the sync loops."""
-        await _wait_for_matrix_homeserver()
-        if not self.agent_bots:
-            await self.initialize()
-
-        set_runtime_starting("Starting Matrix bot accounts")
-        # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
-        start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
-        results = await asyncio.gather(*start_tasks)
-
-        # Check for failures
-        failed_agents = [bot.agent_name for bot, success in zip(self.agent_bots.values(), results) if not success]
-
-        if len(failed_agents) == len(self.agent_bots):
-            msg = "All agents failed to start - cannot proceed"
+    async def _start_router_bot(self) -> AgentBot | TeamBot:
+        """Start the router bot, retrying until it succeeds."""
+        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        if router_bot is None:
+            msg = "Router bot is required for startup"
             raise RuntimeError(msg)
+
+        async def _start_router() -> None:
+            if await router_bot.try_start():
+                return
+            msg = "Router bot failed to start"
+            raise RuntimeError(msg)
+
+        set_runtime_starting("Starting router Matrix account")
+        await _run_with_retry("Starting router Matrix account", _start_router)
+        return router_bot
+
+    async def _start_remaining_bots_once(self) -> tuple[list[AgentBot | TeamBot], list[str]]:
+        """Start non-router bots once and return started bots plus failed entity names."""
+        started_bots: list[AgentBot | TeamBot] = []
+        failed_agents: list[str] = []
+        remaining_bots = [
+            (entity_name, bot) for entity_name, bot in self.agent_bots.items() if entity_name != ROUTER_AGENT_NAME
+        ]
+        if not remaining_bots:
+            return started_bots, failed_agents
+
+        set_runtime_starting("Starting remaining Matrix bot accounts")
+        results = await asyncio.gather(*[bot.try_start() for _, bot in remaining_bots])
+        for (entity_name, bot), success in zip(remaining_bots, results):
+            if success:
+                started_bots.append(bot)
+                continue
+            failed_agents.append(entity_name)
+        return started_bots, failed_agents
+
+    def _log_degraded_startup(self, failed_agents: list[str]) -> None:
+        """Log degraded startup status for failed non-router bots."""
         if failed_agents:
             logger.warning(
                 f"System starting in degraded mode. "
                 f"Failed agents: {', '.join(failed_agents)} "
                 f"({len(self.agent_bots) - len(failed_agents)}/{len(self.agent_bots)} operational)",
             )
-        else:
-            logger.info("All agent bots started successfully")
+            return
+        logger.info("All agent bots started successfully")
 
-        self.running = True
+    async def _start_runtime(self) -> None:
+        """Run the startup sequence before handing off to the sync loops."""
+        await _wait_for_matrix_homeserver()
+        if not self.agent_bots:
+            await self.initialize()
+
+        router_bot = await self._start_router_bot()
+        started_bots = [router_bot]
+        additional_started_bots, failed_agents = await self._start_remaining_bots_once()
+        started_bots.extend(additional_started_bots)
+        self._log_degraded_startup(failed_agents)
+
         config = self.config
         if config is None:
             msg = "Configuration not loaded"
@@ -331,12 +549,16 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have all bots join them before potentially heavy
         # knowledge indexing, so new rooms/invites are not delayed by embeddings.
-        set_runtime_starting("Setting up Matrix rooms and memberships")
-        await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
+        await _run_with_retry(
+            "Setting up Matrix rooms and memberships",
+            lambda: self._setup_rooms_and_memberships(started_bots),
+        )
 
-        # Build knowledge before sync loops start so first responses include configured bases.
-        set_runtime_starting("Initializing knowledge bases")
-        await self._configure_knowledge(config, start_watcher=True)
+        self.running = True
+
+        # Knowledge is optional for initial availability.
+        set_runtime_starting("Refreshing knowledge bases in background")
+        await self._schedule_knowledge_refresh(config, start_watcher=True)
 
         set_runtime_starting("Starting background workers")
         await self._sync_memory_auto_flush_worker()
@@ -344,10 +566,11 @@ class MultiAgentOrchestrator:
         # Create sync tasks for each bot with automatic restart on failure
         set_runtime_starting("Starting Matrix sync loops")
         for entity_name, bot in self.agent_bots.items():
-            # Create a task for each bot's sync loop with restart wrapper
-            sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-            # Store the task reference for later cancellation
-            self._sync_tasks[entity_name] = sync_task
+            if bot.running:
+                self._start_sync_task(entity_name, bot)
+
+        for entity_name in failed_agents:
+            await self._schedule_bot_start_retry(entity_name)
 
         set_runtime_ready()
 
@@ -417,9 +640,12 @@ class MultiAgentOrchestrator:
 
         # Stop entities that need restarting
         if entities_to_restart:
+            for entity_name in entities_to_restart:
+                await self._cancel_bot_start_task(entity_name)
             await _stop_entities(entities_to_restart, self.agent_bots, self._sync_tasks)
 
         # Recreate entities that need restarting using self-management
+        failed_entities_to_retry: list[str] = []
         for entity_name in entities_to_restart:
             if entity_name in all_new_entities:
                 # Create temporary user object (will be updated by ensure_user_account)
@@ -431,11 +657,9 @@ class MultiAgentOrchestrator:
                     # Agent handles its own setup (but doesn't join rooms yet)
                     if await bot.try_start():
                         # Start sync loop with automatic restart
-                        sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-                        self._sync_tasks[entity_name] = sync_task
+                        self._start_sync_task(entity_name, bot)
                     else:
-                        # Remove the failed bot from our registry
-                        del self.agent_bots[entity_name]
+                        failed_entities_to_retry.append(entity_name)
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
@@ -448,15 +672,14 @@ class MultiAgentOrchestrator:
                 bot.orchestrator = self
                 self.agent_bots[entity_name] = bot
                 if await bot.try_start():
-                    sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
-                    self._sync_tasks[entity_name] = sync_task
+                    self._start_sync_task(entity_name, bot)
                 else:
-                    # Remove the failed bot from our registry
-                    del self.agent_bots[entity_name]
+                    failed_entities_to_retry.append(entity_name)
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
         for entity_name in removed_entities:
+            await self._cancel_bot_start_task(entity_name)
             # Cancel sync task first
             await _cancel_sync_task(entity_name, self._sync_tasks)
 
@@ -475,6 +698,9 @@ class MultiAgentOrchestrator:
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed or authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
+        for entity_name in failed_entities_to_retry:
+            await self._schedule_bot_start_retry(entity_name)
+
         await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
         await self._sync_memory_auto_flush_worker()
 
@@ -486,6 +712,7 @@ class MultiAgentOrchestrator:
         self.running = False
         await self._stop_memory_auto_flush_worker()
         await self._cancel_knowledge_refresh_task()
+        await self._cancel_bot_start_tasks()
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 
@@ -872,7 +1099,7 @@ async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int =
             await asyncio.sleep(wait_time)
 
 
-async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watching: asyncio.Event) -> None:
+async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
     """Handle configuration file changes."""
     logger.info("Configuration file changed, checking for updates...")
     if orchestrator.running:
@@ -881,8 +1108,8 @@ async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watch
             logger.info("Configuration update applied to affected agents")
         else:
             logger.info("No agent changes detected in configuration update")
-    if not orchestrator.running:
-        stop_watching.set()
+        return
+    logger.info("Ignoring config change while startup is still in progress")
 
 
 async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
@@ -890,7 +1117,7 @@ async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestr
     stop_watching = asyncio.Event()
 
     async def on_config_change() -> None:
-        await _handle_config_change(orchestrator, stop_watching)
+        await _handle_config_change(orchestrator)
 
     await watch_file(config_path, on_config_change, stop_watching)
 
@@ -917,6 +1144,51 @@ async def _run_api_server(host: str, port: int, log_level: str) -> None:
     config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     await server.serve()
+
+
+async def _run_auxiliary_task_forever(
+    task_name: str,
+    operation: Callable[[], Awaitable[None]],
+    *,
+    initial_delay_seconds: float = _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
+    max_delay_seconds: float = _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,
+) -> None:
+    """Restart a non-critical background task whenever it exits or crashes."""
+    restart_count = 0
+    while True:
+        try:
+            await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            restart_count += 1
+            retry_in_seconds = _retry_delay_seconds(
+                restart_count,
+                initial_delay_seconds=initial_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+            logger.exception(
+                "Auxiliary task crashed; restarting",
+                task_name=task_name,
+                restart_count=restart_count,
+                retry_in_seconds=retry_in_seconds,
+            )
+            await asyncio.sleep(retry_in_seconds)
+            continue
+
+        restart_count += 1
+        retry_in_seconds = _retry_delay_seconds(
+            restart_count,
+            initial_delay_seconds=initial_delay_seconds,
+            max_delay_seconds=max_delay_seconds,
+        )
+        logger.warning(
+            "Auxiliary task exited unexpectedly; restarting",
+            task_name=task_name,
+            restart_count=restart_count,
+            retry_in_seconds=retry_in_seconds,
+        )
+        await asyncio.sleep(retry_in_seconds)
 
 
 async def main(
@@ -957,53 +1229,55 @@ async def main(
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
     set_runtime_starting()
+    auxiliary_tasks: list[asyncio.Task] = []
 
     try:
-        # Create task to run the orchestrator
-        orchestrator_task = asyncio.create_task(orchestrator.start())
-
-        # Create task to watch config file for changes
-        watcher_task = asyncio.create_task(_watch_config_task(config_path, orchestrator))
-
-        # Create task to watch skills for changes
-        skills_watcher_task = asyncio.create_task(_watch_skills_task(orchestrator))
-
-        tasks = {orchestrator_task, watcher_task, skills_watcher_task}
+        # Keep auxiliary tasks alive independently of the main runtime task.
+        auxiliary_tasks.append(
+            asyncio.create_task(
+                _run_auxiliary_task_forever(
+                    "config watcher",
+                    lambda: _watch_config_task(config_path, orchestrator),
+                ),
+                name="config_watcher_supervisor",
+            ),
+        )
+        auxiliary_tasks.append(
+            asyncio.create_task(
+                _run_auxiliary_task_forever(
+                    "skills watcher",
+                    lambda: _watch_skills_task(orchestrator),
+                ),
+                name="skills_watcher_supervisor",
+            ),
+        )
 
         # Optionally start the bundled dashboard/API server
         if api:
             logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
-            api_task = asyncio.create_task(_run_api_server(api_host, api_port, log_level))
-            tasks.add(api_task)
+            auxiliary_tasks.append(
+                asyncio.create_task(
+                    _run_auxiliary_task_forever(
+                        "bundled API server",
+                        lambda: _run_api_server(api_host, api_port, log_level),
+                    ),
+                    name="api_server_supervisor",
+                ),
+            )
 
-        # Wait for any task to complete (or fail)
-        done, pending = await asyncio.wait(
-            tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        # Check if any completed task had an exception
-        for task in done:
-            try:
-                task.result()  # This will raise if the task had an exception
-            except asyncio.CancelledError:
-                logger.info("Task was cancelled")
-            except Exception:
-                logger.exception("Task failed with exception")
-                # Don't re-raise - let cleanup happen gracefully
-
-        # Cancel any pending tasks
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        await orchestrator.start()
 
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
     except Exception:
         logger.exception("Error in orchestrator")
+        raise
     finally:
+        for task in auxiliary_tasks:
+            task.cancel()
+        for task in auxiliary_tasks:
+            with suppress(asyncio.CancelledError):
+                await task
         # Final cleanup
-        if orchestrator is not None:
-            await orchestrator.stop()
+        await orchestrator.stop()
         reset_runtime_state()
