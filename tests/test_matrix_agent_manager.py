@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -11,6 +11,7 @@ import yaml
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.matrix import provisioning
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
@@ -412,8 +413,86 @@ class TestMatrixRegistration:
         monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_ID", raising=False)
         monkeypatch.delenv("MINDROOM_LOCAL_CLIENT_SECRET", raising=False)
 
-        with pytest.raises(ValueError, match="mindroom connect --pair-code"):
+        with pytest.raises(PermanentMatrixStartupError, match="mindroom connect --pair-code"):
             await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_invalid_credentials_is_permanent(self) -> None:
+        """Credential revocation from the provisioning service should stop startup retries."""
+        client_secret = "secret-123"  # noqa: S105
+        password = "test_pass"  # noqa: S105
+
+        class _FakeResponse:
+            is_success = False
+            status_code = 403
+            text = "forbidden"
+
+        class _FakeAsyncClient:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, *_: object, **__: object) -> _FakeResponse:
+                return _FakeResponse()
+
+        with (
+            patch.object(provisioning.httpx, "AsyncClient", _FakeAsyncClient),
+            pytest.raises(PermanentMatrixStartupError, match="invalid or revoked"),
+        ):
+            await provisioning.register_user_via_provisioning_service(
+                provisioning_url="https://provisioning.example",
+                client_id="client-123",
+                client_secret=client_secret,
+                homeserver="http://localhost:8008",
+                username="test_user",
+                password=password,
+                display_name="Test User",
+            )
+
+    @pytest.mark.asyncio
+    async def test_register_user_via_provisioning_service_invalid_json_is_permanent(self) -> None:
+        """Invalid provisioning responses should not trigger endless retries."""
+        client_secret = "secret-123"  # noqa: S105
+        password = "test_pass"  # noqa: S105
+
+        class _FakeResponse:
+            is_success = True
+
+            def json(self) -> object:
+                msg = "bad json"
+                raise ValueError(msg)
+
+        class _FakeAsyncClient:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, *_: object, **__: object) -> _FakeResponse:
+                return _FakeResponse()
+
+        with (
+            patch.object(provisioning.httpx, "AsyncClient", _FakeAsyncClient),
+            pytest.raises(PermanentMatrixStartupError, match="invalid JSON"),
+        ):
+            await provisioning.register_user_via_provisioning_service(
+                provisioning_url="https://provisioning.example",
+                client_id="client-123",
+                client_secret=client_secret,
+                homeserver="http://localhost:8008",
+                username="test_user",
+                password=password,
+                display_name="Test User",
+            )
 
     @pytest.mark.asyncio
     async def test_register_user_missing_token_error_is_explicit(
