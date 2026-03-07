@@ -507,3 +507,71 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
     assert call_kwargs["reply_to_event_id"] == "$voice_event"
     assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
+
+
+@pytest.mark.asyncio
+async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tmp_path) -> None:  # noqa: ANN001
+    """Inherited audio-caption mentions should still target the agent when STT omits them."""
+    config = Config(
+        agents={
+            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+        },
+        authorization={"default_room_access": True},
+        voice={"enabled": True},
+    )
+
+    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
+    event = _make_voice_event(
+        sender="@alice:example.com",
+        body="For @research voice note",
+        source={
+            "content": {
+                "body": "For @research voice note",
+                "filename": "voice.ogg",
+                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+            },
+        },
+    )
+
+    bots: list[AgentBot] = []
+    for agent_name in ("home", "research"):
+        agent_user = MagicMock()
+        agent_user.user_id = f"@mindroom_{agent_name}:localhost"
+        agent_user.agent_name = agent_name
+        agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["!test:example.com"],
+        )
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot.logger = MagicMock()
+        bot.client = AsyncMock()
+        bot.client.rooms = {}
+        bot.client.user_id = f"@mindroom_{agent_name}:localhost"
+        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+        bots.append(bot)
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        for bot in bots:
+            await bot._on_media_message(room, event)
+
+    assert mock_download_audio.await_count == 1
+    assert mock_voice.await_count == 1
+    assert bots[0]._generate_response.await_count == 0
+    assert bots[1]._generate_response.await_count == 1
+    call_kwargs = bots[1]._generate_response.call_args.kwargs
+    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
+    assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
