@@ -179,6 +179,14 @@ class _ResponseAction:
     form_team: TeamFormationDecision | None = None
 
 
+@dataclass(frozen=True)
+class _RouterDispatchResult:
+    """Whether router dispatch consumed the event and if display-only echoes count as handled."""
+
+    handled: bool
+    mark_visible_echo_responded: bool = False
+
+
 def _should_skip_mentions(event_source: dict) -> bool:
     """Check if mentions in this message should be ignored for agent responses.
 
@@ -728,6 +736,8 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
         requester_user_id: str,
+        *,
+        visible_router_echo_event_id: str | None = None,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         assert isinstance(event.body, str)
@@ -769,6 +779,7 @@ class AgentBot:
             dispatch,
             message_for_decision=event.body,
             extra_content=message_extra_content or None,
+            visible_router_echo_event_id=visible_router_echo_event_id,
         )
         if action is None:
             return
@@ -981,7 +992,7 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        await self._maybe_send_visible_voice_echo(
+        visible_router_echo_event_id = await self._maybe_send_visible_voice_echo(
             room,
             event,
             text=prepared_voice.text,
@@ -997,6 +1008,7 @@ class AgentBot:
                 source=prepared_voice.source,
             ),
             requester_user_id,
+            visible_router_echo_event_id=visible_router_echo_event_id,
         )
 
     async def _maybe_send_visible_voice_echo(
@@ -1006,12 +1018,12 @@ class AgentBot:
         *,
         text: str,
         thread_id: str | None,
-    ) -> None:
+    ) -> str | None:
         """Optionally post a display-only router echo for normalized audio."""
         if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
-            return
+            return None
 
-        await self._send_response(
+        return await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=text,
@@ -1270,16 +1282,24 @@ class AgentBot:
         message_for_decision: str,
         router_message: str | None = None,
         extra_content: dict[str, Any] | None = None,
+        visible_router_echo_event_id: str | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
-        if await self._handle_router_dispatch(
+        router_result = await self._handle_router_dispatch(
             room,
             event,
             dispatch.context,
             dispatch.requester_user_id,
             message=router_message,
             extra_content=extra_content,
-        ):
+        )
+        if router_result.handled:
+            if (
+                router_result.mark_visible_echo_responded
+                and visible_router_echo_event_id is not None
+                and not self.response_tracker.has_responded(event.event_id)
+            ):
+                self.response_tracker.mark_responded(event.event_id, visible_router_echo_event_id)
             return None
 
         assert self.client is not None
@@ -1351,14 +1371,14 @@ class AgentBot:
         *,
         message: str | None = None,
         extra_content: dict[str, Any] | None = None,
-    ) -> bool:
+    ) -> _RouterDispatchResult:
         """Run the router dispatch logic shared by text and media handlers.
 
-        Returns True when this agent is the router and has handled (or skipped)
-        the message, meaning the caller should ``return`` immediately.
+        Returns whether router handling should short-circuit normal dispatch, and
+        whether a display-only router voice echo should count as handled.
         """
         if self.agent_name != ROUTER_AGENT_NAME:
-            return False
+            return _RouterDispatchResult(handled=False)
 
         agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
         sender_visible = filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config)
@@ -1366,21 +1386,34 @@ class AgentBot:
         if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
             if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
                 self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
-            else:
-                available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
-                if len(available_agents) == 1:
-                    self.logger.info("Skipping routing: only one agent present")
-                else:
-                    await self._handle_ai_routing(
-                        room,
-                        event,
-                        context.thread_history,
-                        context.thread_id,
-                        message=message,
-                        requester_user_id=requester_user_id,
-                        extra_content=extra_content,
-                    )
-        return True
+                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+            available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
+            if not available_agents:
+                self.logger.info("Routing check: no available agents present")
+                await self._handle_ai_routing(
+                    room,
+                    event,
+                    context.thread_history,
+                    context.thread_id,
+                    message=message,
+                    requester_user_id=requester_user_id,
+                    extra_content=extra_content,
+                )
+                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+            if len(available_agents) == 1:
+                self.logger.info("Skipping routing: only one agent present")
+                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
+            await self._handle_ai_routing(
+                room,
+                event,
+                context.thread_history,
+                context.thread_id,
+                message=message,
+                requester_user_id=requester_user_id,
+                extra_content=extra_content,
+            )
+            return _RouterDispatchResult(handled=True)
+        return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
 
     async def _resolve_response_action(
         self,
