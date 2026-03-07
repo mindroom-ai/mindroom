@@ -196,16 +196,13 @@ async def _download_mxc_text(  # noqa: PLR0911, PLR0912, C901
             logger.error(f"Invalid MXC URL: {mxc_url}")
             return None
 
-        # Extract server and media ID
+        # Validate the MXC URL structure before issuing the download.
         parts = mxc_url[6:].split("/", 1)
-        if len(parts) != 2:
+        if len(parts) != 2 or not parts[0] or not parts[1]:
             logger.error(f"Invalid MXC URL format: {mxc_url}")
             return None
 
-        server_name, media_id = parts
-
-        # Download the content
-        response = await client.download(server_name, media_id)
+        response = await client.download(mxc=mxc_url)
 
         if not isinstance(response, nio.DownloadResponse):
             logger.error(f"Failed to download MXC content: {response}", mxc_url=mxc_url)
