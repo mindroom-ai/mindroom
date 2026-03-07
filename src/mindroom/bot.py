@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -439,9 +438,7 @@ class AgentBot:
         assert self.client is not None
         joined_rooms = await get_joined_rooms(self.client)
         current_rooms = set(joined_rooms or [])
-        room_cache = getattr(self.client, "rooms", {})
-        if isinstance(room_cache, Mapping):
-            current_rooms.update(room_cache)
+        current_rooms.update(self.client.rooms)
 
         for room_id in self.rooms:
             if room_id in current_rooms:

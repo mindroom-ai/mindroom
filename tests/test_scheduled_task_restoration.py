@@ -58,6 +58,7 @@ class TestScheduledTaskRestoration:
 
         # Mock the client and join_room
         router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client.rooms = {}
 
         with (
             patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -107,6 +108,7 @@ class TestScheduledTaskRestoration:
 
         # Mock the client and join_room
         regular_bot.client = AsyncMock(spec=nio.AsyncClient)
+        regular_bot.client.rooms = {}
 
         with (
             patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -178,10 +180,15 @@ class TestScheduledTaskRestoration:
             rooms=["lobby"],
         )
         router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client.rooms = {}
 
         with (
             patch("mindroom.bot.wait_for_background_tasks", new_callable=AsyncMock),
-            patch("mindroom.bot.cancel_all_running_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_cancel,
+            patch(
+                "mindroom.bot.cancel_all_running_scheduled_tasks",
+                new_callable=AsyncMock,
+                return_value=2,
+            ) as mock_cancel,
         ):
             await router_bot.stop()
 
@@ -231,6 +238,7 @@ class TestScheduledTaskRestoration:
                 rooms=["lobby"],
             )
             bot.client = AsyncMock(spec=nio.AsyncClient)
+            bot.client.rooms = {}
 
             with (
                 patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),

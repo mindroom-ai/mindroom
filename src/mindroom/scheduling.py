@@ -245,9 +245,7 @@ async def cancel_all_running_scheduled_tasks() -> int:
         task.cancel()
         del _running_tasks[task_id]
 
-    awaitables = [task for _, task in running_items if isinstance(task, asyncio.Future)]
-    if awaitables:
-        await asyncio.gather(*awaitables, return_exceptions=True)
+    await asyncio.gather(*(task for _, task in running_items), return_exceptions=True)
 
     return len(running_items)
 
@@ -1089,7 +1087,7 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901
+async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901, PLR0912
     """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:

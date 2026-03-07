@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info, log_warning
-from openai.types.create_embedding_response import CreateEmbeddingResponse
+
+if TYPE_CHECKING:
+    from openai.types.create_embedding_response import CreateEmbeddingResponse
 
 _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
@@ -27,14 +29,13 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
     _dimensions_explicit: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Track whether dimensions came from explicit config."""
         self._dimensions_explicit = self.dimensions is not None
         if self.dimensions is None:
             self.dimensions = _default_dimensions(self.id)
 
     def _should_send_dimensions(self) -> bool:
-        return self.dimensions is not None and (
-            self._dimensions_explicit or self.id in _OPENAI_EMBEDDING_DIMENSIONS
-        )
+        return self.dimensions is not None and (self._dimensions_explicit or self.id in _OPENAI_EMBEDDING_DIMENSIONS)
 
     def _request_params(self, input_value: str | list[str]) -> dict[str, Any]:
         request: dict[str, Any] = {
@@ -50,10 +51,15 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
             request.update(self.request_params)
         return request
 
+    # NOTE: These overrides intentionally mirror agno's async/embedder methods
+    # because upstream inlines request construction instead of calling a shared helper.
+    # Keep them aligned with agno when upgrading that dependency.
     def response(self, text: str) -> CreateEmbeddingResponse:
+        """Request a single embedding synchronously."""
         return self.client.embeddings.create(**self._request_params(text))
 
     async def async_get_embedding(self, text: str) -> list[float]:
+        """Request a single embedding asynchronously."""
         try:
             response: CreateEmbeddingResponse = await self.aclient.embeddings.create(**self._request_params(text))
             return response.data[0].embedding
@@ -62,6 +68,7 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
             return []
 
     async def async_get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, Any] | None]:
+        """Request one embedding and its usage payload asynchronously."""
         try:
             response = await self.aclient.embeddings.create(**self._request_params(text))
             embedding = response.data[0].embedding
@@ -75,6 +82,7 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         self,
         texts: list[str],
     ) -> tuple[list[list[float]], list[dict[str, Any] | None]]:
+        """Request embeddings for a batch of texts and return per-item usage."""
         all_embeddings: list[list[float]] = []
         all_usage: list[dict[str, Any] | None] = []
         log_info(f"Getting embeddings and usage for {len(texts)} texts in batches of {self.batch_size} (async)")
@@ -83,7 +91,7 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
             batch_texts = texts[i : i + self.batch_size]
             try:
                 response: CreateEmbeddingResponse = await self.aclient.embeddings.create(
-                    **self._request_params(batch_texts)
+                    **self._request_params(batch_texts),
                 )
                 batch_embeddings = [data.embedding for data in response.data]
                 all_embeddings.extend(batch_embeddings)

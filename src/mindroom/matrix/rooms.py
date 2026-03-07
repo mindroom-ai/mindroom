@@ -223,7 +223,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 await _configure_managed_room_access(
                     client=client,
                     room_key=room_key,
-                    room_id=str(room_id),
+                    room_id=room_id,
                     config=config,
                     room_alias=full_alias,
                     context="existing_room_reconciliation",
