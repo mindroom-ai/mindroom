@@ -11,7 +11,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
@@ -23,7 +22,8 @@ def getenv_int(name: str, default: int) -> int:
 def validate_port(name: str, port: int) -> None:
     """Ensure a TCP port is within the valid range."""
     if not 1 <= port <= 65535:
-        raise ValueError(f"{name} must be between 1 and 65535, got {port}")
+        msg = f"{name} must be between 1 and 65535, got {port}"
+        raise ValueError(msg)
 
 
 def log(message: str) -> None:
@@ -36,7 +36,12 @@ def error(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def run_command(command: list[str], *, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    *,
+    check: bool = True,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess in the repository root."""
     return subprocess.run(
         command,
@@ -49,14 +54,14 @@ def run_command(command: list[str], *, check: bool = True, capture_output: bool 
 
 def http_get_text(url: str) -> str:
     """Return the response body for a URL."""
-    with urllib.request.urlopen(url, timeout=3.0) as response:
+    with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
 
 
 def http_status(url: str) -> int | None:
     """Return the HTTP status code for a URL."""
     try:
-        with urllib.request.urlopen(url, timeout=3.0) as response:
+        with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
             return response.status
     except urllib.error.HTTPError as exc:
         return exc.code
@@ -72,14 +77,22 @@ def http_contains(url: str, expected: str) -> bool:
         return False
 
 
-def wait_for_http_status(url: str, expected_status: int, label: str, *, attempts: int = 30, sleep_seconds: float = 2.0) -> None:
+def wait_for_http_status(
+    url: str,
+    expected_status: int,
+    label: str,
+    *,
+    attempts: int = 30,
+    sleep_seconds: float = 2.0,
+) -> None:
     """Poll an HTTP endpoint until it returns the expected status code."""
     for _ in range(attempts):
         if http_status(url) == expected_status:
             log(f"[smoke] {label} ready")
             return
         time.sleep(sleep_seconds)
-    raise RuntimeError(f"[error] Timed out waiting for {label} ({url})")
+    msg = f"[error] Timed out waiting for {label} ({url})"
+    raise RuntimeError(msg)
 
 
 def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 30, sleep_seconds: float = 2.0) -> None:
@@ -89,7 +102,8 @@ def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 
             log(f"[smoke] {label} ready")
             return
         time.sleep(sleep_seconds)
-    raise RuntimeError(f"[error] Timed out waiting for {label} ({url})")
+    msg = f"[error] Timed out waiting for {label} ({url})"
+    raise RuntimeError(msg)
 
 
 def dump_container_diagnostics(container_names: list[str]) -> None:
@@ -119,6 +133,7 @@ def main() -> int:
 
     container_names = [backend_container_name, frontend_container_name]
     cleanup(container_names)
+    exit_code = 0
 
     try:
         run_command(
@@ -161,13 +176,13 @@ def main() -> int:
             "Platform frontend",
         )
         log("[smoke] platform image checks passed")
-        return 0
     except Exception as exc:
         error(str(exc))
         dump_container_diagnostics(container_names)
-        return 1
+        exit_code = 1
     finally:
         cleanup(container_names)
+    return exit_code
 
 
 if __name__ == "__main__":

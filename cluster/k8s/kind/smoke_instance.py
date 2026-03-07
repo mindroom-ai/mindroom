@@ -16,7 +16,6 @@ import urllib.request
 from pathlib import Path
 from typing import IO
 
-
 ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
@@ -28,7 +27,8 @@ def getenv_int(name: str, default: int) -> int:
 def validate_port(name: str, port: int) -> None:
     """Ensure a TCP port is within the valid range."""
     if not 1 <= port <= 65535:
-        raise ValueError(f"{name} must be between 1 and 65535, got {port}")
+        msg = f"{name} must be between 1 and 65535, got {port}"
+        raise ValueError(msg)
 
 
 def log(message: str) -> None:
@@ -41,7 +41,12 @@ def error(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def run_command(command: list[str], *, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    *,
+    check: bool = True,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run a command with text output."""
     return subprocess.run(
         command,
@@ -61,10 +66,17 @@ def read_log_file(path: Path) -> None:
         error(content)
 
 
-def http_get_text(url: str, *, timeout: float = 2.0, headers: dict[str, str] | None = None, method: str = "GET", body: bytes | None = None) -> str:
+def http_get_text(
+    url: str,
+    *,
+    timeout: float = 2.0,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+    body: bytes | None = None,
+) -> str:
     """Fetch a URL and return the response body as text."""
-    request = urllib.request.Request(url, headers=headers or {}, method=method, data=body)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    request = urllib.request.Request(url, headers=headers or {}, method=method, data=body)  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         return response.read().decode("utf-8", errors="replace")
 
 
@@ -83,7 +95,8 @@ def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 
             log(f"[smoke] {label} ready")
             return
         time.sleep(sleep_seconds)
-    raise RuntimeError(f"[error] Timed out waiting for {label} ({url})")
+    msg = f"[error] Timed out waiting for {label} ({url})"
+    raise RuntimeError(msg)
 
 
 def port_is_listening(local_port: int) -> bool:
@@ -101,14 +114,16 @@ def wait_for_port_forward(local_port: int, process: subprocess.Popen[str], log_f
         if process.poll() is not None:
             error(f"[error] {label} port-forward exited early")
             read_log_file(log_file)
-            raise RuntimeError(f"{label} port-forward exited early")
+            msg = f"{label} port-forward exited early"
+            raise RuntimeError(msg)
         if port_is_listening(local_port):
             log(f"[smoke] {label} port-forward ready")
             return
         time.sleep(1)
     error(f"[error] Timed out waiting for {label} port-forward on 127.0.0.1:{local_port}")
     read_log_file(log_file)
-    raise RuntimeError(f"Timed out waiting for {label} port-forward")
+    msg = f"Timed out waiting for {label} port-forward"
+    raise RuntimeError(msg)
 
 
 def start_port_forward(
@@ -167,10 +182,16 @@ def start_port_forward_for_http_match(
         time.sleep(1)
     error(f"[error] Timed out waiting for {label} via port-forward ({url})")
     read_log_file(log_file)
-    raise RuntimeError(f"Timed out waiting for {label}")
+    msg = f"Timed out waiting for {label}"
+    raise RuntimeError(msg)
 
 
-def provision_via_platform_api(platform_backend_local_port: int, provisioner_api_key: str, account_id: str, tmp_dir: Path) -> str:
+def provision_via_platform_api(
+    platform_backend_local_port: int,
+    provisioner_api_key: str,
+    account_id: str,
+    tmp_dir: Path,
+) -> str:
     """Provision an instance via the platform backend API and return the customer id."""
     response_body = http_get_text(
         f"http://127.0.0.1:{platform_backend_local_port}/system/provision",
@@ -185,7 +206,7 @@ def provision_via_platform_api(platform_backend_local_port: int, provisioner_api
                 "subscription_id": "smoke-subscription",
                 "account_id": account_id,
                 "tier": "starter",
-            }
+            },
         ).encode("utf-8"),
     )
     response_file = tmp_dir / "provision-response.json"
@@ -193,7 +214,8 @@ def provision_via_platform_api(platform_backend_local_port: int, provisioner_api
     payload = json.loads(response_body)
     customer_id = payload.get("customer_id")
     if customer_id in (None, ""):
-        raise RuntimeError("missing customer_id in provisioner response")
+        msg = "missing customer_id in provisioner response"
+        raise RuntimeError(msg)
     return str(customer_id)
 
 
@@ -260,7 +282,7 @@ def deploy_instance_directly(
             "deepseek_key=test-deepseek",
             "--set",
             "sandbox_proxy_token=test-sandbox-token",
-        ]
+        ],
     )
 
 
@@ -275,9 +297,36 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
         ["kubectl", "describe", "deployment", f"synapse-{instance_id}", "-n", instance_namespace],
         ["kubectl", "describe", "pod", "-n", instance_namespace, "-l", "app=mindroom"],
         ["kubectl", "describe", "pod", "-n", instance_namespace, "-l", "app=synapse"],
-        ["kubectl", "logs", f"deployment/mindroom-{instance_id}", "-n", instance_namespace, "-c", "mindroom", "--tail=200"],
-        ["kubectl", "logs", f"deployment/mindroom-{instance_id}", "-n", instance_namespace, "-c", "sandbox-runner", "--tail=200"],
-        ["kubectl", "logs", f"deployment/synapse-{instance_id}", "-n", instance_namespace, "-c", "synapse", "--tail=200"],
+        [
+            "kubectl",
+            "logs",
+            f"deployment/mindroom-{instance_id}",
+            "-n",
+            instance_namespace,
+            "-c",
+            "mindroom",
+            "--tail=200",
+        ],
+        [
+            "kubectl",
+            "logs",
+            f"deployment/mindroom-{instance_id}",
+            "-n",
+            instance_namespace,
+            "-c",
+            "sandbox-runner",
+            "--tail=200",
+        ],
+        [
+            "kubectl",
+            "logs",
+            f"deployment/synapse-{instance_id}",
+            "-n",
+            instance_namespace,
+            "-c",
+            "synapse",
+            "--tail=200",
+        ],
         ["kubectl", "get", "events", "-n", instance_namespace, "--sort-by=.lastTimestamp"],
         [
             "kubectl",
@@ -289,7 +338,8 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
             "mindroom",
             "--",
             "curl",
-            "-fsS",
+            "-sS",
+            "-i",
             "localhost:8765/api/ready",
         ],
     ]
@@ -311,7 +361,7 @@ def cleanup_port_forwards(port_forwards: list[tuple[subprocess.Popen[str], IO[st
         log_handle.close()
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915
     """Run the smoke deploy."""
     instance_id = os.getenv("INSTANCE_ID", "1")
     instance_namespace = os.getenv("INSTANCE_NAMESPACE", "mindroom-instances")
@@ -341,6 +391,7 @@ def main() -> int:
     validate_port("SYNAPSE_LOCAL_PORT", synapse_local_port)
 
     port_forwards: list[tuple[subprocess.Popen[str], IO[str]]] = []
+    exit_code = 0
 
     try:
         with tempfile.TemporaryDirectory() as tmp_dir_name:
@@ -371,9 +422,15 @@ def main() -> int:
             platform_health = http_get_text(platform_health_url, timeout=5.0)
             if '"supabase":true' in platform_health:
                 log("[smoke] Provisioning instance through live platform API")
-                instance_id = provision_via_platform_api(platform_backend_local_port, provisioner_api_key, account_id, tmp_dir)
+                instance_id = provision_via_platform_api(
+                    platform_backend_local_port,
+                    provisioner_api_key,
+                    account_id,
+                    tmp_dir,
+                )
             elif smoke_require_platform_provisioning == "1":
-                raise RuntimeError("[error] Platform provisioning smoke requires Supabase-configured platform backend")
+                msg = "[error] Platform provisioning smoke requires Supabase-configured platform backend"
+                raise RuntimeError(msg)  # noqa: TRY301
             else:
                 log("[smoke] Platform backend has no Supabase; falling back to direct Helm instance deploy")
                 deploy_instance_directly(
@@ -392,22 +449,22 @@ def main() -> int:
                     "kubectl",
                     "rollout",
                     "status",
-                    f"deployment/mindroom-{instance_id}",
+                    f"deployment/synapse-{instance_id}",
                     "-n",
                     instance_namespace,
                     f"--timeout={deployment_rollout_timeout}",
-                ]
+                ],
             )
             run_command(
                 [
                     "kubectl",
                     "rollout",
                     "status",
-                    f"deployment/synapse-{instance_id}",
+                    f"deployment/mindroom-{instance_id}",
                     "-n",
                     instance_namespace,
                     f"--timeout={deployment_rollout_timeout}",
-                ]
+                ],
             )
 
             start_port_forward_for_http_match(
@@ -434,14 +491,14 @@ def main() -> int:
                 port_forwards,
             )
             log("[smoke] kind platform + instance checks passed")
-        return 0
     except Exception as exc:
         error(f"[error] smoke_instance.py failed: {exc}")
         traceback.print_exc()
         dump_instance_diagnostics(instance_namespace, instance_id)
-        return 1
+        exit_code = 1
     finally:
         cleanup_port_forwards(port_forwards)
+    return exit_code
 
 
 if __name__ == "__main__":

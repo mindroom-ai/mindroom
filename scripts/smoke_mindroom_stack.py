@@ -12,7 +12,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
@@ -24,7 +23,8 @@ def getenv_int(name: str, default: int) -> int:
 def validate_port(name: str, port: int) -> None:
     """Ensure a TCP port is within the valid range."""
     if not 1 <= port <= 65535:
-        raise ValueError(f"{name} must be between 1 and 65535, got {port}")
+        msg = f"{name} must be between 1 and 65535, got {port}"
+        raise ValueError(msg)
 
 
 def log(message: str) -> None:
@@ -37,7 +37,12 @@ def error(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def run_command(command: list[str], *, check: bool = True, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    *,
+    check: bool = True,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess in the repository root."""
     return subprocess.run(
         command,
@@ -51,7 +56,7 @@ def run_command(command: list[str], *, check: bool = True, capture_output: bool 
 def http_contains(url: str, expected: str) -> bool:
     """Return whether an HTTP response contains the expected text."""
     try:
-        with urllib.request.urlopen(url, timeout=3.0) as response:
+        with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
             body = response.read().decode("utf-8", errors="replace")
     except (OSError, urllib.error.URLError, urllib.error.HTTPError):
         return False
@@ -61,7 +66,7 @@ def http_contains(url: str, expected: str) -> bool:
 def http_status(url: str) -> int | None:
     """Return the HTTP status code for a URL."""
     try:
-        with urllib.request.urlopen(url, timeout=3.0) as response:
+        with urllib.request.urlopen(url, timeout=3.0) as response:  # noqa: S310
             return response.status
     except urllib.error.HTTPError as exc:
         return exc.code
@@ -76,7 +81,8 @@ def wait_for_http_match(url: str, expected: str, label: str, *, attempts: int = 
             log(f"[smoke] {label} ready")
             return
         time.sleep(sleep_seconds)
-    raise RuntimeError(f"[error] Timed out waiting for {label} ({url})")
+    msg = f"[error] Timed out waiting for {label} ({url})"
+    raise RuntimeError(msg)
 
 
 def dump_compose_diagnostics(stack_dir: Path, project_name: str, env_file: Path, compose_file: Path) -> None:
@@ -176,7 +182,7 @@ def main() -> int:
                     "OLLAMA_HOST=http://localhost:11434",
                     f"ELEMENT_HOMESERVER_URL=http://localhost:{stack_synapse_port}",
                     "",
-                ]
+                ],
             ),
             encoding="utf-8",
         )
@@ -186,6 +192,7 @@ def main() -> int:
         compose_text = compose_text.replace('"8765:8765"', f'"127.0.0.1:{stack_mindroom_port}:8765"')
         compose_text = compose_text.replace('"8080:8080"', f'"127.0.0.1:{stack_element_port}:8080"')
         compose_file.write_text(compose_text, encoding="utf-8")
+        exit_code = 0
 
         try:
             log(f"[smoke] Starting mindroom-stack from {stack_dir}")
@@ -234,16 +241,18 @@ def main() -> int:
                 if http_status(element_url) == 200:
                     log("[smoke] Element ready")
                     log("[smoke] mindroom-stack checks passed")
-                    return 0
+                    break
                 time.sleep(3)
-
-            raise RuntimeError(f"[error] Timed out waiting for Element ({element_url})")
+            else:
+                msg = f"[error] Timed out waiting for Element ({element_url})"
+                raise RuntimeError(msg)  # noqa: TRY301
         except Exception as exc:
             error(str(exc))
             dump_compose_diagnostics(stack_dir, project_name, env_file, compose_file)
-            return 1
+            exit_code = 1
         finally:
             cleanup(stack_dir, project_name, env_file, compose_file)
+        return exit_code
 
 
 if __name__ == "__main__":

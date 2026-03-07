@@ -185,6 +185,7 @@ class MultiAgentOrchestrator:
 
         Each agent is now responsible for ensuring its own user account and rooms.
         """
+        set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
         config = Config.from_yaml()
@@ -226,6 +227,7 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
+        set_runtime_starting("Starting Matrix bot accounts")
         # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
         start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
         results = await asyncio.gather(*start_tasks)
@@ -253,14 +255,18 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have all bots join them before potentially heavy
         # knowledge indexing, so new rooms/invites are not delayed by embeddings.
+        set_runtime_starting("Setting up Matrix rooms and memberships")
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
         # Build knowledge before sync loops start so first responses include configured bases.
+        set_runtime_starting("Initializing knowledge bases")
         await self._configure_knowledge(config, start_watcher=True)
 
+        set_runtime_starting("Starting background workers")
         await self._sync_memory_auto_flush_worker()
 
         # Create sync tasks for each bot with automatic restart on failure
+        set_runtime_starting("Starting Matrix sync loops")
         for entity_name, bot in self.agent_bots.items():
             # Create a task for each bot's sync loop with restart wrapper
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
