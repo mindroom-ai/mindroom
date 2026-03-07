@@ -161,6 +161,32 @@ class TestConfigInit:
         output = _strip_ansi(result.output)
         assert "mindroom connect --pair-code" in output
 
+    def test_init_profile_public_vertexai_anthropic_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
+        """Hosted Vertex profile should use Vertex Claude defaults and hosted Matrix settings."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "vertexai_claude"
+        assert config["models"]["default"]["id"] == "claude-sonnet-4@20250514"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
+        assert "CLOUD_ML_REGION=us-central1" in env_content
+        assert "gcloud auth application-default login" in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nOPENROUTER_API_KEY=" not in env_content
+
+        output = _strip_ansi(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert "Vertex AI project/region and Google auth" in output
+
     def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
         """Full profile next steps should NOT mention pairing."""
         target = tmp_path / "config.yaml"
@@ -267,6 +293,19 @@ class TestConfigInit:
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4-5" in content
 
+    def test_init_vertexai_claude_preset_uses_vertex_models(self, tmp_path: Path) -> None:
+        """Config init --provider vertexai_claude uses Vertex AI Claude defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "vertexai_claude"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: vertexai_claude" in content
+        assert "id: claude-sonnet-4@20250514" in content
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
+        assert "CLOUD_ML_REGION=us-central1" in env_content
+
 
 # ---------------------------------------------------------------------------
 # mindroom config show
@@ -369,7 +408,29 @@ class TestConfigValidate:
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0
-        assert "Missing API key environment variables" not in result.output
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_warns_for_missing_vertexai_claude_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should warn about missing Vertex AI project settings."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4@20250514\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" in result.output
+        assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
+        assert "CLOUD_ML_REGION" in result.output
 
 
 # ---------------------------------------------------------------------------
