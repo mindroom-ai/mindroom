@@ -3300,6 +3300,46 @@ class TestMultiAgentOrchestrator:
         assert calls == 2
 
     @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:
+        """Long healthy runs should reset crash-loop backoff for auxiliary tasks."""
+        retry_attempts: list[int] = []
+        calls = 0
+        third_start = asyncio.Event()
+
+        async def _operation() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await asyncio.sleep(0.02)
+            if calls == 3:
+                third_start.set()
+                await asyncio.Future()
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        with (
+            patch(
+                "mindroom.orchestrator._retry_delay_seconds",
+                side_effect=lambda attempt, **_: retry_attempts.append(attempt) or 0,
+            ),
+        ):
+            task = asyncio.create_task(
+                _run_auxiliary_task_forever(
+                    "test task",
+                    _operation,
+                    initial_delay_seconds=1,
+                    max_delay_seconds=0.01,
+                ),
+            )
+            await asyncio.wait_for(third_start.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert calls == 3
+        assert retry_attempts == [1, 1]
+
+    @pytest.mark.asyncio
     async def test_run_with_retry_can_skip_runtime_state_updates(self) -> None:
         """Background retries must not flip a ready runtime back to startup state."""
         reset_runtime_state()

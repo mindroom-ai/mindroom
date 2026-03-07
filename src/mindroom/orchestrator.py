@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -394,30 +395,12 @@ class MultiAgentOrchestrator:
     async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
         """Run background knowledge refresh until it succeeds or is cancelled."""
         current_task = asyncio.current_task()
-        attempt = 0
         try:
-            while True:
-                try:
-                    await self._configure_knowledge(config, start_watcher=start_watcher)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    attempt += 1
-                    retry_in_seconds = _retry_delay_seconds(
-                        attempt,
-                        initial_delay_seconds=_STARTUP_RETRY_INITIAL_DELAY_SECONDS,
-                        max_delay_seconds=_STARTUP_RETRY_MAX_DELAY_SECONDS,
-                    )
-                    logger.warning(
-                        "Background knowledge refresh failed; retrying",
-                        attempt=attempt,
-                        retry_in_seconds=retry_in_seconds,
-                        exc_info=True,
-                    )
-                    await asyncio.sleep(retry_in_seconds)
-                    continue
-                else:
-                    return
+            await _run_with_retry(
+                "Background knowledge refresh",
+                lambda: self._configure_knowledge(config, start_watcher=start_watcher),
+                update_runtime_state=False,
+            )
         finally:
             if self._knowledge_refresh_task is current_task:
                 self._knowledge_refresh_task = None
@@ -1117,12 +1100,11 @@ async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
 
 async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
     """Watch config file for changes."""
-    stop_watching = asyncio.Event()
 
     async def on_config_change() -> None:
         await _handle_config_change(orchestrator)
 
-    await watch_file(config_path, on_config_change, stop_watching)
+    await watch_file(config_path, on_config_change)
 
 
 async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
@@ -1159,11 +1141,14 @@ async def _run_auxiliary_task_forever(
     """Restart a non-critical background task whenever it exits or crashes."""
     restart_count = 0
     while True:
+        started_at = time.monotonic()
         try:
             await operation()
         except asyncio.CancelledError:
             raise
         except Exception:
+            if time.monotonic() - started_at >= max_delay_seconds:
+                restart_count = 0
             restart_count += 1
             retry_in_seconds = _retry_delay_seconds(
                 restart_count,
@@ -1177,21 +1162,22 @@ async def _run_auxiliary_task_forever(
                 retry_in_seconds=retry_in_seconds,
             )
             await asyncio.sleep(retry_in_seconds)
-            continue
-
-        restart_count += 1
-        retry_in_seconds = _retry_delay_seconds(
-            restart_count,
-            initial_delay_seconds=initial_delay_seconds,
-            max_delay_seconds=max_delay_seconds,
-        )
-        logger.warning(
-            "Auxiliary task exited unexpectedly; restarting",
-            task_name=task_name,
-            restart_count=restart_count,
-            retry_in_seconds=retry_in_seconds,
-        )
-        await asyncio.sleep(retry_in_seconds)
+        else:
+            if time.monotonic() - started_at >= max_delay_seconds:
+                restart_count = 0
+            restart_count += 1
+            retry_in_seconds = _retry_delay_seconds(
+                restart_count,
+                initial_delay_seconds=initial_delay_seconds,
+                max_delay_seconds=max_delay_seconds,
+            )
+            logger.warning(
+                "Auxiliary task exited unexpectedly; restarting",
+                task_name=task_name,
+                restart_count=restart_count,
+                retry_in_seconds=retry_in_seconds,
+            )
+            await asyncio.sleep(retry_in_seconds)
 
 
 async def main(
