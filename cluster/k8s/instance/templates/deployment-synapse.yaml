@@ -50,6 +50,12 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        readinessProbe:
+          httpGet:
+            path: /_matrix/client/versions
+            port: http
+          periodSeconds: 5
+          failureThreshold: 120
         # Initialize and start Synapse
         command: ["/bin/sh"]
         args:

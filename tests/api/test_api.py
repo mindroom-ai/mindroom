@@ -182,6 +182,20 @@ def test_readiness_check_reports_ready(test_client: TestClient) -> None:
     reset_runtime_state()
 
 
+def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None:
+    """Readiness should expose the current startup stage while the runtime is still booting."""
+    set_runtime_starting("Setting up Matrix rooms and memberships")
+
+    response = test_client.get("/api/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "starting",
+        "detail": "Setting up Matrix rooms and memberships",
+    }
+    reset_runtime_state()
+
+
 def test_load_config(test_client: TestClient) -> None:
     """Test loading configuration."""
     response = test_client.post("/api/config/load")

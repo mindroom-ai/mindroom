@@ -1005,6 +1005,8 @@ class TestDoctor:
 
         def _mock_get(url: str, **_kw: object) -> httpx.Response:
             called_urls.append(str(url))
+            if "/_matrix/client/versions" in str(url):
+                return httpx.Response(200, json={"versions": ["v1.1"]})
             return httpx.Response(200, json={})
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
@@ -1507,7 +1509,10 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.STORAGE_PATH", str(tmp_path / "mindroom_data"))
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr("mindroom.cli.local_stack.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.httpx.get",
+            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
+        )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
 
         commands: list[list[str]] = []
@@ -1559,7 +1564,10 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.STORAGE_PATH", str(tmp_path / "mindroom_data"))
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr("mindroom.cli.local_stack.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.httpx.get",
+            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
+        )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
 
         commands: list[list[str]] = []
@@ -1585,7 +1593,10 @@ class TestLocalStackSetup:
         monkeypatch.setattr("mindroom.cli.local_stack.STORAGE_PATH", str(tmp_path / "mindroom_data"))
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr("mindroom.cli.local_stack.httpx.get", lambda *_a, **_kw: httpx.Response(200, json={}))
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.httpx.get",
+            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
+        )
         monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
         monkeypatch.setattr(
             "mindroom.cli.local_stack.subprocess.run",

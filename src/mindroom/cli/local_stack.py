@@ -9,14 +9,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
 import typer
 
 from mindroom.constants import CONFIG_PATH, STORAGE_PATH
+from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
 from .config import console
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-cinny:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
@@ -75,8 +80,7 @@ def local_stack_setup(
     if not skip_synapse:
         _start_synapse_stack(synapse_dir)
 
-    synapse_versions_url = f"{homeserver_url.rstrip('/')}/_matrix/client/versions"
-    _wait_for_service(synapse_versions_url, "Synapse")
+    _wait_for_matrix_homeserver(homeserver_url)
 
     cinny_config_path = _write_local_cinny_config(homeserver_url, inferred_server_name)
     console.print(f"Cinny config written: [dim]{cinny_config_path}[/dim]")
@@ -230,6 +234,21 @@ def _wait_for_service(url: str, service_name: str) -> None:
     raise typer.Exit(1)
 
 
+def _wait_for_matrix_homeserver(homeserver_url: str) -> None:
+    """Wait for the local Synapse `/versions` endpoint to return Matrix metadata."""
+    url = matrix_versions_url(homeserver_url)
+    console.print(f"Waiting for Synapse: [dim]{url}[/dim]")
+    if _wait_for_http_success(
+        url,
+        timeout_seconds=60,
+        verify=False,
+        response_matches=response_has_matrix_versions,
+    ):
+        return
+    console.print(f"[red]Error:[/red] Synapse did not become healthy at {url}")
+    raise typer.Exit(1)
+
+
 def _print_local_stack_summary(
     *,
     homeserver_url: str,
@@ -286,13 +305,15 @@ def _wait_for_http_success(
     *,
     timeout_seconds: int,
     verify: bool,
+    response_matches: Callable[[httpx.Response], bool] | None = None,
 ) -> bool:
     """Wait until an HTTP GET request returns success."""
     deadline = time.monotonic() + timeout_seconds
+    matcher = response_matches or (lambda response: response.is_success)
     while time.monotonic() < deadline:
         try:
             response = httpx.get(url, timeout=3, verify=verify)
-            if response.is_success:
+            if matcher(response):
                 return True
         except httpx.HTTPError:
             pass

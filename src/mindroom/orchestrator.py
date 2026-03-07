@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
@@ -19,12 +21,13 @@ from .agents import get_rooms_for_entity
 from .authorization import is_authorized_sender
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from .logging_config import get_logger, setup_logging
 from .matrix.client import get_joined_rooms, get_room_members, invite_to_room
+from .matrix.health import matrix_versions_url, response_has_matrix_versions
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
 from .matrix.state import MatrixState
@@ -39,6 +42,78 @@ if TYPE_CHECKING:
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
+
+_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS"
+_MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
+_MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
+
+
+def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
+    """Return the startup wait timeout from the environment, if configured."""
+    raw_timeout = os.getenv(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV, "").strip()
+    if not raw_timeout:
+        return None
+    timeout_seconds = int(raw_timeout)
+    if timeout_seconds == 0:
+        return None
+    if timeout_seconds < 0:
+        msg = f"{_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV} must be 0 or a positive integer"
+        raise ValueError(msg)
+    return timeout_seconds
+
+
+async def _wait_for_matrix_homeserver(
+    *,
+    timeout_seconds: float | None = None,
+    request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
+    retry_interval_seconds: float = _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS,
+) -> None:
+    """Wait for the configured Matrix homeserver to answer `/versions`."""
+    if timeout_seconds is None:
+        timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env()
+    versions_url = matrix_versions_url(MATRIX_HOMESERVER)
+    set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
+    attempt = 0
+    logger.info(
+        "Waiting for Matrix homeserver",
+        url=versions_url,
+        timeout_seconds=timeout_seconds,
+    )
+
+    async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=MATRIX_SSL_VERIFY) as client:
+        while deadline is None or loop.time() < deadline:
+            attempt += 1
+            try:
+                response = await client.get(versions_url)
+            except httpx.TransportError as exc:
+                if attempt == 1 or attempt % 5 == 0:
+                    logger.info(
+                        "Matrix homeserver not ready yet",
+                        url=versions_url,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                await asyncio.sleep(retry_interval_seconds)
+                continue
+
+            if response_has_matrix_versions(response):
+                logger.info("Matrix homeserver ready", url=versions_url)
+                return
+
+            if attempt == 1 or attempt % 5 == 0:
+                logger.info(
+                    "Matrix homeserver not ready yet",
+                    url=versions_url,
+                    attempt=attempt,
+                    status_code=response.status_code,
+                    body_preview=response.text[:200].replace("\n", " "),
+                )
+            await asyncio.sleep(retry_interval_seconds)
+
+    msg = f"Timed out waiting for Matrix homeserver at {versions_url}"
+    raise RuntimeError(msg)
 
 
 @dataclass
@@ -185,6 +260,7 @@ class MultiAgentOrchestrator:
 
         Each agent is now responsible for ensuring its own user account and rooms.
         """
+        set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
         config = Config.from_yaml()
@@ -223,9 +299,11 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
+        await _wait_for_matrix_homeserver()
         if not self.agent_bots:
             await self.initialize()
 
+        set_runtime_starting("Starting Matrix bot accounts")
         # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
         start_tasks = [bot.try_start() for bot in self.agent_bots.values()]
         results = await asyncio.gather(*start_tasks)
@@ -253,14 +331,18 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have all bots join them before potentially heavy
         # knowledge indexing, so new rooms/invites are not delayed by embeddings.
+        set_runtime_starting("Setting up Matrix rooms and memberships")
         await self._setup_rooms_and_memberships(list(self.agent_bots.values()))
 
         # Build knowledge before sync loops start so first responses include configured bases.
+        set_runtime_starting("Initializing knowledge bases")
         await self._configure_knowledge(config, start_watcher=True)
 
+        set_runtime_starting("Starting background workers")
         await self._sync_memory_auto_flush_worker()
 
         # Create sync tasks for each bot with automatic restart on failure
+        set_runtime_starting("Starting Matrix sync loops")
         for entity_name, bot in self.agent_bots.items():
             # Create a task for each bot's sync loop with restart wrapper
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))

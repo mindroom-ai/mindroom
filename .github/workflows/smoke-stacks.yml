@@ -86,36 +86,17 @@ jobs:
           docker run --rm ghcr.io/mindroom-ai/mindroom:latest mindroom version
           docker run --rm ghcr.io/mindroom-ai/mindroom-minimal:latest mindroom version
 
-      - name: Probe platform images
-        run: |
-          docker run -d --rm --name platform-backend-smoke -p 18000:8000 ghcr.io/mindroom-ai/platform-backend:latest
-          docker run -d --rm --name platform-frontend-smoke -p 13000:3000 ghcr.io/mindroom-ai/platform-frontend:latest
-
-          cleanup() {
-            docker logs platform-backend-smoke || true
-            docker logs platform-frontend-smoke || true
-            docker rm -f platform-backend-smoke platform-frontend-smoke || true
-          }
-          trap cleanup EXIT
-
-          for _ in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18000/health >/dev/null; then
-              break
-            fi
-            sleep 2
-          done
-
-          curl -fsS http://127.0.0.1:18000/health
-          curl -fsS http://127.0.0.1:13000/ | grep -q "MindRoom"
+      - name: Smoke platform images
+        run: python -m scripts.smoke_platform_images
 
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh
 
       - name: Smoke kind platform and instance
-        run: bash cluster/k8s/kind/smoke_instance.sh
+        run: python -m cluster.k8s.kind.smoke_instance
 
       - name: Smoke mindroom-stack compose
-        run: bash scripts/smoke_mindroom_stack.sh "${GITHUB_WORKSPACE}/mindroom-stack"
+        run: python -m scripts.smoke_mindroom_stack "${GITHUB_WORKSPACE}/mindroom-stack"
 
       - name: Tear down kind cluster
         if: always()

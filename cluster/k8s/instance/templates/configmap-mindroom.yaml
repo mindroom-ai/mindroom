@@ -1,3 +1,7 @@
+{{- $config := .Files.Get "default-config.yaml" | fromYaml -}}
+{{- $authorization := get $config "authorization" | default (dict) -}}
+{{- $_ := set $authorization "global_users" (.Values.authorizationGlobalUsers | default (list)) -}}
+{{- $_ := set $config "authorization" $authorization -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,4 +9,4 @@ metadata:
   namespace: mindroom-instances
 data:
   config.yaml: |
-{{ .Files.Get "default-config.yaml" | indent 4 }}
+{{ $config | toYaml | indent 4 }}
