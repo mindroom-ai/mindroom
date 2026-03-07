@@ -77,7 +77,10 @@ In `multi_user` mode, the router can set join rules (`public`/`knock`) and optio
 
 ### Voice Message Processing
 
-Voice message callbacks are registered only on the router to avoid duplicate processing. When a voice message is received, the router transcribes it and posts the text (prefixed with a microphone emoji), which can then be routed to the appropriate agent.
+Audio events are handled through the shared media pipeline on all bots.
+The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room.
+When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message.
+See [Voice Messages](../voice.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 

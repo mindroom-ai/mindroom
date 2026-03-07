@@ -4,22 +4,26 @@ icon: lucide/mic
 
 # Voice Messages
 
-MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
+MindRoom can surface Matrix voice messages as attachment-aware prompts for agents.
+If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline.
+If STT is unavailable, disabled, or fails, the audio still remains available as an attachment and falls back to `🎤 [Attached voice message]`.
 
 ## Overview
 
-When voice message handling is enabled:
+When a voice message is received:
 
-1. Voice messages are detected in Matrix rooms
-2. Audio is downloaded and decrypted (if E2E encrypted)
-3. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
-4. Transcription is processed by an AI to recognize agent mentions and commands
-5. The formatted message is sent to the room (prefixed with a microphone emoji)
-6. The appropriate agent responds
+1. The audio event is handled through the shared media pipeline.
+2. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
+3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
+6. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
+7. Otherwise, no extra router message is posted and the chosen agent replies directly.
+8. The responding agent receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
-Enable voice in `config.yaml`:
+Enable STT and voice-intelligence formatting in `config.yaml`:
 
 ```yaml
 voice:
@@ -34,6 +38,9 @@ voice:
 ```
 
 Or use the dashboard's Voice tab.
+
+With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt.
+Enabling voice adds STT and command-recognition on top of that attachment flow.
 
 ## STT Providers
 
@@ -111,17 +118,61 @@ You can specify a different model for faster or more accurate command recognitio
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
                                                                   │
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ 🎤 Message  │
-                                                            │ to Room     │
-                                                            └─────────────┘
-                                                                  │
+                                                         ┌──────────────────┐
+                                                         │ Normal Dispatch  │
+                                                         │ Decision         │
+                                                         └──────────────────┘
+                                                           │            │
+                                                           │            │
+                                                           ▼            ▼
+                                                 ┌──────────────┐  ┌──────────────┐
+                                                 │ Visible      │  │ No Visible   │
+                                                 │ Router       │  │ Router       │
+                                                 │ Handoff      │  │ Handoff      │
+                                                 └──────────────┘  └──────────────┘
+                                                           │            │
+                                                           └──────┬─────┘
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ Agent       │
-                                                            │ Responds    │
-                                                            └─────────────┘
+                                                           ┌─────────────┐
+                                                           │ Agent       │
+                                                           │ Responds    │
+                                                           └─────────────┘
 ```
+
+## Dispatch Behavior
+
+### Single-agent rooms or explicitly targeted audio
+
+If only one eligible agent is visible, that agent responds directly to the normalized audio event.
+If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well.
+In these cases, the router does not post an extra visible routing handoff.
+The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
+
+### Multi-agent rooms where the router must choose
+
+If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step.
+The router then posts a normal handoff message such as `@home could you help with this?`.
+The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
+This is the case where a visible router message appears.
+
+### No router, or router cannot reply
+
+Audio still works when the router is absent.
+In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages.
+The same direct handling also applies when the router is present but is not allowed to reply to the original sender.
+If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
+
+### Visibility rule
+
+MindRoom does not automatically post the transcript to the room.
+A visible router message appears only when the router must disambiguate between multiple eligible responders.
+If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message.
+
+### Attachment access
+
+The original audio is always registered as a context-scoped attachment before dispatch continues.
+That means the responding agent can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool.
+This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
 
 ## Matrix Integration
 
@@ -130,10 +181,13 @@ Voice messages in Matrix are:
 - Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
 - Downloaded from the Matrix media server
 - Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Processed in memory as audio bytes for STT requests
-- Sent to the STT service via the OpenAI-compatible API
+- Registered as audio attachments before dispatch
+- Sent to the STT service via the OpenAI-compatible API when transcription is enabled
+- Normalized once per room and thread context, even though multiple bots may observe the event
 
-The router agent handles all voice message processing to avoid duplicate transcriptions.
+Audio callbacks are registered on all bots because audio now follows the shared media pipeline.
+Shared normalization prevents repeated download and STT work for the same event.
+Reply-permission checks still use the original human sender, not a later router relay.
 
 ## Environment Variables
 
@@ -152,23 +206,25 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 
 See the [Tools documentation](tools/index.md) for configuration details.
 
-## Voice Fallback (No STT Configured)
+## Voice Fallback (No STT Available)
 
-When voice is enabled but no STT provider is configured (or transcription fails), MindRoom falls back to raw audio passthrough:
+When STT is unavailable, disabled, or transcription fails, MindRoom falls back to raw audio passthrough:
 
 1. The voice message audio is downloaded and saved locally as an attachment
-2. A text fallback `🎤 [Attached voice message]` is sent to the room
-3. The raw audio is registered as an attachment ID available to agents in the thread
-4. When an agent responds in the thread, it automatically receives the raw audio as an Agno `Audio` object
+2. The normalized text becomes `🎤 [Attached voice message]`
+3. The raw audio is registered as an attachment ID available to agents in the room or thread context
+4. When an agent responds, it automatically receives the raw audio as an Agno `Audio` object
 
-This means voice messages still reach agents even without STT -- agents with audio-capable models can process the raw audio directly.
+This means voice messages still reach agents even without STT.
+Agents with audio-capable models can process the raw audio directly, and tool-using agents can retrieve the file by attachment ID.
 Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](attachments.md).
 
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
-- Without STT, agents receive raw audio instead of transcription -- the model must support audio inputs to process it
+- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-agent rooms
+- Without STT, agents receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
 
 ## Tips
 
