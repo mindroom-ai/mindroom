@@ -35,19 +35,19 @@ OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 
 Without either of these, the API returns 401 on all requests.
 
-### 2. Start the backend
+### 2. Start MindRoom
 
 ```
-# Full backend (Matrix bot + API server)
+# Full MindRoom runtime (Matrix bot + API server + dashboard)
 uv run mindroom run
 
 # Or via just
-just start-backend-dev
+just start-mindroom-dev
 ```
 
 The API is available at `http://localhost:8765/v1/`.
 
-> [!IMPORTANT] If frontend and backend are served on the same domain behind a reverse proxy, route `/v1/*` to the backend (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the frontend and fail.
+> [!IMPORTANT] If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 
@@ -95,7 +95,7 @@ endpoints:
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
 
-`X-Session-Id` is recommended when you want deterministic backend session continuity. This is especially important for tools that keep long-lived backend sessions. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
+`X-Session-Id` is recommended when you want deterministic MindRoom session continuity. This is especially important for tools that keep long-lived sessions inside the MindRoom runtime. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
 
 ### Open WebUI
 
@@ -136,11 +136,11 @@ Session IDs are derived from request headers:
 1. `X-LibreChat-Conversation-Id` header (automatic with LibreChat)
 1. Random UUID fallback
 
-Agent memory and conversation history persist across requests with the same session ID. For persistent backend tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+Agent memory and conversation history persist across requests with the same session ID. For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
 ### Claude Agent tool sessions
 
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 
@@ -171,7 +171,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 

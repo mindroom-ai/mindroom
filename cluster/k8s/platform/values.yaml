@@ -3,8 +3,9 @@ environment: staging
 domain: mindroom.chat  # Base domain - override with --set domain based on environment
 
 # Image settings
-registry: git.nijho.lt/basnijholt
+registry: ghcr.io/mindroom-ai
 imageTag: latest
+imagePullPolicy: Always
 
 # Replicas
 replicas: 1
@@ -23,14 +24,15 @@ stripe:
   secretKey: ""
   webhookSecret: ""
 
-# Gitea registry auth
-gitea:
-  user: "basnijholt"
-  token: ""
-
 # Provisioner
 provisioner:
   apiKey: ""
+  instanceBaseDomain: ""
+  instanceStorageClassName: ""
+  instanceMindroomImage: ""
+  instanceMindroomImagePullPolicy: ""
+  instanceSynapseImage: ""
+  instanceSynapseImagePullPolicy: ""
 
 # Optional AI API keys
 apiKeys:

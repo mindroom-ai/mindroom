@@ -8,7 +8,7 @@ from typing import Annotated, Any
 
 from backend.config import PROVISIONER_API_KEY, logger
 from backend.deps import ensure_supabase, limiter, verify_user
-from backend.k8s import check_deployment_exists, run_kubectl
+from backend.k8s import check_deployment_exists, instance_deployment_ref, run_kubectl
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.routes.provisioner import (
     provision_instance,
@@ -48,7 +48,7 @@ async def _background_sync_instance_status(instance_id: str) -> None:
             code, out, err = await run_kubectl(
                 [
                     "get",
-                    f"deployment/mindroom-backend-{instance_id}",
+                    instance_deployment_ref(instance_id),
                     "-o=json",
                 ],
                 namespace="mindroom-instances",
@@ -149,7 +149,7 @@ async def list_user_instances(
                 "containers pull images and TLS certificates issue."
             )
         elif status == "restarting":
-            hint = "Restarting backend pods; the workspace will be available again shortly."
+            hint = "Restarting MindRoom pods; the workspace will be available again shortly."
         elif status == "running" and not instance.get("kubernetes_synced_at"):
             hint = "Running (awaiting initial Kubernetes health check)."
 

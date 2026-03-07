@@ -10,9 +10,9 @@ If you are a single local user and want to bring your own Google OAuth app, see 
 
 ## What You Need Before Starting
 
-- Your backend URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
+- Your MindRoom URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
 - Access to [Google Cloud Console](https://console.cloud.google.com/)
-- Access to set backend environment variables
+- Access to set MindRoom environment variables
 
 The MindRoom callback path is always:
 
@@ -23,7 +23,7 @@ The MindRoom callback path is always:
 Your full callback URL is:
 
 ```
-<your-backend-origin>/api/google/callback
+<your-mindroom-origin>/api/google/callback
 ```
 
 ## Step 1: Create a Google Cloud Project
@@ -70,9 +70,9 @@ Your full callback URL is:
 1. Production: `https://<your-domain>/api/google/callback`
 1. Copy the generated client ID and client secret.
 
-## Step 5: Configure MindRoom Backend Environment
+## Step 5: Configure MindRoom Environment
 
-Set these env vars in your backend deployment (`.env`, Kubernetes secret, or hosting config):
+Set these env vars in your MindRoom deployment (`.env`, Kubernetes secret, or hosting config):
 
 ```
 GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
@@ -86,9 +86,9 @@ Notes:
 - `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
 - If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
 
-Restart the MindRoom backend after setting env vars.
+Restart MindRoom after setting env vars.
 
-## Step 6: Verify Backend Is Configured
+## Step 6: Verify MindRoom Is Configured
 
 Run:
 
@@ -134,15 +134,15 @@ Each user does only this:
 
 ### "Google OAuth is not configured"
 
-`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in backend environment.
+`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in the MindRoom environment.
 
 ### "Redirect URI mismatch"
 
 Ensure all three are identical:
 
-- `GOOGLE_REDIRECT_URI` in backend env
+- `GOOGLE_REDIRECT_URI` in the MindRoom environment
 - Redirect URI in Google Console
-- Actual backend callback URL
+- Actual MindRoom callback URL
 
 ### Users cannot authorize while app is in testing mode
 

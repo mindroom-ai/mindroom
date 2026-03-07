@@ -21,7 +21,9 @@ from mindroom.constants import (
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
     config_search_locations,
+    ensure_writable_config_path,
 )
+from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
 from .config import (
@@ -80,17 +82,17 @@ def run(
     api: bool = typer.Option(
         True,
         "--api/--no-api",
-        help="Start the dashboard API server alongside the bot",
+        help="Start the bundled dashboard/API server alongside the bot",
     ),
     api_port: int = typer.Option(
         8765,
         "--api-port",
-        help="Port for the dashboard API server",
+        help="Port for the bundled dashboard/API server",
     ),
     api_host: str = typer.Option(
         "0.0.0.0",  # noqa: S104
         "--api-host",
-        help="Host for the dashboard API server",
+        help="Host for the bundled dashboard/API server",
     ),
 ) -> None:
     """Run the mindroom multi-agent system.
@@ -99,7 +101,7 @@ def run(
     - Creates all necessary user and agent accounts
     - Creates all rooms defined in config.yaml
     - Manages agent room memberships
-    - Starts the dashboard API server (disable with --no-api)
+    - Starts the bundled dashboard/API server (disable with --no-api)
     """
     asyncio.run(
         _run(
@@ -121,6 +123,8 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
+    ensure_writable_config_path()
+
     # Check config exists before starting
     config_path = Path(CONFIG_PATH)
     if not config_path.exists():
@@ -145,7 +149,14 @@ async def _run(
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
-        console.print(f"Dashboard API: http://{api_host}:{api_port}")
+        frontend_dir = ensure_frontend_dist_dir()
+        display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
+        if frontend_dir is None:
+            console.print("Dashboard: unavailable (frontend assets missing)")
+            console.print("  Install Bun or provide MINDROOM_FRONTEND_DIST when running from a source checkout.")
+        else:
+            console.print(f"Dashboard: http://{display_host}:{api_port}")
+        console.print(f"API: http://{display_host}:{api_port}/api")
     console.print("Press Ctrl+C to stop\n")
 
     try:

@@ -156,3 +156,22 @@ class TestResponseTracker:
         with tracker._responses_file.open() as f:
             data = json.load(f)
             assert len(data) == 100
+
+    def test_visible_echo_tracking_stays_partial_until_completed(self, temp_dir: Path) -> None:
+        """Visible router echoes should dedupe retries without marking the event fully handled."""
+        tracker = ResponseTracker("test_visible_echo", base_path=temp_dir)
+
+        tracker.mark_visible_echo_sent("event123", "$echo")
+
+        assert not tracker.has_responded("event123")
+        assert tracker.get_response_event_id("event123") is None
+        assert tracker.get_visible_echo_event_id("event123") == "$echo"
+
+        tracker.mark_responded("event123")
+
+        assert tracker.has_responded("event123")
+        assert tracker.get_visible_echo_event_id("event123") == "$echo"
+
+        tracker2 = ResponseTracker("test_visible_echo", base_path=temp_dir)
+        assert tracker2.has_responded("event123")
+        assert tracker2.get_visible_echo_event_id("event123") == "$echo"

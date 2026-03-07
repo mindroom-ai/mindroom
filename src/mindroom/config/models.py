@@ -22,7 +22,7 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Enable streaming responses via progressive message edits",
     )
-    show_stop_button: bool = Field(default=False, description="Whether to automatically show stop button on messages")
+    show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
     learning: bool = Field(default=True, description="Default Agno Learning setting")
     learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
     num_history_runs: int | None = Field(
@@ -94,6 +94,11 @@ class EmbedderConfig(BaseModel):
     model: str = Field(default="text-embedding-3-small", description="Model name for embeddings")
     api_key: str | None = Field(default=None, description="API key (usually from environment variable)")
     host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
+    dimensions: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional embedding dimension override for OpenAI-compatible providers",
+    )
 
 
 class ModelConfig(BaseModel):

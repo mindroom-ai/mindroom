@@ -10,7 +10,7 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 
 ```
 ┌──────────────────────────┐         HTTP          ┌──────────────────────────┐
-│ Primary backend          │  ── tool call ──▶     │ Sandbox runner           │
+│ Primary MindRoom runtime │  ── tool call ──▶     │ Sandbox runner           │
 │ has secrets              │  ◀── result ───       │ no secrets               │
 │ has credentials          │                       │ no credentials           │
 │ has persistent data      │                       │ writable scratch only    │
@@ -18,23 +18,23 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 ```
 
 1. Agent invokes `shell.run_shell_command(...)` (or file/python tool)
-2. Primary backend detects the tool is in the proxy list
+2. Primary MindRoom runtime detects the tool is in the proxy list
 3. Call is forwarded over HTTP to the sandbox runner
 4. Runner executes the tool locally and returns the result
-5. All other tools (API tools, search, etc.) execute in the primary backend as usual
+5. All other tools (API tools, search, etc.) execute in the primary MindRoom runtime as usual
 
-The runner authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials (e.g., a shell tool that calls an authenticated API), the primary backend can create a short-lived **credential lease** that the runner consumes once — credentials never persist in the runner's memory.
+The runner authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials (e.g., a shell tool that calls an authenticated API), the primary MindRoom runtime can create a short-lived **credential lease** that the runner consumes once — credentials never persist in the runner's memory.
 
 ## Deployment modes
 
 ### Docker Compose (sidecar container)
 
-Add a `sandbox-runner` service alongside the backend. Both use the same image; the runner just has a different entrypoint and no access to `.env` or the data volume.
+Add a `sandbox-runner` service alongside MindRoom. Both use the same image; the runner just has a different entrypoint and no access to `.env` or the data volume.
 
 ```yaml
 services:
-  backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+  mindroom:
+    image: ghcr.io/mindroom-ai/mindroom:latest
     env_file: .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -46,7 +46,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
   sandbox-runner:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom:latest
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
@@ -68,7 +68,7 @@ volumes:
 > ```
 > Alternatively, omit the `user:` directive to run as root (less secure).
 
-Key differences from the primary backend:
+Key differences from the primary MindRoom runtime:
 - **No `env_file`** — runner has no API keys, no Matrix credentials
 - **No data volume** — runner cannot access `mindroom_data/`
 - **Scratch workspace** — a dedicated volume for file operations
@@ -76,7 +76,7 @@ Key differences from the primary backend:
 
 ### Kubernetes (pod sidecar)
 
-In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-backend.yaml` for the full manifest. The runner gets:
+In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The runner gets:
 - An `emptyDir` volume for scratch workspace
 - Read-only access to config (for plugin tool registration)
 - No access to the secrets volume
@@ -93,7 +93,7 @@ docker run -d \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
-  ghcr.io/mindroom-ai/mindroom-backend:latest \
+  ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
 # 2. Start MindRoom on the host with proxy config
@@ -126,13 +126,13 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 >   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
 >   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
 >   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
->   ghcr.io/mindroom-ai/mindroom-backend:latest \
+>   ghcr.io/mindroom-ai/mindroom:latest \
 >   /app/run-sandbox-runner.sh
 > ```
 
 ## Environment variable reference
 
-### Primary backend (proxy client)
+### Primary MindRoom runtime (proxy client)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -166,7 +166,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 ## Credential leases
 
-Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary backend creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
+Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
@@ -183,7 +183,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - Credential leases are single-use by default and expire after 60 seconds
 - The runner's `securityContext` drops all capabilities and disables privilege escalation
 - In Kubernetes, the runner uses `emptyDir` for scratch space — no persistent state
-- The primary backend **does not** mount the sandbox runner router — the `/api/sandbox-runner/` endpoints exist only in the runner process
+- The primary MindRoom runtime **does not** mount the sandbox runner router — the `/api/sandbox-runner/` endpoints exist only in the runner process
 
 ## Per-agent configuration
 
@@ -219,4 +219,4 @@ Agent-level `sandbox_tools` overrides `defaults.sandbox_tools`, which in turn ov
 
 ## Without sandbox proxy
 
-When no `MINDROOM_SANDBOX_PROXY_URL` is set, all tools execute directly in the primary backend process. This is fine for development but not recommended for production deployments where agents run untrusted code.
+When no `MINDROOM_SANDBOX_PROXY_URL` is set, all tools execute directly in the primary MindRoom runtime process. This is fine for development but not recommended for production deployments where agents run untrusted code.

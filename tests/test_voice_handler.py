@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -12,6 +14,10 @@ from mindroom import voice_handler
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
+from mindroom.constants import ATTACHMENT_IDS_KEY
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestVoiceHandler:
@@ -161,3 +167,114 @@ class TestVoiceHandler:
         assert result.content == b"decrypted_audio_data"
         assert result.mime_type == "audio/mpeg"
         mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
+    async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
+        """Failed normalization should not leave stale in-flight task entries behind."""
+        config = Config(authorization={"default_room_access": True})
+        client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:server"
+        room.users = {"@alice:example.com": MagicMock()}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice123"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        voice_handler._voice_normalization_cache.clear()
+        voice_handler._voice_normalization_tasks.clear()
+        cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
+
+        with patch("mindroom.voice_handler.download_audio", new=AsyncMock(return_value=None)):
+            prepared = await voice_handler.prepare_voice_message(
+                client,
+                tmp_path,
+                room,
+                event,
+                config,
+                sender_domain="example.com",
+                thread_id=None,
+            )
+
+        assert prepared is None
+        assert cache_key not in voice_handler._voice_normalization_tasks
+        assert cache_key not in voice_handler._voice_normalization_cache
+
+    @pytest.mark.asyncio
+    async def test_prepare_voice_message_cancellation_does_not_cancel_shared_normalization(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Canceling one waiter should not cancel the shared normalization task for others."""
+        config = Config(authorization={"default_room_access": True})
+        client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:server"
+        room.users = {"@alice:example.com": MagicMock()}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice123"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        voice_handler._voice_normalization_cache.clear()
+        voice_handler._voice_normalization_tasks.clear()
+        cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
+        started = asyncio.Event()
+        release = asyncio.Event()
+        compute_calls = 0
+
+        async def fake_compute(
+            *_args: object,
+            **_kwargs: object,
+        ) -> voice_handler._NormalizedVoiceMessage:
+            nonlocal compute_calls
+            compute_calls += 1
+            started.set()
+            await release.wait()
+            return voice_handler._NormalizedVoiceMessage(
+                attachment_id="att-123",
+                transcribed_message="🎤 hello",
+            )
+
+        with patch("mindroom.voice_handler._compute_normalized_voice_message", side_effect=fake_compute):
+            first_waiter = asyncio.create_task(
+                voice_handler.prepare_voice_message(
+                    client,
+                    tmp_path,
+                    room,
+                    event,
+                    config,
+                    sender_domain="example.com",
+                    thread_id=None,
+                ),
+            )
+            await started.wait()
+
+            second_waiter = asyncio.create_task(
+                voice_handler.prepare_voice_message(
+                    client,
+                    tmp_path,
+                    room,
+                    event,
+                    config,
+                    sender_domain="example.com",
+                    thread_id=None,
+                ),
+            )
+            await asyncio.sleep(0)
+
+            first_waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first_waiter
+
+            release.set()
+            prepared = await second_waiter
+
+        assert prepared is not None
+        assert prepared.text == "🎤 hello"
+        assert prepared.source["content"][ATTACHMENT_IDS_KEY] == ["att-123"]
+        assert compute_calls == 1
+        assert cache_key in voice_handler._voice_normalization_cache
+        assert cache_key not in voice_handler._voice_normalization_tasks

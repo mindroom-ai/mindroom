@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
+from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -211,7 +212,17 @@ class MultiAgentOrchestrator:
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
     async def start(self) -> None:
-        """Start all agent bots."""
+        """Start all agent bots and publish readiness state."""
+        try:
+            await self._start_runtime()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            set_runtime_failed(str(exc))
+            raise
+
+    async def _start_runtime(self) -> None:
+        """Run the startup sequence before handing off to the sync loops."""
         if not self.agent_bots:
             await self.initialize()
 
@@ -255,6 +266,8 @@ class MultiAgentOrchestrator:
             sync_task = asyncio.create_task(_sync_forever_with_restart(bot))
             # Store the task reference for later cancellation
             self._sync_tasks[entity_name] = sync_task
+
+        set_runtime_ready()
 
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
@@ -430,19 +443,32 @@ class MultiAgentOrchestrator:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases)
 
-        # After rooms exist, ensure room invitations are up to date
+        async def _ensure_internal_user_memberships() -> None:
+            all_rooms = load_rooms()
+            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+            if all_room_ids and config.mindroom_user is not None:
+                await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
+
+        # First invitation/join pass for rooms the router is already in.
         await self._ensure_room_invitations()
+        await _ensure_internal_user_memberships()
+        await asyncio.gather(*(bot.ensure_rooms() for bot in bots))
 
-        # Ensure user joins all rooms after being invited
-        # Get all room IDs (not just newly created ones)
-        all_rooms = load_rooms()
-        all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
-        if all_room_ids and config.mindroom_user is not None:
-            await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
+        # Existing invite-only rooms may resolve before the router is a member.
+        # Rerun room reconciliation after the router's first join pass so topic
+        # and access policy updates apply once the router can manage the room.
+        if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
+            await self._ensure_rooms_exist()
 
-        # Now have bots join their configured rooms
-        join_tasks = [bot.ensure_rooms() for bot in bots]
-        await asyncio.gather(*join_tasks)
+        # Existing invite-only rooms may only become joinable for others after the
+        # router joins them in the first pass, so retry invitations once more.
+        await self._ensure_room_invitations()
+        await _ensure_internal_user_memberships()
+
+        follow_up_bots = [bot for bot in bots if bot.agent_name != ROUTER_AGENT_NAME]
+        if follow_up_bots:
+            await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
+
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> None:
@@ -803,7 +829,7 @@ async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
 
 
 async def _run_api_server(host: str, port: int, log_level: str) -> None:
-    """Run the dashboard API server as an asyncio task."""
+    """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api.main import app as api_app  # noqa: PLC0415  # avoid heavy import at module level
 
     config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
@@ -824,9 +850,9 @@ async def main(
     Args:
         log_level: The logging level to use (DEBUG, INFO, WARNING, ERROR)
         storage_path: The base directory for storing agent data
-        api: Whether to start the dashboard API server
-        api_port: Port for the dashboard API server
-        api_host: Host for the dashboard API server
+        api: Whether to start the bundled dashboard/API server
+        api_port: Port for the bundled dashboard/API server
+        api_host: Host for the bundled dashboard/API server
 
     """
     # Set up logging with the specified level
@@ -848,6 +874,7 @@ async def main(
     # Create and start orchestrator
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    set_runtime_starting()
 
     try:
         # Create task to run the orchestrator
@@ -861,9 +888,9 @@ async def main(
 
         tasks = {orchestrator_task, watcher_task, skills_watcher_task}
 
-        # Optionally start the dashboard API server
+        # Optionally start the bundled dashboard/API server
         if api:
-            logger.info("Starting dashboard API server on %s:%d", api_host, api_port)
+            logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
             api_task = asyncio.create_task(_run_api_server(api_host, api_port, log_level))
             tasks.add(api_task)
 
@@ -897,3 +924,4 @@ async def main(
         # Final cleanup
         if orchestrator is not None:
             await orchestrator.stop()
+        reset_runtime_state()

@@ -142,11 +142,17 @@ def format_message_with_mentions(
         merged_extra_content.update(tool_trace_content)
     if extra_content:
         merged_extra_content.update(extra_content)
+    inherited_mentions = merged_extra_content.pop("m.mentions", None)
+    inherited_user_ids = inherited_mentions.get("user_ids", []) if isinstance(inherited_mentions, dict) else []
+    merged_mentioned_user_ids = list(mentioned_user_ids)
+    for user_id in inherited_user_ids:
+        if isinstance(user_id, str) and user_id not in merged_mentioned_user_ids:
+            merged_mentioned_user_ids.append(user_id)
 
     return build_message_content(
         body=plain_text,
         formatted_body=formatted_html,
-        mentioned_user_ids=mentioned_user_ids,
+        mentioned_user_ids=merged_mentioned_user_ids,
         thread_event_id=thread_event_id,
         reply_to_event_id=reply_to_event_id,
         latest_thread_event_id=latest_thread_event_id,

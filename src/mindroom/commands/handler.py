@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
-from mindroom.commands.parsing import Command, CommandType, get_command_help, handle_widget_command
+from mindroom.commands.parsing import Command, CommandType, get_command_help
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
@@ -39,6 +39,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class CommandEvent(Protocol):
+    """Minimal event shape required by command handling."""
+
+    sender: str
+    event_id: str
+    body: str
+    source: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -48,7 +57,7 @@ class CommandHandlerContext:
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
-    requester_user_id_for_event: Callable[[nio.RoomMessageText], str]
+    requester_user_id_for_event: Callable[[CommandEvent], str]
     resolve_reply_thread_id: Callable[..., str | None]
     send_response: Callable[..., Awaitable[str | None]]
     send_skill_command_response: Callable[..., Awaitable[str | None]]
@@ -126,7 +135,6 @@ def _generate_welcome_message(room_id: str, config: Config) -> str:
         "• 🎤 Voice messages are automatically transcribed and work perfectly!\n\n"
         "⚡ **Quick commands:**\n"
         "• `!hi` - Show this welcome message again\n"
-        "• `!widget` - Add configuration widget to this room\n"
         "• `!schedule <time> <message>` - Schedule tasks and reminders\n"
         "• `!help [topic]` - Get detailed help\n\n"
         "✨ Feel free to ask any agent for help or start a conversation!"
@@ -380,7 +388,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     *,
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
-    event: nio.RoomMessageText,
+    event: CommandEvent,
     command: Command,
 ) -> None:
     """Dispatch chat commands using injected bot context."""
@@ -389,14 +397,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     event_info = EventInfo.from_event(event.source)
     _, thread_id, thread_history = await context.derive_conversation_context(room.room_id, event_info)
     requester_user_id = context.requester_user_id_for_event(event)
-
-    # Widget command modifies room state, so it doesn't need a thread
-    if command.type == CommandType.WIDGET:
-        url = command.args.get("url")
-        response_text = await handle_widget_command(client=context.client, room_id=room.room_id, url=url)
-        # Send response in thread if in thread, otherwise in main room
-        await context.send_response(room.room_id, event.event_id, response_text, thread_id)
-        return
 
     # Commands/tools that persist conversation context should use the same
     # thread-root policy as outgoing replies.

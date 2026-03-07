@@ -64,7 +64,7 @@ Start MindRoom with your configuration.
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
  - Manages agent room memberships
- - Starts the dashboard API server (disable with --no-api)
+ - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
@@ -74,12 +74,12 @@ Start MindRoom with your configuration.
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │                                          [default: mindroom_data]                      │
-│ --api               --no-api             Start the dashboard API server alongside the  │
-│                                          bot                                           │
+│ --api               --no-api             Start the bundled dashboard/API server        │
+│                                          alongside the bot                             │
 │                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the dashboard API server             │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
 │                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the dashboard API server             │
+│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
 │                                          [default: 0.0.0.0]                            │
 │ --help          -h                       Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯

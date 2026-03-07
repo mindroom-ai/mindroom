@@ -1,14 +1,9 @@
 // API configuration
-// If VITE_API_URL is explicitly set to empty string, use relative URLs (for Docker/production)
-// Otherwise use the provided URL or fallback to localhost
+// Default to relative URLs so requests use the current origin (/api/* via proxy/reverse-proxy).
+// Set VITE_API_URL to override (for explicit cross-origin backend setups).
 const viteApiUrl = (import.meta as any).env?.VITE_API_URL;
 export const API_BASE_URL =
-  viteApiUrl === ''
-    ? '' // Use relative URLs when empty (Docker/production mode)
-    : viteApiUrl ?? `http://localhost:${(import.meta as any).env?.VITE_BACKEND_PORT || '8765'}`;
-
-// Export as API_BASE for compatibility
-export const API_BASE = API_BASE_URL;
+  typeof viteApiUrl === 'string' && viteApiUrl.length > 0 ? viteApiUrl : '';
 
 export const API_ENDPOINTS = {
   // Config endpoints
@@ -114,9 +109,4 @@ export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<
     }
     throw error;
   }
-}
-
-// Backward-compatible helper for existing call sites.
-export async function fetchAPI(url: string, options?: RequestInit): Promise<any> {
-  return fetchJSON<any>(url, options);
 }

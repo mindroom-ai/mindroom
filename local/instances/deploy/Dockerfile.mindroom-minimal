@@ -1,34 +1,41 @@
-# Multi-stage build for MindRoom Backend
+# Minimal MindRoom runtime image - no tool extras pre-installed.
+# Tools auto-install their dependencies at runtime via tool_dependencies.py.
+# Good target for sandbox runners where image size matters.
 FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM oven/bun:1 AS bun
 
 # Builder stage with uv for dependencies
 FROM public.ecr.aws/docker/library/python:3.12-slim AS builder
 # Copy uv from the uv image
 COPY --from=uv /uv /uvx /bin/
+# Copy bun for frontend builds triggered by the editable install hook
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
 WORKDIR /app
 
 # Copy project files
-COPY pyproject.toml uv.lock README.md /app/
+COPY pyproject.toml uv.lock README.md hatch_build.py /app/
 
-# Install dependencies
+# Install dependencies (base only, no extras)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
 # Copy source code
 COPY src /app/src
 COPY skills /app/skills
+COPY frontend /app/frontend
 
-# Install the project itself
+# Install the project itself (base only, no extras)
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --all-extras
+    uv sync --locked --no-dev
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.12-slim AS final
-# Copy uv for runtime
+# Copy uv for runtime (needed for auto-installing tool extras)
 COPY --from=uv /uv /uvx /bin/
 
 # Set version for setuptools-scm at runtime (no .git in container)
@@ -64,10 +71,11 @@ RUN chmod +x /app/run-sandbox-runner.sh \
 
 # Set environment variable to indicate Docker mode
 ENV DOCKER_CONTAINER=1
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # Run as non-root user
 USER 1000:1000
 
 EXPOSE 8765
-# Run the app
-CMD ["uv", "run", "mindroom", "run"]
+# Run the app from the prebuilt virtualenv to avoid rebuilding at runtime
+CMD ["/app/.venv/bin/mindroom", "run"]

@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import yaml
+from anthropic import PermissionDeniedError
+from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
@@ -161,6 +164,32 @@ class TestConfigInit:
         output = _strip_ansi(result.output)
         assert "mindroom connect --pair-code" in output
 
+    def test_init_profile_public_vertexai_anthropic_writes_hosted_vertex_defaults(self, tmp_path: Path) -> None:
+        """Hosted Vertex profile should use Vertex Claude defaults and hosted Matrix settings."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--profile", "public-vertexai-anthropic"],
+        )
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert "mindroom_user" not in config
+        assert config["models"]["default"]["provider"] == "vertexai_claude"
+        assert config["models"]["default"]["id"] == "claude-opus-4-6@default"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
+        assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
+        assert "CLOUD_ML_REGION=us-central1" in env_content
+        assert "gcloud auth application-default login" in env_content
+        assert "\nOPENAI_API_KEY=" not in env_content
+        assert "\nOPENROUTER_API_KEY=" not in env_content
+
+        output = _strip_ansi(result.output)
+        assert "mindroom connect --pair-code" in output
+        assert "Vertex AI project/region and Google auth" in output
+
     def test_init_full_profile_omits_pairing_step(self, tmp_path: Path) -> None:
         """Full profile next steps should NOT mention pairing."""
         target = tmp_path / "config.yaml"
@@ -267,6 +296,19 @@ class TestConfigInit:
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4-5" in content
 
+    def test_init_vertexai_claude_preset_uses_vertex_models(self, tmp_path: Path) -> None:
+        """Config init --provider vertexai_claude uses Vertex AI Claude defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "vertexai_claude"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: vertexai_claude" in content
+        assert "id: claude-opus-4-6@default" in content
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
+        assert "CLOUD_ML_REGION=us-central1" in env_content
+
 
 # ---------------------------------------------------------------------------
 # mindroom config show
@@ -352,6 +394,46 @@ class TestConfigValidate:
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
         assert result.exit_code == 1
         assert "Issues found" in result.output
+
+    def test_validate_accepts_file_based_api_key_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Config validate does not warn when provider secrets are supplied via *_FILE."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.2\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        secret_file = tmp_path / "openai_key"
+        secret_file.write_text("sk-test", encoding="utf-8")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY_FILE", str(secret_file))
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
+
+    def test_validate_warns_for_missing_vertexai_claude_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config validate should warn about missing Vertex AI project settings."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" in result.output
+        assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
+        assert "CLOUD_ML_REGION" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +573,18 @@ class TestRunApiFlags:
 
 _VALID_CONFIG = (
     "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+    "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+    "router:\n  model: default\n"
+)
+_VALID_VERTEXAI_CLAUDE_CONFIG = (
+    "models:\n  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
+    "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+    "router:\n  model: default\n"
+)
+_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
+    "models:\n"
+    "  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
+    "  fast:\n    provider: vertexai_claude\n    id: claude-sonnet-4@20250514\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
@@ -691,6 +785,202 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "anthropic (2 models)" in result.output
         assert "openai (1 model)" in result.output
+
+    def test_vertexai_claude_connection_check_passes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates Vertex AI Claude with a tiny messages smoke test."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called: dict[str, object] = {}
+
+        class _FakeMessages:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                called["kwargs"] = kwargs
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                called["model_id"] = kwargs["id"]
+                called["client_kwargs"] = kwargs
+                self.id = str(kwargs["id"])
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": called["client_kwargs"]["timeout"]}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for claude-opus-4-6@default" in result.output
+        assert called["model_id"] == "claude-opus-4-6@default"
+        assert called["client_kwargs"] == {
+            "id": "claude-opus-4-6@default",
+            "project_id": "mindroom-test",
+            "region": "us-central1",
+            "timeout": 10,
+        }
+        assert called["kwargs"] == {
+            "model": "claude-opus-4-6@default",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "timeout": 10,
+        }
+
+    def test_vertexai_claude_connection_checks_each_configured_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates every configured Vertex AI Claude model by its actual ID."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        created_models: list[str] = []
+        requested_models: list[str] = []
+
+        class _FakeMessages:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                requested_models.append(str(kwargs["model"]))
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                created_models.append(str(kwargs["id"]))
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for claude-opus-4-6@default" in result.output
+        assert "vertexai_claude connection valid for claude-sonnet-4@20250514" in result.output
+        assert created_models == ["claude-opus-4-6@default", "claude-sonnet-4@20250514"]
+        assert requested_models == ["claude-opus-4-6@default", "claude-sonnet-4@20250514"]
+
+    def test_vertexai_claude_missing_env_is_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns when Vertex AI Claude is configured without required env vars."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude: could not validate connection" in result.output
+        assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
+        assert "CLOUD_ML_REGION" in result.output
+
+    def test_vertexai_claude_missing_adc_is_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns when Vertex AI Claude cannot load Google credentials."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _MissingCredentialsMessages:
+            def create(self, **_kwargs: object) -> None:
+                message = "ADC unavailable"
+                raise DefaultCredentialsError(message)
+
+        class _MissingCredentialsModel:
+            def __init__(self, **kwargs: object) -> None:
+                self.id = str(kwargs["id"])
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_MissingCredentialsMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _MissingCredentialsModel)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude: could not validate connection" in result.output
+        assert "ADC unavailable" in result.output
+
+    def test_vertexai_claude_api_rejection_is_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor fails when Vertex AI rejects the configured Claude request."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _RejectedMessages:
+            def create(self, **_kwargs: object) -> None:
+                response = httpx.Response(403, request=httpx.Request("POST", "https://vertex.test"))
+                message = "denied"
+                raise PermissionDeniedError(message, response=response, body={"error": "denied"})
+
+        class _RejectedModel:
+            def __init__(self, **kwargs: object) -> None:
+                self.id = str(kwargs["id"])
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_RejectedMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _RejectedModel)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "vertexai_claude connection failed for claude-opus-4-6@default" in result.output
+        assert "HTTP 403" in result.output
 
     def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor validates against custom base_url when configured."""

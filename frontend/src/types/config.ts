@@ -141,6 +141,7 @@ export interface VoiceLLMConfig {
 
 export interface VoiceConfig {
   enabled: boolean;
+  visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;
 }

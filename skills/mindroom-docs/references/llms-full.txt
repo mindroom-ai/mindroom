@@ -26,7 +26,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Recommended: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -41,7 +41,7 @@ docker compose up -d
 
 Open:
 
-- MindRoom UI: http://localhost:3003
+- MindRoom UI: http://localhost:8765
 - Element: http://localhost:8080
 - Matrix homeserver: http://matrix.localhost:8008
 
@@ -177,17 +177,15 @@ mindroom run
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Hosted Matrix + Local Backend (`uv` only)
+## Recommended: Hosted Matrix + Local MindRoom (`uv` only)
 
-If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+If you do not want to self-host Matrix yet, this is the simplest setup. You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Create a local project
+### 1. Initialize local config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
@@ -236,9 +234,9 @@ Send a message mentioning your agent in a room where it is configured.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 
-## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
-Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -264,7 +262,7 @@ docker compose up -d
 
 Open:
 
-- MindRoom UI: http://localhost:3003
+- MindRoom UI: http://localhost:8765
 - Element: http://localhost:8080
 - Matrix homeserver: http://matrix.localhost:8008
 
@@ -420,11 +418,10 @@ MindRoom includes a web dashboard for configuring agents, teams, rooms, and inte
 **Standalone Mode:**
 
 ```
-mindroom run              # Start the backend
-cd frontend && bun run dev  # Start the frontend (in another terminal)
+mindroom run
 ```
 
-The dashboard will be available at `http://localhost:3003`.
+The dashboard will be available at `http://localhost:8765`. When running from a source checkout, MindRoom will build the dashboard assets on first start if Bun is available.
 
 **SaaS Platform:** Access your dashboard at `https://<instance-id>.mindroom.chat`
 
@@ -764,7 +761,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
-  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
+  show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: true      # Compress tool results in history to save context
@@ -806,6 +803,7 @@ knowledge_bases:
 # Voice message handling (optional)
 voice:
   enabled: false                   # Default: false
+  visible_router_echo: false       # Optional: show the normalized voice text from the router
   stt:
     provider: openai               # Default: openai
     model: whisper-1               # Default: whisper-1
@@ -1111,7 +1109,7 @@ defaults:
   learning: true                        # Enable Agno Learning
   learning_mode: always                 # "always" or "agentic"
   max_preload_chars: 50000              # Hard cap for preloaded context from context_files
-  show_stop_button: false               # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
+  show_stop_button: true                # Show a stop button while agent is responding (global-only, cannot be overridden per-agent)
   num_history_runs: null                # Number of prior runs to include (null = all)
   num_history_messages: null            # Max messages from history (null = use num_history_runs)
   enable_streaming: true                # Stream agent responses via progressive message edits
@@ -1491,7 +1489,6 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!widget [url]` - Add configuration widget to the room
 - `!config <operation>` - Manage configuration
 - `!skill <name> [args]` - Run a skill by name
 
@@ -1522,7 +1519,7 @@ By default (`matrix_room_access.mode: single_user_private`), rooms remain invite
 
 ### Voice Message Processing
 
-Voice message callbacks are registered only on the router to avoid duplicate processing. When a voice message is received, the router transcribes it and posts the text (prefixed with a microphone emoji), which can then be routed to the appropriate agent.
+Audio events are handled through the shared media pipeline on all bots. The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room. When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message. Set `voice.visible_router_echo: true` if you also want the router to post the normalized voice text as a display-only message when it is allowed to reply. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
@@ -1901,7 +1898,7 @@ agents:
       - claude_agent
 ```
 
-Configure credentials via the dashboard widget or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
+Configure credentials via the dashboard or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
 
 ```
 {
@@ -2879,26 +2876,30 @@ This exposes `add_memory`, `search_memory`, `get_all_memories`, and `delete_all_
 
 # Voice Messages
 
-MindRoom can process voice messages sent to Matrix rooms, transcribing them and responding appropriately.
+MindRoom can surface Matrix voice messages as attachment-aware prompts for agents. If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline. If STT is unavailable, disabled, or fails, the audio still remains available as an attachment and falls back to `🎤 [Attached voice message]`.
 
 ## Overview
 
-When voice message handling is enabled:
+When a voice message is received:
 
-1. Voice messages are detected in Matrix rooms
-1. Audio is downloaded and decrypted (if E2E encrypted)
-1. Audio is sent to an OpenAI-compatible speech-to-text (STT) service
-1. Transcription is processed by an AI to recognize agent mentions and commands
-1. The formatted message is sent to the room (prefixed with a microphone emoji)
-1. The appropriate agent responds
+1. The audio event is handled through the shared media pipeline.
+1. Audio is downloaded and decrypted, if needed, and registered as a context-scoped attachment.
+1. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
+1. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
+1. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
+1. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
+1. If `voice.visible_router_echo` is enabled and the router is present and allowed to reply, the router also posts the normalized voice text as a display-only message.
+1. Otherwise, no extra router message is posted and the chosen agent replies directly.
+1. The responding agent receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
-Enable voice in `config.yaml`:
+Enable STT and voice-intelligence formatting in `config.yaml`:
 
 ```
 voice:
   enabled: true
+  visible_router_echo: false
   stt:
     provider: openai
     model: whisper-1
@@ -2909,6 +2910,8 @@ voice:
 ```
 
 Or use the dashboard's Voice tab.
+
+With `voice.enabled: false`, audio messages are still surfaced as attachments with the fallback prompt. Enabling voice adds STT and command-recognition on top of that attachment flow. With `voice.visible_router_echo: true`, the router also posts the normalized transcript or fallback text for inspection when it is present in the room and allowed to reply.
 
 ## STT Providers
 
@@ -2986,17 +2989,48 @@ You can specify a different model for faster or more accurate command recognitio
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
                                                                   │
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ 🎤 Message  │
-                                                            │ to Room     │
-                                                            └─────────────┘
-                                                                  │
+                                                         ┌──────────────────┐
+                                                         │ Normal Dispatch  │
+                                                         │ Decision         │
+                                                         └──────────────────┘
+                                                           │            │
+                                                           │            │
+                                                           ▼            ▼
+                                                 ┌──────────────┐  ┌──────────────┐
+                                                 │ Visible      │  │ No Visible   │
+                                                 │ Router       │  │ Router       │
+                                                 │ Handoff      │  │ Handoff      │
+                                                 └──────────────┘  └──────────────┘
+                                                           │            │
+                                                           └──────┬─────┘
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ Agent       │
-                                                            │ Responds    │
-                                                            └─────────────┘
+                                                           ┌─────────────┐
+                                                           │ Agent       │
+                                                           │ Responds    │
+                                                           └─────────────┘
 ```
+
+## Dispatch Behavior
+
+### Single-agent rooms or explicitly targeted audio
+
+If only one eligible agent is visible, that agent responds directly to the normalized audio event. If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well. In these cases, the router does not post an extra visible routing handoff. The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message. If `voice.visible_router_echo` is enabled, the router still posts a display-only copy of the normalized voice text, but agents ignore that echo and continue responding to the original audio event.
+
+### Multi-agent rooms where the router must choose
+
+If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step. The router then posts a normal handoff message such as `@home could you help with this?`. The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward. This is the case where a visible router message appears. If `voice.visible_router_echo` is also enabled, the router first posts the normalized voice text as a display-only echo and then posts the normal handoff.
+
+### No router, or router cannot reply
+
+Audio still works when the router is absent. In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages. The same direct handling also applies when the router is present but is not allowed to reply to the original sender. In these cases, there is no visible router echo because the router does not handle the event. If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
+
+### Visibility rule
+
+MindRoom does not automatically post the transcript to the room. A visible router message appears only when the router must disambiguate between multiple eligible responders. If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message. Setting `voice.visible_router_echo: true` adds a visible router-authored echo of the normalized voice text when the router is actually allowed to process the event, without changing which event agents actually answer.
+
+### Attachment access
+
+The original audio is always registered as a context-scoped attachment before dispatch continues. That means the responding agent can inspect the file directly, use audio-capable models, or fetch it later with the `attachments` tool. This is true whether the prompt came from a transcript, a fallback message, or a router handoff.
 
 ## Matrix Integration
 
@@ -3005,10 +3039,11 @@ Voice messages in Matrix are:
 - Detected as `RoomMessageAudio` or `RoomEncryptedAudio` events
 - Downloaded from the Matrix media server
 - Decrypted if end-to-end encrypted (using the encryption key from the event)
-- Processed in memory as audio bytes for STT requests
-- Sent to the STT service via the OpenAI-compatible API
+- Registered as audio attachments before dispatch
+- Sent to the STT service via the OpenAI-compatible API when transcription is enabled
+- Normalized once per room and thread context, even though multiple bots may observe the event
 
-The router agent handles all voice message processing to avoid duplicate transcriptions.
+Audio callbacks are registered on all bots because audio now follows the shared media pipeline. Shared normalization prevents repeated download and STT work for the same event. Reply-permission checks still use the original human sender, not a later router relay.
 
 ## Environment Variables
 
@@ -3027,22 +3062,23 @@ MindRoom also supports text-to-speech (TTS) through agent tools. These are separ
 
 See the [Tools documentation](https://docs.mindroom.chat/tools/index.md) for configuration details.
 
-## Voice Fallback (No STT Configured)
+## Voice Fallback (No STT Available)
 
-When voice is enabled but no STT provider is configured (or transcription fails), MindRoom falls back to raw audio passthrough:
+When STT is unavailable, disabled, or transcription fails, MindRoom falls back to raw audio passthrough:
 
 1. The voice message audio is downloaded and saved locally as an attachment
-1. A text fallback `🎤 [Attached voice message]` is sent to the room
-1. The raw audio is registered as an attachment ID available to agents in the thread
-1. When an agent responds in the thread, it automatically receives the raw audio as an Agno `Audio` object
+1. The normalized text becomes `🎤 [Attached voice message]`
+1. The raw audio is registered as an attachment ID available to agents in the room or thread context
+1. When an agent responds, it automatically receives the raw audio as an Agno `Audio` object
 
-This means voice messages still reach agents even without STT -- agents with audio-capable models can process the raw audio directly. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
+This means voice messages still reach agents even without STT. Agents with audio-capable models can process the raw audio directly, and tool-using agents can retrieve the file by attachment ID. Attachment IDs in this fallback path use the same context-scoping rules described in [File & Video Attachments](https://docs.mindroom.chat/attachments/index.md).
 
 ## Limitations
 
 - Only OpenAI-compatible STT APIs are supported
 - Audio quality and background noise affect transcription accuracy
-- Without STT, agents receive raw audio instead of transcription -- the model must support audio inputs to process it
+- Without STT, routing has less textual context, so explicit `@mentions` or existing thread context are more reliable in multi-agent rooms
+- Without STT, agents receive raw audio instead of transcription, so the model or tools must support audio inputs to process it
 
 ## Tips
 
@@ -3152,7 +3188,7 @@ Each uploaded file or video is assigned a stable attachment ID (e.g., `att_abc12
 Available attachment IDs: att_abc123. Use tool calls to inspect or process them.
 ```
 
-Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another. This prevents cross-room data leakage for ID-based access. Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-configured).
+Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another. This prevents cross-room data leakage for ID-based access. Voice raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
 
 ## The `attachments` Tool
 
@@ -3508,19 +3544,19 @@ OPENAI_COMPAT_ALLOW_UNAUTHENTICATED=true
 
 Without either of these, the API returns 401 on all requests.
 
-### 2. Start the backend
+### 2. Start MindRoom
 
 ```
-# Full backend (Matrix bot + API server)
+# Full MindRoom runtime (Matrix bot + API server + dashboard)
 uv run mindroom run
 
 # Or via just
-just start-backend-dev
+just start-mindroom-dev
 ```
 
 The API is available at `http://localhost:8765/v1/`.
 
-> [!IMPORTANT] If frontend and backend are served on the same domain behind a reverse proxy, route `/v1/*` to the backend (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the frontend and fail.
+> [!IMPORTANT] If the dashboard and `/v1/*` share a domain behind a reverse proxy, route `/v1/*` to the MindRoom runtime (in addition to `/api/*`). Otherwise OpenAI-compatible requests can be handled by the dashboard and fail.
 
 ### 3. Verify
 
@@ -3568,7 +3604,7 @@ endpoints:
         X-LibreChat-Conversation-Id: "{{LIBRECHAT_BODY_CONVERSATIONID}}"
 ```
 
-`X-Session-Id` is recommended when you want deterministic backend session continuity. This is especially important for tools that keep long-lived backend sessions. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
+`X-Session-Id` is recommended when you want deterministic MindRoom session continuity. This is especially important for tools that keep long-lived sessions inside the MindRoom runtime. `X-LibreChat-Conversation-Id` alone is still enough to keep continuity if you already use it.
 
 ### Open WebUI
 
@@ -3609,11 +3645,11 @@ Session IDs are derived from request headers:
 1. `X-LibreChat-Conversation-Id` header (automatic with LibreChat)
 1. Random UUID fallback
 
-Agent memory and conversation history persist across requests with the same session ID. For persistent backend tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
+Agent memory and conversation history persist across requests with the same session ID. For persistent MindRoom tool sessions (for example a long-running coding session), prefer `X-Session-Id`.
 
 ### Claude Agent tool sessions
 
-If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude backend session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
+If an agent enables the `claude_agent` tool, the same `X-Session-Id` keeps the Claude session alive across turns. This lets a user continue one long coding flow instead of starting a fresh Claude process on every request. See [Claude Agent Sessions](https://docs.mindroom.chat/tools/builtin/#claude-agent-sessions) for configuration details.
 
 Parallel Claude sub-sessions are supported by using different `session_label` values in tool calls:
 
@@ -3644,7 +3680,7 @@ Client `system` / `developer` messages are prepended to the prompt. They augment
 | Unset                    | `true`                                | No authentication required                                        |
 | Unset                    | Unset/`false`                         | All requests return 401 (locked)                                  |
 
-The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY` (Bearer token). The auth header is injected at the proxy layer (nginx in Docker/K8s), so the frontend JS bundle does not contain secrets. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
+The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate from the dashboard API auth. In standalone mode, the dashboard `/api/*` endpoints can be protected with `MINDROOM_API_KEY`; the browser dashboard uses a same-origin auth cookie, while CLI and curl clients can still send `Authorization: Bearer ...`. These are independent: `MINDROOM_API_KEY` secures the dashboard, while `OPENAI_COMPAT_API_KEYS` secures the `/v1/*` chat completions endpoints.
 
 ## Limitations
 
@@ -3983,13 +4019,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                        | Best For                                                    |
-| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| [Hosted Matrix + local backend](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally         |
-| Full Stack (Docker Compose)                                                                   | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)            | Backend-only or when you already have Matrix                |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                       | Multi-tenant SaaS, production                               |
-| Direct                                                                                        | Development, simple setups                                  |
+| Method                                                                                         | Best For                                                   |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally        |
+| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix    |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                              |
+| Direct                                                                                         | Development, simple setups                                 |
 
 ## Bridges
 
@@ -4007,11 +4043,9 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 
 ## Quick Start
 
-### Hosted Matrix + local backend (simplest)
+### Hosted Matrix + local MindRoom (simplest)
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
 $EDITOR ~/.mindroom/.env
@@ -4040,9 +4074,9 @@ docker compose up -d
 mindroom run --storage-path ./mindroom_data
 ```
 
-The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
 
 ```
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
@@ -4053,15 +4087,15 @@ mindroom run --storage-path ./mindroom_data
 
 ```
 docker run -d \
-  --name mindroom-backend \
+  --name mindroom \
   -p 8765:8765 \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom:latest
 ```
 
-See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for full setup including the frontend.
+See the [Docker deployment guide](https://docs.mindroom.chat/deployment/docker/index.md) for the full single-container setup.
 
 ### Kubernetes
 
@@ -4113,8 +4147,6 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
@@ -4480,9 +4512,9 @@ If you are a single local user and want to bring your own Google OAuth app, see 
 
 ## What You Need Before Starting
 
-- Your backend URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
+- Your MindRoom URL (local example: `http://localhost:8765`, production example: `https://mindroom.example.com`)
 - Access to [Google Cloud Console](https://console.cloud.google.com/)
-- Access to set backend environment variables
+- Access to set MindRoom environment variables
 
 The MindRoom callback path is always:
 
@@ -4493,7 +4525,7 @@ The MindRoom callback path is always:
 Your full callback URL is:
 
 ```
-<your-backend-origin>/api/google/callback
+<your-mindroom-origin>/api/google/callback
 ```
 
 ## Step 1: Create a Google Cloud Project
@@ -4540,9 +4572,9 @@ Your full callback URL is:
 1. Production: `https://<your-domain>/api/google/callback`
 1. Copy the generated client ID and client secret.
 
-## Step 5: Configure MindRoom Backend Environment
+## Step 5: Configure MindRoom Environment
 
-Set these env vars in your backend deployment (`.env`, Kubernetes secret, or hosting config):
+Set these env vars in your MindRoom deployment (`.env`, Kubernetes secret, or hosting config):
 
 ```
 GOOGLE_CLIENT_ID=your-app-client-id.apps.googleusercontent.com
@@ -4556,9 +4588,9 @@ Notes:
 - `GOOGLE_REDIRECT_URI` must match one of your Google Console redirect URIs exactly.
 - If omitted, MindRoom defaults to `http://localhost:8765/api/google/callback`.
 
-Restart the MindRoom backend after setting env vars.
+Restart MindRoom after setting env vars.
 
-## Step 6: Verify Backend Is Configured
+## Step 6: Verify MindRoom Is Configured
 
 Run:
 
@@ -4604,15 +4636,15 @@ Each user does only this:
 
 ### "Google OAuth is not configured"
 
-`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in backend environment.
+`GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_SECRET` is missing in the MindRoom environment.
 
 ### "Redirect URI mismatch"
 
 Ensure all three are identical:
 
-- `GOOGLE_REDIRECT_URI` in backend env
+- `GOOGLE_REDIRECT_URI` in the MindRoom environment
 - Redirect URI in Google Console
-- Actual backend callback URL
+- Actual MindRoom callback URL
 
 ### Users cannot authorize while app is in testing mode
 
@@ -4628,7 +4660,7 @@ For team/shared deployments, use [Google Services OAuth (Admin Setup)](https://d
 
 - A Google account
 - Access to Google Cloud Console
-- A running MindRoom backend/frontend (default backend URL: `http://localhost:8765`)
+- A running MindRoom instance with the bundled dashboard (default URL: `http://localhost:8765`)
 
 The callback path is always:
 
@@ -4683,21 +4715,21 @@ http://localhost:8765/api/google/callback
 1. `http://localhost:8765/api/google/callback`
 1. Copy client ID and client secret.
 
-## Step 5: Configure MindRoom Backend
+## Step 5: Configure MindRoom
 
 Add this to `.env` (or export in your shell):
 
 ```
-BACKEND_PORT=8765
+MINDROOM_PORT=8765
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_PROJECT_ID=your-project-id
 GOOGLE_REDIRECT_URI=http://localhost:8765/api/google/callback
 ```
 
-Restart the MindRoom backend.
+Restart MindRoom.
 
-## Step 6: Verify Backend Reads Credentials
+## Step 6: Verify MindRoom Reads Credentials
 
 Run:
 
@@ -4740,7 +4772,7 @@ Gmail tool capabilities include:
 - `gmail_latest`: Read latest inbox emails
 - `gmail_unread`: Read unread emails only
 
-After editing `config.yaml`, restart MindRoom backend to reload configuration.
+After editing `config.yaml`, restart MindRoom to reload configuration.
 
 ## Disconnect Later (Optional)
 
@@ -4751,11 +4783,11 @@ After editing `config.yaml`, restart MindRoom backend to reload configuration.
 
 ### "Admin Setup Required" shown in frontend
 
-Your backend does not have valid Google OAuth env vars yet.
+MindRoom does not have valid Google OAuth env vars yet.
 
 ### "Failed to complete OAuth flow"
 
-Check redirect URI exact match between Google Cloud Console and MindRoom backend.
+Check redirect URI exact match between Google Cloud Console and MindRoom.
 
 ### Access blocked by Google
 
@@ -4767,21 +4799,23 @@ Deploy MindRoom using Docker for simple, containerized deployments.
 
 ## Quick Start
 
-MindRoom consists of two containers:
+MindRoom ships as a single runtime container that serves:
 
-- **Backend**: The bot orchestrator and API server (port 8765)
-- **Frontend**: The dashboard UI (port 8080)
+- the bot orchestrator
+- the dashboard UI at `http://localhost:8765`
+- the dashboard API at `http://localhost:8765/api`
+- the OpenAI-compatible API at `http://localhost:8765/v1`
 
-For a minimal setup with just the backend:
+Run it with:
 
 ```
 docker run -d \
-  --name mindroom-backend \
+  --name mindroom \
   -p 8765:8765 \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom:latest
 ```
 
 ## Docker Compose
@@ -4791,7 +4825,7 @@ Create a `docker-compose.yml`:
 ```
 services:
   mindroom:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom:latest
     container_name: mindroom
     restart: unless-stopped
     ports:
@@ -4835,17 +4869,19 @@ Key environment variables (set in `.env` or pass directly):
 
 Streaming responses are configured in `config.yaml` via `defaults.enable_streaming` (default: `true`).
 
+If `MINDROOM_API_KEY` is set, the browser dashboard will prompt for the key via a same-origin login page before loading the UI.
+
 ## Building from Source
 
 Build from the repository root:
 
 ```
-docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.backend .
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
 The Dockerfile uses a multi-stage build with `uv` for dependency management and runs as a non-root user (UID 1000).
 
-A `Dockerfile.backend-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
+A `Dockerfile.mindroom-minimal` variant is also available, which builds a smaller image without pre-installed tool extras -- useful for sandbox runners.
 
 ## With Local Matrix
 
@@ -4900,43 +4936,11 @@ MindRoom stores data in the `mindroom_data` directory:
 
 ## Sandbox Proxy Isolation
 
-When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the backend process.
+When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
 
 See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
 
-## Full Stack with Frontend
-
-For a complete deployment including the dashboard:
-
-```
-services:
-  backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
-    container_name: mindroom-backend
-    restart: unless-stopped
-    ports:
-      - "8765:8765"
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./mindroom_data:/app/mindroom_data
-    env_file:
-      - .env
-    environment:
-      - MINDROOM_STORAGE_PATH=/app/mindroom_data
-
-  frontend:
-    image: ghcr.io/mindroom-ai/mindroom-frontend:latest
-    container_name: mindroom-frontend
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    depends_on:
-      - backend
-```
-
-> [!NOTE] The frontend image is built with `VITE_API_URL=""` (empty), meaning it uses relative URLs and expects `/api/*` requests to be proxied to the backend. If you also use the OpenAI-compatible API through the same domain, proxy `/v1/*` to the backend as well. For standalone deployments without a reverse proxy, rebuild the frontend image with `VITE_API_URL=http://localhost:8765`.
->
-> [!TIP] For production, use a reverse proxy (Traefik, Nginx) to serve both services under the same domain. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
+> [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
 
 # Sandbox Proxy Isolation
 
@@ -4946,7 +4950,7 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 
 ```
 ┌──────────────────────────┐         HTTP          ┌──────────────────────────┐
-│ Primary backend          │  ── tool call ──▶     │ Sandbox runner           │
+│ Primary MindRoom runtime │  ── tool call ──▶     │ Sandbox runner           │
 │ has secrets              │  ◀── result ───       │ no secrets               │
 │ has credentials          │                       │ no credentials           │
 │ has persistent data      │                       │ writable scratch only    │
@@ -4954,23 +4958,23 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 ```
 
 1. Agent invokes `shell.run_shell_command(...)` (or file/python tool)
-1. Primary backend detects the tool is in the proxy list
+1. Primary MindRoom runtime detects the tool is in the proxy list
 1. Call is forwarded over HTTP to the sandbox runner
 1. Runner executes the tool locally and returns the result
-1. All other tools (API tools, search, etc.) execute in the primary backend as usual
+1. All other tools (API tools, search, etc.) execute in the primary MindRoom runtime as usual
 
-The runner authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials (e.g., a shell tool that calls an authenticated API), the primary backend can create a short-lived **credential lease** that the runner consumes once — credentials never persist in the runner's memory.
+The runner authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials (e.g., a shell tool that calls an authenticated API), the primary MindRoom runtime can create a short-lived **credential lease** that the runner consumes once — credentials never persist in the runner's memory.
 
 ## Deployment modes
 
 ### Docker Compose (sidecar container)
 
-Add a `sandbox-runner` service alongside the backend. Both use the same image; the runner just has a different entrypoint and no access to `.env` or the data volume.
+Add a `sandbox-runner` service alongside MindRoom. Both use the same image; the runner just has a different entrypoint and no access to `.env` or the data volume.
 
 ```
 services:
-  backend:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+  mindroom:
+    image: ghcr.io/mindroom-ai/mindroom:latest
     env_file: .env
     volumes:
       - ./config.yaml:/app/config.yaml:ro
@@ -4982,7 +4986,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
   sandbox-runner:
-    image: ghcr.io/mindroom-ai/mindroom-backend:latest
+    image: ghcr.io/mindroom-ai/mindroom:latest
     command: ["/app/run-sandbox-runner.sh"]
     user: "1000:1000"
     volumes:
@@ -4999,7 +5003,7 @@ volumes:
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
-Key differences from the primary backend:
+Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
 - **No data volume** — runner cannot access `mindroom_data/`
@@ -5008,7 +5012,7 @@ Key differences from the primary backend:
 
 ### Kubernetes (pod sidecar)
 
-In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-backend.yaml` for the full manifest. The runner gets:
+In Kubernetes the runner runs as a second container in the same pod, sharing `localhost` networking. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The runner gets:
 
 - An `emptyDir` volume for scratch workspace
 - Read-only access to config (for plugin tool registration)
@@ -5026,7 +5030,7 @@ docker run -d \
   -e MINDROOM_SANDBOX_RUNNER_MODE=true \
   -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \
   -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \
-  ghcr.io/mindroom-ai/mindroom-backend:latest \
+  ghcr.io/mindroom-ai/mindroom:latest \
   /app/run-sandbox-runner.sh
 
 # 2. Start MindRoom on the host with proxy config
@@ -5048,11 +5052,11 @@ MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python
 
 This gives you the convenience of running MindRoom natively while keeping code-execution tools inside a container boundary.
 
-> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ ghcr.io/mindroom-ai/mindroom-backend:latest \ /app/run-sandbox-runner.sh`
+> [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
 
 ## Environment variable reference
 
-### Primary backend (proxy client)
+### Primary MindRoom runtime (proxy client)
 
 | Variable                                        | Description                                        | Default                               |
 | ----------------------------------------------- | -------------------------------------------------- | ------------------------------------- |
@@ -5086,7 +5090,7 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 ## Credential leases
 
-Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary backend creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
+Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
@@ -5103,7 +5107,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - Credential leases are single-use by default and expire after 60 seconds
 - The runner's `securityContext` drops all capabilities and disables privilege escalation
 - In Kubernetes, the runner uses `emptyDir` for scratch space — no persistent state
-- The primary backend **does not** mount the sandbox runner router — the `/api/sandbox-runner/` endpoints exist only in the runner process
+- The primary MindRoom runtime **does not** mount the sandbox runner router — the `/api/sandbox-runner/` endpoints exist only in the runner process
 
 ## Per-agent configuration
 
@@ -5139,7 +5143,7 @@ Agent-level `sandbox_tools` overrides `defaults.sandbox_tools`, which in turn ov
 
 ## Without sandbox proxy
 
-When no `MINDROOM_SANDBOX_PROXY_URL` is set, all tools execute directly in the primary backend process. This is fine for development but not recommended for production deployments where agents run untrusted code.
+When no `MINDROOM_SANDBOX_PROXY_URL` is set, all tools execute directly in the primary MindRoom runtime process. This is fine for development but not recommended for production deployments where agents run untrusted code.
 
 # Kubernetes Deployment
 
@@ -5149,7 +5153,7 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 MindRoom uses two Helm charts:
 
-- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom instance with bundled Matrix/Synapse
+- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 
 ## Prerequisites
@@ -5192,7 +5196,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Secrets Management
 
-API keys are mounted as files at `/etc/secrets/` (not environment variables). The backend reads paths from `*_API_KEY_FILE` environment variables:
+API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
 
 ```
 env:
@@ -5206,8 +5210,8 @@ env:
 
 Each instance gets three hosts:
 
-- `{customer}.{baseDomain}` - Frontend and API
-- `{customer}.api.{baseDomain}` - Direct backend access
+- `{customer}.{baseDomain}` - MindRoom dashboard and API
+- `{customer}.api.{baseDomain}` - Direct API access
 - `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
 
 ## Platform Deployment
@@ -5284,8 +5288,7 @@ The provisioner creates the namespace, generates URLs, deploys via Helm, and upd
 cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
-./redeploy-mindroom-backend.sh         # Redeploy all instance backends
-./redeploy-mindroom-frontend.sh        # Redeploy all instance frontends
+./redeploy-mindroom.sh         # Redeploy all customer MindRoom instances
 ```
 
 ## Multi-Tenant Architecture
@@ -5366,7 +5369,7 @@ Start MindRoom with your configuration.
  - Creates all necessary user and agent accounts
  - Creates all rooms defined in config.yaml
  - Manages agent room memberships
- - Starts the dashboard API server (disable with --no-api)
+ - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
@@ -5376,12 +5379,12 @@ Start MindRoom with your configuration.
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
 │                                          [default: mindroom_data]                      │
-│ --api               --no-api             Start the dashboard API server alongside the  │
-│                                          bot                                           │
+│ --api               --no-api             Start the bundled dashboard/API server        │
+│                                          alongside the bot                             │
 │                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the dashboard API server             │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
 │                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the dashboard API server             │
+│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
 │                                          [default: 0.0.0.0]                            │
 │ --help          -h                       Show this message and exit.                   │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯

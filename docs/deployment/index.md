@@ -10,9 +10,9 @@ MindRoom can be deployed in various ways depending on your needs.
 
 | Method | Best For |
 |--------|----------|
-| [Hosted Matrix + local backend](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
-| Full Stack (Docker Compose) | All-in-one: backend + frontend + Matrix (Synapse) + Element |
-| [Docker (single container)](docker.md) | Backend-only or when you already have Matrix |
+| [Hosted Matrix + local MindRoom](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
+| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
+| [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
 | Direct | Development, simple setups |
 
@@ -32,11 +32,9 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 
 ## Quick Start
 
-### Hosted Matrix + local backend (simplest)
+### Hosted Matrix + local MindRoom (simplest)
 
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
 $EDITOR ~/.mindroom/.env
@@ -66,9 +64,9 @@ docker compose up -d
 mindroom run --storage-path ./mindroom_data
 ```
 
-The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + Cinny with a host-installed backend (Linux/macOS), use:
+If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
 
 ```bash
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
@@ -79,15 +77,15 @@ mindroom run --storage-path ./mindroom_data
 
 ```bash
 docker run -d \
-  --name mindroom-backend \
+  --name mindroom \
   -p 8765:8765 \
   -v ./config.yaml:/app/config.yaml:ro \
   -v ./mindroom_data:/app/mindroom_data \
   --env-file .env \
-  ghcr.io/mindroom-ai/mindroom-backend:latest
+  ghcr.io/mindroom-ai/mindroom:latest
 ```
 
-See the [Docker deployment guide](docker.md) for full setup including the frontend.
+See the [Docker deployment guide](docker.md) for the full single-container setup.
 
 ### Kubernetes
 

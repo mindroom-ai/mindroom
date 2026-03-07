@@ -12,6 +12,9 @@ from urllib.parse import urlparse
 import httpx
 import typer
 import yaml
+from agno.models.vertexai.claude import Claude as VertexAIClaude
+from anthropic import APIStatusError
+from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
 from mindroom.constants import (
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
 
 
 def doctor() -> None:
@@ -281,6 +285,46 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
+def _validate_vertexai_claude_connection(model_config: ModelConfig) -> tuple[bool | None, str]:
+    """Validate the configured Vertex AI Claude model with the runtime request path."""
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+    project_id = extra_kwargs.get("project_id") or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+    region = extra_kwargs.get("region") or os.getenv("CLOUD_ML_REGION")
+    missing = []
+    if not project_id:
+        missing.append("ANTHROPIC_VERTEX_PROJECT_ID")
+    if not region:
+        missing.append("CLOUD_ML_REGION")
+    if missing:
+        return None, f"missing {', '.join(missing)}"
+
+    extra_kwargs.setdefault("project_id", project_id)
+    extra_kwargs.setdefault("region", region)
+    extra_kwargs.setdefault("timeout", 10)
+
+    try:
+        model = VertexAIClaude(id=model_config.id, **extra_kwargs)
+        request_kwargs = model.get_request_params().copy()
+        request_kwargs["model"] = model_config.id
+        request_kwargs["messages"] = [{"role": "user", "content": "Reply with OK."}]
+        request_kwargs.setdefault("max_tokens", 1)
+        request_kwargs["timeout"] = request_kwargs.get("timeout", 10)
+        client = model.get_client()
+        client.messages.create(
+            **request_kwargs,
+        )
+    except APIStatusError as exc:
+        return False, f"HTTP {exc.status_code}"
+    except DefaultCredentialsError as exc:
+        return None, str(exc)
+    except RefreshError as exc:
+        return False, str(exc)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return None, str(exc)
+
+    return True, ""
+
+
 def _get_ollama_host(config: Config) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
@@ -343,6 +387,26 @@ def _check_single_provider(
     validated_keys: set[str],
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
+    if provider == "vertexai_claude":
+        passed = 0
+        failed = 0
+        warnings = 0
+        for model_config in config.models.values():
+            if model_config.provider != provider:
+                continue
+            valid, detail = _validate_vertexai_claude_connection(model_config)
+            p, f, w = _print_validation(
+                valid,
+                detail,
+                f"{provider} connection valid for {model_config.id}",
+                f"{provider} connection failed for {model_config.id}",
+                f"{provider}: could not validate connection for {model_config.id}",
+            )
+            passed += p
+            failed += f
+            warnings += w
+        return passed, failed, warnings
+
     if provider == "ollama":
         host = _get_ollama_host(config)
         url = f"{host.rstrip('/')}/api/tags"

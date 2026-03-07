@@ -15,10 +15,6 @@ stripe:
   secretKey: # sk_test_...
   webhookSecret: # whsec_...
 
-# Gitea registry
-gitea:
-  token: # Your Gitea token
-
 cleanupScheduler:
   enabled: "true"
 

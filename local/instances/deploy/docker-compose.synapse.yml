@@ -93,8 +93,8 @@ services:
       - traefik.http.routers.${INSTANCE_NAME}-fed.tls.certresolver=porkbun
       - traefik.http.routers.${INSTANCE_NAME}-fed.service=${INSTANCE_NAME}-matrix
 
-  # Update backend to know about Matrix server
-  backend:
+  # Update MindRoom to know about the Matrix server
+  mindroom:
     environment:
       - MATRIX_HOMESERVER=http://synapse:8008
       - MATRIX_SERVER_NAME=m-${INSTANCE_DOMAIN}

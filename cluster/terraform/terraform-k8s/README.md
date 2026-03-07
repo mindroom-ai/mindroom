@@ -15,24 +15,23 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    - [Porkbun](https://porkbun.com/) account with API access enabled
    - [Supabase](https://supabase.com/) project
    - [Stripe](https://stripe.com/) account (test mode is fine)
-   - [Gitea](https://gitea.io/) or similar Docker registry
+   - Access to the published GHCR images (or your own registry override)
 
 3. **Domain Setup:**
    - Own a domain (e.g., mindroom.chat)
    - Domain must use Porkbun nameservers
 
 4. **Docker Images:**
-   The platform expects Docker images to be available in your Gitea registry.
+   The platform expects Docker images to be available in GHCR by default.
 
    Platform images needed:
-   - `platform-frontend:latest`
-   - `platform-backend:latest`
+   - `ghcr.io/mindroom-ai/platform-frontend:latest`
+   - `ghcr.io/mindroom-ai/platform-backend:latest`
 
    Customer instance images (from main MindRoom project):
-   - `mindroom-backend:latest`
-   - `mindroom-frontend:latest`
+   - `ghcr.io/mindroom-ai/mindroom:latest`
 
-   These should be built and pushed to your registry before deployment.
+   Override `registry` if you want to deploy from a different registry.
 
 ## What It Deploys
 
@@ -98,7 +97,6 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 - **Porkbun API Keys**: From https://porkbun.com/account/api
 - **Supabase**: Project URL and keys
 - **Stripe**: API keys and webhook secret
-- **Gitea**: Registry token for Docker images
 
 ## Outputs
 

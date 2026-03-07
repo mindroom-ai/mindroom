@@ -122,6 +122,55 @@ class TestProvisionerCommandValidation:
                 assert set_args["openrouter_key"] != set_args["openai_key"]
 
     @pytest.mark.asyncio
+    async def test_helm_install_command_honors_instance_overrides(self):
+        """Provisioner should forward configured instance chart overrides to Helm."""
+        from backend.routes.provisioner import provision_instance
+
+        captured_helm_args = []
+
+        async def capture_helm_command(args):
+            captured_helm_args.append(args)
+            return (0, "Success", "")
+
+        with (
+            patch("backend.routes.provisioner.PROVISIONER_API_KEY", "test-key"),
+            patch("backend.routes.provisioner.INSTANCE_BASE_DOMAIN", "local"),
+            patch("backend.routes.provisioner.INSTANCE_STORAGE_CLASS_NAME", "standard"),
+            patch("backend.routes.provisioner.INSTANCE_MINDROOM_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest"),
+            patch("backend.routes.provisioner.INSTANCE_MINDROOM_IMAGE_PULL_POLICY", "IfNotPresent"),
+            patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE", "matrixdotorg/synapse:latest"),
+            patch("backend.routes.provisioner.INSTANCE_SYNAPSE_IMAGE_PULL_POLICY", "IfNotPresent"),
+            patch("backend.routes.provisioner.run_helm", side_effect=capture_helm_command),
+            patch("backend.routes.provisioner.ensure_supabase") as mock_sb,
+        ):
+            mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+
+            await provision_instance(
+                None,
+                {
+                    "subscription_id": "sub-123",
+                    "account_id": "acc-123",
+                    "tier": "starter",
+                },
+                "Bearer test-key",
+                None,
+            )
+
+        helm_args = captured_helm_args[0]
+        set_args = {}
+        for i, arg in enumerate(helm_args):
+            if arg == "--set":
+                key, value = helm_args[i + 1].split("=", 1)
+                set_args[key] = value
+
+        assert set_args["baseDomain"] == "local"
+        assert set_args["storageClassName"] == "standard"
+        assert set_args["mindroom_image"] == "ghcr.io/mindroom-ai/mindroom:latest"
+        assert set_args["mindroom_image_pull_policy"] == "IfNotPresent"
+        assert set_args["synapse_image"] == "matrixdotorg/synapse:latest"
+        assert set_args["synapse_image_pull_policy"] == "IfNotPresent"
+
+    @pytest.mark.asyncio
     async def test_kubectl_scale_command_uses_correct_syntax(self):
         """Verify scale commands use correct Kubernetes syntax."""
         from backend.routes.provisioner import stop_instance_provisioner
@@ -150,7 +199,7 @@ class TestProvisionerCommandValidation:
 
         # Verify deployment name format
         deployment = args[1].split("/")[1]
-        assert deployment == "mindroom-backend-123"
+        assert deployment == "mindroom-123"
 
 
 class TestProvisionerStateTransitions:
@@ -317,19 +366,16 @@ class TestProvisionerErrorRecovery:
                     with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                         mock_kubectl.return_value = (0, "Success", "")
 
-                        with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                            mock_secret.return_value = True
-
-                            with pytest.raises(Exception):
-                                await provision_instance(
-                                    None,  # request
-                                    {
-                                        "subscription_id": "sub-123",
-                                        "account_id": "acc-123",
-                                    },
-                                    "Bearer test-key",  # authorization
-                                    None,  # background_tasks
-                                )
+                        with pytest.raises(Exception):
+                            await provision_instance(
+                                None,  # request
+                                {
+                                    "subscription_id": "sub-123",
+                                    "account_id": "acc-123",
+                                },
+                                "Bearer test-key",  # authorization
+                                None,  # background_tasks
+                            )
 
         # In a real implementation, we should call rollback
         # assert rollback_called, "Failed to rollback after Helm failure"
@@ -539,7 +585,7 @@ class TestProvisionerRealScenarios:
             mock_kubectl.return_value = (
                 1,  # Non-zero return code indicates failure
                 "",
-                'error: deployment "mindroom-backend-test-instance" exceeded its progress deadline',
+                'error: deployment "mindroom-test-instance" exceeded its progress deadline',
             )
 
             ready = await wait_for_deployment_ready("test-instance", timeout_seconds=5)
@@ -632,29 +678,24 @@ class TestProvisionerObservability:
             with patch("backend.routes.provisioner.run_kubectl") as mock_kubectl:
                 mock_kubectl.return_value = (0, "Success", "")
 
-                with patch("backend.routes.provisioner.ensure_docker_registry_secret") as mock_secret:
-                    mock_secret.return_value = True
+                with patch("backend.routes.provisioner.run_helm") as mock_helm:
+                    mock_helm.return_value = (1, "", "Connection refused")
 
-                    with patch("backend.routes.provisioner.run_helm") as mock_helm:
-                        mock_helm.return_value = (1, "", "Connection refused")
+                    with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
+                        mock_sb.return_value.table().insert().execute.return_value = Mock(data=[{"instance_id": "123"}])
+                        mock_sb.return_value.table().update().eq().execute.return_value = Mock()
 
-                        with patch("backend.routes.provisioner.ensure_supabase") as mock_sb:
-                            mock_sb.return_value.table().insert().execute.return_value = Mock(
-                                data=[{"instance_id": "123"}]
+                        with pytest.raises(Exception) as exc_info:
+                            await provision_instance(
+                                None,  # request
+                                {
+                                    "subscription_id": "sub-123",
+                                    "account_id": "acc-123",
+                                    "tier": "professional",
+                                },
+                                "Bearer test-key",  # authorization
+                                None,  # background_tasks
                             )
-                            mock_sb.return_value.table().update().eq().execute.return_value = Mock()
-
-                            with pytest.raises(Exception) as exc_info:
-                                await provision_instance(
-                                    None,  # request
-                                    {
-                                        "subscription_id": "sub-123",
-                                        "account_id": "acc-123",
-                                        "tier": "professional",
-                                    },
-                                    "Bearer test-key",  # authorization
-                                    None,  # background_tasks
-                                )
 
                 error = str(exc_info.value)
 

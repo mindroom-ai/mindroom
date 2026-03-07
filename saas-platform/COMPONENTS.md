@@ -33,8 +33,7 @@ Next.js application serving:
 ## Customer Instances
 
 Each MindRoom instance consists of:
-- **Backend Container**: Runs bot and API server (port 8765)
-- **Frontend Container**: Serves web UI (port 3003)
+- **Backend Container**: Runs bot, serves the bundled dashboard, and exposes the APIs (port 8765)
 - **Persistent Storage**: Config files and conversation data
 - **Environment Isolation**: Separate namespace and secrets
 

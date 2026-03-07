@@ -38,10 +38,11 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        image:
-          - backend
-          - backend-minimal
-          - frontend
+        target:
+          - image_name: mindroom
+            dockerfile: local/instances/deploy/Dockerfile.mindroom
+          - image_name: mindroom-minimal
+            dockerfile: local/instances/deploy/Dockerfile.mindroom-minimal
         platform:
           - linux/amd64
           - linux/arm64
@@ -83,7 +84,6 @@ jobs:
     - name: Set build vars
       id: vars
       run: |
-        echo "dockerfile=local/instances/deploy/Dockerfile.${{ matrix.image }}" >> $GITHUB_OUTPUT
         echo "timestamp=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
         # Sanitize ref for Docker tag usage (e.g. pull/123/merge -> pull-123-merge)
         echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> $GITHUB_OUTPUT
@@ -98,17 +98,17 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ${{ steps.vars.outputs.dockerfile }}
+        file: ${{ matrix.target.dockerfile }}
         platforms: ${{ matrix.platform }}
         push: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.push_images) }}
         tags: |
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ matrix.platform_suffix }}
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-${{ matrix.platform_suffix }}
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.timestamp }}-${{ matrix.platform_suffix }}
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ matrix.platform_suffix }}
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-${{ matrix.platform_suffix }}
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.timestamp }}-${{ matrix.platform_suffix }}
         build-args: |
           VERSION=${{ steps.vars.outputs.version }}
-        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ matrix.platform_suffix }}
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:buildcache-${{ matrix.platform_suffix }},mode=max
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }}
+        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:buildcache-${{ matrix.platform_suffix }},mode=max
         provenance: false
         sbom: false
 
@@ -122,10 +122,9 @@ jobs:
 
     strategy:
       matrix:
-        image:
-          - backend
-          - backend-minimal
-          - frontend
+        target:
+          - image_name: mindroom
+          - image_name: mindroom-minimal
 
     steps:
     - name: Login to GitHub Container Registry
@@ -144,19 +143,19 @@ jobs:
       run: |
         # Create multi-arch manifest with both amd64 and arm64
         docker manifest create \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:amd64 \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:arm64
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:amd64 \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:arm64
 
-        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest
+        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest
 
         # Also create branch-tagged manifest
         docker manifest create \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }} \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-amd64 \
-          ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}-arm64
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }} \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-amd64 \
+          ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}-arm64
 
-        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:${{ steps.vars.outputs.safe_ref }}
+        docker manifest push ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:${{ steps.vars.outputs.safe_ref }}
 
-        echo "✅ Multi-arch manifest created for mindroom-${{ matrix.image }}"
-        echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/mindroom-${{ matrix.image }}:latest"
+        echo "✅ Multi-arch manifest created for ${{ matrix.target.image_name }}"
+        echo "Pull with: docker pull ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.target.image_name }}:latest"

@@ -335,8 +335,6 @@ Use this when Matrix + chat UI are hosted and only the MindRoom backend runs loc
 
 1) Initialize local config with hosted defaults
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
@@ -390,7 +388,7 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 #   -f values-with-secrets.yaml  # Never commit this file!
 
 # Quick redeploy of MindRoom backend (updates all instances)
-./saas-platform/redeploy-mindroom-backend.sh
+./saas-platform/redeploy-mindroom.sh
 
 # Deploy platform frontend or backend
 ./saas-platform/deploy.sh platform-frontend  # Build, push, and deploy frontend
@@ -424,10 +422,10 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the widget without Jupyter, use `python frontend/take_screenshot.py` from the project root.
+- **Taking Screenshots**: To view the dashboard without Jupyter, use `python frontend/take_screenshot.py` from the project root.
 - **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
-- **Use Cases**: This is helpful for visual verification, documentation, and sharing the widget appearance.
+- **Use Cases**: This is helpful for visual verification, documentation, and sharing the dashboard appearance.
 
 ### Developer Automation (`justfile`)
 

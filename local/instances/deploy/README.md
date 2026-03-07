@@ -1,4 +1,4 @@
-# Mindroom Deployment Guide
+# MindRoom Deployment Guide
 
 ## Quick Start
 
@@ -9,7 +9,7 @@
 
 ### Using the Instance Manager
 
-The `deploy` script manages multiple Mindroom instances with optional Matrix server integration.
+The `deploy` script manages multiple MindRoom instances with optional Matrix server integration.
 
 ## Basic Commands
 
@@ -59,8 +59,7 @@ GOOGLE_API_KEY=...
 ```
 
 This will start:
-- Mindroom backend (port automatically assigned, e.g., 8765)
-- Mindroom frontend (port automatically assigned, e.g., 8080)
+- MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled (with Redis for sessions)
 - PostgreSQL and Redis (if using Synapse)
@@ -68,8 +67,7 @@ This will start:
 ### 4. Access Your Instance
 
 After starting, your instance will be available at:
-- **Frontend**: `http://localhost:{FRONTEND_PORT}` (e.g., `http://localhost:8085`)
-- **Backend API**: `http://localhost:{BACKEND_PORT}` (e.g., `http://localhost:8765`)
+- **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 - **Auth Portal** (if enabled): `https://auth-{DOMAIN}` (e.g., `https://auth-myapp.example.com`)
 
@@ -103,14 +101,14 @@ To find your ports:
 
 Output:
 ```
-                              Mindroom Instances
-┏━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┓
-┃ Name    ┃  Status   ┃ Backend ┃ Frontend ┃   Matrix ┃ Domain    ┃ Data       ┃
-┡━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ prod    │ ● running │    8765 │     8085 │ 8448 (S) │ prod.com  │ ./instance…│
-│ dev     │ ○ stopped │    8766 │     3006 │ 8449 (T) │ dev.local │ ./instance…│
-│ test    │ ● running │    8767 │     3007 │     none │ test.local│ ./instance…│
-└─────────┴───────────┴─────────┴──────────┴──────────┴───────────┴────────────┘
+                              MindRoom Instances
+┏━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Name    ┃  Status   ┃   MindRoom ┃   Matrix ┃ Domain    ┃ Data       ┃
+┡━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ prod    │ ● running │         8765 │ 8448 (S) │ prod.com  │ ./instance…│
+│ dev     │ ○ stopped │         8766 │ 8449 (T) │ dev.local │ ./instance…│
+│ test    │ ● running │         8767 │     none │ test.local│ ./instance…│
+└─────────┴───────────┴──────────────┴──────────┴───────────┴────────────┘
 
 (S) = Synapse, (T) = Tuwunel
 ```
@@ -151,9 +149,9 @@ nano .env.test  # Add API keys
 - **Features**: Complete Matrix spec implementation, battle-tested
 
 ### No Matrix
-- **When to use**: When you only need Mindroom without chat features
+- **When to use**: When you only need MindRoom without chat features
 - **Command**: (default, no flag needed)
-- **Features**: Just Mindroom backend and frontend
+- **Features**: Just MindRoom on the bundled dashboard/API port
 
 ## Testing Your Matrix Server
 
@@ -173,8 +171,7 @@ python deploy/test_matrix.py 8450 Synapse
 ## Port Management
 
 Ports are automatically assigned and tracked:
-- **Backend**: Starts at 8765, increments for each instance
-- **Frontend**: Starts at 8080, increments for each instance (internal port always 8080)
+- **MindRoom**: Starts at 8765, increments for each instance
 - **Matrix**: Starts at 8448, increments for each instance
 
 The instance manager ensures no port conflicts.
@@ -185,7 +182,7 @@ Each instance has its own data directory:
 ```
 deploy/instance_data/
 ├── myapp/
-│   ├── config/       # Mindroom configuration
+│   ├── config/       # MindRoom configuration
 │   ├── tmp/          # Temporary files
 │   ├── logs/         # Application logs
 │   ├── synapse/      # Synapse data (if using Synapse)
@@ -200,7 +197,7 @@ deploy/instance_data/
 
 ### Instance Won't Start
 1. Check if ports are already in use: `docker ps`
-2. Check logs: `docker logs {instance_name}-backend`
+2. Check logs: `docker logs {instance_name}-mindroom`
 3. Ensure `.env.{instance_name}` has valid API keys
 4. Try stopping and starting again
 
@@ -243,11 +240,11 @@ docker logs {instance_name}-tuwunel
 ### Instance Registry
 - `instances.json` - Tracks all instances, ports, and configuration
 - Automatically manages port allocation (no conflicts!)
-- Port allocation starts at: Backend (8765), Frontend (8085), Matrix (8448)
+- Port allocation starts at: MindRoom (8765), Matrix (8448)
 
 ### Docker Compose Structure
 The system uses parameterized Docker Compose files:
-- `docker-compose.yml` - Base Mindroom services (backend, frontend)
+- `docker-compose.yml` - Base MindRoom services (runtime + bundled dashboard/API)
 - `docker-compose.tuwunel.yml` - Adds Tuwunel Matrix server
 - `docker-compose.synapse.yml` - Adds Synapse with PostgreSQL and Redis
 
@@ -285,8 +282,7 @@ OLLAMA_HOST=
 ```env
 # Instance configuration
 INSTANCE_NAME=myapp
-BACKEND_PORT=8765
-FRONTEND_PORT=8085
+MINDROOM_PORT=8765
 DATA_DIR=/absolute/path/to/instance_data/myapp
 INSTANCE_DOMAIN=myapp.localhost
 
@@ -305,7 +301,7 @@ echo "OPENAI_API_KEY=sk-..." >> .env.dev
 echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
 ./deploy.py start dev
 
-# Access at http://localhost:3004
+# Access at the MindRoom port shown by ./deploy.py list
 ```
 
 ### Production Setup

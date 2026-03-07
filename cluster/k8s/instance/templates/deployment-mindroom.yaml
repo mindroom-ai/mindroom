@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mindroom-backend-{{ .Values.customer }}
+  name: mindroom-{{ .Values.customer }}
   namespace: mindroom-instances
   labels:
-    app: mindroom-backend
+    app: mindroom
     customer: {{ .Values.customer | quote }}
 spec:
   strategy:
@@ -12,12 +12,12 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mindroom-backend
+      app: mindroom
       customer: {{ .Values.customer | quote }}
   template:
     metadata:
       labels:
-        app: mindroom-backend
+        app: mindroom
         customer: {{ .Values.customer | quote }}
     spec:
       securityContext:
@@ -27,10 +27,10 @@ spec:
         runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
       containers:
-      - name: mindroom-backend
-        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
-        imagePullPolicy: Always
-        # Expose API port - backend now runs both bot and API
+      - name: mindroom
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        # Expose the MindRoom port; the runtime serves bot, dashboard, and API traffic.
         ports:
         - containerPort: 8765
           name: api
@@ -72,6 +72,8 @@ spec:
           value: "/etc/secrets/supabase_service_key"
         - name: SUPABASE_ANON_KEY
           value: {{ .Values.supabaseAnonKey | quote }}
+        - name: MINDROOM_PLATFORM_LOGIN_URL
+          value: "https://app.{{ .Values.baseDomain }}/auth/login"
         - name: OPENROUTER_API_KEY_FILE
           value: "/etc/secrets/openrouter_key"
         - name: GOOGLE_API_KEY_FILE
@@ -96,14 +98,33 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        # Startup only needs the API process to bind the socket; readiness waits for full bootstrap.
+        startupProbe:
+          httpGet:
+            path: /api/health
+            port: api
+          periodSeconds: 2
+          failureThreshold: 90
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: api
+          periodSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: api
+          periodSeconds: 10
+          failureThreshold: 6
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
             drop:
               - ALL
       - name: sandbox-runner
-        image: {{ .Values.mindroom_backend_image | default "git.nijho.lt/basnijholt/mindroom-backend:latest" }}
-        imagePullPolicy: Always
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
         command: ["/app/run-sandbox-runner.sh"]
         ports:
         - containerPort: 8766
@@ -138,8 +159,6 @@ spec:
           capabilities:
             drop:
               - ALL
-      imagePullSecrets:
-      - name: gitea-registry
       volumes:
       - name: storage
         persistentVolumeClaim:

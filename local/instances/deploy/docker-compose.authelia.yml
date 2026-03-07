@@ -29,10 +29,10 @@ services:
       - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.trustForwardHeader=true
       - traefik.http.middlewares.${INSTANCE_NAME:-mindroom}-auth.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email
 
-  # Apply auth middleware to frontend
-  frontend:
+  # Apply auth middleware to the dashboard router on the MindRoom runtime
+  mindroom:
     labels:
-      # Add auth middleware to the frontend router
+      # Add auth middleware to the dashboard router
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.middlewares=${INSTANCE_NAME:-mindroom}-auth
 
 networks:

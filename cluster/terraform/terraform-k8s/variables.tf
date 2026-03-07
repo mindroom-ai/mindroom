@@ -128,23 +128,10 @@ variable "provisioner_api_key" {
   default     = ""
 }
 
-variable "gitea_user" {
-  description = "Gitea username for registry access"
-  type        = string
-  default     = "basnijholt"
-}
-
-variable "gitea_token" {
-  description = "Gitea registry token"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
 variable "registry" {
   description = "Docker registry URL"
   type        = string
-  default     = "git.nijho.lt/basnijholt"
+  default     = "ghcr.io/mindroom-ai"
 }
 
 variable "image_tag" {

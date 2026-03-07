@@ -2,17 +2,15 @@
 
 This guide will help you set up MindRoom and create your first AI agent.
 
-## Recommended: Hosted Matrix + Local Backend (`uv` only)
+## Recommended: Hosted Matrix + Local MindRoom (`uv` only)
 
-If you do not want to self-host Matrix yet, this is the simplest setup. You only run the MindRoom backend locally.
+If you do not want to self-host Matrix yet, this is the simplest setup. You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Create a local project
+### 1. Initialize local config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
@@ -61,9 +59,9 @@ Send a message mentioning your agent in a room where it is configured.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 
-## Alternative: Full Stack Docker Compose (backend + frontend + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
 
-Use this when you want everything local: backend, frontend, Matrix homeserver, and a Matrix client in one stack.
+Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -89,7 +87,7 @@ docker compose up -d
 
 Open:
 
-- MindRoom UI: http://localhost:3003
+- MindRoom UI: http://localhost:8765
 - Element: http://localhost:8080
 - Matrix homeserver: http://matrix.localhost:8008
 

@@ -1,4 +1,4 @@
-"""Pytest configuration and fixtures for widget backend tests."""
+"""Pytest configuration and fixtures for dashboard backend tests."""
 
 # Import the app after we can mock the config path
 import tempfile

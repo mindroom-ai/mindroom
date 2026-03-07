@@ -10,7 +10,7 @@ Deploy MindRoom on Kubernetes for production multi-tenant deployments.
 
 MindRoom uses two Helm charts:
 
-- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom instance with bundled Matrix/Synapse
+- **Instance Chart** (`cluster/k8s/instance/`) - Individual MindRoom runtime with bundled dashboard/API plus Matrix/Synapse
 - **Platform Chart** (`cluster/k8s/platform/`) - SaaS control plane (API, frontend, provisioner)
 
 ## Prerequisites
@@ -53,7 +53,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Secrets Management
 
-API keys are mounted as files at `/etc/secrets/` (not environment variables). The backend reads paths from `*_API_KEY_FILE` environment variables:
+API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:
 
 ```yaml
 env:
@@ -67,8 +67,8 @@ env:
 
 Each instance gets three hosts:
 
-- `{customer}.{baseDomain}` - Frontend and API
-- `{customer}.api.{baseDomain}` - Direct backend access
+- `{customer}.{baseDomain}` - MindRoom dashboard and API
+- `{customer}.api.{baseDomain}` - Direct API access
 - `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
 
 ## Platform Deployment
@@ -145,8 +145,7 @@ The provisioner creates the namespace, generates URLs, deploys via Helm, and upd
 cd saas-platform
 ./deploy.sh platform-frontend          # Deploy platform frontend
 ./deploy.sh platform-backend           # Deploy platform backend
-./redeploy-mindroom-backend.sh         # Redeploy all instance backends
-./redeploy-mindroom-frontend.sh        # Redeploy all instance frontends
+./redeploy-mindroom.sh         # Redeploy all customer MindRoom instances
 ```
 
 ## Multi-Tenant Architecture

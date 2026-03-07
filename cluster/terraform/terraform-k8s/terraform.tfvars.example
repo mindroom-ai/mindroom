@@ -36,9 +36,8 @@ google_oauth_client_secret = ""
 github_oauth_client_id     = ""
 github_oauth_client_secret = ""
 
-# Docker Registry (Gitea)
-gitea_token = "YOUR_GITEA_TOKEN"
-registry    = "git.nijho.lt/basnijholt"
+# Docker Registry
+registry  = "ghcr.io/mindroom-ai"
 image_tag   = "latest"
 
 # Server Configuration

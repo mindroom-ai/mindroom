@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
-def _get_secret(name: str) -> str | None:
+def get_secret_from_env(name: str) -> str | None:
     """Read a secret from NAME or NAME_FILE.
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
@@ -42,7 +42,7 @@ def _get_secret(name: str) -> str | None:
 
 def _sync_github_private_credentials() -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
-    github_token = _get_secret("GITHUB_TOKEN")
+    github_token = get_secret_from_env("GITHUB_TOKEN")
     if not github_token:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
@@ -89,7 +89,7 @@ def sync_env_to_credentials() -> None:
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
-        env_value = _get_secret(env_var)
+        env_value = get_secret_from_env(env_var)
 
         if not env_value:
             logger.debug(f"No value found for {env_var} or {env_var}_FILE")

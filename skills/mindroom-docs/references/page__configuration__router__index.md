@@ -42,7 +42,6 @@ The router exclusively handles all commands:
 - `!list_schedules` - List scheduled tasks
 - `!cancel_schedule <id>` - Cancel a scheduled task
 - `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!widget [url]` - Add configuration widget to the room
 - `!config <operation>` - Manage configuration
 - `!skill <name> [args]` - Run a skill by name
 
@@ -73,7 +72,7 @@ By default (`matrix_room_access.mode: single_user_private`), rooms remain invite
 
 ### Voice Message Processing
 
-Voice message callbacks are registered only on the router to avoid duplicate processing. When a voice message is received, the router transcribes it and posts the text (prefixed with a microphone emoji), which can then be routed to the appropriate agent.
+Audio events are handled through the shared media pipeline on all bots. The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room. When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message. Set `voice.visible_router_echo: true` if you also want the router to post the normalized voice text as a display-only message when it is allowed to reply. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 

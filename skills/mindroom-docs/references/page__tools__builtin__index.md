@@ -206,7 +206,7 @@ agents:
       - claude_agent
 ```
 
-Configure credentials via the dashboard widget or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
+Configure credentials via the dashboard or by writing `mindroom_data/credentials/claude_agent_credentials.json`:
 
 ```
 {
