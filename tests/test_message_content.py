@@ -75,7 +75,7 @@ class TestGetFullMessageBody:
 
         result = await _get_full_message_body(message, client)
         assert result == "Full message content that is very long"
-        client.download.assert_called_once_with("server", "file123")
+        client.download.assert_called_once_with(mxc="mxc://server/file123")
 
     @pytest.mark.asyncio
     async def test_large_message_v2_json_sidecar_extracts_body(self) -> None:
@@ -326,6 +326,7 @@ class TestDownloadMxcText:
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result == "Downloaded text content"
+        client.download.assert_called_once_with(mxc="mxc://server/media123")
 
     @pytest.mark.asyncio
     async def test_download_failure(self) -> None:
@@ -335,3 +336,16 @@ class TestDownloadMxcText:
 
         result = await _download_mxc_text(client, "mxc://server/media123")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_download_failure_uses_negative_cache(self) -> None:
+        """Repeated failures for the same MXC should not re-download immediately."""
+        client = AsyncMock()
+        client.download.return_value = MagicMock(spec=nio.DownloadError)
+
+        first_result = await _download_mxc_text(client, "mxc://server/media123")
+        second_result = await _download_mxc_text(client, "mxc://server/media123")
+
+        assert first_result is None
+        assert second_result is None
+        client.download.assert_called_once_with(mxc="mxc://server/media123")
