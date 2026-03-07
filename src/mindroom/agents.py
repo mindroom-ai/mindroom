@@ -93,22 +93,50 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
+def _load_context_file(
+    raw_path: str,
+    *,
+    kind: str,
+    warn_on_missing: bool,
+) -> _AdditionalContextChunk | None:
+    """Load one configured context file."""
+    resolved_path = resolve_config_relative_path(raw_path)
+    if not resolved_path.is_file():
+        if warn_on_missing:
+            logger.warning(f"Context file not found: {resolved_path}")
+        return None
+
+    return _AdditionalContextChunk(
+        kind=kind,
+        title=resolved_path.name,
+        body=resolved_path.read_text(encoding="utf-8").strip(),
+    )
+
+
 def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
-        resolved_path = resolve_config_relative_path(raw_path)
-        if resolved_path.is_file():
-            loaded_parts.append(
-                _AdditionalContextChunk(
-                    kind="personality",
-                    title=resolved_path.name,
-                    body=resolved_path.read_text(encoding="utf-8").strip(),
-                ),
-            )
-        else:
-            logger.warning(f"Context file not found: {resolved_path}")
+        chunk = _load_context_file(raw_path, kind="personality", warn_on_missing=True)
+        if chunk is not None:
+            loaded_parts.append(chunk)
     return loaded_parts
+
+
+def _load_boot_file(boot_file: str | None) -> list[_AdditionalContextChunk]:
+    """Load the optional always-on boot context file."""
+    if not boot_file:
+        return []
+    chunk = _load_context_file(boot_file, kind="boot", warn_on_missing=True)
+    return [chunk] if chunk is not None else []
+
+
+def _load_bootstrap_file(bootstrap_file: str | None) -> list[_AdditionalContextChunk]:
+    """Load the optional first-run bootstrap file when it still exists."""
+    if not bootstrap_file:
+        return []
+    chunk = _load_context_file(bootstrap_file, kind="bootstrap", warn_on_missing=False)
+    return [chunk] if chunk is not None else []
 
 
 def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContextChunk]) -> str:
@@ -119,28 +147,40 @@ def _render_context_chunks(section_heading: str, chunks: list[_AdditionalContext
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
 
 
-def _render_additional_context(personality_chunks: list[_AdditionalContextChunk]) -> str:
-    """Render full additional context from personality chunks."""
-    return _render_context_chunks("## Personality Context", personality_chunks)
+def _render_additional_context(chunks: list[_AdditionalContextChunk]) -> str:
+    """Render full additional context from loaded context chunks."""
+    startup_chunks = [chunk for chunk in chunks if chunk.kind in {"boot", "bootstrap"}]
+    personality_chunks = [chunk for chunk in chunks if chunk.kind == "personality"]
+
+    return "".join(
+        [
+            _render_context_chunks("## Startup Context", startup_chunks),
+            _render_context_chunks("## Personality Context", personality_chunks),
+        ],
+    )
 
 
 def _build_preload_truncation_groups(
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
 ) -> list[list[_AdditionalContextChunk]]:
     """Return truncation groups ordered from least to most critical context."""
-    return [[chunk for chunk in personality_chunks if chunk.kind == "personality"]]
+    return [
+        [chunk for chunk in chunks if chunk.kind == "personality"],
+        [chunk for chunk in chunks if chunk.kind == "bootstrap"],
+        [chunk for chunk in chunks if chunk.kind == "boot"],
+    ]
 
 
 def _drop_whole_chunks(
     groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
     """Drop entire chunk bodies (least critical first) until under the cap."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            if len(_render_additional_context(personality_chunks)) <= max_preload_chars:
+            if len(_render_additional_context(chunks)) <= max_preload_chars:
                 return omitted
             if not chunk.body:
                 continue
@@ -151,14 +191,14 @@ def _drop_whole_chunks(
 
 def _trim_chunk_tails(
     groups: list[list[_AdditionalContextChunk]],
-    personality_chunks: list[_AdditionalContextChunk],
+    chunks: list[_AdditionalContextChunk],
     max_preload_chars: int,
 ) -> int:
     """Trim from the *end* of chunks to preserve headers/identity at the top."""
     omitted = 0
     for group in groups:
         for chunk in group:
-            overflow = len(_render_additional_context(personality_chunks)) - max_preload_chars
+            overflow = len(_render_additional_context(chunks)) - max_preload_chars
             if overflow <= 0:
                 return omitted
             if not chunk.body:
@@ -169,21 +209,21 @@ def _trim_chunk_tails(
     return omitted
 
 
-def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
+def _apply_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
     """Apply hard preload cap with deterministic truncation priority.
 
     Truncation order is by file list order.
     First drops whole chunks, then trims from the *end* of remaining chunks.
     """
-    rendered = _render_additional_context(personality_chunks)
+    rendered = _render_additional_context(chunks)
     if len(rendered) <= max_preload_chars:
         return rendered, 0
 
-    groups = _build_preload_truncation_groups(personality_chunks)
-    omitted_chars = _drop_whole_chunks(groups, personality_chunks, max_preload_chars)
-    omitted_chars += _trim_chunk_tails(groups, personality_chunks, max_preload_chars)
+    groups = _build_preload_truncation_groups(chunks)
+    omitted_chars = _drop_whole_chunks(groups, chunks, max_preload_chars)
+    omitted_chars += _trim_chunk_tails(groups, chunks, max_preload_chars)
 
-    rendered = _render_additional_context(personality_chunks)
+    rendered = _render_additional_context(chunks)
     if omitted_chars <= 0:
         return rendered, 0
 
@@ -206,11 +246,13 @@ def _build_additional_context(
     This is evaluated when the agent is created (and re-created on config
     reload), so file content snapshots update on agent hot-reload.
     """
-    personality_chunks: list[_AdditionalContextChunk] = []
+    context_chunks: list[_AdditionalContextChunk] = []
+    context_chunks.extend(_load_boot_file(agent_config.boot_file))
+    context_chunks.extend(_load_bootstrap_file(agent_config.bootstrap_file))
     if agent_config.context_files:
-        personality_chunks = _load_context_files(agent_config.context_files)
+        context_chunks.extend(_load_context_files(agent_config.context_files))
 
-    additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
+    additional_context, omitted_chars = _apply_preload_cap(context_chunks, max_preload_chars)
     if omitted_chars > 0:
         logger.warning(
             "Preload context exceeded max_preload_chars and was truncated",

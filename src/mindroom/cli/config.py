@@ -65,6 +65,8 @@ _CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "publi
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
 _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
+    "BOOT.md",
+    "BOOTSTRAP.md",
     "SOUL.md",
     "AGENTS.md",
     "USER.md",
@@ -575,6 +577,8 @@ agents:
     learning: false
     memory_backend: file
     memory_file_path: ./mind_data
+    boot_file: ./mind_data/BOOT.md
+    bootstrap_file: ./mind_data/BOOTSTRAP.md
     rooms:
       - personal
     context_files:
