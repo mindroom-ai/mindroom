@@ -454,6 +454,12 @@ class MultiAgentOrchestrator:
         await _ensure_internal_user_memberships()
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots))
 
+        # Existing invite-only rooms may resolve before the router is a member.
+        # Rerun room reconciliation after the router's first join pass so topic
+        # and access policy updates apply once the router can manage the room.
+        if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
+            await self._ensure_rooms_exist()
+
         # Existing invite-only rooms may only become joinable for others after the
         # router joins them in the first pass, so retry invitations once more.
         await self._ensure_room_invitations()
