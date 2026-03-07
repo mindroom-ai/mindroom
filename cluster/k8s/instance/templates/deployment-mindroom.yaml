@@ -98,6 +98,25 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
+        # First boot registers Matrix users, creates rooms, and initializes knowledge.
+        startupProbe:
+          httpGet:
+            path: /api/ready
+            port: api
+          periodSeconds: 2
+          failureThreshold: 90
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: api
+          periodSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: api
+          periodSeconds: 10
+          failureThreshold: 6
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
