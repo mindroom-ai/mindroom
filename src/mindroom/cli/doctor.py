@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 import httpx
 import typer
 import yaml
+from anthropic import AnthropicVertex, APIStatusError
+from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
 from mindroom.constants import (
@@ -19,6 +21,7 @@ from mindroom.constants import (
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
+    VERTEXAI_CLAUDE_ENV_KEYS,
     env_key_for_provider,
 )
 
@@ -281,6 +284,36 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
+def _validate_vertexai_claude_connection(model: str) -> tuple[bool | None, str]:
+    """Validate Anthropic-on-Vertex access with a tiny count-tokens request."""
+    missing = [env_key for env_key in VERTEXAI_CLAUDE_ENV_KEYS if not os.getenv(env_key)]
+    if missing:
+        return None, f"missing {', '.join(missing)}"
+
+    project_id = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+    region = os.getenv("CLOUD_ML_REGION")
+    assert project_id is not None
+    assert region is not None
+
+    try:
+        client = AnthropicVertex(project_id=project_id, region=region, timeout=10, max_retries=0)
+        client.messages.count_tokens(
+            model=model,
+            messages=[{"role": "user", "content": "mindroom doctor vertexai check"}],
+            timeout=10,
+        )
+    except APIStatusError as exc:
+        return False, f"HTTP {exc.status_code}"
+    except DefaultCredentialsError as exc:
+        return None, str(exc)
+    except RefreshError as exc:
+        return False, str(exc)
+    except (RuntimeError, TypeError, ValueError, httpx.HTTPError) as exc:
+        return None, str(exc)
+
+    return True, ""
+
+
 def _get_ollama_host(config: Config) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
@@ -343,6 +376,17 @@ def _check_single_provider(
     validated_keys: set[str],
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
+    if provider == "vertexai_claude":
+        model_id = next(model.id for model in config.models.values() if model.provider == provider)
+        valid, detail = _validate_vertexai_claude_connection(model_id)
+        return _print_validation(
+            valid,
+            detail,
+            f"{provider} connection valid for {model_id}",
+            f"{provider} connection failed for {model_id}",
+            f"{provider}: could not validate connection for {model_id}",
+        )
+
     if provider == "ollama":
         host = _get_ollama_host(config)
         url = f"{host.rstrip('/')}/api/tags"

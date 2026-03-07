@@ -145,6 +145,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "ollama": "OLLAMA_HOST",
 }
+VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 
 _CHROMADB_PY314_PATCHED = False
 
