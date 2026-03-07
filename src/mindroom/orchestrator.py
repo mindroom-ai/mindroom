@@ -1103,8 +1103,8 @@ async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int =
                 logger.exception(f"Max retries ({max_retries}) reached for {bot.agent_name}, giving up")
                 break
 
-            # Wait a bit before restarting to avoid rapid restarts
-            wait_time = min(60, 5 * retry_count)  # Exponential backoff, max 60 seconds
+            # Wait a bit before restarting to avoid rapid restarts.
+            wait_time = min(60, 5 * retry_count)  # Linear backoff, max 60 seconds
             logger.info(f"Restarting sync loop for {bot.agent_name} in {wait_time} seconds...")
             await asyncio.sleep(wait_time)
 
