@@ -548,6 +548,43 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(tmp_path) -> None:  # noqa: ANN001
+    """A failed handoff retry should reuse the prior visible echo instead of reposting it."""
+    bot, room, event = _make_visible_router_echo_scenario(
+        tmp_path,
+        agents={
+            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+        },
+        send_response_side_effect=["$voice_echo", None, "$route"],
+    )
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await bot._on_media_message(room, event)
+
+        assert not bot.response_tracker.has_responded(event.event_id)
+        assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+
+        await bot._on_media_message(room, event)
+
+    response_texts = [call.kwargs["response_text"] for call in bot._send_response.call_args_list]
+    assert response_texts == [
+        f"{VOICE_PREFIX}summarize this audio",
+        "@home could you help with this?",
+        "@home could you help with this?",
+    ]
+    assert bot.response_tracker.has_responded(event.event_id)
+    assert bot.response_tracker.get_visible_echo_event_id(event.event_id) == "$voice_echo"
+
+
+@pytest.mark.asyncio
 async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(tmp_path) -> None:  # noqa: ANN001
     """Router should route normalized audio like any other synthetic text input."""
     agent_user = MagicMock()

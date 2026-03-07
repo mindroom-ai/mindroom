@@ -1023,13 +1023,20 @@ class AgentBot:
         if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
             return None
 
-        return await self._send_response(
+        existing_visible_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
+        if existing_visible_echo_event_id is not None:
+            return existing_visible_echo_event_id
+
+        visible_echo_event_id = await self._send_response(
             room_id=room.room_id,
             reply_to_event_id=event.event_id,
             response_text=text,
             thread_id=thread_id,
             skip_mentions=True,
         )
+        if visible_echo_event_id is not None:
+            self.response_tracker.mark_visible_echo_sent(event.event_id, visible_echo_event_id)
+        return visible_echo_event_id
 
     async def _on_media_message(
         self,

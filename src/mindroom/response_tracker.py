@@ -18,11 +18,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _ResponseRecord(TypedDict):
+class _ResponseRecord(TypedDict, total=False):
     """Record of a response to a user message."""
 
     timestamp: float
     response_id: str | None
+    completed: bool
+    visible_echo_response_id: str | None
 
 
 @dataclass
@@ -54,7 +56,8 @@ class ResponseTracker:
 
         """
         with self._thread_lock:
-            return event_id in self._responses
+            record = self._responses.get(event_id)
+            return bool(record and record.get("completed", True))
 
     def mark_responded(self, event_id: str, response_event_id: str | None = None) -> None:
         """Mark an event as responded to with current timestamp.
@@ -65,12 +68,32 @@ class ResponseTracker:
 
         """
         with self._thread_lock:
-            self._responses[event_id] = {
+            existing_record = self._responses.get(event_id, {})
+            updated_record: _ResponseRecord = {
                 "timestamp": time.time(),
                 "response_id": response_event_id,
+                "completed": True,
             }
+            visible_echo_response_id = existing_record.get("visible_echo_response_id")
+            if visible_echo_response_id is not None:
+                updated_record["visible_echo_response_id"] = visible_echo_response_id
+            self._responses[event_id] = updated_record
             self._save_responses_locked()
         logger.debug(f"Marked event {event_id} as responded for agent {self.agent_name}")
+
+    def mark_visible_echo_sent(self, event_id: str, response_event_id: str) -> None:
+        """Track a visible router echo without marking the event fully handled."""
+        with self._thread_lock:
+            existing_record = self._responses.get(event_id, {})
+            updated_record: _ResponseRecord = {
+                "timestamp": time.time(),
+                "response_id": existing_record.get("response_id"),
+                "completed": existing_record.get("completed", True) if existing_record else False,
+                "visible_echo_response_id": response_event_id,
+            }
+            self._responses[event_id] = updated_record
+            self._save_responses_locked()
+        logger.debug(f"Tracked visible echo for event {event_id} on agent {self.agent_name}")
 
     def get_response_event_id(self, user_event_id: str) -> str | None:
         """Get the response event ID for a given user message event ID.
@@ -85,6 +108,12 @@ class ResponseTracker:
         with self._thread_lock:
             record = self._responses.get(user_event_id)
             return record["response_id"] if record else None
+
+    def get_visible_echo_event_id(self, user_event_id: str) -> str | None:
+        """Get the visible router echo event ID for a given user message event ID."""
+        with self._thread_lock:
+            record = self._responses.get(user_event_id)
+            return record.get("visible_echo_response_id") if record else None
 
     def _load_responses(self) -> None:
         """Load the responses from disk."""
