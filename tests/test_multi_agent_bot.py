@@ -31,7 +31,11 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import MultiAgentOrchestrator, _wait_for_matrix_homeserver
+from mindroom.orchestrator import (
+    MultiAgentOrchestrator,
+    _matrix_homeserver_startup_timeout_seconds_from_env,
+    _wait_for_matrix_homeserver,
+)
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
@@ -3111,6 +3115,25 @@ class TestMultiAgentOrchestrator:
         await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
 
         assert calls == 1
+
+    def test_matrix_homeserver_startup_timeout_defaults_to_infinite(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unset or non-positive startup timeouts should wait forever."""
+        monkeypatch.delenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", raising=False)
+        assert _matrix_homeserver_startup_timeout_seconds_from_env() is None
+
+        monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "0")
+        assert _matrix_homeserver_startup_timeout_seconds_from_env() is None
+
+    def test_matrix_homeserver_startup_timeout_reads_positive_seconds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A positive timeout env var should bound the startup wait."""
+        monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "45")
+        assert _matrix_homeserver_startup_timeout_seconds_from_env() == 45.0
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_retries_on_connection_errors(

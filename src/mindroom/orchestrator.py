@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,26 +43,46 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_MATRIX_HOMESERVER_TIMEOUT_SECONDS = 300
+_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS"
 _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 
 
+def _matrix_homeserver_startup_timeout_seconds_from_env() -> float | None:
+    """Return the startup wait timeout from the environment, if configured."""
+    raw_timeout = os.getenv(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV, "").strip()
+    if not raw_timeout:
+        return None
+    if raw_timeout.lower() in {"inf", "infinite", "forever", "none"}:
+        return None
+    timeout_seconds = float(raw_timeout)
+    if timeout_seconds <= 0:
+        return None
+    return timeout_seconds
+
+
 async def _wait_for_matrix_homeserver(
     *,
-    timeout_seconds: float = _MATRIX_HOMESERVER_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
     request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
     retry_interval_seconds: float = _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS,
 ) -> None:
     """Wait for the configured Matrix homeserver to answer `/versions`."""
+    if timeout_seconds is None:
+        timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env()
     versions_url = matrix_versions_url(MATRIX_HOMESERVER)
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
     attempt = 0
-    logger.info("Waiting for Matrix homeserver", url=versions_url)
+    logger.info(
+        "Waiting for Matrix homeserver",
+        url=versions_url,
+        timeout_seconds=timeout_seconds,
+    )
 
     async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=MATRIX_SSL_VERIFY) as client:
-        while asyncio.get_running_loop().time() < deadline:
+        while deadline is None or loop.time() < deadline:
             attempt += 1
             try:
                 response = await client.get(versions_url)

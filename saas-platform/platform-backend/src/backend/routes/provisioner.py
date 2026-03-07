@@ -10,6 +10,7 @@ from backend.config import (
     DEEPSEEK_API_KEY,
     GOOGLE_API_KEY,
     INSTANCE_BASE_DOMAIN,
+    INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
     INSTANCE_SYNAPSE_IMAGE,
@@ -226,6 +227,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             helm_args += ["--set", f"mindroom_image={INSTANCE_MINDROOM_IMAGE}"]
         if INSTANCE_MINDROOM_IMAGE_PULL_POLICY:
             helm_args += ["--set", f"mindroom_image_pull_policy={INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"]
+        if INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS:
+            helm_args += [
+                "--set",
+                (f"matrixHomeserverStartupTimeoutSeconds={INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS}"),
+            ]
         if INSTANCE_SYNAPSE_IMAGE:
             helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
         if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:

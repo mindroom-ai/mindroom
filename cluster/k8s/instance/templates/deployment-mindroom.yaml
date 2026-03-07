@@ -85,6 +85,8 @@ spec:
           value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
+        - name: MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS
+          value: {{ .Values.matrixHomeserverStartupTimeoutSeconds | quote }}
         - name: SUPABASE_URL
           value: {{ .Values.supabaseUrl | quote }}
         - name: SUPABASE_SERVICE_KEY_FILE
