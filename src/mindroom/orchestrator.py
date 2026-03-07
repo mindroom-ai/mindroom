@@ -48,16 +48,17 @@ _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 
 
-def _matrix_homeserver_startup_timeout_seconds_from_env() -> float | None:
+def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
     """Return the startup wait timeout from the environment, if configured."""
     raw_timeout = os.getenv(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV, "").strip()
     if not raw_timeout:
         return None
-    if raw_timeout.lower() in {"inf", "infinite", "forever", "none"}:
+    timeout_seconds = int(raw_timeout)
+    if timeout_seconds == 0:
         return None
-    timeout_seconds = float(raw_timeout)
-    if timeout_seconds <= 0:
-        return None
+    if timeout_seconds < 0:
+        msg = f"{_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV} must be 0 or a positive integer"
+        raise ValueError(msg)
     return timeout_seconds
 
 

@@ -3120,7 +3120,7 @@ class TestMultiAgentOrchestrator:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Unset or non-positive startup timeouts should wait forever."""
+        """Unset or zero startup timeouts should wait forever."""
         monkeypatch.delenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", raising=False)
         assert _matrix_homeserver_startup_timeout_seconds_from_env() is None
 
@@ -3133,7 +3133,16 @@ class TestMultiAgentOrchestrator:
     ) -> None:
         """A positive timeout env var should bound the startup wait."""
         monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "45")
-        assert _matrix_homeserver_startup_timeout_seconds_from_env() == 45.0
+        assert _matrix_homeserver_startup_timeout_seconds_from_env() == 45
+
+    def test_matrix_homeserver_startup_timeout_rejects_negative_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Negative timeout values are invalid."""
+        monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "-1")
+        with pytest.raises(ValueError, match="must be 0 or a positive integer"):
+            _matrix_homeserver_startup_timeout_seconds_from_env()
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_retries_on_connection_errors(
