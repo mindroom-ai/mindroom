@@ -51,7 +51,7 @@ _ProviderPreset = Literal["openai", "openrouter", "vertexai_claude"]
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "openai": ("openai", "gpt-5.2"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
-    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4@20250514"),
+    "vertexai_claude": ("vertexai_claude", "claude-opus-4-6@default"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {

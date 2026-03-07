@@ -173,7 +173,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4@20250514"
+        assert config["models"]["default"]["id"] == "claude-opus-4-6@default"
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -300,7 +300,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         content = target.read_text()
         assert "provider: vertexai_claude" in content
-        assert "id: claude-sonnet-4@20250514" in content
+        assert "id: claude-opus-4-6@default" in content
 
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
@@ -418,7 +418,7 @@ class TestConfigValidate:
         """Config validate should warn about missing Vertex AI project settings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4@20250514\n"
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
