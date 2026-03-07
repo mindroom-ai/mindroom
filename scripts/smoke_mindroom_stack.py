@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
-"""Smoke test the mindroom-stack compose environment."""
+"""Smoke test the mindroom-stack compose environment.
+
+Run via ``python -m scripts.smoke_mindroom_stack <path>`` from the repo root.
+"""
 
 from __future__ import annotations
 

@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
-"""Smoke test the published platform images."""
+"""Smoke test the published platform images.
+
+Run via ``python -m scripts.smoke_platform_images`` from the repo root.
+"""
 
 from __future__ import annotations
 

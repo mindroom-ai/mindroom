@@ -1,5 +1,7 @@
-#!/usr/bin/env python3
-"""Deploy and verify a MindRoom instance in kind."""
+"""Deploy and verify a MindRoom instance in kind.
+
+Run via ``python -m cluster.k8s.kind.smoke_instance`` from the repo root.
+"""
 
 from __future__ import annotations
 
@@ -507,7 +509,7 @@ def verify_instance_http_endpoints(
 
 def run_smoke(
     *,
-    instance_id: str,
+    instance_id_ref: list[str],
     instance_namespace: str,
     platform_namespace: str,
     base_domain: str,
@@ -525,8 +527,8 @@ def run_smoke(
     deployment_rollout_timeout: str,
     tmp_dir: Path,
     port_forwards: list[tuple[subprocess.Popen[str], IO[str]]],
-) -> str:
-    """Run the full platform and instance smoke flow and return the final instance id."""
+) -> None:
+    """Run the full platform and instance smoke flow, updating *instance_id_ref* in-place."""
     platform_health = start_platform_port_forwards(
         platform_namespace=platform_namespace,
         platform_backend_local_port=platform_backend_local_port,
@@ -534,8 +536,8 @@ def run_smoke(
         tmp_dir=tmp_dir,
         port_forwards=port_forwards,
     )
-    instance_id = resolve_instance_id(
-        instance_id=instance_id,
+    instance_id_ref[0] = resolve_instance_id(
+        instance_id=instance_id_ref[0],
         platform_health=platform_health,
         smoke_require_platform_provisioning=smoke_require_platform_provisioning,
         platform_backend_local_port=platform_backend_local_port,
@@ -549,6 +551,7 @@ def run_smoke(
         synapse_image=synapse_image,
         synapse_image_pull_policy=synapse_image_pull_policy,
     )
+    instance_id = instance_id_ref[0]
     wait_for_instance_rollouts(instance_id, instance_namespace, deployment_rollout_timeout)
     verify_instance_http_endpoints(
         instance_id=instance_id,
@@ -559,7 +562,6 @@ def run_smoke(
         port_forwards=port_forwards,
     )
     log("[smoke] kind platform + instance checks passed")
-    return instance_id
 
 
 def main() -> int:
@@ -587,11 +589,12 @@ def main() -> int:
         synapse_local_port,
     )
 
+    instance_id_ref = [instance_id]
     port_forwards: list[tuple[subprocess.Popen[str], IO[str]]] = []
     try:
         with tempfile.TemporaryDirectory() as tmp_dir_name:
-            instance_id = run_smoke(
-                instance_id=instance_id,
+            run_smoke(
+                instance_id_ref=instance_id_ref,
                 instance_namespace=instance_namespace,
                 platform_namespace=platform_namespace,
                 base_domain=base_domain,
@@ -613,7 +616,7 @@ def main() -> int:
     except Exception as exc:
         error(f"[error] smoke_instance.py failed: {exc}")
         traceback.print_exc()
-        dump_instance_diagnostics(instance_namespace, instance_id)
+        dump_instance_diagnostics(instance_namespace, instance_id_ref[0])
         return 1
     finally:
         cleanup_port_forwards(port_forwards)
