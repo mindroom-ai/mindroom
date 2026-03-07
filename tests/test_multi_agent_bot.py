@@ -2938,6 +2938,9 @@ class TestMultiAgentOrchestrator:
 
         call_order: list[str] = []
 
+        async def _wait_for_homeserver() -> None:
+            call_order.append("wait_for_homeserver")
+
         async def _setup_rooms(_: list[Any]) -> None:
             call_order.append("setup_rooms")
 
@@ -2945,6 +2948,7 @@ class TestMultiAgentOrchestrator:
             call_order.append("configure_knowledge")
 
         with (
+            patch("mindroom.orchestrator._wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
             patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=_setup_rooms),
             patch.object(orchestrator, "_configure_knowledge", side_effect=_configure_knowledge),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -2952,7 +2956,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.start()
 
-        assert call_order == ["setup_rooms", "configure_knowledge"]
+        assert call_order == ["wait_for_homeserver", "setup_rooms", "configure_knowledge"]
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio

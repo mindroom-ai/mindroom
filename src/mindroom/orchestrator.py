@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
@@ -19,7 +20,7 @@ from .agents import get_rooms_for_entity
 from .authorization import is_authorized_sender
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -39,6 +40,36 @@ if TYPE_CHECKING:
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
+
+
+async def _wait_for_matrix_homeserver() -> None:
+    """Wait for the configured Matrix homeserver to answer `/versions`."""
+    versions_url = f"{MATRIX_HOMESERVER.rstrip('/')}/_matrix/client/versions"
+    set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
+    deadline = asyncio.get_running_loop().time() + 300
+    logger.info("Waiting for Matrix homeserver", url=versions_url)
+
+    async with httpx.AsyncClient(timeout=5.0, verify=MATRIX_SSL_VERIFY) as client:
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                response = await client.get(versions_url)
+            except httpx.HTTPError as exc:
+                logger.debug("Matrix homeserver not ready yet", url=versions_url, error=str(exc))
+                await asyncio.sleep(2)
+                continue
+
+            if response.is_success:
+                with suppress(ValueError):
+                    payload = response.json()
+                    if isinstance(payload, dict) and "versions" in payload:
+                        logger.info("Matrix homeserver ready", url=versions_url)
+                        return
+
+            logger.debug("Matrix homeserver not ready yet", url=versions_url, status_code=response.status_code)
+            await asyncio.sleep(2)
+
+    msg = f"Timed out waiting for Matrix homeserver at {versions_url}"
+    raise RuntimeError(msg)
 
 
 @dataclass
@@ -227,6 +258,7 @@ class MultiAgentOrchestrator:
         if not self.agent_bots:
             await self.initialize()
 
+        await _wait_for_matrix_homeserver()
         set_runtime_starting("Starting Matrix bot accounts")
         # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
         start_tasks = [bot.try_start() for bot in self.agent_bots.values()]

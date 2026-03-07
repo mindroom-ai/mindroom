@@ -26,35 +26,6 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
         fsGroupChangePolicy: OnRootMismatch
-      initContainers:
-      - name: wait-for-synapse
-        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
-        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
-        command: ["python", "-c"]
-        args:
-        - |
-          import os
-          import sys
-          import time
-          import urllib.error
-          import urllib.request
-
-          url = os.environ["SYNAPSE_READY_URL"]
-          deadline = time.time() + 300
-          while time.time() < deadline:
-              try:
-                  with urllib.request.urlopen(url, timeout=5) as response:
-                      body = response.read().decode("utf-8", errors="replace")
-                  if "\"versions\"" in body:
-                      print(f"Synapse is ready: {url}", flush=True)
-                      sys.exit(0)
-              except (OSError, urllib.error.URLError) as exc:
-                  print(f"Waiting for Synapse at {url}: {exc}", flush=True)
-              time.sleep(2)
-          raise SystemExit(f"Timed out waiting for Synapse at {url}")
-        env:
-        - name: SYNAPSE_READY_URL
-          value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
       containers:
       - name: mindroom
         image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
