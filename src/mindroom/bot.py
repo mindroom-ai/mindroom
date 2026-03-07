@@ -119,6 +119,7 @@ from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
+    cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
 
@@ -435,26 +436,39 @@ class AgentBot:
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
+        joined_rooms = await get_joined_rooms(self.client)
+        current_rooms = set(joined_rooms or [])
+        current_rooms.update(self.client.rooms)
+
         for room_id in self.rooms:
+            if room_id in current_rooms:
+                self.logger.debug("Already joined room", room_id=room_id)
+                await self._post_join_room_setup(room_id)
+                continue
+
             if await join_room(self.client, room_id):
+                current_rooms.add(room_id)
                 self.logger.info("Joined room", room_id=room_id)
-                # Only the router agent should restore scheduled tasks
-                # to avoid duplicate task instances after restart
-                if self.agent_name == ROUTER_AGENT_NAME:
-                    # Restore scheduled tasks
-                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored_tasks > 0:
-                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
-
-                    # Restore pending config confirmations
-                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
-                    if restored_configs > 0:
-                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
-
-                    # Send welcome message if room is empty
-                    await self._send_welcome_message_if_empty(room_id)
+                await self._post_join_room_setup(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
+
+    async def _post_join_room_setup(self, room_id: str) -> None:
+        """Run room setup that should happen after joins and across restarts."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+
+        assert self.client is not None
+
+        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+        if restored_tasks > 0:
+            self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+        restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+        if restored_configs > 0:
+            self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
+        await self._send_welcome_message_if_empty(room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""
@@ -635,6 +649,11 @@ class AgentBot:
             self.logger.info("Background tasks completed")
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
+
+        if self.agent_name == ROUTER_AGENT_NAME:
+            cancelled_tasks = await cancel_all_running_scheduled_tasks()
+            if cancelled_tasks > 0:
+                self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")

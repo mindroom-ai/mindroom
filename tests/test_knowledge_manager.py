@@ -113,13 +113,26 @@ class _DummyChromaDb:
         return True
 
 
-def _make_config(path: Path) -> Config:
+def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Config:
+    memory: dict[str, object] | None = None
+    if embedder_dimensions is not None:
+        memory = {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "gemini-embedding-001",
+                    "host": "http://example.com/v1",
+                    "dimensions": embedder_dimensions,
+                },
+            },
+        }
     return Config(
         agents={},
         models={},
         knowledge_bases={
             "research": KnowledgeBaseConfig(path=str(path), watch=False),
         },
+        **({"memory": memory} if memory is not None else {}),
     )
 
 
@@ -182,6 +195,25 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
+
+
+def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing embedder dimensions should invalidate the existing knowledge manager."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    storage_path = tmp_path / "storage"
+    config_1536 = _make_config(tmp_path / "knowledge", embedder_dimensions=1536)
+    config_3072 = _make_config(tmp_path / "knowledge", embedder_dimensions=3072)
+
+    manager = KnowledgeManager(base_id="research", config=config_1536, storage_path=storage_path)
+
+    assert not manager.matches(config_3072, storage_path)
+    assert manager.needs_full_reindex(config_3072, storage_path)
 
 
 def test_resolve_file_path_rejects_traversal(dummy_manager: KnowledgeManager) -> None:

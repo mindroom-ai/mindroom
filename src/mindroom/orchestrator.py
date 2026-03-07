@@ -443,19 +443,32 @@ class MultiAgentOrchestrator:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
             bot.rooms = resolve_room_aliases(room_aliases)
 
-        # After rooms exist, ensure room invitations are up to date
+        async def _ensure_internal_user_memberships() -> None:
+            all_rooms = load_rooms()
+            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+            if all_room_ids and config.mindroom_user is not None:
+                await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
+
+        # First invitation/join pass for rooms the router is already in.
         await self._ensure_room_invitations()
+        await _ensure_internal_user_memberships()
+        await asyncio.gather(*(bot.ensure_rooms() for bot in bots))
 
-        # Ensure user joins all rooms after being invited
-        # Get all room IDs (not just newly created ones)
-        all_rooms = load_rooms()
-        all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
-        if all_room_ids and config.mindroom_user is not None:
-            await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
+        # Existing invite-only rooms may resolve before the router is a member.
+        # Rerun room reconciliation after the router's first join pass so topic
+        # and access policy updates apply once the router can manage the room.
+        if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
+            await self._ensure_rooms_exist()
 
-        # Now have bots join their configured rooms
-        join_tasks = [bot.ensure_rooms() for bot in bots]
-        await asyncio.gather(*join_tasks)
+        # Existing invite-only rooms may only become joinable for others after the
+        # router joins them in the first pass, so retry invitations once more.
+        await self._ensure_room_invitations()
+        await _ensure_internal_user_memberships()
+
+        follow_up_bots = [bot for bot in bots if bot.agent_name != ROUTER_AGENT_NAME]
+        if follow_up_bots:
+            await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
+
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> None:
