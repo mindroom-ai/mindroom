@@ -255,10 +255,10 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
+        await _wait_for_matrix_homeserver()
         if not self.agent_bots:
             await self.initialize()
 
-        await _wait_for_matrix_homeserver()
         set_runtime_starting("Starting Matrix bot accounts")
         # Start each agent bot (this registers callbacks and logs in, but doesn't join rooms)
         start_tasks = [bot.try_start() for bot in self.agent_bots.values()]

@@ -2960,6 +2960,35 @@ class TestMultiAgentOrchestrator:
         bot.try_start.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
+        """Matrix readiness must gate initialize(), which creates the internal Matrix user."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        call_order: list[str] = []
+
+        async def _wait_for_homeserver() -> None:
+            call_order.append("wait_for_homeserver")
+
+        async def _initialize() -> None:
+            call_order.append("initialize")
+            orchestrator.config = MagicMock()
+            bot = MagicMock()
+            bot.agent_name = "router"
+            bot.try_start = AsyncMock(return_value=True)
+            orchestrator.agent_bots = {"router": bot}
+
+        with (
+            patch("mindroom.orchestrator._wait_for_matrix_homeserver", side_effect=_wait_for_homeserver),
+            patch.object(orchestrator, "initialize", side_effect=_initialize),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await orchestrator.start()
+
+        assert call_order[:2] == ["wait_for_homeserver", "initialize"]
+
+    @pytest.mark.asyncio
     async def test_schedule_knowledge_refresh_logs_failure(self, tmp_path: Path) -> None:
         """Background knowledge failures should be logged and task state reset."""
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
