@@ -11,7 +11,11 @@ from mindroom.config.main import Config
 from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
-from mindroom.matrix.client import login, matrix_client
+from mindroom.matrix.client import (
+    login,
+    matrix_client,
+    matrix_startup_error,
+)
 from mindroom.matrix.identity import MatrixID, agent_username_localpart, extract_server_name_from_homeserver
 from mindroom.matrix.state import MatrixState
 
@@ -153,7 +157,7 @@ async def _login_and_sync_display_name(
         f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
         f"({login_response}). Set a unique MINDROOM_NAMESPACE (or choose different names) and retry."
     )
-    raise ValueError(msg)
+    raise matrix_startup_error(msg, permanent=True)
 
 
 async def _register_user(
@@ -262,9 +266,9 @@ async def _register_user(
         if isinstance(response, nio.ErrorResponse):
             failure_message = await _registration_failure_message(response, homeserver, registration_token)
             if failure_message:
-                raise ValueError(failure_message)
+                raise matrix_startup_error(failure_message, permanent=True)
         msg = f"Failed to register user {username}: {response}"
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, response=response)
 
 
 async def create_agent_user(
@@ -300,7 +304,7 @@ async def create_agent_user(
             f"(existing: '{existing_creds['username']}', configured: '{preferred_username}'). "
             "Keep the existing username and change mindroom_user.display_name instead."
         )
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, permanent=True)
 
     if existing_creds and (preferred_username is None or existing_creds["username"] == preferred_username):
         matrix_username = existing_creds["username"]

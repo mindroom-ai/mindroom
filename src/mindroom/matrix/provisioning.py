@@ -9,6 +9,7 @@ from typing import Literal
 import httpx
 
 from mindroom.constants import MATRIX_SSL_VERIFY
+from mindroom.matrix.client import matrix_startup_error
 
 
 def provisioning_url_from_env() -> str | None:
@@ -35,7 +36,7 @@ def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
             "Set both MINDROOM_LOCAL_CLIENT_ID and MINDROOM_LOCAL_CLIENT_SECRET, "
             "or run `mindroom connect --pair-code ...` again."
         )
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, permanent=True)
     return client_id, client_secret
 
 
@@ -54,7 +55,7 @@ def required_local_provisioning_client_credentials_for_registration(
             "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
             "Run `mindroom connect --pair-code ...` first."
         )
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, permanent=True)
     return creds
 
 
@@ -99,13 +100,13 @@ async def register_user_via_provisioning_service(
         detail = response.text.strip() or "unknown error"
         if response.status_code in {401, 403}:
             msg = "Provisioning credentials are invalid or revoked. Run `mindroom connect --pair-code ...` again."
-            raise ValueError(msg)
+            raise matrix_startup_error(msg, permanent=True)
         if response.status_code == 404:
             msg = (
                 "Provisioning service does not support /register-agent yet. "
                 "Deploy the latest local provisioning service."
             )
-            raise ValueError(msg)
+            raise matrix_startup_error(msg, permanent=True)
         msg = f"Provisioning service returned HTTP {response.status_code}: {detail}"
         raise ValueError(msg)
 
@@ -113,19 +114,19 @@ async def register_user_via_provisioning_service(
         body = response.json()
     except ValueError as exc:
         msg = "Provisioning service returned invalid JSON while registering agent."
-        raise ValueError(msg) from exc
+        raise matrix_startup_error(msg, permanent=True) from exc
 
     if not isinstance(body, dict):
         msg = "Provisioning service returned invalid register-agent payload."
-        raise TypeError(msg)
+        raise matrix_startup_error(msg, permanent=True)
 
     status = body.get("status")
     user_id = body.get("user_id")
     if status not in {"created", "user_in_use"}:
         msg = "Provisioning service response missing valid status for register-agent."
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, permanent=True)
     if not isinstance(user_id, str) or not user_id.strip():
         msg = "Provisioning service response missing user_id for register-agent."
-        raise ValueError(msg)
+        raise matrix_startup_error(msg, permanent=True)
 
     return _ProvisioningRegisterResult(status=status, user_id=user_id.strip())

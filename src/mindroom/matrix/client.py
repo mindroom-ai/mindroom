@@ -22,6 +22,33 @@ from mindroom.matrix.message_content import extract_and_resolve_message, extract
 
 logger = get_logger(__name__)
 
+_PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
+    {
+        "M_FORBIDDEN",
+        "M_USER_DEACTIVATED",
+        "M_UNKNOWN_TOKEN",
+        "M_INVALID_USERNAME",
+    },
+)
+
+
+class PermanentMatrixStartupError(ValueError):
+    """Raised for Matrix startup failures that should not be retried."""
+
+
+def matrix_startup_error(
+    message: str,
+    *,
+    response: object | None = None,
+    permanent: bool = False,
+) -> ValueError:
+    """Return the appropriate startup exception type for a Matrix failure."""
+    if permanent:
+        return PermanentMatrixStartupError(message)
+    if isinstance(response, nio.ErrorResponse) and response.status_code in _PERMANENT_MATRIX_STARTUP_ERROR_CODES:
+        return PermanentMatrixStartupError(message)
+    return ValueError(message)
+
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
@@ -134,7 +161,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         return client
     await client.close()
     msg = f"Failed to login {user_id}: {response}"
-    raise ValueError(msg)
+    raise matrix_startup_error(msg, response=response)
 
 
 async def invite_to_room(
