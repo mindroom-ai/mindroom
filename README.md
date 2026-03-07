@@ -165,10 +165,7 @@ Gmail, GitHub, Spotify, Home Assistant, Google Drive, Reddit, weather services, 
 Use this path if you want to run MindRoom locally while using hosted chat + Matrix on `mindroom.chat`.
 
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
-
-# Create starter config + .env in ~/.mindroom tuned for hosted matrix
+# Create ~/.mindroom/config.yaml and ~/.mindroom/.env with hosted defaults
 uvx mindroom config init --profile public
 
 # Add at least one model API key

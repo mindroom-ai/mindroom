@@ -35,8 +35,6 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 ### Hosted Matrix + local MindRoom (simplest)
 
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
 $EDITOR ~/.mindroom/.env
@@ -66,7 +64,7 @@ docker compose up -d
 mindroom run --storage-path ./mindroom_data
 ```
 
-The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
 If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
 

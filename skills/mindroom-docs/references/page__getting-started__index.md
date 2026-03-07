@@ -8,11 +8,9 @@ If you do not want to self-host Matrix yet, this is the simplest setup. You only
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Create a local project
+### 1. Initialize local config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 

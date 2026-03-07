@@ -24,8 +24,6 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 

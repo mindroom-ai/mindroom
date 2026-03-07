@@ -13,11 +13,9 @@ You only run MindRoom locally.
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Create a local project
+### 1. Initialize local config
 
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 

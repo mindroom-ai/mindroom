@@ -183,11 +183,9 @@ If you do not want to self-host Matrix yet, this is the simplest setup. You only
 
 **Prerequisite:** Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
-### 1. Create a local project
+### 1. Initialize local config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
@@ -4008,8 +4006,6 @@ Use these guides if you want users to connect Google accounts in the MindRoom fr
 ### Hosted Matrix + local MindRoom (simplest)
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 # Creates ~/.mindroom/config.yaml and ~/.mindroom/.env by default
 uvx mindroom config init --profile public
 $EDITOR ~/.mindroom/.env
@@ -4038,7 +4034,7 @@ docker compose up -d
 mindroom run --storage-path ./mindroom_data
 ```
 
-The config file path is set via `MINDROOM_CONFIG_PATH` (defaults to `./config.yaml`).
+The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
 If you want local Matrix + Cinny with a host-installed MindRoom runtime (Linux/macOS), use:
 
@@ -4111,8 +4107,6 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
