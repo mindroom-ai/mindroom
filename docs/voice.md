@@ -17,7 +17,9 @@ When a voice message is received:
 3. If STT is configured and succeeds, the audio is transcribed and lightly normalized for mentions and commands.
 4. If STT is unavailable, disabled, or fails, MindRoom falls back to `🎤 [Attached voice message]`.
 5. The normalized text plus attachment metadata is dispatched using the normal routing and thread logic.
-6. The responding agent receives the original audio attachment alongside the normalized prompt.
+6. If routing is ambiguous in a multi-agent room, the router posts a visible handoff message.
+7. Otherwise, no extra router message is posted and the chosen agent replies directly.
+8. The responding agent receives the original audio attachment alongside the normalized prompt.
 
 ## Configuration
 
@@ -116,16 +118,25 @@ You can specify a different model for faster or more accurate command recognitio
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
                                                                   │
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ 🎤 Message  │
-                                                            │ to Room     │
-                                                            └─────────────┘
-                                                                  │
+                                                         ┌──────────────────┐
+                                                         │ Normal Dispatch  │
+                                                         │ Decision         │
+                                                         └──────────────────┘
+                                                           │            │
+                                                           │            │
+                                                           ▼            ▼
+                                                 ┌──────────────┐  ┌──────────────┐
+                                                 │ Visible      │  │ No Visible   │
+                                                 │ Router       │  │ Router       │
+                                                 │ Handoff      │  │ Handoff      │
+                                                 └──────────────┘  └──────────────┘
+                                                           │            │
+                                                           └──────┬─────┘
                                                                   ▼
-                                                            ┌─────────────┐
-                                                            │ Agent       │
-                                                            │ Responds    │
-                                                            └─────────────┘
+                                                           ┌─────────────┐
+                                                           │ Agent       │
+                                                           │ Responds    │
+                                                           └─────────────┘
 ```
 
 ## Dispatch Behavior
@@ -134,13 +145,15 @@ You can specify a different model for faster or more accurate command recognitio
 
 If only one eligible agent is visible, that agent responds directly to the normalized audio event.
 If the audio caption or transcript explicitly mentions an agent, that targeted agent responds directly as well.
-In these cases, the router does not need to post an extra routing handoff.
+In these cases, the router does not post an extra visible routing handoff.
+The transcript or fallback text is used internally for dispatch, not echoed to the room as a separate message.
 
 ### Multi-agent rooms where the router must choose
 
 If multiple agents are available and the audio does not already target one of them, the router uses the normalized text to do the usual routing step.
 The router then posts a normal handoff message such as `@home could you help with this?`.
 The selected agent responds to that router handoff, and the handoff carries the original audio attachment metadata forward.
+This is the case where a visible router message appears.
 
 ### No router, or router cannot reply
 
@@ -148,6 +161,12 @@ Audio still works when the router is absent.
 In that case, agents handle the normalized audio directly using the same mention, thread, and permission rules as normal text messages.
 The same direct handling also applies when the router is present but is not allowed to reply to the original sender.
 If multiple eligible agents remain and the audio does not already target one of them, there is no automatic handoff until the user mentions an agent.
+
+### Visibility rule
+
+MindRoom does not automatically post the transcript to the room.
+A visible router message appears only when the router must disambiguate between multiple eligible responders.
+If the responder is already clear from room shape, thread context, or explicit targeting, the chosen agent replies directly without an extra router message.
 
 ### Attachment access
 

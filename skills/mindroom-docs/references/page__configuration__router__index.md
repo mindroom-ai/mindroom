@@ -72,7 +72,7 @@ By default (`matrix_room_access.mode: single_user_private`), rooms remain invite
 
 ### Voice Message Processing
 
-Audio events are handled through the shared media pipeline on all bots. The router still performs the normal routing step when a multi-agent room needs it, but single-agent rooms, explicit agent mentions, no-router rooms, and router-disallowed cases can all be handled directly by the target agent. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
+Audio events are handled through the shared media pipeline on all bots. The router only posts a visible handoff when it must disambiguate between multiple eligible responders in a multi-agent room. When the responder is already clear, normalized audio follows the normal direct agent or team dispatch rules without an extra router message. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
