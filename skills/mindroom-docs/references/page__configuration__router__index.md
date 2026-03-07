@@ -72,7 +72,7 @@ By default (`matrix_room_access.mode: single_user_private`), rooms remain invite
 
 ### Voice Message Processing
 
-Voice message callbacks are registered only on the router to avoid duplicate processing. When a voice message is received, the router transcribes it and posts the text (prefixed with a microphone emoji), which can then be routed to the appropriate agent.
+Audio events are handled through the shared media pipeline on all bots. The router still performs the normal routing step when a multi-agent room needs it, but single-agent rooms, explicit agent mentions, no-router rooms, and router-disallowed cases can all be handled directly by the target agent. See [Voice Messages](https://docs.mindroom.chat/voice/index.md) for the detailed dispatch behavior.
 
 ### Configuration Confirmations
 
