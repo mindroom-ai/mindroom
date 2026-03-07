@@ -25,7 +25,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -2849,7 +2849,100 @@ class TestMultiAgentOrchestrator:
 
         assert bot.rooms == ["!room1:localhost"]
         mock_ensure_user_in_rooms.assert_not_awaited()
-        bot.ensure_rooms.assert_awaited_once()
+        assert bot.ensure_rooms.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:
+        """Invite-only existing rooms should get a second invitation/join pass after router joins."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["lobby"],
+                ),
+            },
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_bot = AsyncMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.rooms = []
+        router_bot.ensure_rooms = AsyncMock()
+
+        general_bot = AsyncMock()
+        general_bot.agent_name = "general"
+        general_bot.rooms = []
+        general_bot.ensure_rooms = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()) as mock_invitations,
+            patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
+            patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
+            patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
+            patch("mindroom.orchestrator.ensure_user_in_rooms", new=AsyncMock()) as mock_ensure_user_in_rooms,
+        ):
+            await orchestrator._setup_rooms_and_memberships([router_bot, general_bot])
+
+        assert router_bot.rooms == ["!room1:localhost"]
+        assert general_bot.rooms == ["!room1:localhost"]
+        assert router_bot.ensure_rooms.await_count == 1
+        assert general_bot.ensure_rooms.await_count == 2
+        assert mock_invitations.await_count == 2
+        assert mock_ensure_user_in_rooms.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_setup_rooms_and_memberships_reruns_room_reconciliation_after_router_joins(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Startup should rerun room reconciliation after the router joins existing rooms."""
+        config = Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=["lobby"],
+                ),
+            },
+        )
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = config
+
+        router_joined = False
+        reconciliation_join_states: list[bool] = []
+
+        async def record_room_reconciliation() -> None:
+            reconciliation_join_states.append(router_joined)
+
+        async def router_join_rooms() -> None:
+            nonlocal router_joined
+            router_joined = True
+
+        router_bot = AsyncMock()
+        router_bot.agent_name = ROUTER_AGENT_NAME
+        router_bot.rooms = []
+        router_bot.ensure_rooms = AsyncMock(side_effect=router_join_rooms)
+
+        general_bot = AsyncMock()
+        general_bot.agent_name = "general"
+        general_bot.rooms = []
+        general_bot.ensure_rooms = AsyncMock()
+
+        with (
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(side_effect=record_room_reconciliation)),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+            patch("mindroom.orchestrator.get_rooms_for_entity", return_value=["lobby"]),
+            patch("mindroom.orchestrator.resolve_room_aliases", return_value=["!room1:localhost"]),
+            patch("mindroom.orchestrator.load_rooms", return_value={"lobby": MagicMock(room_id="!room1:localhost")}),
+            patch("mindroom.orchestrator.ensure_user_in_rooms", new=AsyncMock()),
+        ):
+            await orchestrator._setup_rooms_and_memberships([router_bot, general_bot])
+
+        assert reconciliation_join_states == [False, True]
+        assert router_bot.ensure_rooms.await_count == 1
+        assert general_bot.ensure_rooms.await_count == 2
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
