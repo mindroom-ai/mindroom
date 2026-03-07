@@ -557,7 +557,7 @@ def _check_matrix_homeserver() -> tuple[int, int, int]:
     url = matrix_versions_url(MATRIX_HOMESERVER)
     try:
         response = httpx.get(url, timeout=5, verify=MATRIX_SSL_VERIFY)
-    except httpx.HTTPError as exc:
+    except httpx.TransportError as exc:
         console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
         return 0, 1, 0
     if response_has_matrix_versions(response):
