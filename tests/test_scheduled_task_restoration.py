@@ -161,6 +161,34 @@ class TestScheduledTaskRestoration:
         mock_welcome.assert_awaited_once_with("lobby")
 
     @pytest.mark.asyncio
+    async def test_router_stop_cancels_running_scheduled_tasks(self, tmp_path: Path) -> None:
+        """Stopping the router should clear in-memory scheduled tasks before restart."""
+        config = Config(models={"default": {"provider": "test", "id": "test-model"}})
+
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
+            password="test",  # noqa: S106
+            display_name="RouterAgent",
+        )
+        router_bot = AgentBot(
+            agent_user=router_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["lobby"],
+        )
+        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+
+        with (
+            patch("mindroom.bot.wait_for_background_tasks", new_callable=AsyncMock),
+            patch("mindroom.bot.cancel_all_running_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_cancel,
+        ):
+            await router_bot.stop()
+
+        mock_cancel.assert_awaited_once()
+        router_bot.client.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
         """Test that when multiple agents join a room, only router restores tasks."""
         config = Config(

@@ -43,3 +43,35 @@ def test_custom_host_official_openai_model_keeps_dimensions() -> None:
 
     _, kwargs = client.embeddings.create.call_args
     assert kwargs["dimensions"] == 1536
+
+
+def test_official_openai_ada_omits_dimensions() -> None:
+    """Legacy OpenAI ada requests should not include the newer dimensions parameter."""
+    client = _mock_openai_client()
+    embedder = MindRoomOpenAIEmbedder(
+        id="text-embedding-ada-002",
+        api_key="sk-test",
+        openai_client=client,
+    )
+
+    embedder.response("hello")
+
+    _, kwargs = client.embeddings.create.call_args
+    assert "dimensions" not in kwargs
+
+
+def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
+    """Explicit dimensions should still be forwarded for custom-host models."""
+    client = _mock_openai_client()
+    embedder = MindRoomOpenAIEmbedder(
+        id="gemini-embedding-001",
+        api_key="sk-test",
+        base_url="http://example.com/v1",
+        dimensions=3072,
+        openai_client=client,
+    )
+
+    embedder.response("hello")
+
+    _, kwargs = client.embeddings.create.call_args
+    assert kwargs["dimensions"] == 3072

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
@@ -12,26 +12,29 @@ from openai.types.create_embedding_response import CreateEmbeddingResponse
 _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
-    "text-embedding-ada-002": 1536,
 }
 
 
-def _default_dimensions(model: str, base_url: str | None) -> int | None:
-    """Return a safe default dimension for known OpenAI embedding models."""
-    if model in _OPENAI_EMBEDDING_DIMENSIONS:
-        return _OPENAI_EMBEDDING_DIMENSIONS[model]
-    if base_url is None:
-        return 1536
-    return None
+def _default_dimensions(model: str) -> int | None:
+    """Return the default dimensions for models that support the parameter."""
+    return _OPENAI_EMBEDDING_DIMENSIONS.get(model)
 
 
 @dataclass
 class MindRoomOpenAIEmbedder(OpenAIEmbedder):
     """Avoid forcing OpenAI defaults onto arbitrary OpenAI-compatible hosts."""
 
+    _dimensions_explicit: bool = field(init=False, default=False, repr=False)
+
     def __post_init__(self) -> None:
+        self._dimensions_explicit = self.dimensions is not None
         if self.dimensions is None:
-            self.dimensions = _default_dimensions(self.id, self.base_url)
+            self.dimensions = _default_dimensions(self.id)
+
+    def _should_send_dimensions(self) -> bool:
+        return self.dimensions is not None and (
+            self._dimensions_explicit or self.id in _OPENAI_EMBEDDING_DIMENSIONS
+        )
 
     def _request_params(self, input_value: str | list[str]) -> dict[str, Any]:
         request: dict[str, Any] = {
@@ -41,7 +44,7 @@ class MindRoomOpenAIEmbedder(OpenAIEmbedder):
         }
         if self.user is not None:
             request["user"] = self.user
-        if self.dimensions is not None:
+        if self._should_send_dimensions():
             request["dimensions"] = self.dimensions
         if self.request_params:
             request.update(self.request_params)

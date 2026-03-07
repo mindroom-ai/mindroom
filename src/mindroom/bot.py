@@ -120,6 +120,7 @@ from .media_inputs import MediaInputs
 from .response_tracker import ResponseTracker
 from .routing import suggest_agent_for_message
 from .scheduling import (
+    cancel_all_running_scheduled_tasks,
     restore_scheduled_tasks,
 )
 
@@ -651,6 +652,11 @@ class AgentBot:
             self.logger.info("Background tasks completed")
         except Exception as e:
             self.logger.warning(f"Some background tasks did not complete: {e}")
+
+        if self.agent_name == ROUTER_AGENT_NAME:
+            cancelled_tasks = await cancel_all_running_scheduled_tasks()
+            if cancelled_tasks > 0:
+                self.logger.info("Cancelled running scheduled tasks", count=cancelled_tasks)
 
         if self.client is not None:
             self.logger.warning("Client is not None in stop()")

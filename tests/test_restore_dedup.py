@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
+from mindroom import scheduling
 from mindroom.scheduling import ScheduledWorkflow, restore_scheduled_tasks
 
 
@@ -78,3 +79,44 @@ async def test_restore_skips_past_once_and_does_not_duplicate_cron() -> None:
     restored = await restore_scheduled_tasks(client, "!r:server", config)
     # All should be skipped: 0 restored
     assert restored == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restoration should not create duplicate asyncio tasks for the same task id."""
+    client = AsyncMock()
+    config = AsyncMock()
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=10),
+        message="Future",
+        description="Future",
+        room_id="!r:server",
+        thread_id="$t",
+    )
+
+    response = nio.RoomGetStateResponse.from_dict(
+        [
+            {
+                "type": "com.mindroom.scheduled.task",
+                "state_key": "id1",
+                "content": {"workflow": workflow.model_dump_json(), "status": "pending"},
+                "event_id": "$e1",
+                "sender": "@s:server",
+                "origin_server_ts": 1,
+            },
+        ],
+        room_id="!r:server",
+    )
+    client.room_get_state = AsyncMock(return_value=response)
+
+    existing_task = MagicMock()
+    existing_task.done.return_value = False
+    monkeypatch.setattr(scheduling, "_running_tasks", {"id1": existing_task})
+    create_task = MagicMock()
+    monkeypatch.setattr(scheduling.asyncio, "create_task", create_task)
+
+    restored = await restore_scheduled_tasks(client, "!r:server", config)
+
+    assert restored == 0
+    create_task.assert_not_called()

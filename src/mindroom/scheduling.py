@@ -206,8 +206,16 @@ def _start_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
-) -> None:
+) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
+    existing_task = _running_tasks.get(task_id)
+    if existing_task is not None:
+        if existing_task.done():
+            del _running_tasks[task_id]
+        else:
+            logger.debug("Scheduled task already running; skipping duplicate start", task_id=task_id)
+            return False
+
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
             _run_once_task(client, task_id, workflow, config),
@@ -217,6 +225,7 @@ def _start_scheduled_task(
             _run_cron_task(client, task_id, workflow, _running_tasks, config),
         )
     _running_tasks[task_id] = task
+    return True
 
 
 def _cancel_running_task(task_id: str) -> None:
@@ -224,6 +233,23 @@ def _cancel_running_task(task_id: str) -> None:
     if task_id in _running_tasks:
         _running_tasks[task_id].cancel()
         del _running_tasks[task_id]
+
+
+async def cancel_all_running_scheduled_tasks() -> int:
+    """Cancel all in-memory scheduled tasks and wait for shutdown."""
+    running_items = list(_running_tasks.items())
+    if not running_items:
+        return 0
+
+    for task_id, task in running_items:
+        task.cancel()
+        del _running_tasks[task_id]
+
+    awaitables = [task for _, task in running_items if isinstance(task, asyncio.Future)]
+    if awaitables:
+        await asyncio.gather(*awaitables, return_exceptions=True)
+
+    return len(running_items)
 
 
 def _workflows_differ(left: ScheduledWorkflow, right: ScheduledWorkflow) -> bool:
@@ -1108,8 +1134,8 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
                 continue
 
             # Start the appropriate task
-            _start_scheduled_task(client, task_id, workflow, config)
-            restored_count += 1
+            if _start_scheduled_task(client, task_id, workflow, config):
+                restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):
             logger.exception("Failed to restore task")

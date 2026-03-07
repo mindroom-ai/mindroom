@@ -85,6 +85,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> 
         config.memory.embedder.provider,
         embedder_config.model,
         embedder_config.host or "",
+        str(embedder_config.dimensions) if embedder_config.dimensions is not None else "",
         str(base_config.chunk_size),
         str(base_config.chunk_overlap),
         git_config.repo_url if git_config is not None else "",
