@@ -340,6 +340,18 @@ class MultiAgentOrchestrator:
         bot = self.agent_bots.get(entity_name)
         return [bot] if bot is not None else []
 
+    async def _try_start_bot_once(
+        self,
+        entity_name: str,
+        bot: AgentBot | TeamBot,
+    ) -> bool | None:
+        """Run one bot start attempt and classify the result."""
+        try:
+            return bool(await bot.try_start())
+        except PermanentMatrixStartupError:
+            self._log_permanent_bot_start_failure(entity_name)
+            return None
+
     async def _run_bot_start_retry(self, entity_name: str) -> None:
         """Keep retrying one bot start until it succeeds or the task is cancelled."""
         current_task = asyncio.current_task()
@@ -350,13 +362,10 @@ class MultiAgentOrchestrator:
                 if bot is None:
                     return
 
-                try:
-                    started = await bot.try_start()
-                except PermanentMatrixStartupError:
-                    self._log_permanent_bot_start_failure(entity_name)
+                start_status = await self._try_start_bot_once(entity_name, bot)
+                if start_status is None:
                     return
-
-                if started:
+                if start_status:
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     if bots_to_setup:
@@ -446,28 +455,6 @@ class MultiAgentOrchestrator:
         self.agent_bots[entity_name] = bot
         return bot
 
-    async def _start_registered_bot_once(
-        self,
-        entity_name: str,
-        *,
-        failed_entities_to_retry: list[str],
-        permanently_failed_entities: list[str],
-    ) -> None:
-        """Try one registered bot start and either sync it or queue background retry."""
-        bot = self.agent_bots.get(entity_name)
-        if bot is None:
-            return
-        try:
-            started = await bot.try_start()
-        except PermanentMatrixStartupError:
-            self._log_permanent_bot_start_failure(entity_name)
-            permanently_failed_entities.append(entity_name)
-            return
-        if started:
-            self._start_sync_task(entity_name, bot)
-            return
-        failed_entities_to_retry.append(entity_name)
-
     async def _create_and_start_entities(
         self,
         entity_names: set[str],
@@ -478,13 +465,17 @@ class MultiAgentOrchestrator:
     ) -> None:
         """Create configured entities and try to start them once."""
         for entity_name in entity_names:
-            if self._create_managed_bot(entity_name, config) is None:
+            bot = self._create_managed_bot(entity_name, config)
+            if bot is None:
                 continue
-            await self._start_registered_bot_once(
-                entity_name,
-                failed_entities_to_retry=failed_entities_to_retry,
-                permanently_failed_entities=permanently_failed_entities,
-            )
+            start_status = await self._try_start_bot_once(entity_name, bot)
+            if start_status is None:
+                permanently_failed_entities.append(entity_name)
+                continue
+            if start_status:
+                self._start_sync_task(entity_name, bot)
+                continue
+            failed_entities_to_retry.append(entity_name)
 
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
@@ -546,13 +537,14 @@ class MultiAgentOrchestrator:
             return started_bots, failed_agents_to_retry, permanently_failed_agents
 
         set_runtime_starting("Starting remaining Matrix bot accounts")
-        results = await asyncio.gather(*[bot.try_start() for _, bot in remaining_bots], return_exceptions=True)
-        for (entity_name, bot), success in zip(remaining_bots, results):
-            if success is True:
+        start_statuses = await asyncio.gather(
+            *[self._try_start_bot_once(entity_name, bot) for entity_name, bot in remaining_bots],
+        )
+        for (entity_name, bot), start_status in zip(remaining_bots, start_statuses):
+            if start_status:
                 started_bots.append(bot)
                 continue
-            if isinstance(success, PermanentMatrixStartupError):
-                self._log_permanent_bot_start_failure(entity_name)
+            if start_status is None:
                 permanently_failed_agents.append(entity_name)
                 continue
             failed_agents_to_retry.append(entity_name)
