@@ -10,6 +10,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
@@ -425,10 +426,10 @@ class TestDynamicConfigUpdate:
             patch.object(
                 orchestrator,
                 "_ensure_user_account",
-                new=AsyncMock(side_effect=ValueError("mindroom_user.username cannot be changed")),
+                new=AsyncMock(side_effect=PermanentMatrixStartupError("mindroom_user.username cannot be changed")),
             ) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
-            pytest.raises(ValueError, match="cannot be changed"),
+            pytest.raises(PermanentMatrixStartupError, match="cannot be changed"),
         ):
             await orchestrator.update_config()
 

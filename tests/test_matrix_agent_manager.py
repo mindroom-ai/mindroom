@@ -11,6 +11,7 @@ import yaml
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
@@ -223,14 +224,15 @@ class TestMatrixRegistration:
         """Test registration failure."""
         mock_client = AsyncMock()
         # Mock registration failure
-        mock_response = MagicMock()
+        mock_response = MagicMock(spec=nio.ErrorResponse)
         mock_response.status_code = "M_FORBIDDEN"
+        mock_response.message = "Forbidden"
         mock_client.register.return_value = mock_response
 
         with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
-            with pytest.raises(ValueError, match="Failed to register user"):
+            with pytest.raises(PermanentMatrixStartupError, match="Failed to register user"):
                 await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
             mock_matrix_client.assert_called_once()
@@ -431,7 +433,7 @@ class TestMatrixRegistration:
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
             mock_req.return_value = True
 
-            with pytest.raises(ValueError, match="Set MATRIX_REGISTRATION_TOKEN"):
+            with pytest.raises(PermanentMatrixStartupError, match="Set MATRIX_REGISTRATION_TOKEN"):
                 await _register_user("http://localhost:8008", "test_user", "test_pass", "Test User")
 
 
@@ -499,7 +501,7 @@ class TestAgentUserCreation:
             "password": "existing_pass",
         }
 
-        with pytest.raises(ValueError, match="cannot be changed"):
+        with pytest.raises(PermanentMatrixStartupError, match="cannot be changed"):
             await create_agent_user(
                 "http://localhost:8008",
                 INTERNAL_USER_AGENT_NAME,

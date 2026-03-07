@@ -27,6 +27,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -489,6 +490,28 @@ class TestAgentBot:
         assert (
             mock_client.add_event_callback.call_count == 11
         )  # invite, message, reaction, audio, image/file/video callbacks
+
+    @pytest.mark.asyncio
+    async def test_agent_bot_try_start_reraises_permanent_startup_error(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Permanent startup failures should stop retrying immediately."""
+        config = Config.from_yaml()
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+
+        with (
+            patch.object(
+                bot,
+                "start",
+                new=AsyncMock(side_effect=PermanentMatrixStartupError("boom")),
+            ) as mock_start,
+            pytest.raises(PermanentMatrixStartupError, match="boom"),
+        ):
+            await bot.try_start()
+
+        mock_start.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -3268,6 +3291,35 @@ class TestMultiAgentOrchestrator:
         mock_schedule_retry.assert_awaited_once_with("general")
 
     @pytest.mark.asyncio
+    async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
+        """Permanent startup failures should leave bots disabled without retry loops."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator.config = MagicMock()
+
+        router_bot = MagicMock()
+        router_bot.agent_name = "router"
+        router_bot.try_start = AsyncMock(return_value=True)
+
+        failing_bot = MagicMock()
+        failing_bot.agent_name = "general"
+        failing_bot.try_start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
+
+        orchestrator.agent_bots = {"router": router_bot, "general": failing_bot}
+
+        with (
+            patch("mindroom.orchestrator._wait_for_matrix_homeserver", new=AsyncMock()),
+            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
+            patch("mindroom.orchestrator._sync_forever_with_restart", new=AsyncMock()),
+        ):
+            await orchestrator.start()
+
+        assert "general" in orchestrator.agent_bots
+        mock_schedule_retry.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()
@@ -3475,6 +3527,78 @@ class TestMultiAgentOrchestrator:
         assert orchestrator.agent_bots["coach"] is new_bot
         new_bot.ensure_rooms.assert_not_awaited()
         mock_schedule_retry.assert_awaited_once_with("coach")
+
+    @pytest.mark.asyncio
+    async def test_update_config_keeps_permanently_failed_new_bot_without_retry(self, tmp_path: Path) -> None:
+        """Hot reload should retain permanently failed bots without scheduling retries."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+
+        old_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+        new_config = Config(
+            agents={
+                "general": {
+                    "display_name": "GeneralAgent",
+                    "role": "General assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+                "coach": {
+                    "display_name": "Coach",
+                    "role": "Coaching assistant",
+                    "model": "default",
+                    "rooms": ["lobby"],
+                },
+            },
+            models={"default": {"provider": "test", "id": "test-model"}},
+        )
+
+        orchestrator.config = old_config
+        orchestrator.running = True
+
+        router_bot = MagicMock()
+        router_bot.config = old_config
+        router_bot.enable_streaming = True
+        router_bot._set_presence_with_model_info = AsyncMock()
+        general_bot = MagicMock()
+        general_bot.config = old_config
+        general_bot.enable_streaming = True
+        general_bot._set_presence_with_model_info = AsyncMock()
+        orchestrator.agent_bots = {"router": router_bot, "general": general_bot}
+
+        new_bot = MagicMock()
+        new_bot.agent_name = "coach"
+        new_bot.running = False
+        new_bot.try_start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
+        new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
+            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
+            patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
+            patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
+            patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is True
+        assert orchestrator.agent_bots["coach"] is new_bot
+        new_bot.ensure_rooms.assert_not_awaited()
+        mock_schedule_retry.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop

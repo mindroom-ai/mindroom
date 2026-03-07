@@ -27,7 +27,7 @@ from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from .logging_config import get_logger, setup_logging
-from .matrix.client import get_joined_rooms, get_room_members, invite_to_room
+from .matrix.client import PermanentMatrixStartupError, get_joined_rooms, get_room_members, invite_to_room
 from .matrix.health import matrix_versions_url, response_has_matrix_versions
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
 from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
@@ -53,15 +53,6 @@ _STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 _STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
-_PERMANENT_STARTUP_ERROR_MARKERS = (
-    "M_FORBIDDEN",
-    "M_USER_DEACTIVATED",
-    "M_UNKNOWN_TOKEN",
-    "M_INVALID_USERNAME",
-    "mindroom_user.username cannot be changed after first startup",
-    "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid",
-    "Matrix homeserver requires registration tokens for account creation",
-)
 
 
 def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
@@ -91,10 +82,7 @@ def _retry_delay_seconds(
 
 def _is_permanent_startup_error(exc: Exception) -> bool:
     """Return whether a startup exception is clearly non-retryable."""
-    if not isinstance(exc, ValueError):
-        return False
-    error_message = str(exc)
-    return any(marker in error_message for marker in _PERMANENT_STARTUP_ERROR_MARKERS)
+    return isinstance(exc, PermanentMatrixStartupError)
 
 
 async def _run_with_retry(
@@ -264,6 +252,17 @@ class MultiAgentOrchestrator:
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
+    async def _prepare_user_account(self, config: Config, *, update_runtime_state: bool) -> None:
+        """Ensure the internal user account exists, retrying only transient failures."""
+        if config.mindroom_user is None:
+            return
+        await _run_with_retry(
+            "Preparing MindRoom user account",
+            lambda: self._ensure_user_account(config),
+            permanent_error_check=_is_permanent_startup_error,
+            update_runtime_state=update_runtime_state,
+        )
+
     async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
         """Initialize or reconfigure knowledge managers for the current config."""
         self.knowledge_managers = await initialize_knowledge_managers(
@@ -328,6 +327,14 @@ class MultiAgentOrchestrator:
             name=f"sync_{entity_name}",
         )
 
+    @staticmethod
+    def _log_permanent_bot_start_failure(entity_name: str) -> None:
+        """Log that one bot failed in a non-retryable way and stays disabled."""
+        logger.error(
+            "Bot startup failed permanently; leaving bot disabled until configuration changes",
+            agent_name=entity_name,
+        )
+
     def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot | TeamBot]:
         """Return the bots whose room memberships should be reconciled after a background start."""
         if entity_name == ROUTER_AGENT_NAME:
@@ -347,7 +354,13 @@ class MultiAgentOrchestrator:
                 if bot is None:
                     return
 
-                if await bot.try_start():
+                try:
+                    started = await bot.try_start()
+                except PermanentMatrixStartupError:
+                    self._log_permanent_bot_start_failure(entity_name)
+                    return
+
+                if started:
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     if bots_to_setup:
@@ -422,6 +435,49 @@ class MultiAgentOrchestrator:
             return
         await self._configure_knowledge(config, start_watcher=start_watcher)
 
+    async def _sync_runtime_support_services(self, config: Config, *, start_watcher: bool) -> None:
+        """Refresh runtime support services that depend on the active config."""
+        await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
+        await self._sync_memory_auto_flush_worker()
+
+    @staticmethod
+    def _configured_entity_names(config: Config) -> list[str]:
+        """Return configured entity names with the router first."""
+        return [ROUTER_AGENT_NAME, *config.agents.keys(), *config.teams.keys()]
+
+    def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot | None:
+        """Create and register one runtime-managed bot."""
+        temp_user = _create_temp_user(entity_name, config)
+        bot = create_bot_for_entity(entity_name, temp_user, config, self.storage_path)
+        if bot is None:
+            logger.warning(f"Could not create bot for {entity_name}")
+            return None
+        bot.orchestrator = self
+        self.agent_bots[entity_name] = bot
+        return bot
+
+    async def _start_registered_bot_once(
+        self,
+        entity_name: str,
+        *,
+        failed_entities_to_retry: list[str],
+        permanently_failed_entities: list[str],
+    ) -> None:
+        """Try one registered bot start and either sync it or queue background retry."""
+        bot = self.agent_bots.get(entity_name)
+        if bot is None:
+            return
+        try:
+            started = await bot.try_start()
+        except PermanentMatrixStartupError:
+            self._log_permanent_bot_start_failure(entity_name)
+            permanently_failed_entities.append(entity_name)
+            return
+        if started:
+            self._start_sync_task(entity_name, bot)
+            return
+        failed_entities_to_retry.append(entity_name)
+
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
 
@@ -432,30 +488,10 @@ class MultiAgentOrchestrator:
 
         config = Config.from_yaml()
         load_plugins(config)
-
-        # Ensure user account exists first
-        if config.mindroom_user is not None:
-            await _run_with_retry(
-                "Preparing MindRoom user account",
-                lambda: self._ensure_user_account(config),
-                permanent_error_check=_is_permanent_startup_error,
-            )
+        await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
-
-        # Create bots for all configured entities
-        # Make Router the first so that it can manage room invitations
-        all_entities = [ROUTER_AGENT_NAME, *list(config.agents.keys()), *list(config.teams.keys())]
-
-        for entity_name in all_entities:
-            temp_user = _create_temp_user(entity_name, config)
-
-            bot = create_bot_for_entity(entity_name, temp_user, config, self.storage_path)
-            if bot is None:
-                logger.warning(f"Could not create bot for {entity_name}")
-                continue
-
-            bot.orchestrator = self
-            self.agent_bots[entity_name] = bot
+        for entity_name in self._configured_entity_names(config):
+            self._create_managed_bot(entity_name, config)
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
@@ -483,27 +519,36 @@ class MultiAgentOrchestrator:
             raise RuntimeError(msg)
 
         set_runtime_starting("Starting router Matrix account")
-        await _run_with_retry("Starting router Matrix account", _start_router)
+        await _run_with_retry(
+            "Starting router Matrix account",
+            _start_router,
+            permanent_error_check=_is_permanent_startup_error,
+        )
         return router_bot
 
-    async def _start_remaining_bots_once(self) -> tuple[list[AgentBot | TeamBot], list[str]]:
-        """Start non-router bots once and return started bots plus failed entity names."""
+    async def _start_remaining_bots_once(self) -> tuple[list[AgentBot | TeamBot], list[str], list[str]]:
+        """Start non-router bots once and return started, retryable, and permanent failures."""
         started_bots: list[AgentBot | TeamBot] = []
-        failed_agents: list[str] = []
+        failed_agents_to_retry: list[str] = []
+        permanently_failed_agents: list[str] = []
         remaining_bots = [
             (entity_name, bot) for entity_name, bot in self.agent_bots.items() if entity_name != ROUTER_AGENT_NAME
         ]
         if not remaining_bots:
-            return started_bots, failed_agents
+            return started_bots, failed_agents_to_retry, permanently_failed_agents
 
         set_runtime_starting("Starting remaining Matrix bot accounts")
-        results = await asyncio.gather(*[bot.try_start() for _, bot in remaining_bots])
+        results = await asyncio.gather(*[bot.try_start() for _, bot in remaining_bots], return_exceptions=True)
         for (entity_name, bot), success in zip(remaining_bots, results):
-            if success:
+            if success is True:
                 started_bots.append(bot)
                 continue
-            failed_agents.append(entity_name)
-        return started_bots, failed_agents
+            if isinstance(success, PermanentMatrixStartupError):
+                self._log_permanent_bot_start_failure(entity_name)
+                permanently_failed_agents.append(entity_name)
+                continue
+            failed_agents_to_retry.append(entity_name)
+        return started_bots, failed_agents_to_retry, permanently_failed_agents
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
@@ -524,9 +569,13 @@ class MultiAgentOrchestrator:
 
         router_bot = await self._start_router_bot()
         started_bots = [router_bot]
-        additional_started_bots, failed_agents = await self._start_remaining_bots_once()
+        (
+            additional_started_bots,
+            failed_agents_to_retry,
+            permanently_failed_agents,
+        ) = await self._start_remaining_bots_once()
         started_bots.extend(additional_started_bots)
-        self._log_degraded_startup(failed_agents)
+        self._log_degraded_startup([*failed_agents_to_retry, *permanently_failed_agents])
 
         config = self.config
         if config is None:
@@ -555,7 +604,7 @@ class MultiAgentOrchestrator:
             if bot.running:
                 self._start_sync_task(entity_name, bot)
 
-        for entity_name in failed_agents:
+        for entity_name in failed_agents_to_retry:
             await self._schedule_bot_start_retry(entity_name)
 
         set_runtime_ready()
@@ -576,10 +625,9 @@ class MultiAgentOrchestrator:
         load_plugins(new_config)
 
         if not self.config:
-            await self._ensure_user_account(new_config)
+            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
             self.config = new_config
-            await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
-            await self._sync_memory_auto_flush_worker()
+            await self._sync_runtime_support_services(new_config, start_watcher=self.running)
             return False
 
         current_config = self.config
@@ -591,12 +639,12 @@ class MultiAgentOrchestrator:
         authorization_changed = current_config.authorization != new_config.authorization
 
         # Also check for new entities that didn't exist before
-        all_new_entities = set(new_config.agents.keys()) | set(new_config.teams.keys()) | {ROUTER_AGENT_NAME}
+        all_new_entities = set(self._configured_entity_names(new_config))
         existing_entities = set(self.agent_bots.keys())
         new_entities = all_new_entities - existing_entities - entities_to_restart
 
         if mindroom_user_changed:
-            await self._ensure_user_account(new_config)
+            await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
         # Only apply the new config after all validation/account checks succeed.
         self.config = new_config
@@ -619,8 +667,7 @@ class MultiAgentOrchestrator:
             and not matrix_room_access_changed
             and not authorization_changed
         ):
-            await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
-            await self._sync_memory_auto_flush_worker()
+            await self._sync_runtime_support_services(new_config, start_watcher=self.running)
             # No entities to restart or create, we're done
             return False
 
@@ -632,35 +679,27 @@ class MultiAgentOrchestrator:
 
         # Recreate entities that need restarting using self-management
         failed_entities_to_retry: list[str] = []
+        permanently_failed_entities: list[str] = []
         for entity_name in entities_to_restart:
             if entity_name in all_new_entities:
-                # Create temporary user object (will be updated by ensure_user_account)
-                temp_user = _create_temp_user(entity_name, new_config)
-                bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
-                if bot:
-                    bot.orchestrator = self
-                    self.agent_bots[entity_name] = bot
-                    # Agent handles its own setup (but doesn't join rooms yet)
-                    if await bot.try_start():
-                        # Start sync loop with automatic restart
-                        self._start_sync_task(entity_name, bot)
-                    else:
-                        failed_entities_to_retry.append(entity_name)
+                if self._create_managed_bot(entity_name, new_config) is not None:
+                    await self._start_registered_bot_once(
+                        entity_name,
+                        failed_entities_to_retry=failed_entities_to_retry,
+                        permanently_failed_entities=permanently_failed_entities,
+                    )
             # Entity was removed from config
             elif entity_name in self.agent_bots:
                 del self.agent_bots[entity_name]
 
         # Create new entities
         for entity_name in new_entities:
-            temp_user = _create_temp_user(entity_name, new_config)
-            bot = create_bot_for_entity(entity_name, temp_user, new_config, self.storage_path)
-            if bot:
-                bot.orchestrator = self
-                self.agent_bots[entity_name] = bot
-                if await bot.try_start():
-                    self._start_sync_task(entity_name, bot)
-                else:
-                    failed_entities_to_retry.append(entity_name)
+            if self._create_managed_bot(entity_name, new_config) is not None:
+                await self._start_registered_bot_once(
+                    entity_name,
+                    failed_entities_to_retry=failed_entities_to_retry,
+                    permanently_failed_entities=permanently_failed_entities,
+                )
 
         # Handle removed entities (cleanup)
         removed_entities = existing_entities - all_new_entities
@@ -687,8 +726,13 @@ class MultiAgentOrchestrator:
         for entity_name in failed_entities_to_retry:
             await self._schedule_bot_start_retry(entity_name)
 
-        await self._refresh_knowledge_for_runtime(new_config, start_watcher=self.running)
-        await self._sync_memory_auto_flush_worker()
+        if permanently_failed_entities:
+            logger.warning(
+                "Configuration update left some bots disabled due to permanent startup errors",
+                agent_names=permanently_failed_entities,
+            )
+
+        await self._sync_runtime_support_services(new_config, start_watcher=self.running)
 
         logger.info(f"Configuration update complete: {len(entities_to_restart) + len(new_entities)} bots affected")
         return True

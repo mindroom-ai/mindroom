@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import nio
-from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.matrix import image_handler
 from mindroom.matrix.event_info import EventInfo
@@ -107,6 +107,7 @@ from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
+    PermanentMatrixStartupError,
     _latest_thread_event_id,
     edit_message,
     fetch_thread_history,
@@ -584,40 +585,17 @@ class AgentBot:
     async def try_start(self) -> bool:
         """Try to start the agent bot with smart retry logic.
 
-        Uses tenacity to retry transient failures (network, timeouts) but not
-        permanent ones (auth failures).
+        Retries transient failures but stops immediately on permanent startup errors.
 
         Returns:
             True if the bot started successfully, False otherwise.
 
         """
 
-        def should_retry_error(retry_state: RetryCallState) -> bool:
-            """Determine if we should retry based on the exception.
-
-            Don't retry on auth failures (M_FORBIDDEN, M_USER_DEACTIVATED, etc)
-            which come as ValueError with those strings in the message.
-            """
-            if retry_state.outcome is None:
-                return True
-            exception = retry_state.outcome.exception()
-            if exception is None:
-                return False
-
-            # Don't retry auth failures
-            if isinstance(exception, ValueError):
-                error_msg = str(exception)
-                # Matrix auth error codes that shouldn't be retried
-                permanent_errors = ["M_FORBIDDEN", "M_USER_DEACTIVATED", "M_UNKNOWN_TOKEN", "M_INVALID_USERNAME"]
-                return not any(err in error_msg for err in permanent_errors)
-
-            # Retry other exceptions (network errors, timeouts, etc)
-            return True
-
         @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=should_retry_error,
+            retry=retry_if_not_exception_type(PermanentMatrixStartupError),
             reraise=True,
         )
         async def _start_with_retry() -> None:
@@ -626,6 +604,9 @@ class AgentBot:
         try:
             await _start_with_retry()
             return True  # noqa: TRY300
+        except PermanentMatrixStartupError:
+            logger.exception(f"Failed to start agent {self.agent_name}")
+            raise
         except Exception:
             logger.exception(f"Failed to start agent {self.agent_name}")
             return False
