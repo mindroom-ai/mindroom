@@ -42,8 +42,6 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-No separate `~/mindroom-local` working directory is required for this flow.
-
 Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 

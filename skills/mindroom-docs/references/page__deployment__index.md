@@ -38,8 +38,6 @@ uvx mindroom connect --pair-code ABCD-EFGH
 uvx mindroom run
 ```
 
-No separate `~/mindroom-local` working directory is required for this flow.
-
 Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.

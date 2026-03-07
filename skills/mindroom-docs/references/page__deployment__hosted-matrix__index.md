@@ -27,7 +27,7 @@ This guide covers the simplest production-like setup:
 uvx mindroom config init --profile public
 ```
 
-This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults. You do not need to create or `cd` into a separate `~/mindroom-local` directory.
+This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
 
 ## 2. Add AI Provider Key
 

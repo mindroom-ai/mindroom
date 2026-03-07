@@ -24,8 +24,6 @@ This creates:
 - `~/.mindroom/config.yaml`
 - `~/.mindroom/.env` prefilled with `MATRIX_HOMESERVER=https://mindroom.chat`
 
-You do not need to create or `cd` into a separate `~/mindroom-local` directory for this flow.
-
 ### 2. Add model API key(s)
 
 ```bash
