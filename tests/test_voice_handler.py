@@ -161,3 +161,36 @@ class TestVoiceHandler:
         assert result.content == b"decrypted_audio_data"
         assert result.mime_type == "audio/mpeg"
         mock_download.assert_awaited_once_with(client, event)
+
+    @pytest.mark.asyncio
+    async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path) -> None:  # noqa: ANN001
+        """Failed normalization should not leave stale in-flight task entries behind."""
+        config = Config(authorization={"default_room_access": True})
+        client = AsyncMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!test:server"
+        room.users = {"@alice:example.com": MagicMock()}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$voice123"
+        event.sender = "@alice:example.com"
+        event.body = "voice.ogg"
+        event.source = {"content": {"body": "voice.ogg"}}
+
+        voice_handler._voice_normalization_cache.clear()
+        voice_handler._voice_normalization_tasks.clear()
+        cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
+
+        with patch("mindroom.voice_handler.download_audio", new=AsyncMock(return_value=None)):
+            prepared = await voice_handler.prepare_voice_message(
+                client,
+                tmp_path,
+                room,
+                event,
+                config,
+                sender_domain="example.com",
+                thread_id=None,
+            )
+
+        assert prepared is None
+        assert cache_key not in voice_handler._voice_normalization_tasks
+        assert cache_key not in voice_handler._voice_normalization_cache
