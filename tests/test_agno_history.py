@@ -50,6 +50,11 @@ class TestHistoryConfig:
         assert defaults.num_history_runs is None
         assert defaults.num_history_messages is None
 
+    def test_show_stop_button_default_true(self) -> None:
+        """DefaultsConfig.show_stop_button defaults to True."""
+        defaults = DefaultsConfig()
+        assert defaults.show_stop_button is True
+
     def test_agent_config_history_defaults_none(self) -> None:
         """AgentConfig history fields default to None (inherit from defaults)."""
         agent = AgentConfig(display_name="Test")

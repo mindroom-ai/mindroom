@@ -362,7 +362,7 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
         "tools": ["scheduler"],
         "markdown": True,
         "enable_streaming": True,
-        "show_stop_button": False,
+        "show_stop_button": True,
         "learning": True,
         "learning_mode": "always",
         "compress_tool_results": True,
