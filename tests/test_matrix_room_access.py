@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom import topic_generator
 from mindroom.config.main import Config
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
@@ -206,6 +207,61 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
         room_alias="#lobby:example.com",
         context="new_room_creation",
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_room_topic_ai_skips_model_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Smoke deployments can force static room topics without touching external AI providers."""
+    config = Config(
+        agents={
+            "analyst": {
+                "display_name": "AnalystAgent",
+                "role": "Analyze information comprehensively.",
+                "model": "default",
+                "rooms": ["analysis"],
+            },
+        },
+    )
+    monkeypatch.setenv("MINDROOM_DISABLE_AI_ROOM_TOPICS", "true")
+
+    get_model_instance = MagicMock()
+    monkeypatch.setattr(topic_generator, "get_model_instance", get_model_instance)
+
+    topic = await topic_generator.generate_room_topic_ai("analysis", "Analysis", config)
+
+    assert topic == "📊 Analysis • AnalystAgent"
+    get_model_instance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_room_topic_ai_falls_back_to_static_topic_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AI topic failures should not leak provider errors into room topics."""
+    config = Config(
+        agents={
+            "general": {
+                "display_name": "GeneralAgent",
+                "role": "General assistance.",
+                "model": "default",
+                "rooms": ["lobby"],
+            },
+            "research": {
+                "display_name": "ResearchAgent",
+                "role": "Research.",
+                "model": "default",
+                "rooms": ["lobby"],
+            },
+        },
+    )
+    monkeypatch.delenv("MINDROOM_DISABLE_AI_ROOM_TOPICS", raising=False)
+    monkeypatch.setattr(topic_generator, "_cached_agent_run", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(topic_generator, "get_model_instance", MagicMock(return_value="openai:gpt-4o-mini"))
+    monkeypatch.setattr(topic_generator, "Agent", MagicMock(return_value=MagicMock()))
+
+    topic = await topic_generator.generate_room_topic_ai("lobby", "Lobby", config)
+
+    assert topic == "🤖 Lobby • GeneralAgent + ResearchAgent"
 
 
 @pytest.mark.asyncio

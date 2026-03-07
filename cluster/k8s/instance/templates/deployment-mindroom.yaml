@@ -82,6 +82,8 @@ spec:
           value: "/etc/secrets/deepseek_key"
         - name: HOME
           value: {{ .Values.storagePath }}
+        - name: MINDROOM_DISABLE_AI_ROOM_TOPICS
+          value: {{ .Values.disableAiRoomTopics | default false | quote }}
         volumeMounts:
         - name: storage
           mountPath: {{ .Values.storagePath }}

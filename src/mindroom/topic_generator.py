@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import nio
@@ -17,11 +18,48 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_STATIC_TOPIC_ENV = "MINDROOM_DISABLE_AI_ROOM_TOPICS"
+_ROOM_TOPIC_EMOJIS = {
+    "analysis": "📊",
+    "automation": "⚙️",
+    "business": "💼",
+    "communication": "💬",
+    "dev": "💻",
+    "finance": "💰",
+    "help": "🆘",
+    "home": "🏠",
+    "lobby": "🤖",
+    "news": "📰",
+    "personal": "👤",
+    "productivity": "✅",
+    "research": "🔎",
+    "science": "🔬",
+}
+
 
 class _RoomTopic(BaseModel):
     """Structured room topic response."""
 
     topic: str = Field(description="The room topic - concise, informative, with emoji")
+
+
+def _ai_room_topics_disabled() -> bool:
+    """Return whether room topics should skip AI generation."""
+    return os.getenv(_STATIC_TOPIC_ENV, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _fallback_room_topic(room_key: str, room_name: str, agents_in_room: list[str]) -> str:
+    """Build a deterministic topic when AI generation is disabled or fails."""
+    emoji = _ROOM_TOPIC_EMOJIS.get(room_key, "🤖")
+    if not agents_in_room:
+        capability = "MindRoom collaboration"
+    elif len(agents_in_room) == 1:
+        capability = agents_in_room[0]
+    elif len(agents_in_room) == 2:
+        capability = f"{agents_in_room[0]} + {agents_in_room[1]}"
+    else:
+        capability = f"{len(agents_in_room)} agents"
+    return f"{emoji} {room_name} • {capability}"
 
 
 async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str | None:
@@ -45,6 +83,11 @@ async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) 
 
     # Build agent list for the prompt
     agent_list = ", ".join(agents_in_room)
+    fallback_topic = _fallback_room_topic(room_key, room_name, agents_in_room)
+
+    if _ai_room_topics_disabled():
+        logger.info("AI room topics disabled; using static topic", room_key=room_key, topic=fallback_topic)
+        return fallback_topic
 
     prompt = f"""Generate a concise, informative room topic for a MindRoom Matrix room.
 
@@ -99,11 +142,11 @@ Generate the topic:"""
         )
     except Exception:
         logger.exception(f"Error generating topic for room {room_key}")
-        return None
+        return fallback_topic
     content = response.content
     if not isinstance(content, _RoomTopic):
         logger.warning(f"Topic generation returned unexpected type: {type(content)}")
-        return str(content) if content else None
+        return fallback_topic
     return content.topic
 
 

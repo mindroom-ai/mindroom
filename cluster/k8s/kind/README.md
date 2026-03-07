@@ -126,7 +126,7 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 ./test-access.sh
 
 # Deploy and smoke-test a real MindRoom instance
-./smoke_instance.sh
+python smoke_instance.py
 ```
 
 ## Clean Up
@@ -143,7 +143,7 @@ kind delete cluster --name mindroom
 - `up.sh` - Create kind cluster with ingress
 - `build_load_images.sh` - Build and load platform + MindRoom Docker images
 - `install_platform.sh` - Deploy platform via Helm
-- `smoke_instance.sh` - Deploy and verify a MindRoom instance
+- `smoke_instance.py` - Deploy and verify a MindRoom instance
 - `start-fresh.sh` - Complete setup from scratch
 - `setup-local-access.sh` - Configure ingress for local domains
 - `test-access.sh` - Test all access methods
