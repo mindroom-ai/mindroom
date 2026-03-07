@@ -60,14 +60,21 @@ class TestScheduledTaskRestoration:
         router_bot.client = AsyncMock(spec=nio.AsyncClient)
 
         with (
-            patch("mindroom.bot.join_room", return_value=True) as mock_join,
-            patch("mindroom.bot.restore_scheduled_tasks", return_value=2) as mock_restore,
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
+            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
+            patch(
+                "mindroom.bot.config_confirmation.restore_pending_changes",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock),
         ):
             await router_bot.join_configured_rooms()
 
             # Verify router agent called restore_scheduled_tasks
-            mock_join.assert_called_once()
-            mock_restore.assert_called_once_with(router_bot.client, "lobby", config)
+            mock_join.assert_awaited_once_with(router_bot.client, "lobby")
+            mock_restore.assert_awaited_once_with(router_bot.client, "lobby", config)
 
     @pytest.mark.asyncio
     async def test_non_router_agents_dont_restore_tasks(self, tmp_path: Path) -> None:
@@ -102,14 +109,56 @@ class TestScheduledTaskRestoration:
         regular_bot.client = AsyncMock(spec=nio.AsyncClient)
 
         with (
-            patch("mindroom.bot.join_room", return_value=True) as mock_join,
-            patch("mindroom.bot.restore_scheduled_tasks", return_value=2) as mock_restore,
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True) as mock_join,
+            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
         ):
             await regular_bot.join_configured_rooms()
 
             # Verify regular agent did NOT call restore_scheduled_tasks
-            mock_join.assert_called_once()
+            mock_join.assert_awaited_once_with(regular_bot.client, "lobby")
             mock_restore.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_router_restores_tasks_without_rejoining_existing_room(self, tmp_path: Path) -> None:
+        """Router restart setup should run even when the room is already joined."""
+        config = Config(models={"default": {"provider": "test", "id": "test-model"}})
+
+        router_user = AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            user_id=f"@{ROUTER_AGENT_NAME}:mindroom.com",
+            password="test",  # noqa: S106
+            display_name="RouterAgent",
+        )
+        router_bot = AgentBot(
+            agent_user=router_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["lobby"],
+        )
+        router_bot.client = AsyncMock(spec=nio.AsyncClient)
+        router_bot.client.rooms = {"lobby": object()}
+
+        with (
+            patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
+            patch("mindroom.bot.join_room", new_callable=AsyncMock) as mock_join,
+            patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
+            patch(
+                "mindroom.bot.config_confirmation.restore_pending_changes",
+                new_callable=AsyncMock,
+                return_value=1,
+            ) as mock_restore_configs,
+            patch(
+                "mindroom.bot.AgentBot._send_welcome_message_if_empty",
+                new_callable=AsyncMock,
+            ) as mock_welcome,
+        ):
+            await router_bot.join_configured_rooms()
+
+        mock_join.assert_not_awaited()
+        mock_restore.assert_awaited_once_with(router_bot.client, "lobby", config)
+        mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
+        mock_welcome.assert_awaited_once_with("lobby")
 
     @pytest.mark.asyncio
     async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
@@ -156,8 +205,15 @@ class TestScheduledTaskRestoration:
             bot.client = AsyncMock(spec=nio.AsyncClient)
 
             with (
-                patch("mindroom.bot.join_room", return_value=True),
-                patch("mindroom.bot.restore_scheduled_tasks", return_value=2) as mock_restore,
+                patch("mindroom.bot.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
+                patch("mindroom.bot.join_room", new_callable=AsyncMock, return_value=True),
+                patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock, return_value=2) as mock_restore,
+                patch(
+                    "mindroom.bot.config_confirmation.restore_pending_changes",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+                patch("mindroom.bot.AgentBot._send_welcome_message_if_empty", new_callable=AsyncMock),
             ):
                 await bot.join_configured_rooms()
 

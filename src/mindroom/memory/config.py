@@ -51,6 +51,8 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
         if app_config.memory.embedder.config.host:
             embedder_config["config"]["openai_base_url"] = app_config.memory.embedder.config.host
+        if app_config.memory.embedder.config.dimensions is not None:
+            embedder_config["config"]["embedding_dims"] = app_config.memory.embedder.config.dimensions
     elif app_config.memory.embedder.provider == "ollama":
         # Check CredentialsManager for Ollama host
         ollama_creds = creds_manager.load_credentials("ollama")

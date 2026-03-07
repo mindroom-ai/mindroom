@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
@@ -435,26 +436,41 @@ class AgentBot:
     async def join_configured_rooms(self) -> None:
         """Join all rooms this agent is configured for."""
         assert self.client is not None
+        joined_rooms = await get_joined_rooms(self.client)
+        current_rooms = set(joined_rooms or [])
+        room_cache = getattr(self.client, "rooms", {})
+        if isinstance(room_cache, Mapping):
+            current_rooms.update(room_cache)
+
         for room_id in self.rooms:
+            if room_id in current_rooms:
+                self.logger.debug("Already joined room", room_id=room_id)
+                await self._post_join_room_setup(room_id)
+                continue
+
             if await join_room(self.client, room_id):
+                current_rooms.add(room_id)
                 self.logger.info("Joined room", room_id=room_id)
-                # Only the router agent should restore scheduled tasks
-                # to avoid duplicate task instances after restart
-                if self.agent_name == ROUTER_AGENT_NAME:
-                    # Restore scheduled tasks
-                    restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
-                    if restored_tasks > 0:
-                        self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
-
-                    # Restore pending config confirmations
-                    restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
-                    if restored_configs > 0:
-                        self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
-
-                    # Send welcome message if room is empty
-                    await self._send_welcome_message_if_empty(room_id)
+                await self._post_join_room_setup(room_id)
             else:
                 self.logger.warning("Failed to join room", room_id=room_id)
+
+    async def _post_join_room_setup(self, room_id: str) -> None:
+        """Run room setup that should happen after joins and across restarts."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return
+
+        assert self.client is not None
+
+        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+        if restored_tasks > 0:
+            self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
+
+        restored_configs = await config_confirmation.restore_pending_changes(self.client, room_id)
+        if restored_configs > 0:
+            self.logger.info(f"Restored {restored_configs} pending config changes in room {room_id}")
+
+        await self._send_welcome_message_if_empty(room_id)
 
     async def leave_unconfigured_rooms(self) -> None:
         """Leave any rooms this agent is no longer configured for."""

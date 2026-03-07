@@ -17,7 +17,6 @@ from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.embedder.ollama import OllamaEmbedder
-from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.knowledge.knowledge import Knowledge
 from agno.knowledge.reader import ReaderFactory
 from agno.knowledge.reader.markdown_reader import MarkdownReader
@@ -28,6 +27,7 @@ from watchfiles import Change, awatch
 from mindroom.constants import resolve_config_relative_path
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings import MindRoomOpenAIEmbedder
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -111,10 +111,11 @@ def _create_embedder(config: Config) -> Embedder:
     embedder_config = config.memory.embedder.config
 
     if provider == "openai":
-        return OpenAIEmbedder(
+        return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
             api_key=get_api_key_for_provider("openai"),
             base_url=embedder_config.host,
+            dimensions=embedder_config.dimensions,
         )
 
     if provider == "ollama":
