@@ -21,6 +21,7 @@ const OPENAI_TRANSCRIPTION_ENDPOINT = 'https://api.openai.com/v1/audio/transcrip
 
 const DEFAULT_VOICE_CONFIG: VoiceConfigType = {
   enabled: false,
+  visible_router_echo: false,
   stt: {
     provider: 'openai',
     model: 'whisper-1',
@@ -194,6 +195,33 @@ export function VoiceConfig() {
                   {voiceConfig.intelligence.model}
                 </span>
               </div>
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-muted-foreground">Visible Router Echo:</span>
+                <span className="font-mono text-right text-foreground">
+                  {voiceConfig.visible_router_echo ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border bg-background p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="visible-router-echo" className="text-base font-semibold">
+                  Visible Router Echo
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Post the normalized transcript or fallback text as a display-only router message
+                  before any router handoff.
+                </p>
+              </div>
+              <input
+                id="visible-router-echo"
+                type="checkbox"
+                checked={voiceConfig.visible_router_echo}
+                onChange={e => handleVoiceConfigChange({ visible_router_echo: e.target.checked })}
+                className="mt-1 h-5 w-5 rounded"
+              />
             </div>
           </div>
 

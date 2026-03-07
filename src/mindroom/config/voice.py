@@ -24,6 +24,10 @@ class VoiceConfig(BaseModel):
     """Configuration for voice message handling."""
 
     enabled: bool = Field(default=False, description="Enable voice message processing")
+    visible_router_echo: bool = Field(
+        default=False,
+        description="Post the normalized voice transcript or fallback as a visible router message",
+    )
     stt: _VoiceSTTConfig = Field(default_factory=_VoiceSTTConfig, description="STT configuration")
     intelligence: _VoiceLLMConfig = Field(
         default_factory=_VoiceLLMConfig,

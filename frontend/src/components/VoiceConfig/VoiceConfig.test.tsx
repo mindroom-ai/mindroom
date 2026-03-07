@@ -23,6 +23,7 @@ describe('VoiceConfig', () => {
     },
     voice: {
       enabled: true,
+      visible_router_echo: false,
       stt: {
         provider: 'custom',
         model: 'whisper-1',
@@ -118,6 +119,25 @@ describe('VoiceConfig', () => {
 
     await waitFor(() => {
       expect(mockSaveConfig).toHaveBeenCalled();
+    });
+  });
+
+  it('updates visible router echo from the voice tab', async () => {
+    const config = createConfig();
+    setMockStore(config);
+
+    render(<VoiceConfig />);
+
+    const visibleRouterEchoToggle = document.getElementById(
+      'visible-router-echo'
+    ) as HTMLInputElement;
+    fireEvent.click(visibleRouterEchoToggle);
+
+    await waitFor(() => {
+      expect(mockMarkDirty).toHaveBeenCalled();
+      expect(config.voice?.visible_router_echo).toBe(true);
+      expect(screen.getByText('Visible Router Echo:')).toBeInTheDocument();
+      expect(visibleRouterEchoToggle).toBeChecked();
     });
   });
 });

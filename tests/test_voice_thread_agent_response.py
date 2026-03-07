@@ -222,6 +222,36 @@ async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) 
 
 
 @pytest.mark.asyncio
+async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) -> None:
+    """Display-only router voice echoes should not trigger a second agent reply."""
+    bot = mock_home_bot
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+
+    router_voice_echo = MagicMock(spec=nio.RoomMessageText)
+    router_voice_echo.event_id = "$router_voice_echo"
+    router_voice_echo.sender = f"@mindroom_{ROUTER_AGENT_NAME}:localhost"
+    router_voice_echo.body = f"{VOICE_PREFIX}@home turn on the guest room lights"
+    router_voice_echo.source = {
+        "content": {
+            "body": f"{VOICE_PREFIX}@home turn on the guest room lights",
+            "com.mindroom.skip_mentions": True,
+        },
+    }
+
+    with (
+        patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
+        patch("mindroom.bot.interactive.handle_text_response", new_callable=AsyncMock),
+    ):
+        mock_extract_agent.side_effect = _extract_agent_side_effect
+        await bot._on_message(room, router_voice_echo)
+
+    bot._generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: AgentBot) -> None:
     """Voice fallback relays should pass resolved attachment audio into generation."""
     bot = mock_home_bot
