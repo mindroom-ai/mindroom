@@ -28,12 +28,11 @@ This guide covers the simplest production-like setup:
 ## 1. Initialize Local Config
 
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
 This creates `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted defaults.
+You do not need to create or `cd` into a separate `~/mindroom-local` directory.
 
 ## 2. Add AI Provider Key
 

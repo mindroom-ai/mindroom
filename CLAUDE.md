@@ -335,8 +335,6 @@ Use this when Matrix + chat UI are hosted and only the MindRoom backend runs loc
 
 1) Initialize local config with hosted defaults
 ```bash
-mkdir -p ~/mindroom-local
-cd ~/mindroom-local
 uvx mindroom config init --profile public
 ```
 
