@@ -9,7 +9,6 @@ mindroom_image: ghcr.io/mindroom-ai/mindroom:latest
 mindroom_image_pull_policy: Always
 synapse_image: matrixdotorg/synapse:latest
 synapse_image_pull_policy: Always
-disableAiRoomTopics: false
 authorizationGlobalUsers:
   - "@test:m-test-4.mindroom.chat"
 

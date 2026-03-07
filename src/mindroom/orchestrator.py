@@ -47,14 +47,22 @@ async def _wait_for_matrix_homeserver() -> None:
     versions_url = f"{MATRIX_HOMESERVER.rstrip('/')}/_matrix/client/versions"
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
     deadline = asyncio.get_running_loop().time() + 300
+    attempt = 0
     logger.info("Waiting for Matrix homeserver", url=versions_url)
 
     async with httpx.AsyncClient(timeout=5.0, verify=MATRIX_SSL_VERIFY) as client:
         while asyncio.get_running_loop().time() < deadline:
+            attempt += 1
             try:
                 response = await client.get(versions_url)
             except httpx.HTTPError as exc:
-                logger.debug("Matrix homeserver not ready yet", url=versions_url, error=str(exc))
+                if attempt == 1 or attempt % 5 == 0:
+                    logger.info(
+                        "Matrix homeserver not ready yet",
+                        url=versions_url,
+                        attempt=attempt,
+                        error=str(exc),
+                    )
                 await asyncio.sleep(2)
                 continue
 
@@ -65,7 +73,14 @@ async def _wait_for_matrix_homeserver() -> None:
                         logger.info("Matrix homeserver ready", url=versions_url)
                         return
 
-            logger.debug("Matrix homeserver not ready yet", url=versions_url, status_code=response.status_code)
+            if attempt == 1 or attempt % 5 == 0:
+                logger.info(
+                    "Matrix homeserver not ready yet",
+                    url=versions_url,
+                    attempt=attempt,
+                    status_code=response.status_code,
+                    body_preview=response.text[:200].replace("\n", " "),
+                )
             await asyncio.sleep(2)
 
     msg = f"Timed out waiting for Matrix homeserver at {versions_url}"

@@ -63,7 +63,7 @@ spec:
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
           value: "shell,file,python"
         - name: MATRIX_HOMESERVER
-          value: "http://synapse-{{ .Values.customer }}:8008"
+          value: "http://synapse-{{ .Values.customer }}.mindroom-instances.svc.cluster.local:8008"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: SUPABASE_URL
@@ -82,8 +82,6 @@ spec:
           value: "/etc/secrets/deepseek_key"
         - name: HOME
           value: {{ .Values.storagePath }}
-        - name: MINDROOM_DISABLE_AI_ROOM_TOPICS
-          value: {{ .Values.disableAiRoomTopics | default false | quote }}
         volumeMounts:
         - name: storage
           mountPath: {{ .Values.storagePath }}

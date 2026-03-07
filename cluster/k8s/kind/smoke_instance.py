@@ -266,8 +266,6 @@ def deploy_instance_directly(
             f"synapse_image={synapse_image}",
             "--set",
             f"synapse_image_pull_policy={synapse_image_pull_policy}",
-            "--set",
-            "disableAiRoomTopics=true",
             "--set-json",
             "authorizationGlobalUsers=[]",
             "--set",
@@ -289,9 +287,11 @@ def deploy_instance_directly(
 def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None:
     """Best-effort Kubernetes diagnostics for a failed smoke deploy."""
     error(f"[diagnostics] Dumping Kubernetes state for namespace {instance_namespace}")
+    matrix_service_host = f"synapse-{instance_id}.{instance_namespace}.svc.cluster.local"
     commands = [
         ["kubectl", "get", "pods", "-n", instance_namespace, "-o", "wide"],
         ["kubectl", "get", "svc", "-n", instance_namespace],
+        ["kubectl", "get", "endpoints", "-n", instance_namespace],
         ["kubectl", "get", "deployment", "-n", instance_namespace],
         ["kubectl", "describe", "deployment", f"mindroom-{instance_id}", "-n", instance_namespace],
         ["kubectl", "describe", "deployment", f"synapse-{instance_id}", "-n", instance_namespace],
@@ -305,6 +305,17 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
             instance_namespace,
             "-c",
             "mindroom",
+            "--tail=200",
+        ],
+        [
+            "kubectl",
+            "logs",
+            f"deployment/mindroom-{instance_id}",
+            "-n",
+            instance_namespace,
+            "-c",
+            "mindroom",
+            "--previous",
             "--tail=200",
         ],
         [
@@ -341,6 +352,51 @@ def dump_instance_diagnostics(instance_namespace: str, instance_id: str) -> None
             "-sS",
             "-i",
             "localhost:8765/api/ready",
+        ],
+        [
+            "kubectl",
+            "exec",
+            "-n",
+            instance_namespace,
+            f"deployment/mindroom-{instance_id}",
+            "-c",
+            "mindroom",
+            "--",
+            "python",
+            "-c",
+            (
+                "import socket; "
+                f"print('synapse-short', socket.getaddrinfo('synapse-{instance_id}', 8008, type=socket.SOCK_STREAM)); "
+                f"print('synapse-fqdn', socket.getaddrinfo('{matrix_service_host}', 8008, type=socket.SOCK_STREAM))"
+            ),
+        ],
+        [
+            "kubectl",
+            "exec",
+            "-n",
+            instance_namespace,
+            f"deployment/mindroom-{instance_id}",
+            "-c",
+            "mindroom",
+            "--",
+            "python",
+            "-c",
+            (
+                "import traceback\n"
+                "import urllib.request\n"
+                "urls = [\n"
+                f"    'http://synapse-{instance_id}:8008/_matrix/client/versions',\n"
+                f"    'http://{matrix_service_host}:8008/_matrix/client/versions',\n"
+                "]\n"
+                "for url in urls:\n"
+                "    print('URL', url)\n"
+                "    try:\n"
+                "        with urllib.request.urlopen(url, timeout=5) as response:\n"
+                "            print(response.status)\n"
+                "            print(response.read().decode('utf-8', errors='replace')[:400])\n"
+                "    except Exception:\n"
+                "        traceback.print_exc()\n"
+            ),
         ],
     ]
     for command in commands:
