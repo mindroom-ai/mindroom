@@ -40,9 +40,9 @@ jobs:
       matrix:
         target:
           - image_name: mindroom
-            dockerfile: local/instances/deploy/Dockerfile.backend
+            dockerfile: local/instances/deploy/Dockerfile.mindroom
           - image_name: mindroom-minimal
-            dockerfile: local/instances/deploy/Dockerfile.backend-minimal
+            dockerfile: local/instances/deploy/Dockerfile.mindroom-minimal
         platform:
           - linux/amd64
           - linux/arm64

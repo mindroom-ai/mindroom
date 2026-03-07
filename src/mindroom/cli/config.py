@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     CONFIG_PATH,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
+    VERTEXAI_CLAUDE_ENV_KEYS,
     config_search_locations,
     env_key_for_provider,
 )
@@ -51,7 +52,7 @@ _ProviderPreset = Literal["openai", "openrouter", "vertexai_claude"]
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "openai": ("openai", "gpt-5.2"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
-    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4@20250514"),
+    "vertexai_claude": ("vertexai_claude", "claude-opus-4-6@default"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
@@ -59,7 +60,6 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "vertexai_claude": (),
 }
-_VERTEXAI_CLAUDE_ENV_KEYS = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
 _CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
 
 
@@ -430,7 +430,7 @@ def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
     for provider in sorted(providers_used):
         if provider == "vertexai_claude":
             missing.extend(
-                (provider, env_key) for env_key in _VERTEXAI_CLAUDE_ENV_KEYS if not get_secret_from_env(env_key)
+                (provider, env_key) for env_key in VERTEXAI_CLAUDE_ENV_KEYS if not get_secret_from_env(env_key)
             )
             continue
         env_key = env_key_for_provider(provider)

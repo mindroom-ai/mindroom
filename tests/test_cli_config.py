@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import yaml
+from anthropic import PermissionDeniedError
+from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
 from mindroom.cli.main import app
@@ -173,7 +176,7 @@ class TestConfigInit:
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
         assert config["models"]["default"]["provider"] == "vertexai_claude"
-        assert config["models"]["default"]["id"] == "claude-sonnet-4@20250514"
+        assert config["models"]["default"]["id"] == "claude-opus-4-6@default"
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -300,7 +303,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         content = target.read_text()
         assert "provider: vertexai_claude" in content
-        assert "id: claude-sonnet-4@20250514" in content
+        assert "id: claude-opus-4-6@default" in content
 
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
@@ -418,7 +421,7 @@ class TestConfigValidate:
         """Config validate should warn about missing Vertex AI project settings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-sonnet-4@20250514\n"
+            "models:\n  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -570,6 +573,11 @@ class TestRunApiFlags:
 
 _VALID_CONFIG = (
     "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+    "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+    "router:\n  model: default\n"
+)
+_VALID_VERTEXAI_CLAUDE_CONFIG = (
+    "models:\n  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
@@ -770,6 +778,138 @@ class TestDoctor:
         assert result.exit_code == 0
         assert "anthropic (2 models)" in result.output
         assert "openai (1 model)" in result.output
+
+    def test_vertexai_claude_connection_check_passes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates Vertex AI Claude with a count-tokens smoke test."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        called: dict[str, object] = {}
+
+        class _FakeMessages:
+            def count_tokens(self, **kwargs: object) -> SimpleNamespace:
+                called["kwargs"] = kwargs
+                return SimpleNamespace(input_tokens=6)
+
+        class _FakeVertexClient:
+            def __init__(self, **kwargs: object) -> None:
+                called["client_kwargs"] = kwargs
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _FakeVertexClient)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for claude-opus-4-6@default" in result.output
+        assert called["client_kwargs"] == {
+            "project_id": "mindroom-test",
+            "region": "us-central1",
+            "timeout": 10,
+            "max_retries": 0,
+        }
+        assert called["kwargs"] == {
+            "model": "claude-opus-4-6@default",
+            "messages": [{"role": "user", "content": "mindroom doctor vertexai check"}],
+            "timeout": 10,
+        }
+
+    def test_vertexai_claude_missing_env_is_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns when Vertex AI Claude is configured without required env vars."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude: could not validate connection" in result.output
+        assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
+        assert "CLOUD_ML_REGION" in result.output
+
+    def test_vertexai_claude_missing_adc_is_warning(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor warns when Vertex AI Claude cannot load Google credentials."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _MissingCredentialsMessages:
+            def count_tokens(self, **_kwargs: object) -> None:
+                message = "ADC unavailable"
+                raise DefaultCredentialsError(message)
+
+        class _MissingCredentialsClient:
+            def __init__(self, **_kwargs: object) -> None:
+                self.messages = _MissingCredentialsMessages()
+
+        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _MissingCredentialsClient)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude: could not validate connection" in result.output
+        assert "ADC unavailable" in result.output
+
+    def test_vertexai_claude_api_rejection_is_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor fails when Vertex AI rejects the configured Claude request."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _RejectedMessages:
+            def count_tokens(self, **_kwargs: object) -> None:
+                response = httpx.Response(403, request=httpx.Request("POST", "https://vertex.test"))
+                message = "denied"
+                raise PermissionDeniedError(message, response=response, body={"error": "denied"})
+
+        class _RejectedClient:
+            def __init__(self, **_kwargs: object) -> None:
+                self.messages = _RejectedMessages()
+
+        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _RejectedClient)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 1
+        assert "vertexai_claude connection failed for claude-opus-4-6@default" in result.output
+        assert "HTTP 403" in result.output
 
     def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor validates against custom base_url when configured."""
