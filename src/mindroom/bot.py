@@ -981,6 +981,13 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
+        await self._maybe_send_visible_voice_echo(
+            room,
+            event,
+            text=prepared_voice.text,
+            thread_id=effective_thread_id,
+        )
+
         await self._dispatch_text_message(
             room,
             _SyntheticTextEvent(
@@ -990,6 +997,26 @@ class AgentBot:
                 source=prepared_voice.source,
             ),
             requester_user_id,
+        )
+
+    async def _maybe_send_visible_voice_echo(
+        self,
+        room: nio.MatrixRoom,
+        event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+        *,
+        text: str,
+        thread_id: str | None,
+    ) -> None:
+        """Optionally post a display-only router echo for normalized audio."""
+        if self.agent_name != ROUTER_AGENT_NAME or not self.config.voice.visible_router_echo:
+            return
+
+        await self._send_response(
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            response_text=text,
+            thread_id=thread_id,
+            skip_mentions=True,
         )
 
     async def _on_media_message(

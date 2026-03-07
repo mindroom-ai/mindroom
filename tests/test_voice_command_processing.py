@@ -393,6 +393,116 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
 
 
 @pytest.mark.asyncio
+async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  # noqa: ANN001
+    """Router can optionally post the normalized voice text for user visibility."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:localhost"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+
+    config = Config(
+        agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+        authorization={"default_room_access": True},
+        voice={"enabled": True, "visible_router_echo": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = AsyncMock()
+    bot._send_response = AsyncMock(return_value="$voice_echo")
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
+    event = _make_voice_event(sender="@alice:example.com")
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
+        await bot._on_media_message(room, event)
+
+    bot._send_response.assert_called_once()
+    call_kwargs = bot._send_response.call_args.kwargs
+    assert call_kwargs["reply_to_event_id"] == "$voice_event"
+    assert call_kwargs["response_text"] == f"{VOICE_PREFIX}@home turn on the lights"
+    assert call_kwargs["thread_id"] == "$voice_event"
+    assert call_kwargs["skip_mentions"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> None:  # noqa: ANN001
+    """Visible router echoes should not replace the normal multi-agent handoff."""
+    agent_user = MagicMock()
+    agent_user.user_id = "@mindroom_router:localhost"
+    agent_user.agent_name = ROUTER_AGENT_NAME
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
+
+    config = Config(
+        agents={
+            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+        },
+        authorization={"default_room_access": True},
+        voice={"enabled": True, "visible_router_echo": True},
+    )
+
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!test:example.com"],
+    )
+    bot.response_tracker = MagicMock()
+    bot.response_tracker.has_responded.return_value = False
+    bot.logger = MagicMock()
+    bot.client = AsyncMock()
+    bot._send_response = AsyncMock(side_effect=["$voice_echo", "$route"])
+    bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
+
+    room = _make_room(
+        "@mindroom_router:localhost",
+        "@mindroom_home:localhost",
+        "@mindroom_research:localhost",
+        "@alice:example.com",
+    )
+    event = _make_voice_event(sender="@alice:example.com")
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="home"),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        await bot._on_media_message(room, event)
+
+    assert bot._send_response.await_count == 2
+    echo_call = bot._send_response.call_args_list[0].kwargs
+    handoff_call = bot._send_response.call_args_list[1].kwargs
+    assert echo_call["reply_to_event_id"] == "$voice_event"
+    assert echo_call["response_text"] == f"{VOICE_PREFIX}summarize this audio"
+    assert echo_call["skip_mentions"] is True
+    assert "extra_content" not in echo_call
+    assert handoff_call["reply_to_event_id"] == "$voice_event"
+    assert handoff_call["response_text"] == "@home could you help with this?"
+    assert handoff_call["extra_content"] == {
+        ORIGINAL_SENDER_KEY: "@alice:example.com",
+        ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
+    }
+
+
+@pytest.mark.asyncio
 async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(tmp_path) -> None:  # noqa: ANN001
     """Router should route normalized audio like any other synthetic text input."""
     agent_user = MagicMock()
