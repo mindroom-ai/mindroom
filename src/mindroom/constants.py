@@ -79,10 +79,10 @@ CONFIG_PATH = find_config()
 
 # Also load .env from the config directory so that API keys placed next to the
 # config file (e.g. ~/.mindroom/.env) are picked up even when CWD is elsewhere.
-# override=False (the default) means real env vars and CWD .env take precedence.
+# override=True makes config-adjacent .env authoritative for runtime config.
 _config_dotenv = CONFIG_PATH.parent / ".env"
 if _config_dotenv.is_file():
-    load_dotenv(_config_dotenv)
+    load_dotenv(_config_dotenv, override=True)
 
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as CONFIG_PATH so the
