@@ -165,6 +165,19 @@ class TestMentionParsing:
         assert content["io.mindroom.ai_run"]["version"] == 1
         assert content["io.mindroom.ai_run"]["usage"]["total_tokens"] == 42
 
+    def test_format_message_with_mentions_preserves_inherited_mentions(self) -> None:
+        """Inherited mentions should survive even when the new text adds no mentions."""
+        config = Config.from_yaml()
+
+        content = format_message_with_mentions(
+            config,
+            "Transcription omitted the agent mention.",
+            sender_domain="matrix.org",
+            extra_content={"m.mentions": {"user_ids": ["@mindroom_research:matrix.org"]}},
+        )
+
+        assert content["m.mentions"]["user_ids"] == ["@mindroom_research:matrix.org"]
+
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
         config = Config.from_yaml()

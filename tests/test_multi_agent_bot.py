@@ -212,11 +212,7 @@ class TestAgentBot:
         """Invoke the target handler by name."""
         if handler_name == "message":
             await bot._on_message(room, event)
-        elif handler_name == "image":
-            await bot._on_media_message(room, event)
-        elif handler_name == "voice":
-            await bot._on_voice_message(room, event)
-        elif handler_name == "file":
+        elif handler_name in {"image", "voice", "file"}:
             await bot._on_media_message(room, event)
         elif handler_name == "reaction":
             await bot._on_reaction(room, event)
@@ -482,7 +478,9 @@ class TestAgentBot:
         # The bot calls ensure_setup which calls ensure_user_account
         # and then login with whatever user account was ensured
         assert mock_login.called
-        assert mock_client.add_event_callback.call_count == 9  # invite, message, reaction, image/file/video callbacks
+        assert (
+            mock_client.add_event_callback.call_count == 11
+        )  # invite, message, reaction, audio, image/file/video callbacks
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
