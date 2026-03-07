@@ -1178,9 +1178,6 @@ async def _run_api_server(host: str, port: int, log_level: str) -> None:
 async def _run_auxiliary_task_forever(
     task_name: str,
     operation: Callable[[], Awaitable[None]],
-    *,
-    initial_delay_seconds: float = _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
-    max_delay_seconds: float = _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,
 ) -> None:
     """Restart a non-critical background task whenever it exits or crashes."""
     restart_count = 0
@@ -1188,40 +1185,21 @@ async def _run_auxiliary_task_forever(
         started_at = time.monotonic()
         try:
             await operation()
+            logger.warning("Auxiliary task exited; restarting", task_name=task_name)
         except asyncio.CancelledError:
             raise
         except Exception:
-            if time.monotonic() - started_at >= max_delay_seconds:
-                restart_count = 0
-            restart_count += 1
-            retry_in_seconds = _retry_delay_seconds(
+            logger.exception("Auxiliary task crashed; restarting", task_name=task_name)
+        if time.monotonic() - started_at >= _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS:
+            restart_count = 0
+        restart_count += 1
+        await asyncio.sleep(
+            _retry_delay_seconds(
                 restart_count,
-                initial_delay_seconds=initial_delay_seconds,
-                max_delay_seconds=max_delay_seconds,
-            )
-            logger.exception(
-                "Auxiliary task crashed; restarting",
-                task_name=task_name,
-                restart_count=restart_count,
-                retry_in_seconds=retry_in_seconds,
-            )
-            await asyncio.sleep(retry_in_seconds)
-        else:
-            if time.monotonic() - started_at >= max_delay_seconds:
-                restart_count = 0
-            restart_count += 1
-            retry_in_seconds = _retry_delay_seconds(
-                restart_count,
-                initial_delay_seconds=initial_delay_seconds,
-                max_delay_seconds=max_delay_seconds,
-            )
-            logger.warning(
-                "Auxiliary task exited unexpectedly; restarting",
-                task_name=task_name,
-                restart_count=restart_count,
-                retry_in_seconds=retry_in_seconds,
-            )
-            await asyncio.sleep(retry_in_seconds)
+                initial_delay_seconds=_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
+                max_delay_seconds=_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,
+            ),
+        )
 
 
 async def main(

@@ -3334,20 +3334,18 @@ class TestMultiAgentOrchestrator:
             started.set()
             await asyncio.Future()
 
-        task = asyncio.create_task(
-            _run_auxiliary_task_forever(
-                "test task",
-                _operation,
-                initial_delay_seconds=0,
-                max_delay_seconds=0,
-            ),
-        )
+        with (
+            patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS", 0),
+        ):
+            task = asyncio.create_task(
+                _run_auxiliary_task_forever("test task", _operation),
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
 
-        await asyncio.wait_for(started.wait(), timeout=1)
-        task.cancel()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
         assert calls == 2
 
@@ -3370,18 +3368,14 @@ class TestMultiAgentOrchestrator:
             raise RuntimeError(msg)
 
         with (
+            patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS", 0.01),
             patch(
                 "mindroom.orchestrator._retry_delay_seconds",
                 side_effect=lambda attempt, **_: retry_attempts.append(attempt) or 0,
             ),
         ):
             task = asyncio.create_task(
-                _run_auxiliary_task_forever(
-                    "test task",
-                    _operation,
-                    initial_delay_seconds=1,
-                    max_delay_seconds=0.01,
-                ),
+                _run_auxiliary_task_forever("test task", _operation),
             )
             await asyncio.wait_for(third_start.wait(), timeout=1)
             task.cancel()
