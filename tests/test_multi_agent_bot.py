@@ -34,6 +34,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
     _matrix_homeserver_startup_timeout_seconds_from_env,
+    _run_auxiliary_task_forever,
     _run_with_retry,
     _wait_for_matrix_homeserver,
 )
@@ -3265,6 +3266,78 @@ class TestMultiAgentOrchestrator:
 
         assert "general" in orchestrator.agent_bots
         mock_schedule_retry.assert_awaited_once_with("general")
+
+    @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
+        """Auxiliary supervisors should restart tasks that crash."""
+        started = asyncio.Event()
+        calls = 0
+
+        async def _operation() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
+            started.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(
+            _run_auxiliary_task_forever(
+                "test task",
+                _operation,
+                initial_delay_seconds=0,
+                max_delay_seconds=0,
+            ),
+        )
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:
+        """Long healthy runs should reset crash-loop backoff for auxiliary tasks."""
+        retry_attempts: list[int] = []
+        calls = 0
+        third_start = asyncio.Event()
+
+        async def _operation() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                await asyncio.sleep(0.02)
+            if calls == 3:
+                third_start.set()
+                await asyncio.Future()
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        with (
+            patch(
+                "mindroom.orchestrator._retry_delay_seconds",
+                side_effect=lambda attempt, **_: retry_attempts.append(attempt) or 0,
+            ),
+        ):
+            task = asyncio.create_task(
+                _run_auxiliary_task_forever(
+                    "test task",
+                    _operation,
+                    initial_delay_seconds=1,
+                    max_delay_seconds=0.01,
+                ),
+            )
+            await asyncio.wait_for(third_start.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert calls == 3
+        assert retry_attempts == [1, 1]
 
     @pytest.mark.asyncio
     async def test_run_with_retry_can_skip_runtime_state_updates(self) -> None:
