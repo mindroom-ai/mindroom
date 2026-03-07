@@ -102,11 +102,18 @@ def _store_cached_voice_normalization(
         _voice_normalization_cache.popitem(last=False)
 
 
-def _cleanup_inflight_voice_normalization_task(
+def _finalize_inflight_voice_normalization_task(
     cache_key: tuple[str, str, str, str],
     task: asyncio.Task[_NormalizedVoiceMessage | None],
 ) -> None:
-    """Remove an in-flight normalization task once it has completed."""
+    """Persist successful results and remove an in-flight normalization task."""
+    try:
+        normalized = task.result()
+    except (asyncio.CancelledError, Exception):
+        normalized = None
+
+    if normalized is not None:
+        _store_cached_voice_normalization(cache_key, normalized)
     if _voice_normalization_tasks.get(cache_key) is task:
         _voice_normalization_tasks.pop(cache_key, None)
 
@@ -175,12 +182,9 @@ async def _normalize_voice_message(
             ),
         )
         _voice_normalization_tasks[cache_key] = task
-        task.add_done_callback(lambda done_task: _cleanup_inflight_voice_normalization_task(cache_key, done_task))
+        task.add_done_callback(lambda done_task: _finalize_inflight_voice_normalization_task(cache_key, done_task))
 
-    normalized = await task
-    if normalized is not None:
-        _store_cached_voice_normalization(cache_key, normalized)
-    return normalized
+    return await asyncio.shield(task)
 
 
 async def prepare_voice_message(
