@@ -695,7 +695,7 @@ class MultiAgentOrchestrator:
         bots_to_setup = [
             self.agent_bots[entity_name]
             for entity_name in entities_to_restart | new_entities
-            if entity_name in self.agent_bots
+            if entity_name in self.agent_bots and self.agent_bots[entity_name].running
         ]
 
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed or authorization_changed:

@@ -3413,7 +3413,9 @@ class TestMultiAgentOrchestrator:
 
         new_bot = MagicMock()
         new_bot.agent_name = "coach"
+        new_bot.running = False
         new_bot.try_start = AsyncMock(return_value=False)
+        new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
@@ -3421,15 +3423,17 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
             patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
-            patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock()),
+            patch.object(orchestrator, "_ensure_room_invitations", new=AsyncMock()),
         ):
             updated = await orchestrator.update_config()
 
         assert updated is True
         assert orchestrator.agent_bots["coach"] is new_bot
+        new_bot.ensure_rooms.assert_not_awaited()
         mock_schedule_retry.assert_awaited_once_with("coach")
 
     @pytest.mark.asyncio
