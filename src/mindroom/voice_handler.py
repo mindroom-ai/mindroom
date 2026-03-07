@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +15,7 @@ from agno.agent import Agent
 from agno.media import Audio
 
 from mindroom.ai import get_model_instance
-from mindroom.attachments import register_audio_attachment
+from mindroom.attachments import load_attachment, register_audio_attachment
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands.parsing import get_command_list
 from mindroom.constants import (
@@ -55,6 +57,105 @@ class PreparedVoiceMessage:
     source: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _NormalizedVoiceMessage:
+    """Cached audio normalization shared across bots for one room/thread event."""
+
+    attachment_id: str | None
+    local_path: Path | None
+    mime_type: str | None
+    transcribed_message: str | None
+
+
+_VOICE_NORMALIZATION_CACHE_MAX_ENTRIES = 128
+_voice_normalization_cache: OrderedDict[tuple[str, str, str, str], _NormalizedVoiceMessage] = OrderedDict()
+_voice_normalization_locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
+
+
+def _voice_cache_key(
+    storage_path: Path,
+    room_id: str,
+    event_id: str,
+    thread_id: str | None,
+) -> tuple[str, str, str, str]:
+    """Build a stable cache key for one audio event in one room/thread context."""
+    return (str(storage_path.resolve()), room_id, event_id, thread_id or "")
+
+
+def _get_cached_voice_normalization(
+    cache_key: tuple[str, str, str, str],
+) -> _NormalizedVoiceMessage | None:
+    """Return a cached normalization result and refresh its LRU position."""
+    cached = _voice_normalization_cache.get(cache_key)
+    if cached is None:
+        return None
+    _voice_normalization_cache.move_to_end(cache_key)
+    return cached
+
+
+def _store_cached_voice_normalization(
+    cache_key: tuple[str, str, str, str],
+    normalized: _NormalizedVoiceMessage,
+) -> None:
+    """Persist a normalization result in the bounded in-memory cache."""
+    _voice_normalization_cache[cache_key] = normalized
+    _voice_normalization_cache.move_to_end(cache_key)
+    while len(_voice_normalization_cache) > _VOICE_NORMALIZATION_CACHE_MAX_ENTRIES:
+        oldest_key, _ = _voice_normalization_cache.popitem(last=False)
+        _voice_normalization_locks.pop(oldest_key, None)
+
+
+async def _normalize_voice_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    thread_id: str | None,
+) -> _NormalizedVoiceMessage | None:
+    """Download, register, and transcribe one audio event at most once per context."""
+    cache_key = _voice_cache_key(storage_path, room.room_id, event.event_id, thread_id)
+    cached = _get_cached_voice_normalization(cache_key)
+    if cached is not None:
+        return cached
+
+    lock = _voice_normalization_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        cached = _get_cached_voice_normalization(cache_key)
+        if cached is not None:
+            return cached
+
+        audio = await download_audio(client, event)
+        if audio is None or audio.content is None:
+            logger.error("Failed to download audio file")
+            return None
+
+        attachment_record = await register_audio_attachment(
+            storage_path,
+            event_id=event.event_id,
+            audio_bytes=audio.content,
+            mime_type=audio.mime_type,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            sender=event.sender,
+            filename=event.body if isinstance(event.body, str) else None,
+        )
+
+        transcribed_message = await handle_voice_message(client, room, event, config, audio=audio)
+        if not isinstance(transcribed_message, str) or not transcribed_message.strip():
+            transcribed_message = None
+
+        normalized = _NormalizedVoiceMessage(
+            attachment_id=attachment_record.attachment_id if attachment_record is not None else None,
+            local_path=attachment_record.local_path if attachment_record is not None else None,
+            mime_type=audio.mime_type,
+            transcribed_message=transcribed_message,
+        )
+        _store_cached_voice_normalization(cache_key, normalized)
+        return normalized
+
+
 async def prepare_voice_message(
     client: nio.AsyncClient,
     storage_path: Path,
@@ -66,32 +167,43 @@ async def prepare_voice_message(
     thread_id: str | None,
 ) -> PreparedVoiceMessage | None:
     """Download/register audio and normalize it into a synthetic text event."""
-    audio = await download_audio(client, event)
-    if audio is None or audio.content is None:
-        logger.error("Failed to download audio file")
+    normalized = await _normalize_voice_message(
+        client,
+        storage_path,
+        room,
+        event,
+        config,
+        thread_id=thread_id,
+    )
+    if normalized is None:
         return None
 
-    attachment_record = await register_audio_attachment(
-        storage_path,
-        event_id=event.event_id,
-        audio_bytes=audio.content,
-        mime_type=audio.mime_type,
-        room_id=room.room_id,
-        thread_id=thread_id,
-        sender=event.sender,
-        filename=event.body if isinstance(event.body, str) else None,
-    )
-    attachment_id = attachment_record.attachment_id if attachment_record is not None else None
+    attachment_id = normalized.attachment_id
+    attachment_record = load_attachment(storage_path, attachment_id) if attachment_id is not None else None
+    if attachment_record is not None and (
+        attachment_record.room_id != room.room_id or attachment_record.thread_id != thread_id
+    ):
+        attachment_record = await register_audio_attachment(
+            storage_path,
+            event_id=event.event_id,
+            audio_bytes=normalized.local_path.read_bytes() if normalized.local_path is not None else None,
+            mime_type=normalized.mime_type,
+            room_id=room.room_id,
+            thread_id=thread_id,
+            sender=event.sender,
+            filename=event.body if isinstance(event.body, str) else None,
+        )
+        attachment_id = attachment_record.attachment_id if attachment_record is not None else attachment_id
 
-    transcribed_message = await handle_voice_message(client, room, event, config, audio=audio)
-    if not isinstance(transcribed_message, str) or not transcribed_message.strip():
-        transcribed_message = None
-    text = transcribed_message or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
+    text = (
+        normalized.transcribed_message
+        or f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
+    )
 
     extra_content: dict[str, Any] = {ORIGINAL_SENDER_KEY: event.sender}
     if attachment_id is not None:
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
-    if transcribed_message is None:
+    if normalized.transcribed_message is None:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     current_content = event.source.get("content") if isinstance(event.source, dict) else None
     inherited_mentions = current_content.get("m.mentions") if isinstance(current_content, dict) else None

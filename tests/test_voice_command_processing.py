@@ -192,6 +192,9 @@ async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_pat
     assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
     assert prepared.source["content"][ATTACHMENT_IDS_KEY] == [expected_attachment_id]
     assert prepared.source["content"]["m.relates_to"] == {"rel_type": "m.thread", "event_id": "$thread_root"}
+    attachment = load_attachment(tmp_path, expected_attachment_id)
+    assert attachment is not None
+    assert attachment.thread_id == "$thread_root"
 
 
 @pytest.mark.asyncio
@@ -338,6 +341,58 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
 
 
 @pytest.mark.asyncio
+async def test_router_and_agent_share_audio_normalization_when_router_is_present(tmp_path) -> None:  # noqa: ANN001
+    """Router-present rooms should still normalize one audio event only once."""
+    config = Config(
+        agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
+        authorization={"default_room_access": True},
+        voice={"enabled": True},
+    )
+
+    bots: list[AgentBot] = []
+    for agent_name in (ROUTER_AGENT_NAME, "home"):
+        agent_user = MagicMock()
+        agent_user.user_id = f"@mindroom_{agent_name}:localhost"
+        agent_user.agent_name = agent_name
+        agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            rooms=["!test:example.com"],
+        )
+        bot.response_tracker = MagicMock()
+        bot.response_tracker.has_responded.return_value = False
+        bot.logger = MagicMock()
+        bot.client = AsyncMock()
+        bot.client.rooms = {}
+        bot.client.user_id = agent_user.user_id
+        bot._send_response = AsyncMock(return_value="$router_response")
+        bot._generate_response = AsyncMock(return_value=f"${agent_name}_response")
+        bot._derive_conversation_context = AsyncMock(return_value=(True, "$voice_event", []))
+        bots.append(bot)
+
+    room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:example.com")
+    event = _make_voice_event(sender="@alice:example.com")
+
+    with (
+        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_voice,
+        patch("mindroom.bot.is_authorized_sender", return_value=True),
+        patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
+    ):
+        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
+        mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
+        for bot in bots:
+            await bot._on_media_message(room, event)
+
+    assert mock_download_audio.await_count == 1
+    assert mock_voice.await_count == 1
+    bots[0]._send_response.assert_not_called()
+    assert bots[1]._generate_response.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(tmp_path) -> None:  # noqa: ANN001
     """Router should route normalized audio like any other synthetic text input."""
     agent_user = MagicMock()
@@ -444,6 +499,8 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         for bot in bots:
             await bot._on_media_message(room, event)
 
+    assert mock_download_audio.await_count == 1
+    assert mock_voice.await_count == 1
     assert bots[0]._generate_response.await_count == 0
     assert bots[1]._generate_response.await_count == 1
     call_kwargs = bots[1]._generate_response.call_args.kwargs

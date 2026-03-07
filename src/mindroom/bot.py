@@ -957,8 +957,10 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
+        event_info = EventInfo.from_event(event.source)
+        _, thread_id, _ = await self._derive_conversation_context(room.room_id, event_info)
         effective_thread_id = self._resolve_reply_thread_id(
-            None,
+            thread_id,
             event.event_id,
             room_id=room.room_id,
             event_source=event.source,

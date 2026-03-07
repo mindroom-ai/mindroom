@@ -10,6 +10,7 @@ import nio
 import pytest
 from agno.media import Audio
 
+from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
@@ -124,6 +125,9 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     assert call_kwargs["reply_to_event_id"] == "$voice456"
     assert call_kwargs["thread_id"] == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 show me the forecast")
+    attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice456"))
+    assert attachment is not None
+    assert attachment.thread_id == "$thread_root"
 
 
 @pytest.mark.asyncio
@@ -176,3 +180,6 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bo
     assert call_kwargs["reply_to_event_id"] == "$voice789"
     assert call_kwargs["thread_id"] == "$thread_root"
     assert call_kwargs["prompt"].startswith("🎤 continue the same thread")
+    attachment = load_attachment(bot.storage_path, _attachment_id_for_event("$voice789"))
+    assert attachment is not None
+    assert attachment.thread_id == "$thread_root"
