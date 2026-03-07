@@ -35,8 +35,10 @@ from mindroom.orchestrator import (
     MultiAgentOrchestrator,
     _matrix_homeserver_startup_timeout_seconds_from_env,
     _run_auxiliary_task_forever,
+    _run_with_retry,
     _wait_for_matrix_homeserver,
 )
+from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
@@ -3296,6 +3298,36 @@ class TestMultiAgentOrchestrator:
             await task
 
         assert calls == 2
+
+    @pytest.mark.asyncio
+    async def test_run_with_retry_can_skip_runtime_state_updates(self) -> None:
+        """Background retries must not flip a ready runtime back to startup state."""
+        reset_runtime_state()
+        set_runtime_ready()
+        attempts = 0
+
+        async def _operation() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
+
+        with (
+            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
+        ):
+            await _run_with_retry(
+                "background retry",
+                _operation,
+                update_runtime_state=False,
+            )
+
+        state = get_runtime_state()
+        assert attempts == 2
+        assert state.phase == "ready"
+        assert state.detail is None
+        reset_runtime_state()
 
     @pytest.mark.asyncio
     async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:

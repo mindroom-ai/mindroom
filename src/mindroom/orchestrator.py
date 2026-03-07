@@ -103,6 +103,7 @@ async def _run_with_retry(
     initial_delay_seconds: float = _STARTUP_RETRY_INITIAL_DELAY_SECONDS,
     max_delay_seconds: float = _STARTUP_RETRY_MAX_DELAY_SECONDS,
     permanent_error_check: Callable[[Exception], bool] | None = None,
+    update_runtime_state: bool = True,
 ) -> None:
     """Run an async startup step until it succeeds or a permanent error occurs."""
     attempt = 0
@@ -128,7 +129,8 @@ async def _run_with_retry(
                 retry_in_seconds=retry_in_seconds,
                 exc_info=True,
             )
-            set_runtime_starting(f"{step_name} failed; retrying in {retry_in_seconds:.0f}s")
+            if update_runtime_state:
+                set_runtime_starting(f"{step_name} failed; retrying in {retry_in_seconds:.0f}s")
             await asyncio.sleep(retry_in_seconds)
         else:
             return
@@ -357,6 +359,7 @@ class MultiAgentOrchestrator:
                         await _run_with_retry(
                             f"Updating Matrix room memberships for {entity_name}",
                             _setup_operation,
+                            update_runtime_state=False,
                         )
                     self._start_sync_task(entity_name, bot)
                     return
