@@ -581,6 +581,13 @@ _VALID_VERTEXAI_CLAUDE_CONFIG = (
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
+_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG = (
+    "models:\n"
+    "  default:\n    provider: vertexai_claude\n    id: claude-opus-4-6@default\n"
+    "  fast:\n    provider: vertexai_claude\n    id: claude-sonnet-4@20250514\n"
+    "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+    "router:\n  model: default\n"
+)
 
 
 def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -784,7 +791,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor validates Vertex AI Claude with a count-tokens smoke test."""
+        """Doctor validates Vertex AI Claude with a tiny messages smoke test."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -798,31 +805,83 @@ class TestDoctor:
         called: dict[str, object] = {}
 
         class _FakeMessages:
-            def count_tokens(self, **kwargs: object) -> SimpleNamespace:
+            def create(self, **kwargs: object) -> SimpleNamespace:
                 called["kwargs"] = kwargs
-                return SimpleNamespace(input_tokens=6)
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
 
-        class _FakeVertexClient:
+        class _FakeVertexModel:
             def __init__(self, **kwargs: object) -> None:
+                called["model_id"] = kwargs["id"]
                 called["client_kwargs"] = kwargs
-                self.messages = _FakeMessages()
+                self.id = str(kwargs["id"])
 
-        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _FakeVertexClient)
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": called["client_kwargs"]["timeout"]}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-opus-4-6@default" in result.output
+        assert called["model_id"] == "claude-opus-4-6@default"
         assert called["client_kwargs"] == {
+            "id": "claude-opus-4-6@default",
             "project_id": "mindroom-test",
             "region": "us-central1",
             "timeout": 10,
-            "max_retries": 0,
         }
         assert called["kwargs"] == {
             "model": "claude-opus-4-6@default",
-            "messages": [{"role": "user", "content": "mindroom doctor vertexai check"}],
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
             "timeout": 10,
         }
+
+    def test_vertexai_claude_connection_checks_each_configured_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates every configured Vertex AI Claude model by its actual ID."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG)
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
+        monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        created_models: list[str] = []
+        requested_models: list[str] = []
+
+        class _FakeMessages:
+            def create(self, **kwargs: object) -> SimpleNamespace:
+                requested_models.append(str(kwargs["model"]))
+                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
+
+        class _FakeVertexModel:
+            def __init__(self, **kwargs: object) -> None:
+                created_models.append(str(kwargs["id"]))
+
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_FakeMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "vertexai_claude connection valid for claude-opus-4-6@default" in result.output
+        assert "vertexai_claude connection valid for claude-sonnet-4@20250514" in result.output
+        assert created_models == ["claude-opus-4-6@default", "claude-sonnet-4@20250514"]
+        assert requested_models == ["claude-opus-4-6@default", "claude-sonnet-4@20250514"]
 
     def test_vertexai_claude_missing_env_is_warning(
         self,
@@ -863,15 +922,21 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         class _MissingCredentialsMessages:
-            def count_tokens(self, **_kwargs: object) -> None:
+            def create(self, **_kwargs: object) -> None:
                 message = "ADC unavailable"
                 raise DefaultCredentialsError(message)
 
-        class _MissingCredentialsClient:
-            def __init__(self, **_kwargs: object) -> None:
-                self.messages = _MissingCredentialsMessages()
+        class _MissingCredentialsModel:
+            def __init__(self, **kwargs: object) -> None:
+                self.id = str(kwargs["id"])
 
-        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _MissingCredentialsClient)
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_MissingCredentialsMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _MissingCredentialsModel)
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
@@ -895,16 +960,22 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         class _RejectedMessages:
-            def count_tokens(self, **_kwargs: object) -> None:
+            def create(self, **_kwargs: object) -> None:
                 response = httpx.Response(403, request=httpx.Request("POST", "https://vertex.test"))
                 message = "denied"
                 raise PermissionDeniedError(message, response=response, body={"error": "denied"})
 
-        class _RejectedClient:
-            def __init__(self, **_kwargs: object) -> None:
-                self.messages = _RejectedMessages()
+        class _RejectedModel:
+            def __init__(self, **kwargs: object) -> None:
+                self.id = str(kwargs["id"])
 
-        monkeypatch.setattr("mindroom.cli.doctor.AnthropicVertex", _RejectedClient)
+            def get_request_params(self) -> dict[str, object]:
+                return {"timeout": 10}
+
+            def get_client(self) -> SimpleNamespace:
+                return SimpleNamespace(messages=_RejectedMessages())
+
+        monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _RejectedModel)
 
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 1

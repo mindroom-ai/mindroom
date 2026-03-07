@@ -12,7 +12,8 @@ from urllib.parse import urlparse
 import httpx
 import typer
 import yaml
-from anthropic import AnthropicVertex, APIStatusError
+from agno.models.vertexai.claude import Claude as VertexAIClaude
+from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
@@ -21,7 +22,6 @@ from mindroom.constants import (
     MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
     STORAGE_PATH,
-    VERTEXAI_CLAUDE_ENV_KEYS,
     env_key_for_provider,
 )
 
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
 
 
 def doctor() -> None:
@@ -284,23 +285,33 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
-def _validate_vertexai_claude_connection(model: str) -> tuple[bool | None, str]:
-    """Validate Anthropic-on-Vertex access with a tiny count-tokens request."""
-    missing = [env_key for env_key in VERTEXAI_CLAUDE_ENV_KEYS if not os.getenv(env_key)]
+def _validate_vertexai_claude_connection(model_config: ModelConfig) -> tuple[bool | None, str]:
+    """Validate the configured Vertex AI Claude model with the runtime request path."""
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+    project_id = extra_kwargs.get("project_id") or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
+    region = extra_kwargs.get("region") or os.getenv("CLOUD_ML_REGION")
+    missing = []
+    if not project_id:
+        missing.append("ANTHROPIC_VERTEX_PROJECT_ID")
+    if not region:
+        missing.append("CLOUD_ML_REGION")
     if missing:
         return None, f"missing {', '.join(missing)}"
 
-    project_id = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
-    region = os.getenv("CLOUD_ML_REGION")
-    assert project_id is not None
-    assert region is not None
+    extra_kwargs.setdefault("project_id", project_id)
+    extra_kwargs.setdefault("region", region)
+    extra_kwargs.setdefault("timeout", 10)
 
     try:
-        client = AnthropicVertex(project_id=project_id, region=region, timeout=10, max_retries=0)
-        client.messages.count_tokens(
-            model=model,
-            messages=[{"role": "user", "content": "mindroom doctor vertexai check"}],
-            timeout=10,
+        model = VertexAIClaude(id=model_config.id, **extra_kwargs)
+        request_kwargs = model.get_request_params().copy()
+        request_kwargs["model"] = model_config.id
+        request_kwargs["messages"] = [{"role": "user", "content": "Reply with OK."}]
+        request_kwargs.setdefault("max_tokens", 1)
+        request_kwargs["timeout"] = request_kwargs.get("timeout", 10)
+        client = model.get_client()
+        client.messages.create(
+            **request_kwargs,
         )
     except APIStatusError as exc:
         return False, f"HTTP {exc.status_code}"
@@ -377,15 +388,24 @@ def _check_single_provider(
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
     if provider == "vertexai_claude":
-        model_id = next(model.id for model in config.models.values() if model.provider == provider)
-        valid, detail = _validate_vertexai_claude_connection(model_id)
-        return _print_validation(
-            valid,
-            detail,
-            f"{provider} connection valid for {model_id}",
-            f"{provider} connection failed for {model_id}",
-            f"{provider}: could not validate connection for {model_id}",
-        )
+        passed = 0
+        failed = 0
+        warnings = 0
+        for model_config in config.models.values():
+            if model_config.provider != provider:
+                continue
+            valid, detail = _validate_vertexai_claude_connection(model_config)
+            p, f, w = _print_validation(
+                valid,
+                detail,
+                f"{provider} connection valid for {model_config.id}",
+                f"{provider} connection failed for {model_config.id}",
+                f"{provider}: could not validate connection for {model_config.id}",
+            )
+            passed += p
+            failed += f
+            warnings += w
+        return passed, failed, warnings
 
     if provider == "ollama":
         host = _get_ollama_host(config)
