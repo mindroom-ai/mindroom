@@ -45,17 +45,22 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
     help="Override auto-detection and use this config file path.",
 )
 
-_ProviderPreset = Literal["openai", "openrouter"]
+_ConfigInitProfile = Literal["full", "minimal", "public"]
+_ProviderPreset = Literal["openai", "openrouter", "vertexai_claude"]
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
     "openai": ("openai", "gpt-5.2"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
+    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4@20250514"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
+    "vertexai_claude": (),
 }
+_VERTEXAI_CLAUDE_ENV_KEYS = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
+_CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
 
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
@@ -89,7 +94,7 @@ def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
 
 def _write_env_file(
     env_path: Path,
-    selected_profile: str,
+    selected_profile: _ConfigInitProfile,
     selected_preset: _ProviderPreset,
     *,
     force: bool,
@@ -109,14 +114,28 @@ def _write_env_file(
     return True
 
 
-def _print_config_init_next_steps(env_path: Path, *, env_created: bool, selected_profile: str) -> None:
+def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset: _ProviderPreset) -> str:
+    """Return the env setup hint shown after `mindroom config init`."""
+    if selected_preset == "vertexai_claude":
+        if selected_profile == "public":
+            return "Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)"
+        return "Set your Matrix homeserver, Vertex AI project/region, and Google auth"
+    if selected_profile == "public":
+        return "Set your API keys (Matrix homeserver is prefilled)"
+    return "Set your API keys and Matrix homeserver"
+
+
+def _print_config_init_next_steps(
+    env_path: Path,
+    *,
+    env_created: bool,
+    selected_profile: _ConfigInitProfile,
+    selected_preset: _ProviderPreset,
+) -> None:
     """Print post-init guidance for the selected profile."""
     console.print("\nNext steps:")
     if env_created:
-        if selected_profile == "public":
-            env_hint = "Set your API keys (Matrix homeserver is prefilled)"
-        else:
-            env_hint = "Set your API keys and Matrix homeserver"
+        env_hint = _config_init_env_hint(selected_profile, selected_preset)
         console.print(f"  [cyan]Edit {env_path}[/cyan]  {env_hint}")
     if selected_profile == "public":
         console.print(
@@ -192,12 +211,15 @@ def config_init(
     profile: str = typer.Option(
         "full",
         "--profile",
-        help="Template profile: full, minimal, or public (public keeps full YAML and adjusts .env defaults).",
+        help=(
+            "Template profile: full, minimal, public, or public-vertexai-anthropic "
+            "(hosted Matrix with Vertex AI Claude defaults)."
+        ),
     ),
     provider: str | None = typer.Option(
         None,
         "--provider",
-        help="Provider preset for generated config: openai or openrouter.",
+        help="Provider preset for generated config: openai, openrouter, or vertexai_claude.",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -212,25 +234,11 @@ def config_init(
             console.print("[dim]Aborted.[/dim]")
             raise typer.Exit(0)
 
-    selected_profile = "minimal" if minimal else profile.strip().lower()
-    valid_profiles = {"full", "minimal", "public"}
-    if selected_profile not in valid_profiles:
-        msg = f"Invalid profile '{profile}'. Expected one of: {', '.join(sorted(valid_profiles))}"
-        raise typer.BadParameter(msg)
-
-    provider_preset = _normalize_provider_preset(provider) if provider else None
-    if provider and provider_preset is None:
-        console.print("[red]Invalid --provider value.[/red] Use: openai or openrouter.")
-        raise typer.Exit(1)
-
-    if selected_profile == "minimal":
-        selected_preset: _ProviderPreset = provider_preset or "openai"
-    elif provider_preset is not None:
-        selected_preset = provider_preset
-    elif selected_profile == "public":
-        selected_preset = "openai"
-    else:
-        selected_preset = _prompt_provider_preset()
+    selected_profile, selected_preset = _resolve_config_init_selection(
+        profile,
+        minimal=minimal,
+        provider=provider,
+    )
 
     if selected_profile == "minimal":
         content = _minimal_template(selected_preset)
@@ -248,7 +256,12 @@ def config_init(
     env_created = _write_env_file(env_path, selected_profile, selected_preset, force=force)
 
     console.print(f"[green]Config created:[/green] {target}")
-    _print_config_init_next_steps(env_path, env_created=env_created, selected_profile=selected_profile)
+    _print_config_init_next_steps(
+        env_path,
+        env_created=env_created,
+        selected_profile=selected_profile,
+        selected_preset=selected_preset,
+    )
 
 
 @config_app.command("show")
@@ -415,17 +428,66 @@ def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
+        if provider == "vertexai_claude":
+            missing.extend(
+                (provider, env_key) for env_key in _VERTEXAI_CLAUDE_ENV_KEYS if not get_secret_from_env(env_key)
+            )
+            continue
         env_key = env_key_for_provider(provider)
         if env_key and not get_secret_from_env(env_key):
             missing.append((provider, env_key))
     return missing
 
 
+def _resolve_config_init_selection(
+    profile: str,
+    *,
+    minimal: bool,
+    provider: str | None,
+) -> tuple[_ConfigInitProfile, _ProviderPreset]:
+    """Resolve the requested `config init` profile and provider preset."""
+    profile_value = "minimal" if minimal else profile.strip().lower()
+    normalized_profile = _normalize_init_profile(profile_value)
+    if normalized_profile is None:
+        msg = f"Invalid profile '{profile}'. Expected one of: {', '.join(_CANONICAL_INIT_PROFILES)}"
+        raise typer.BadParameter(msg)
+    selected_profile, profile_preset = normalized_profile
+
+    provider_preset = _normalize_provider_preset(provider) if provider else None
+    if provider and provider_preset is None:
+        console.print("[red]Invalid --provider value.[/red] Use: openai, openrouter, or vertexai_claude.")
+        raise typer.Exit(1)
+
+    if selected_profile == "minimal":
+        return selected_profile, provider_preset or "openai"
+    if provider_preset is not None:
+        return selected_profile, provider_preset
+    if profile_preset is not None:
+        return selected_profile, profile_preset
+    if selected_profile == "public":
+        return selected_profile, "openai"
+    return selected_profile, _prompt_provider_preset()
+
+
+def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _ProviderPreset | None] | None:
+    """Normalize `config init --profile` values and profile aliases."""
+    aliases: dict[str, tuple[_ConfigInitProfile, _ProviderPreset | None]] = {
+        "full": ("full", None),
+        "minimal": ("minimal", None),
+        "public": ("public", None),
+        "public-vertexai-anthropic": ("public", "vertexai_claude"),
+        "public-vertexai-claude": ("public", "vertexai_claude"),
+        "vertexai-anthropic": ("public", "vertexai_claude"),
+        "vertexai-claude": ("public", "vertexai_claude"),
+    }
+    return aliases.get(profile.strip().lower())
+
+
 def _check_env_keys(config: Config) -> None:
     """Warn about missing environment variables for configured providers."""
     missing = _find_missing_env_keys(config)
     if missing:
-        console.print("\n[yellow]Warning:[/yellow] Missing API key environment variables:\n")
+        console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
         for provider, env_key in missing:
             console.print(f"  [yellow]*[/yellow] {provider}: Set {env_key}")
         console.print("\nYou can set these in a .env file or export them in your shell.")
@@ -440,6 +502,11 @@ def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
         "openrouter": "openrouter",
         "or": "openrouter",
         "r": "openrouter",
+        "vertexai_claude": "vertexai_claude",
+        "vertexai": "vertexai_claude",
+        "vertex": "vertexai_claude",
+        "vertexai-anthropic": "vertexai_claude",
+        "vertex-anthropic": "vertexai_claude",
     }
     return aliases.get(normalized)
 
@@ -448,19 +515,26 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [openai/openrouter]",
+            "Choose provider preset [openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
         provider_preset = _normalize_provider_preset(raw_value)
         if provider_preset is not None:
             return provider_preset
-        console.print("[red]Invalid choice.[/red] Enter openai or openrouter.")
+        console.print("[red]Invalid choice.[/red] Enter openai, openrouter, or vertexai_claude.")
+
+
+def _model_template_block(provider_preset: _ProviderPreset) -> str:
+    """Render the provider-specific YAML fragment for models.default."""
+    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    lines = [f"provider: {provider}", f"id: {model_id}"]
+    return textwrap.indent("\n".join(lines), "    ")
 
 
 def _full_template(provider_preset: _ProviderPreset, *, profile: Literal["full", "public"] = "full") -> str:
     """Return a provider-aware starter config."""
-    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    model_block = _model_template_block(provider_preset)
 
     if profile == "public":
         mindroom_user_block = ""
@@ -481,8 +555,7 @@ def _full_template(provider_preset: _ProviderPreset, *, profile: Literal["full",
 
 models:
   default:
-    provider: {provider}
-    id: {model_id}
+{model_block}
 
 agents:
   assistant:
@@ -571,7 +644,7 @@ defaults:
 """
 
 
-def _env_template(profile: str, provider_preset: _ProviderPreset) -> str:
+def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset) -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
@@ -594,20 +667,7 @@ def _env_template(profile: str, provider_preset: _ProviderPreset) -> str:
             "# Matrix registration token (only needed if your homeserver requires it)\n# MATRIX_REGISTRATION_TOKEN="
         )
 
-    required_env_keys = set(_REQUIRED_ENV_KEYS[provider_preset])
-
-    key_placeholders = {
-        "OPENAI_API_KEY": "your-openai-key-here",
-        "OPENROUTER_API_KEY": "your-openrouter-key-here",
-    }
-
-    provider_lines: list[str] = []
-    for env_key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
-        prefix = "" if env_key in required_env_keys else "# "
-        line = f"{prefix}{env_key}={key_placeholders[env_key]}"
-        provider_lines.append(line)
-
-    provider_lines_text = "\n".join(provider_lines)
+    provider_lines_text = _provider_env_template(provider_preset)
 
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
@@ -615,7 +675,6 @@ MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
 {extra_matrix.rstrip()}
 
-# AI provider API keys (set the uncommented keys for this preset)
 {provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
@@ -636,14 +695,13 @@ MINDROOM_API_KEY={api_key}
 
 def _minimal_template(provider_preset: _ProviderPreset = "openai") -> str:
     """Return a bare-minimum inline config."""
-    provider, model_id = _DEFAULT_MODEL_PRESETS[provider_preset]
+    model_block = _model_template_block(provider_preset)
     return f"""\
 # MindRoom Configuration (minimal)
 
 models:
   default:
-    provider: {provider}
-    id: {model_id}
+{model_block}
 
 agents:
   assistant:
@@ -677,3 +735,28 @@ defaults:
     - scheduler
   markdown: true
 """
+
+
+def _provider_env_template(provider_preset: _ProviderPreset) -> str:
+    """Return the provider-specific section of the starter .env file."""
+    if provider_preset == "vertexai_claude":
+        return textwrap.dedent("""\
+        # Vertex AI Claude configuration
+        ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
+        CLOUD_ML_REGION=us-central1
+
+        # Authenticate with Google Application Default Credentials before running:
+        # gcloud auth application-default login
+        # or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+        """).rstrip()
+
+    required_env_keys = set(_REQUIRED_ENV_KEYS[provider_preset])
+    key_placeholders = {
+        "OPENAI_API_KEY": "your-openai-key-here",
+        "OPENROUTER_API_KEY": "your-openrouter-key-here",
+    }
+    provider_lines: list[str] = ["# AI provider API keys (set the uncommented keys for this preset)"]
+    for env_key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        prefix = "" if env_key in required_env_keys else "# "
+        provider_lines.append(f"{prefix}{env_key}={key_placeholders[env_key]}")
+    return "\n".join(provider_lines)
