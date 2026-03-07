@@ -1388,18 +1388,6 @@ class AgentBot:
                 self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
             available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
-            if not available_agents:
-                self.logger.info("Routing check: no available agents present")
-                await self._handle_ai_routing(
-                    room,
-                    event,
-                    context.thread_history,
-                    context.thread_id,
-                    message=message,
-                    requester_user_id=requester_user_id,
-                    extra_content=extra_content,
-                )
-                return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
             if len(available_agents) == 1:
                 self.logger.info("Skipping routing: only one agent present")
                 return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
