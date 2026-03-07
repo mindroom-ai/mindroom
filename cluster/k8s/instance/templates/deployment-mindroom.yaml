@@ -20,6 +20,25 @@ spec:
         app: mindroom
         customer: {{ .Values.customer | quote }}
     spec:
+      initContainers:
+      - name: wait-for-synapse
+        image: {{ .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" }}
+        imagePullPolicy: {{ .Values.mindroom_image_pull_policy | default "Always" }}
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          while true; do
+            body="$(curl --silent --show-error --max-time 5 "${SYNAPSE_READY_URL}" || true)"
+            if printf '%s' "${body}" | grep -q '"versions"'; then
+              echo "Synapse is ready: ${SYNAPSE_READY_URL}"
+              exit 0
+            fi
+            echo "Waiting for Synapse at ${SYNAPSE_READY_URL}"
+            sleep 2
+          done
+        env:
+        - name: SYNAPSE_READY_URL
+          value: "http://synapse-{{ .Values.customer }}:8008/_matrix/client/versions"
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
@@ -63,7 +82,7 @@ spec:
         - name: MINDROOM_SANDBOX_PROXY_TOOLS
           value: "shell,file,python"
         - name: MATRIX_HOMESERVER
-          value: "http://synapse-{{ .Values.customer }}.mindroom-instances.svc.cluster.local:8008"
+          value: "http://synapse-{{ .Values.customer }}:8008"
         - name: MATRIX_SERVER_NAME
           value: "{{ .Values.customer }}.{{ .Values.baseDomain }}"
         - name: SUPABASE_URL
