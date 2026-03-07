@@ -98,10 +98,10 @@ spec:
           limits:
             memory: "2Gi"
             cpu: "1000m"
-        # First boot registers Matrix users, creates rooms, and initializes knowledge.
+        # Startup only needs the API process to bind the socket; readiness waits for full bootstrap.
         startupProbe:
           httpGet:
-            path: /api/ready
+            path: /api/health
             port: api
           periodSeconds: 2
           failureThreshold: 90
