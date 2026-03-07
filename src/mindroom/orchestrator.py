@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,8 +50,6 @@ _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
 _STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 _STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
-_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
-_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _PERMANENT_STARTUP_ERROR_MARKERS = (
     "M_FORBIDDEN",
     "M_USER_DEACTIVATED",
@@ -1085,7 +1082,7 @@ async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int =
             await asyncio.sleep(wait_time)
 
 
-async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
+async def _handle_config_change(orchestrator: MultiAgentOrchestrator, stop_watching: asyncio.Event) -> None:
     """Handle configuration file changes."""
     logger.info("Configuration file changed, checking for updates...")
     if orchestrator.running:
@@ -1094,17 +1091,18 @@ async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
             logger.info("Configuration update applied to affected agents")
         else:
             logger.info("No agent changes detected in configuration update")
-        return
-    logger.info("Ignoring config change while startup is still in progress")
+    if not orchestrator.running:
+        stop_watching.set()
 
 
 async def _watch_config_task(config_path: Path, orchestrator: MultiAgentOrchestrator) -> None:
     """Watch config file for changes."""
+    stop_watching = asyncio.Event()
 
     async def on_config_change() -> None:
-        await _handle_config_change(orchestrator)
+        await _handle_config_change(orchestrator, stop_watching)
 
-    await watch_file(config_path, on_config_change)
+    await watch_file(config_path, on_config_change, stop_watching)
 
 
 async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
@@ -1129,55 +1127,6 @@ async def _run_api_server(host: str, port: int, log_level: str) -> None:
     config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     await server.serve()
-
-
-async def _run_auxiliary_task_forever(
-    task_name: str,
-    operation: Callable[[], Awaitable[None]],
-    *,
-    initial_delay_seconds: float = _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
-    max_delay_seconds: float = _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,
-) -> None:
-    """Restart a non-critical background task whenever it exits or crashes."""
-    restart_count = 0
-    while True:
-        started_at = time.monotonic()
-        try:
-            await operation()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            if time.monotonic() - started_at >= max_delay_seconds:
-                restart_count = 0
-            restart_count += 1
-            retry_in_seconds = _retry_delay_seconds(
-                restart_count,
-                initial_delay_seconds=initial_delay_seconds,
-                max_delay_seconds=max_delay_seconds,
-            )
-            logger.exception(
-                "Auxiliary task crashed; restarting",
-                task_name=task_name,
-                restart_count=restart_count,
-                retry_in_seconds=retry_in_seconds,
-            )
-            await asyncio.sleep(retry_in_seconds)
-        else:
-            if time.monotonic() - started_at >= max_delay_seconds:
-                restart_count = 0
-            restart_count += 1
-            retry_in_seconds = _retry_delay_seconds(
-                restart_count,
-                initial_delay_seconds=initial_delay_seconds,
-                max_delay_seconds=max_delay_seconds,
-            )
-            logger.warning(
-                "Auxiliary task exited unexpectedly; restarting",
-                task_name=task_name,
-                restart_count=restart_count,
-                retry_in_seconds=retry_in_seconds,
-            )
-            await asyncio.sleep(retry_in_seconds)
 
 
 async def main(
@@ -1218,55 +1167,51 @@ async def main(
     logger.info("Starting orchestrator...")
     orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
     set_runtime_starting()
-    auxiliary_tasks: list[asyncio.Task] = []
 
     try:
-        # Keep auxiliary tasks alive independently of the main runtime task.
-        auxiliary_tasks.append(
-            asyncio.create_task(
-                _run_auxiliary_task_forever(
-                    "config watcher",
-                    lambda: _watch_config_task(config_path, orchestrator),
-                ),
-                name="config_watcher_supervisor",
-            ),
-        )
-        auxiliary_tasks.append(
-            asyncio.create_task(
-                _run_auxiliary_task_forever(
-                    "skills watcher",
-                    lambda: _watch_skills_task(orchestrator),
-                ),
-                name="skills_watcher_supervisor",
-            ),
-        )
+        # Create task to run the orchestrator
+        orchestrator_task = asyncio.create_task(orchestrator.start())
+
+        # Create task to watch config file for changes
+        watcher_task = asyncio.create_task(_watch_config_task(config_path, orchestrator))
+
+        # Create task to watch skills for changes
+        skills_watcher_task = asyncio.create_task(_watch_skills_task(orchestrator))
+
+        tasks = {orchestrator_task, watcher_task, skills_watcher_task}
 
         # Optionally start the bundled dashboard/API server
         if api:
             logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
-            auxiliary_tasks.append(
-                asyncio.create_task(
-                    _run_auxiliary_task_forever(
-                        "bundled API server",
-                        lambda: _run_api_server(api_host, api_port, log_level),
-                    ),
-                    name="api_server_supervisor",
-                ),
-            )
+            api_task = asyncio.create_task(_run_api_server(api_host, api_port, log_level))
+            tasks.add(api_task)
 
-        await orchestrator.start()
+        # Wait for any task to complete (or fail)
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Check if any completed task had an exception
+        for task in done:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                logger.info("Task was cancelled")
+            except Exception:
+                logger.exception("Task failed with exception")
+
+        # Cancel any pending tasks
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
     except Exception:
         logger.exception("Error in orchestrator")
-        raise
     finally:
-        for task in auxiliary_tasks:
-            task.cancel()
-        for task in auxiliary_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
         # Final cleanup
         await orchestrator.stop()
         reset_runtime_state()
