@@ -109,7 +109,10 @@ def _finalize_inflight_voice_normalization_task(
     """Persist successful results and remove an in-flight normalization task."""
     try:
         normalized = task.result()
-    except (asyncio.CancelledError, Exception):
+    except asyncio.CancelledError:
+        normalized = None
+    except Exception:
+        logger.exception("Voice normalization task failed")
         normalized = None
 
     if normalized is not None:
@@ -220,14 +223,14 @@ async def prepare_voice_message(
         extra_content[ATTACHMENT_IDS_KEY] = [attachment_id]
     if normalized.transcribed_message is None:
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
-    current_content = event.source.get("content") if isinstance(event.source, dict) else None
-    inherited_mentions = current_content.get("m.mentions") if isinstance(current_content, dict) else None
+    original_content = event.source.get("content") if isinstance(event.source, dict) else None
+    inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
     if isinstance(inherited_mentions, dict):
         extra_content["m.mentions"] = inherited_mentions
 
     source = dict(event.source) if isinstance(event.source, dict) else {}
-    current_content = source.get("content")
-    content = dict(current_content) if isinstance(current_content, dict) else {}
+    copied_content = source.get("content")
+    content = dict(copied_content) if isinstance(copied_content, dict) else {}
     content.update(
         format_message_with_mentions(
             config,

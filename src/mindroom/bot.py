@@ -291,7 +291,10 @@ class _DispatchPayload:
 
 @dataclass(frozen=True)
 class _SyntheticTextEvent:
-    """Minimal text-event shape for internal normalized-media dispatch."""
+    """Minimal text-event shape for internal normalized-media dispatch.
+
+    This intentionally satisfies the ``CommandEvent`` protocol used by command handling.
+    """
 
     sender: str
     event_id: str
