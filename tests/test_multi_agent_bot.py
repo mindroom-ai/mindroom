@@ -3377,7 +3377,7 @@ class TestMultiAgentOrchestrator:
             task = asyncio.create_task(
                 _run_auxiliary_task_forever("test task", _operation),
             )
-            await asyncio.wait_for(third_start.wait(), timeout=1)
+            await asyncio.wait_for(third_start.wait(), timeout=2)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

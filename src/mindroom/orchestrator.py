@@ -41,7 +41,9 @@ from .matrix.users import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
+
+    from pydantic import BaseModel
 
     from .knowledge.manager import KnowledgeManager
 
@@ -84,6 +86,43 @@ def _retry_delay_seconds(
 def _is_permanent_startup_error(exc: Exception) -> bool:
     """Return whether a startup exception is clearly non-retryable."""
     return isinstance(exc, PermanentMatrixStartupError)
+
+
+def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | None) -> bool:
+    """Compare optional config models using the same shape as persisted YAML."""
+    if old_entry is None or new_entry is None:
+        return old_entry != new_entry
+    return old_entry.model_dump(exclude_none=True) != new_entry.model_dump(exclude_none=True)
+
+
+async def _cancel_task(
+    task: asyncio.Task | None,
+    *,
+    suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
+) -> None:
+    """Cancel a detached task and wait for it to finish."""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(*suppress_exceptions):
+        await task
+
+
+def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
+    """Log failures from a detached background task."""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception(message)
+
+
+def _create_logged_task(coro: Coroutine[Any, Any, None], *, name: str, failure_message: str) -> asyncio.Task:
+    """Create a detached task that logs failures on completion."""
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(partial(_log_detached_task_result, message=failure_message))
+    return task
 
 
 async def _run_with_retry(
@@ -253,6 +292,14 @@ class MultiAgentOrchestrator:
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
+    def _require_config(self) -> Config:
+        """Return the active config or fail fast if it has not been loaded."""
+        config = self.config
+        if config is None:
+            msg = "Configuration not loaded"
+            raise RuntimeError(msg)
+        return config
+
     async def _prepare_user_account(self, config: Config, *, update_runtime_state: bool) -> None:
         """Ensure the internal user account exists, retrying only transient failures."""
         await _run_with_retry(
@@ -275,45 +322,17 @@ class MultiAgentOrchestrator:
         """Cancel any in-flight background knowledge refresh task."""
         task = self._knowledge_refresh_task
         self._knowledge_refresh_task = None
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await task
-
-    @staticmethod
-    def _log_knowledge_refresh_task_result(task: asyncio.Task) -> None:
-        """Log detached knowledge refresh task failures."""
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("Background knowledge refresh failed")
+        await _cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
 
     async def _cancel_bot_start_task(self, entity_name: str) -> None:
         """Cancel any background start task for one bot."""
         task = self._bot_start_tasks.pop(entity_name, None)
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        await _cancel_task(task)
 
     async def _cancel_bot_start_tasks(self) -> None:
         """Cancel all background bot start tasks."""
         for entity_name in tuple(self._bot_start_tasks):
             await self._cancel_bot_start_task(entity_name)
-
-    @staticmethod
-    def _log_bot_start_task_result(task: asyncio.Task) -> None:
-        """Log detached bot-start task failures."""
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("Background bot start task failed")
 
     def _start_sync_task(self, entity_name: str, bot: AgentBot | TeamBot) -> None:
         """Ensure one sync task exists for a running bot."""
@@ -397,12 +416,11 @@ class MultiAgentOrchestrator:
     async def _schedule_bot_start_retry(self, entity_name: str) -> None:
         """Schedule background retries for one failed bot startup."""
         await self._cancel_bot_start_task(entity_name)
-        task = asyncio.create_task(
+        self._bot_start_tasks[entity_name] = _create_logged_task(
             self._run_bot_start_retry(entity_name),
             name=f"retry_start_{entity_name}",
+            failure_message="Background bot start task failed",
         )
-        task.add_done_callback(self._log_bot_start_task_result)
-        self._bot_start_tasks[entity_name] = task
 
     async def _run_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
         """Run background knowledge refresh until it succeeds or is cancelled."""
@@ -420,12 +438,11 @@ class MultiAgentOrchestrator:
     async def _schedule_knowledge_refresh(self, config: Config, *, start_watcher: bool) -> None:
         """Schedule knowledge refresh in the background, replacing any in-flight run."""
         await self._cancel_knowledge_refresh_task()
-        task = asyncio.create_task(
+        self._knowledge_refresh_task = _create_logged_task(
             self._run_knowledge_refresh(config, start_watcher=start_watcher),
             name="knowledge_refresh",
+            failure_message="Background knowledge refresh failed",
         )
-        task.add_done_callback(self._log_knowledge_refresh_task_result)
-        self._knowledge_refresh_task = task
 
     async def _refresh_knowledge_for_runtime(self, config: Config, *, start_watcher: bool) -> None:
         """Refresh knowledge now (startup path) or in background (runtime updates)."""
@@ -577,10 +594,7 @@ class MultiAgentOrchestrator:
         started_bots.extend(additional_started_bots)
         self._log_degraded_startup([*failed_agents_to_retry, *permanently_failed_agents])
 
-        config = self.config
-        if config is None:
-            msg = "Configuration not loaded"
-            raise RuntimeError(msg)
+        config = self._require_config()
 
         # Setup rooms and have all bots join them before potentially heavy
         # knowledge indexing, so new rooms/invites are not delayed by embeddings.
@@ -764,10 +778,7 @@ class MultiAgentOrchestrator:
         await self._ensure_rooms_exist()
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
-        config = self.config
-        if config is None:
-            msg = "Configuration not loaded"
-            raise RuntimeError(msg)
+        config = self._require_config()
         for bot in bots:
             # Get the room aliases for this entity from config and resolve to IDs
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
@@ -816,10 +827,7 @@ class MultiAgentOrchestrator:
             return
 
         # Directly create rooms using the router's client
-        config = self.config
-        if config is None:
-            msg = "Configuration not loaded"
-            raise RuntimeError(msg)
+        config = self._require_config()
         room_ids = await ensure_all_rooms_exist(router_bot.client, config)
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
 
@@ -956,16 +964,7 @@ def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: d
         old_agent = config.agents.get(agent_name)
         new_agent = new_config.agents.get(agent_name)
 
-        # Compare agents using model_dump with exclude_none=True to match how configs are saved
-        # This prevents false positives when None values are involved
-        if old_agent and new_agent:
-            # Both exist - compare their non-None values (matching save_to_yaml behavior)
-            old_dict = old_agent.model_dump(exclude_none=True)
-            new_dict = new_agent.model_dump(exclude_none=True)
-            agents_differ = old_dict != new_dict
-        else:
-            # One is None - they definitely differ
-            agents_differ = old_agent != new_agent
+        agents_differ = _config_entries_differ(old_agent, new_agent)
 
         old_culture = _culture_signature_for_agent(agent_name, config) if old_agent else None
         new_culture = _culture_signature_for_agent(agent_name, new_config) if new_agent else None
@@ -1008,13 +1007,7 @@ def _get_changed_teams(config: Config | None, new_config: Config, agent_bots: di
         old_team = config.teams.get(team_name)
         new_team = new_config.teams.get(team_name)
 
-        # Compare teams using model_dump with exclude_none=True to match how configs are saved
-        if old_team and new_team:
-            old_dict = old_team.model_dump(exclude_none=True)
-            new_dict = new_team.model_dump(exclude_none=True)
-            teams_differ = old_dict != new_dict
-        else:
-            teams_differ = old_team != new_team
+        teams_differ = _config_entries_differ(old_team, new_team)
 
         if teams_differ and (team_name in agent_bots or new_team is not None):
             changed.add(team_name)
@@ -1053,12 +1046,8 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
 
 async def _cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
     """Cancel and remove a sync task for an entity."""
-    if entity_name in sync_tasks:
-        task = sync_tasks[entity_name]
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        del sync_tasks[entity_name]
+    task = sync_tasks.pop(entity_name, None)
+    await _cancel_task(task)
 
 
 async def _stop_entities(
