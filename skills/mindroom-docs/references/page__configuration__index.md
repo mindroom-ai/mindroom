@@ -142,7 +142,7 @@ defaults:
   learning: true                   # Default: true
   learning_mode: always            # Default: always (or agentic)
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
-  show_stop_button: false          # Default: false (global only, cannot be overridden per-agent)
+  show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: true      # Compress tool results in history to save context
