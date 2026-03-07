@@ -736,8 +736,6 @@ class AgentBot:
         room: nio.MatrixRoom,
         event: _TextDispatchEvent,
         requester_user_id: str,
-        *,
-        visible_router_echo_event_id: str | None = None,
     ) -> None:
         """Run the normal text/command dispatch pipeline for a prepared text event."""
         assert isinstance(event.body, str)
@@ -779,7 +777,6 @@ class AgentBot:
             dispatch,
             message_for_decision=event.body,
             extra_content=message_extra_content or None,
-            visible_router_echo_event_id=visible_router_echo_event_id,
         )
         if action is None:
             return
@@ -992,7 +989,7 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id)
             return
 
-        visible_router_echo_event_id = await self._maybe_send_visible_voice_echo(
+        await self._maybe_send_visible_voice_echo(
             room,
             event,
             text=prepared_voice.text,
@@ -1008,7 +1005,6 @@ class AgentBot:
                 source=prepared_voice.source,
             ),
             requester_user_id,
-            visible_router_echo_event_id=visible_router_echo_event_id,
         )
 
     async def _maybe_send_visible_voice_echo(
@@ -1289,7 +1285,6 @@ class AgentBot:
         message_for_decision: str,
         router_message: str | None = None,
         extra_content: dict[str, Any] | None = None,
-        visible_router_echo_event_id: str | None = None,
     ) -> _ResponseAction | None:
         """Resolve routing + team/individual/skip action for a prepared dispatch."""
         router_result = await self._handle_router_dispatch(
@@ -1301,6 +1296,7 @@ class AgentBot:
             extra_content=extra_content,
         )
         if router_result.handled:
+            visible_router_echo_event_id = self.response_tracker.get_visible_echo_event_id(event.event_id)
             if (
                 router_result.mark_visible_echo_responded
                 and visible_router_echo_event_id is not None

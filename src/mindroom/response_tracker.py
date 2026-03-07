@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from mindroom.constants import TRACKING_DIR
 from mindroom.logging_config import get_logger
@@ -18,13 +18,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class _ResponseRecord(TypedDict, total=False):
+class _ResponseRecord(TypedDict):
     """Record of a response to a user message."""
 
     timestamp: float
     response_id: str | None
-    completed: bool
-    visible_echo_response_id: str | None
+    completed: NotRequired[bool]
+    visible_echo_response_id: NotRequired[str | None]
 
 
 @dataclass
@@ -68,13 +68,13 @@ class ResponseTracker:
 
         """
         with self._thread_lock:
-            existing_record = self._responses.get(event_id, {})
+            existing_record = self._responses.get(event_id)
             updated_record: _ResponseRecord = {
                 "timestamp": time.time(),
                 "response_id": response_event_id,
                 "completed": True,
             }
-            visible_echo_response_id = existing_record.get("visible_echo_response_id")
+            visible_echo_response_id = existing_record.get("visible_echo_response_id") if existing_record else None
             if visible_echo_response_id is not None:
                 updated_record["visible_echo_response_id"] = visible_echo_response_id
             self._responses[event_id] = updated_record
@@ -84,11 +84,11 @@ class ResponseTracker:
     def mark_visible_echo_sent(self, event_id: str, response_event_id: str) -> None:
         """Track a visible router echo without marking the event fully handled."""
         with self._thread_lock:
-            existing_record = self._responses.get(event_id, {})
+            existing_record = self._responses.get(event_id)
             updated_record: _ResponseRecord = {
                 "timestamp": time.time(),
-                "response_id": existing_record.get("response_id"),
-                "completed": existing_record.get("completed", True) if existing_record else False,
+                "response_id": existing_record.get("response_id") if existing_record else None,
+                "completed": existing_record.get("completed", True) if existing_record is not None else False,
                 "visible_echo_response_id": response_event_id,
             }
             self._responses[event_id] = updated_record
