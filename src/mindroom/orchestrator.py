@@ -41,7 +41,7 @@ from .matrix.users import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Iterable
 
     from pydantic import BaseModel
 
@@ -219,6 +219,15 @@ async def _wait_for_matrix_homeserver(
     raise RuntimeError(msg)
 
 
+@dataclass(slots=True)
+class _EntityStartResults:
+    """Result of one pass trying to start a batch of entities."""
+
+    started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
+    retryable_entities: list[str] = field(default_factory=list)
+    permanently_failed_entities: list[str] = field(default_factory=list)
+
+
 @dataclass
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
@@ -355,9 +364,17 @@ class MultiAgentOrchestrator:
     def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot | TeamBot]:
         """Return the bots whose room memberships should be reconciled after a background start."""
         if entity_name == ROUTER_AGENT_NAME:
-            return [bot for bot in self.agent_bots.values() if bot.running]
-        bot = self.agent_bots.get(entity_name)
-        return [bot] if bot is not None else []
+            return self._running_bots_for_entities(self.agent_bots)
+        return self._running_bots_for_entities((entity_name,))
+
+    def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot | TeamBot]:
+        """Return running bots for the given entity names."""
+        running_bots: list[AgentBot | TeamBot] = []
+        for entity_name in entity_names:
+            bot = self.agent_bots.get(entity_name)
+            if bot is not None and bot.running:
+                running_bots.append(bot)
+        return running_bots
 
     async def _try_start_bot_once(
         self,
@@ -472,27 +489,50 @@ class MultiAgentOrchestrator:
         self.agent_bots[entity_name] = bot
         return bot
 
+    async def _start_entities_once(
+        self,
+        entity_names: Iterable[str],
+        *,
+        start_sync_tasks: bool,
+    ) -> _EntityStartResults:
+        """Try to start each named entity once and classify the results."""
+        entity_bots: list[tuple[str, AgentBot | TeamBot]] = []
+        for entity_name in entity_names:
+            bot = self.agent_bots.get(entity_name)
+            if bot is not None:
+                entity_bots.append((entity_name, bot))
+
+        results = _EntityStartResults()
+        if not entity_bots:
+            return results
+
+        start_statuses = await asyncio.gather(
+            *[self._try_start_bot_once(entity_name, bot) for entity_name, bot in entity_bots],
+        )
+        for (entity_name, bot), start_status in zip(entity_bots, start_statuses):
+            if start_status:
+                results.started_bots.append(bot)
+                if start_sync_tasks:
+                    self._start_sync_task(entity_name, bot)
+                continue
+            if start_status is None:
+                results.permanently_failed_entities.append(entity_name)
+                continue
+            results.retryable_entities.append(entity_name)
+        return results
+
     async def _create_and_start_entities(
         self,
         entity_names: set[str],
         config: Config,
         *,
-        failed_entities_to_retry: list[str],
-        permanently_failed_entities: list[str],
-    ) -> None:
+        start_sync_tasks: bool,
+    ) -> _EntityStartResults:
         """Create configured entities and try to start them once."""
-        for entity_name in entity_names:
-            bot = self._create_managed_bot(entity_name, config)
-            if bot is None:
-                continue
-            start_status = await self._try_start_bot_once(entity_name, bot)
-            if start_status is None:
-                permanently_failed_entities.append(entity_name)
-                continue
-            if start_status:
-                self._start_sync_task(entity_name, bot)
-                continue
-            failed_entities_to_retry.append(entity_name)
+        created_entities = [
+            entity_name for entity_name in entity_names if self._create_managed_bot(entity_name, config) is not None
+        ]
+        return await self._start_entities_once(created_entities, start_sync_tasks=start_sync_tasks)
 
     async def initialize(self) -> None:
         """Initialize all agent bots with self-management.
@@ -542,31 +582,6 @@ class MultiAgentOrchestrator:
         )
         return router_bot
 
-    async def _start_remaining_bots_once(self) -> tuple[list[AgentBot | TeamBot], list[str], list[str]]:
-        """Start non-router bots once and return started, retryable, and permanent failures."""
-        started_bots: list[AgentBot | TeamBot] = []
-        failed_agents_to_retry: list[str] = []
-        permanently_failed_agents: list[str] = []
-        remaining_bots = [
-            (entity_name, bot) for entity_name, bot in self.agent_bots.items() if entity_name != ROUTER_AGENT_NAME
-        ]
-        if not remaining_bots:
-            return started_bots, failed_agents_to_retry, permanently_failed_agents
-
-        set_runtime_starting("Starting remaining Matrix bot accounts")
-        start_statuses = await asyncio.gather(
-            *[self._try_start_bot_once(entity_name, bot) for entity_name, bot in remaining_bots],
-        )
-        for (entity_name, bot), start_status in zip(remaining_bots, start_statuses):
-            if start_status:
-                started_bots.append(bot)
-                continue
-            if start_status is None:
-                permanently_failed_agents.append(entity_name)
-                continue
-            failed_agents_to_retry.append(entity_name)
-        return started_bots, failed_agents_to_retry, permanently_failed_agents
-
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
         """Log degraded startup status for failed non-router bots."""
         if failed_agents:
@@ -585,14 +600,15 @@ class MultiAgentOrchestrator:
             await self.initialize()
 
         router_bot = await self._start_router_bot()
-        started_bots = [router_bot]
-        (
-            additional_started_bots,
-            failed_agents_to_retry,
-            permanently_failed_agents,
-        ) = await self._start_remaining_bots_once()
-        started_bots.extend(additional_started_bots)
-        self._log_degraded_startup([*failed_agents_to_retry, *permanently_failed_agents])
+        set_runtime_starting("Starting remaining Matrix bot accounts")
+        start_results = await self._start_entities_once(
+            [entity_name for entity_name in self.agent_bots if entity_name != ROUTER_AGENT_NAME],
+            start_sync_tasks=False,
+        )
+        started_bots = [router_bot, *start_results.started_bots]
+        self._log_degraded_startup(
+            [*start_results.retryable_entities, *start_results.permanently_failed_entities],
+        )
 
         config = self._require_config()
 
@@ -618,7 +634,7 @@ class MultiAgentOrchestrator:
             if bot.running:
                 self._start_sync_task(entity_name, bot)
 
-        for entity_name in failed_agents_to_retry:
+        for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
 
         set_runtime_ready()
@@ -626,7 +642,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
-    async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -694,13 +710,10 @@ class MultiAgentOrchestrator:
         entities_to_recreate = entities_to_restart & all_new_entities
         removed_restarted_entities = entities_to_restart - all_new_entities
         changed_entities = entities_to_recreate | new_entities
-        failed_entities_to_retry: list[str] = []
-        permanently_failed_entities: list[str] = []
-        await self._create_and_start_entities(
+        start_results = await self._create_and_start_entities(
             changed_entities,
             new_config,
-            failed_entities_to_retry=failed_entities_to_retry,
-            permanently_failed_entities=permanently_failed_entities,
+            start_sync_tasks=True,
         )
 
         for entity_name in removed_restarted_entities:
@@ -719,22 +732,18 @@ class MultiAgentOrchestrator:
                 del self.agent_bots[entity_name]
 
         # Setup rooms and have new/restarted bots join them
-        bots_to_setup = [
-            self.agent_bots[entity_name]
-            for entity_name in changed_entities
-            if entity_name in self.agent_bots and self.agent_bots[entity_name].running
-        ]
+        bots_to_setup = self._running_bots_for_entities(changed_entities)
 
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed or authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
 
-        for entity_name in failed_entities_to_retry:
+        for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
 
-        if permanently_failed_entities:
+        if start_results.permanently_failed_entities:
             logger.warning(
                 "Configuration update left some bots disabled due to permanent startup errors",
-                agent_names=permanently_failed_entities,
+                agent_names=start_results.permanently_failed_entities,
             )
 
         await self._sync_runtime_support_services(new_config, start_watcher=self.running)
