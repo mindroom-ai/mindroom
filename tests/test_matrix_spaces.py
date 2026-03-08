@@ -73,6 +73,23 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
         )
 
 
+def test_config_allows_colliding_room_key_when_space_disabled() -> None:
+    """Colliding room keys should be accepted when the space feature is disabled."""
+    reserved_alias = managed_space_alias_localpart()
+    namespace = mindroom_namespace()
+    colliding_room_key = (
+        reserved_alias.removesuffix(f"_{namespace}")
+        if namespace and reserved_alias.endswith(f"_{namespace}")
+        else reserved_alias
+    )
+
+    config = Config(
+        agents={"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+        matrix_space={"enabled": False},
+    )
+    assert config.matrix_space.enabled is False
+
+
 @pytest.mark.asyncio
 async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None:
     """Matching `m.space.child` state should not trigger another state write."""
@@ -235,6 +252,54 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() 
     mock_create.assert_not_awaited()
     mock_name.assert_not_awaited()
     mock_add.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_root_space_returns_none_when_name_write_fails() -> None:
+    """If the router lacks permission to set the space name, reconciliation should bail out."""
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.rooms = {"!space:localhost": MagicMock()}
+    state = MatrixState(space_room_id="!space:localhost")
+    config = Config(
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+    )
+
+    with (
+        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
+        patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
+        patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=False)),
+        patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+    ):
+        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+
+    assert space_id is None
+    mock_add.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_root_space_returns_none_when_child_link_fails() -> None:
+    """If the router cannot add child links, reconciliation should fail."""
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.rooms = {"!space:localhost": MagicMock()}
+    state = MatrixState(space_room_id="!space:localhost")
+    config = Config(
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+    )
+
+    with (
+        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
+        patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
+        patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
+        patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=False)) as mock_add,
+    ):
+        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+
+    assert space_id is None
+    mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
 
 
 @pytest.mark.asyncio

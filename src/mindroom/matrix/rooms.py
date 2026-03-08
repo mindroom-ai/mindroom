@@ -427,11 +427,19 @@ async def ensure_root_space(
     if root_space_id is None:
         return None
 
-    await ensure_room_name(client, root_space_id, config.matrix_space.name)
+    if not await ensure_room_name(client, root_space_id, config.matrix_space.name):
+        logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
+        return None
 
     server_name = extract_server_name_from_homeserver(client.homeserver)
     for room_id in dict.fromkeys(room_ids.values()):
-        await add_room_to_space(client, root_space_id, room_id, server_name)
+        if not await add_room_to_space(client, root_space_id, room_id, server_name):
+            logger.warning(
+                "Failed to link room to root space; aborting reconciliation",
+                space_id=root_space_id,
+                room_id=room_id,
+            )
+            return None
 
     return root_space_id
 

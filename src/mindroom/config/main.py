@@ -290,6 +290,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_root_space_alias_does_not_collide_with_managed_rooms(self) -> Config:
         """Ensure no managed room key maps to the reserved root Space alias."""
+        if not self.matrix_space.enabled:
+            return self
         reserved_alias_localpart = managed_space_alias_localpart()
         colliding_rooms = sorted(
             room_key
