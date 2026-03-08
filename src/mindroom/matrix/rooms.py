@@ -11,15 +11,23 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client import (
+    add_room_to_space,
     create_room,
+    create_space,
     ensure_room_directory_visibility,
     ensure_room_join_rule,
+    ensure_room_name,
     get_joined_rooms,
     join_room,
     leave_room,
     matrix_client,
 )
-from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver, managed_room_alias_localpart
+from mindroom.matrix.identity import (
+    MatrixID,
+    extract_server_name_from_homeserver,
+    managed_room_alias_localpart,
+    managed_space_alias_localpart,
+)
 from mindroom.matrix.state import MatrixRoom, MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
@@ -28,6 +36,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
+_ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 
 
 async def _configure_managed_room_access(
@@ -357,6 +366,82 @@ async def ensure_all_rooms_exist(
             room_ids[room_key] = room_id
 
     return room_ids
+
+
+async def _ensure_root_space_exists(
+    client: nio.AsyncClient,
+    config: Config,
+) -> str | None:
+    """Ensure the configured root Matrix Space exists and return its room ID."""
+    if not config.matrix_space.enabled:
+        return None
+
+    state = MatrixState.load()
+    joined_room_ids = await get_joined_rooms(client) or []
+    if state.space_room_id and state.space_room_id in joined_room_ids:
+        return state.space_room_id
+
+    server_name = extract_server_name_from_homeserver(client.homeserver)
+    alias_localpart = managed_space_alias_localpart()
+    full_alias = f"#{alias_localpart}:{server_name}"
+    response = await client.room_resolve_alias(full_alias)
+    if isinstance(response, nio.RoomResolveAliasResponse):
+        space_room_id = str(response.room_id)
+        joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
+        if not joined_space and not await join_room(client, space_room_id):
+            logger.warning(
+                "Resolved existing root space but router could not join it; skipping reconciliation",
+                space_room_id=space_room_id,
+                space_alias=full_alias,
+            )
+            return None
+        if state.space_room_id != space_room_id:
+            state.set_space_room_id(space_room_id)
+            state.save()
+        return space_room_id
+
+    space_room_id = await create_space(
+        client=client,
+        name=config.matrix_space.name,
+        alias=alias_localpart,
+        topic=_ROOT_SPACE_TOPIC,
+    )
+    if space_room_id is None:
+        return None
+
+    state.set_space_room_id(space_room_id)
+    state.save()
+    return space_room_id
+
+
+async def ensure_root_space(
+    client: nio.AsyncClient,
+    config: Config,
+    room_ids: dict[str, str],
+) -> str | None:
+    """Ensure the optional root Matrix Space exists and links the supplied managed rooms."""
+    if not config.matrix_space.enabled:
+        return None
+
+    root_space_id = await _ensure_root_space_exists(client, config)
+    if root_space_id is None:
+        return None
+
+    if not await ensure_room_name(client, root_space_id, config.matrix_space.name):
+        logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
+        return None
+
+    server_name = extract_server_name_from_homeserver(client.homeserver)
+    for room_id in dict.fromkeys(room_ids.values()):
+        if not await add_room_to_space(client, root_space_id, room_id, server_name):
+            logger.warning(
+                "Failed to link room to root space; aborting reconciliation",
+                space_id=root_space_id,
+                room_id=room_id,
+            )
+            return None
+
+    return root_space_id
 
 
 async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> None:

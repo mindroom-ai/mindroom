@@ -58,6 +58,11 @@ def managed_room_alias_localpart(room_key: str) -> str:
     return f"{room_key}_{namespace}"
 
 
+def managed_space_alias_localpart() -> str:
+    """Build the reserved alias localpart for the root MindRoom Space."""
+    return managed_room_alias_localpart("_mindroom_root_space")
+
+
 def managed_room_key_from_alias_localpart(alias_localpart: str) -> str | None:
     """Extract the configured managed room key from an alias localpart."""
     namespace = mindroom_namespace()

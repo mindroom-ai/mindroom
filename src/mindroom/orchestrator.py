@@ -31,7 +31,13 @@ from .logging_config import get_logger, setup_logging
 from .matrix.client import PermanentMatrixStartupError, get_joined_rooms, get_room_members, invite_to_room
 from .matrix.health import matrix_versions_url, response_has_matrix_versions
 from .matrix.identity import MatrixID, extract_server_name_from_homeserver
-from .matrix.rooms import ensure_all_rooms_exist, ensure_user_in_rooms, load_rooms, resolve_room_aliases
+from .matrix.rooms import (
+    ensure_all_rooms_exist,
+    ensure_root_space,
+    ensure_user_in_rooms,
+    load_rooms,
+    resolve_room_aliases,
+)
 from .matrix.state import MatrixState
 from .matrix.users import (
     INTERNAL_USER_ACCOUNT_KEY,
@@ -642,7 +648,7 @@ class MultiAgentOrchestrator:
         # Run all sync tasks
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
-    async def update_config(self) -> bool:  # noqa: C901, PLR0912
+    async def update_config(self) -> bool:  # noqa: C901, PLR0912, PLR0915
         """Update configuration with simplified self-managing agents.
 
         Each agent handles its own user account creation and room management.
@@ -666,6 +672,7 @@ class MultiAgentOrchestrator:
         entities_to_restart = await _identify_entities_to_restart(current_config, new_config, self.agent_bots)
         mindroom_user_changed = current_config.mindroom_user != new_config.mindroom_user
         matrix_room_access_changed = current_config.matrix_room_access != new_config.matrix_room_access
+        matrix_space_changed = current_config.matrix_space != new_config.matrix_space
         authorization_changed = current_config.authorization != new_config.authorization
 
         # Also check for new entities that didn't exist before
@@ -695,6 +702,7 @@ class MultiAgentOrchestrator:
             and not new_entities
             and not mindroom_user_changed
             and not matrix_room_access_changed
+            and not matrix_space_changed
             and not authorization_changed
         ):
             await self._sync_runtime_support_services(new_config, start_watcher=self.running)
@@ -736,6 +744,9 @@ class MultiAgentOrchestrator:
 
         if bots_to_setup or mindroom_user_changed or matrix_room_access_changed or authorization_changed:
             await self._setup_rooms_and_memberships(bots_to_setup)
+        elif matrix_space_changed:
+            room_ids = await self._ensure_rooms_exist()
+            await self._ensure_root_space(room_ids)
 
         for entity_name in start_results.retryable_entities:
             await self._schedule_bot_start_retry(entity_name)
@@ -784,7 +795,8 @@ class MultiAgentOrchestrator:
 
         """
         # Ensure all configured rooms exist (router creates them if needed)
-        await self._ensure_rooms_exist()
+        room_ids = await self._ensure_rooms_exist()
+        await self._ensure_root_space(room_ids)
 
         # After rooms exist, update each bot's room list to use room IDs instead of aliases
         config = self._require_config()
@@ -808,7 +820,8 @@ class MultiAgentOrchestrator:
         # Rerun room reconciliation after the router's first join pass so topic
         # and access policy updates apply once the router can manage the room.
         if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
-            await self._ensure_rooms_exist()
+            room_ids = await self._ensure_rooms_exist()
+            await self._ensure_root_space(room_ids)
 
         # Existing invite-only rooms may only become joinable for others after the
         # router joins them in the first pass, so retry invitations once more.
@@ -821,24 +834,59 @@ class MultiAgentOrchestrator:
 
         logger.info("All agents have joined their configured rooms")
 
-    async def _ensure_rooms_exist(self) -> None:
+    async def _ensure_rooms_exist(self) -> dict[str, str]:
         """Ensure all configured rooms exist, creating them if necessary.
 
         This uses the router bot's client to create rooms since it has the necessary permissions.
         """
         if ROUTER_AGENT_NAME not in self.agent_bots:
             logger.warning("Router not available, cannot ensure rooms exist")
-            return
+            return {}
 
         router_bot = self.agent_bots[ROUTER_AGENT_NAME]
         if router_bot.client is None:
             logger.warning("Router client not available, cannot ensure rooms exist")
-            return
+            return {}
 
         # Directly create rooms using the router's client
         config = self._require_config()
         room_ids = await ensure_all_rooms_exist(router_bot.client, config)
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
+        return room_ids
+
+    async def _ensure_root_space(self, room_ids: dict[str, str] | None = None) -> None:
+        """Ensure the optional root Matrix Space exists and link the current managed rooms."""
+        if ROUTER_AGENT_NAME not in self.agent_bots:
+            logger.warning("Router not available, cannot ensure root space")
+            return
+
+        router_bot = self.agent_bots[ROUTER_AGENT_NAME]
+        if router_bot.client is None:
+            logger.warning("Router client not available, cannot ensure root space")
+            return
+
+        config = self._require_config()
+        if not config.matrix_space.enabled:
+            return
+
+        normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
+        root_space_id = await ensure_root_space(router_bot.client, config, normalized_room_ids)
+        if root_space_id is None or config.mindroom_user is None:
+            return
+
+        user_id = config.get_mindroom_user_id()
+        if user_id is None:
+            return
+
+        current_members = await get_room_members(router_bot.client, root_space_id)
+        if user_id in current_members:
+            return
+
+        success = await invite_to_room(router_bot.client, root_space_id, user_id)
+        if success:
+            logger.info(f"Invited internal user {user_id} to root space {root_space_id}")
+        else:
+            logger.warning(f"Failed to invite internal user {user_id} to root space {root_space_id}")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.

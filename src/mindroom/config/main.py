@@ -14,13 +14,17 @@ from pydantic import BaseModel, Field, model_validator
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
-from mindroom.config.matrix import MatrixRoomAccessConfig, MindRoomUserConfig
+from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import agent_username_localpart
+from mindroom.matrix.identity import (
+    agent_username_localpart,
+    managed_room_alias_localpart,
+    managed_space_alias_localpart,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -143,6 +147,10 @@ class Config(BaseModel):
     matrix_room_access: MatrixRoomAccessConfig = Field(
         default_factory=MatrixRoomAccessConfig,
         description="Managed Matrix room access/discoverability behavior",
+    )
+    matrix_space: MatrixSpaceConfig = Field(
+        default_factory=MatrixSpaceConfig,
+        description="Optional root Matrix Space for grouping managed rooms",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -279,6 +287,27 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def validate_root_space_alias_does_not_collide_with_managed_rooms(self) -> Config:
+        """Ensure no managed room key maps to the reserved root Space alias."""
+        if not self.matrix_space.enabled:
+            return self
+        reserved_alias_localpart = managed_space_alias_localpart()
+        colliding_rooms = sorted(
+            room_key
+            for room_key in self.get_all_configured_rooms()
+            if not room_key.startswith(("!", "#"))
+            and managed_room_alias_localpart(room_key) == reserved_alias_localpart
+        )
+        if colliding_rooms:
+            formatted = ", ".join(colliding_rooms)
+            msg = (
+                "Managed room keys conflict with the reserved root Space alias "
+                f"'{reserved_alias_localpart}': {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
     @cached_property
     def domain(self) -> str:
         """Extract the domain from the MATRIX_HOMESERVER."""
@@ -343,6 +372,8 @@ class Config(BaseModel):
             data["knowledge_bases"] = {}
         if data.get("matrix_room_access") is None:
             data["matrix_room_access"] = {}
+        if data.get("matrix_space") is None:
+            data["matrix_space"] = {}
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")
