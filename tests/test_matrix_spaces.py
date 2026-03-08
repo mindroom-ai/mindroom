@@ -303,13 +303,17 @@ async def test_ensure_root_space_returns_none_when_child_link_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_ensure_root_space_invites_internal_user(tmp_path) -> None:  # noqa: ANN001
-    """The orchestrator should invite the internal user to the root Space when configured."""
+async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_users(tmp_path) -> None:  # noqa: ANN001
+    """The orchestrator should invite both the internal user and authorized users to the root Space."""
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
     orchestrator.config = Config(
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        authorization={
+            "global_users": ["@owner:example.com"],
+            "room_permissions": {"lobby": ["@collaborator:example.com"]},
+        },
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -327,10 +331,37 @@ async def test_orchestrator_ensure_root_space_invites_internal_user(tmp_path) ->
         orchestrator.config,
         {"lobby": "!lobby:localhost"},
     )
+    # Should have invited both the internal user and the authorized owner
+    invited_user_ids = {c.args[2] for c in mock_invite.await_args_list}
+    assert orchestrator.config.get_mindroom_user_id() in invited_user_ids
+    assert "@owner:example.com" in invited_user_ids
+    assert "@collaborator:example.com" not in invited_user_ids
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_ensure_root_space_invites_authorized_user_without_internal_user(tmp_path) -> None:  # noqa: ANN001
+    """The root Space should still invite the owner when no internal user exists."""
+    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator.config = Config(
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True},
+        authorization={"global_users": ["@owner:example.com"]},
+    )
+    router_bot = MagicMock()
+    router_bot.client = AsyncMock()
+    orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
+
+    with (
+        patch("mindroom.orchestrator.ensure_root_space", new=AsyncMock(return_value="!space:localhost")),
+        patch("mindroom.orchestrator.get_room_members", new=AsyncMock(return_value={"@mindroom_router:localhost"})),
+        patch("mindroom.orchestrator.invite_to_room", new=AsyncMock(return_value=True)) as mock_invite,
+    ):
+        await orchestrator._ensure_root_space({"lobby": "!lobby:localhost"})
+
     mock_invite.assert_awaited_once_with(
         router_bot.client,
         "!space:localhost",
-        orchestrator.config.get_mindroom_user_id(),
+        "@owner:example.com",
     )
 
 

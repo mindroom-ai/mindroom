@@ -871,22 +871,22 @@ class MultiAgentOrchestrator:
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
         root_space_id = await ensure_root_space(router_bot.client, config, normalized_room_ids)
-        if root_space_id is None or config.mindroom_user is None:
+        if root_space_id is None:
             return
 
-        user_id = config.get_mindroom_user_id()
-        if user_id is None:
+        invite_user_ids = _get_root_space_user_ids_to_invite(config)
+        if not invite_user_ids:
             return
 
         current_members = await get_room_members(router_bot.client, root_space_id)
-        if user_id in current_members:
-            return
-
-        success = await invite_to_room(router_bot.client, root_space_id, user_id)
-        if success:
-            logger.info(f"Invited internal user {user_id} to root space {root_space_id}")
-        else:
-            logger.warning(f"Failed to invite internal user {user_id} to root space {root_space_id}")
+        for user_id in sorted(invite_user_ids):
+            if user_id in current_members:
+                continue
+            success = await invite_to_room(router_bot.client, root_space_id, user_id)
+            if success:
+                logger.info(f"Invited user {user_id} to root space {root_space_id}")
+            else:
+                logger.warning(f"Failed to invite user {user_id} to root space {root_space_id}")
 
     async def _ensure_room_invitations(self) -> None:  # noqa: C901, PLR0912
         """Ensure all agents and the user are invited to their configured rooms.
@@ -994,20 +994,36 @@ def _is_concrete_matrix_user_id(user_id: str) -> bool:
     )
 
 
+def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str) -> set[str]:
+    """Return inviteable Matrix user IDs and log skipped wildcard or placeholder entries."""
+    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
+    skipped = sorted(user_ids - concrete_user_ids)
+    if skipped:
+        logger.warning(warning_message, user_ids=skipped)
+    return concrete_user_ids
+
+
 def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
     """Collect Matrix users from authorization config that can be invited."""
     user_ids = set(config.authorization.global_users)
     for room_users in config.authorization.room_permissions.values():
         user_ids.update(room_users)
+    return _filter_concrete_matrix_user_ids(
+        user_ids,
+        warning_message="Skipping non-concrete authorization user IDs for invites",
+    )
 
-    concrete_user_ids = {user_id for user_id in user_ids if _is_concrete_matrix_user_id(user_id)}
-    skipped = sorted(user_ids - concrete_user_ids)
-    if skipped:
-        logger.warning(
-            "Skipping non-concrete authorization user IDs for invites",
-            user_ids=skipped,
-        )
-    return concrete_user_ids
+
+def _get_root_space_user_ids_to_invite(config: Config) -> set[str]:
+    """Collect Matrix users that should be invited to the private root Space."""
+    user_ids = _filter_concrete_matrix_user_ids(
+        set(config.authorization.global_users),
+        warning_message="Skipping non-concrete global user IDs for root space invites",
+    )
+    internal_user_id = config.get_mindroom_user_id()
+    if internal_user_id is not None:
+        user_ids.add(internal_user_id)
+    return user_ids
 
 
 def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
