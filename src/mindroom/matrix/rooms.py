@@ -387,6 +387,14 @@ async def _ensure_root_space_exists(
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
         space_room_id = str(response.room_id)
+        joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
+        if not joined_space and not await join_room(client, space_room_id):
+            logger.warning(
+                "Resolved existing root space but router could not join it; skipping reconciliation",
+                space_room_id=space_room_id,
+                space_alias=full_alias,
+            )
+            return None
         if state.space_room_id != space_room_id:
             state.set_space_room_id(space_room_id)
             state.save()

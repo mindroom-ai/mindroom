@@ -12,6 +12,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
+from mindroom.matrix.identity import managed_space_alias_localpart, mindroom_namespace
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import MultiAgentOrchestrator
 
@@ -53,6 +54,23 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
 
     assert state.space_room_id is None
     assert state.rooms["lobby"].room_id == "!lobby:example.com"
+
+
+def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
+    """Managed room keys must not map to the reserved root Space alias."""
+    reserved_alias = managed_space_alias_localpart()
+    namespace = mindroom_namespace()
+    colliding_room_key = (
+        reserved_alias.removesuffix(f"_{namespace}")
+        if namespace and reserved_alias.endswith(f"_{namespace}")
+        else reserved_alias
+    )
+
+    with pytest.raises(ValueError, match="reserved root Space alias"):
+        Config(
+            agents={"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+            matrix_space={"enabled": True},
+        )
 
 
 @pytest.mark.asyncio
@@ -152,7 +170,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
     client.homeserver = "http://localhost:8008"
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
-        room_alias="#mindroom_space:localhost",
+        room_alias="#_mindroom_root_space:localhost",
         room_id="!space:localhost",
         servers=["localhost"],
     )
@@ -166,6 +184,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
         patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
+        patch("mindroom.matrix.rooms.join_room", new=AsyncMock(return_value=True)) as mock_join,
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
@@ -175,9 +194,47 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
     assert space_id == "!space:localhost"
     assert state.space_room_id == "!space:localhost"
     mock_save.assert_called_once_with(state)
+    mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace")
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
+
+
+@pytest.mark.asyncio
+async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() -> None:
+    """A private existing root Space should not be reused if the router cannot join it."""
+    client = AsyncMock()
+    client.homeserver = "http://localhost:8008"
+    client.rooms = {}
+    client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
+        room_alias="#_mindroom_root_space:localhost",
+        room_id="!space:localhost",
+        servers=["localhost"],
+    )
+    state = MatrixState()
+    config = Config(
+        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+        matrix_space={"enabled": True, "name": "Workspace"},
+    )
+
+    with (
+        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
+        patch.object(MatrixState, "save", autospec=True) as mock_save,
+        patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
+        patch("mindroom.matrix.rooms.join_room", new=AsyncMock(return_value=False)) as mock_join,
+        patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
+        patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
+        patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+    ):
+        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+
+    assert space_id is None
+    assert state.space_room_id is None
+    mock_save.assert_not_called()
+    mock_join.assert_awaited_once_with(client, "!space:localhost")
+    mock_create.assert_not_awaited()
+    mock_name.assert_not_awaited()
+    mock_add.assert_not_awaited()
 
 
 @pytest.mark.asyncio

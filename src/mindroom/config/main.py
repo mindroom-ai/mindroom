@@ -20,7 +20,11 @@ from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
-from mindroom.matrix.identity import agent_username_localpart
+from mindroom.matrix.identity import (
+    agent_username_localpart,
+    managed_room_alias_localpart,
+    managed_space_alias_localpart,
+)
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -280,6 +284,25 @@ class Config(BaseModel):
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
             msg = f"mindroom_user.username '{self.mindroom_user.username}' conflicts with {conflict} Matrix localpart"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_root_space_alias_does_not_collide_with_managed_rooms(self) -> Config:
+        """Ensure no managed room key maps to the reserved root Space alias."""
+        reserved_alias_localpart = managed_space_alias_localpart()
+        colliding_rooms = sorted(
+            room_key
+            for room_key in self.get_all_configured_rooms()
+            if not room_key.startswith(("!", "#"))
+            and managed_room_alias_localpart(room_key) == reserved_alias_localpart
+        )
+        if colliding_rooms:
+            formatted = ", ".join(colliding_rooms)
+            msg = (
+                "Managed room keys conflict with the reserved root Space alias "
+                f"'{reserved_alias_localpart}': {formatted}"
+            )
             raise ValueError(msg)
         return self
 
