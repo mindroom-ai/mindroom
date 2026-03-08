@@ -35,6 +35,7 @@ class MatrixState(BaseModel):
 
     accounts: dict[str, _MatrixAccount] = Field(default_factory=dict)
     rooms: dict[str, MatrixRoom] = Field(default_factory=dict)
+    space_room_id: str | None = None
 
     @classmethod
     def load(cls) -> Self:
@@ -75,3 +76,7 @@ class MatrixState(BaseModel):
     def get_room_aliases(self) -> dict[str, str]:
         """Get mapping of room aliases to room IDs."""
         return {key: room.room_id for key, room in self.rooms.items()}
+
+    def set_space_room_id(self, room_id: str | None) -> None:
+        """Persist the root Matrix Space room ID."""
+        self.space_room_id = room_id

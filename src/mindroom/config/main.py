@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
-from mindroom.config.matrix import MatrixRoomAccessConfig, MindRoomUserConfig
+from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
@@ -143,6 +143,10 @@ class Config(BaseModel):
     matrix_room_access: MatrixRoomAccessConfig = Field(
         default_factory=MatrixRoomAccessConfig,
         description="Managed Matrix room access/discoverability behavior",
+    )
+    matrix_space: MatrixSpaceConfig = Field(
+        default_factory=MatrixSpaceConfig,
+        description="Optional root Matrix Space for grouping managed rooms",
     )
     authorization: AuthorizationConfig = Field(
         default_factory=AuthorizationConfig,
@@ -343,6 +347,8 @@ class Config(BaseModel):
             data["knowledge_bases"] = {}
         if data.get("matrix_room_access") is None:
             data["matrix_room_access"] = {}
+        if data.get("matrix_space") is None:
+            data["matrix_space"] = {}
 
         config = cls(**data)
         logger.info(f"Loaded agent configuration from {path}")
