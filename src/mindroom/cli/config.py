@@ -614,6 +614,10 @@ matrix_room_access:
   invite_only_rooms: []
   reconcile_existing_rooms: false
 
+matrix_space:
+  enabled: false
+  name: MindRoom
+
 knowledge_bases:
   mind_memory:
     path: ./mind_data/memory
@@ -719,6 +723,10 @@ router:
 mindroom_user:
   username: mindroom_user
   display_name: MindRoomUser
+
+matrix_space:
+  enabled: false
+  name: MindRoom
 
 authorization:
   default_room_access: false

@@ -241,6 +241,32 @@ async def create_room(
     return None
 
 
+async def create_space(
+    client: nio.AsyncClient,
+    name: str,
+    alias: str | None = None,
+    topic: str | None = None,
+) -> str | None:
+    """Create a private Matrix Space."""
+    room_config: dict[str, Any] = {
+        "name": name,
+        "space": True,
+        "preset": nio.RoomPreset.private_chat,
+    }
+    if alias:
+        room_config["alias"] = alias
+    if topic:
+        room_config["topic"] = topic
+
+    response = await client.room_create(**room_config)
+    if isinstance(response, nio.RoomCreateResponse):
+        logger.info(f"Created space: {name} ({response.room_id})")
+        return str(response.room_id)
+
+    logger.error(f"Failed to create space {name}: {response}")
+    return None
+
+
 def _describe_matrix_response_error(response: object) -> str:
     """Convert a Matrix response object into a concise error string."""
     if isinstance(response, nio.ErrorResponse):
@@ -389,6 +415,73 @@ async def ensure_room_directory_visibility(
         logger.debug("Room directory visibility already configured", room_id=room_id, visibility=target_visibility)
         return True
     return await _set_room_directory_visibility(client, room_id, target_visibility)
+
+
+async def ensure_room_name(
+    client: nio.AsyncClient,
+    room_id: str,
+    name: str,
+) -> bool:
+    """Ensure a room or Space has the desired display name."""
+    current_response = await client.room_get_state_event(room_id, "m.room.name")
+    if isinstance(current_response, nio.RoomGetStateEventResponse) and current_response.content.get("name") == name:
+        logger.debug("Room name already configured", room_id=room_id, name=name)
+        return True
+
+    response = await client.room_put_state(
+        room_id=room_id,
+        event_type="m.room.name",
+        content={"name": name},
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info("Updated room name", room_id=room_id, name=name)
+        return True
+
+    logger.error(
+        "Failed to update room name",
+        room_id=room_id,
+        name=name,
+        error=_describe_matrix_response_error(response),
+    )
+    return False
+
+
+async def add_room_to_space(
+    client: nio.AsyncClient,
+    space_id: str,
+    room_id: str,
+    via_server_name: str,
+    *,
+    suggested: bool = True,
+) -> bool:
+    """Ensure a room is linked as a child of a root Space."""
+    desired_content = {
+        "via": [via_server_name],
+        "suggested": suggested,
+    }
+
+    current_response = await client.room_get_state_event(space_id, "m.space.child", room_id)
+    if isinstance(current_response, nio.RoomGetStateEventResponse) and current_response.content == desired_content:
+        logger.debug("Room already linked under root space", space_id=space_id, room_id=room_id)
+        return True
+
+    response = await client.room_put_state(
+        room_id=space_id,
+        event_type="m.space.child",
+        content=desired_content,
+        state_key=room_id,
+    )
+    if isinstance(response, nio.RoomPutStateResponse):
+        logger.info("Linked room under root space", space_id=space_id, room_id=room_id)
+        return True
+
+    logger.error(
+        "Failed to link room under root space",
+        space_id=space_id,
+        room_id=room_id,
+        error=_describe_matrix_response_error(response),
+    )
+    return False
 
 
 async def _create_dm_room(

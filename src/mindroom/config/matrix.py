@@ -56,6 +56,29 @@ class MindRoomUserConfig(BaseModel):
         return normalized
 
 
+class MatrixSpaceConfig(BaseModel):
+    """Configuration for the optional root Matrix Space."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to create and maintain a root Matrix Space for managed MindRoom rooms",
+    )
+    name: str = Field(
+        default="MindRoom",
+        description="Display name for the root Matrix Space when enabled",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        """Validate and normalize the root Space display name."""
+        normalized = name.strip()
+        if not normalized:
+            msg = "matrix_space.name cannot be empty"
+            raise ValueError(msg)
+        return normalized
+
+
 class MatrixRoomAccessConfig(BaseModel):
     """Configuration for managed Matrix room access and discoverability."""
 

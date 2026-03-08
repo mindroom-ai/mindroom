@@ -50,6 +50,7 @@ class TestConfigInit:
         assert "agents:" in content
         assert "models:" in content
         assert "authorization:" in content
+        assert "matrix_space:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
@@ -135,6 +136,7 @@ class TestConfigInit:
         assert "agents:" in content
         assert "# MindRoom Configuration (minimal)" in content
         assert "authorization:" in content
+        assert "matrix_space:" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
     def test_init_profile_minimal(self, tmp_path: Path) -> None:
