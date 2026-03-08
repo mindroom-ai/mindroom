@@ -17,6 +17,8 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD
 
@@ -180,6 +182,47 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
     # Verify the bot left room2 (unconfigured) but not room1 (configured)
     assert len(left_rooms) == 1
     assert "!room2:localhost" in left_rooms
+
+
+@pytest.mark.asyncio
+async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The router should not leave the managed root Space during room cleanup."""
+    agent_user = AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id="@mindroom_router:localhost",
+        display_name="Router",
+        password=TEST_PASSWORD,
+    )
+    config = Config(router=RouterConfig(model="default"))
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        rooms=["!room1:localhost"],
+    )
+
+    mock_client = AsyncMock()
+    bot.client = mock_client
+
+    left_room_ids: list[str] = []
+
+    async def mock_leave_non_dm_rooms(_client: AsyncMock, room_ids: list[str]) -> None:
+        left_room_ids.extend(room_ids)
+
+    monkeypatch.setattr(
+        "mindroom.bot.get_joined_rooms",
+        AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!room2:localhost"]),
+    )
+    monkeypatch.setattr("mindroom.bot.leave_non_dm_rooms", mock_leave_non_dm_rooms)
+    monkeypatch.setattr("mindroom.bot.MatrixState.load", lambda: MatrixState(space_room_id="!space:localhost"))
+
+    await bot.leave_unconfigured_rooms()
+
+    assert set(left_room_ids) == {"!room2:localhost"}
+    assert "!space:localhost" not in left_room_ids
 
 
 @pytest.mark.asyncio

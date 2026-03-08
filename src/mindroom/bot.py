@@ -33,6 +33,7 @@ from mindroom.matrix.rooms import (
     leave_non_dm_rooms,
     resolve_room_aliases,
 )
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.typing import typing_indicator
 from mindroom.matrix.users import (
     AgentMatrixUser,
@@ -490,6 +491,12 @@ class AgentBot:
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.rooms)
+        if self.agent_name == ROUTER_AGENT_NAME:
+            # The router is the long-lived manager of the root Space even though it is
+            # not part of the normal configured room list for conversational routing.
+            root_space_id = MatrixState.load().space_room_id
+            if root_space_id is not None:
+                configured_rooms.add(root_space_id)
 
         # Leave rooms we're no longer configured for (preserving DM rooms)
         await leave_non_dm_rooms(self.client, list(current_rooms - configured_rooms))
