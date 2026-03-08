@@ -60,7 +60,7 @@ class MatrixSpaceConfig(BaseModel):
     """Configuration for the optional root Matrix Space."""
 
     enabled: bool = Field(
-        default=False,
+        default=True,
         description="Whether to create and maintain a root Matrix Space for managed MindRoom rooms",
     )
     name: str = Field(

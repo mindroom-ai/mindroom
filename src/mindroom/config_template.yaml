@@ -42,7 +42,7 @@ matrix_room_access:
 
 # Optional root Matrix Space for grouping managed rooms in clients that support Spaces.
 matrix_space:
-  enabled: false
+  enabled: true
   name: MindRoom
 
 # Authorization defaults (recommended for public deployments)

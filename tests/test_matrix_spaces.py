@@ -17,10 +17,10 @@ from mindroom.orchestrator import MultiAgentOrchestrator
 
 
 def test_matrix_space_defaults() -> None:
-    """Matrix Space config should default to disabled with the standard name."""
+    """Matrix Space config should default to enabled with the standard name."""
     config = Config()
 
-    assert config.matrix_space.enabled is False
+    assert config.matrix_space.enabled is True
     assert config.matrix_space.name == "MindRoom"
 
 
@@ -31,7 +31,7 @@ def test_matrix_space_yaml_null_uses_defaults(tmp_path) -> None:  # noqa: ANN001
 
     config = Config.from_yaml(config_path)
 
-    assert config.matrix_space.enabled is False
+    assert config.matrix_space.enabled is True
     assert config.matrix_space.name == "MindRoom"
 
 
@@ -43,7 +43,7 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
             {
                 "accounts": {"bot": {"username": "mindroom_bot", "password": "secret"}},
                 "rooms": {"lobby": {"room_id": "!lobby:example.com", "alias": "#lobby:example.com", "name": "Lobby"}},
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -283,7 +283,11 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         patch.object(Config, "from_yaml", return_value=updated_config),
         patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
-        patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(return_value={"lobby": "!room1:localhost"})) as mock_rooms,
+        patch.object(
+            orchestrator,
+            "_ensure_rooms_exist",
+            new=AsyncMock(return_value={"lobby": "!room1:localhost"}),
+        ) as mock_rooms,
         patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()) as mock_root_space,
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
     ):

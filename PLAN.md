@@ -6,7 +6,7 @@ Keep the existing room-centric authorization, routing, and membership behavior u
 
 ## Product Decision
 The Space is a workspace shell for client navigation and discovery, not a source of truth for permissions, routing, or bot membership.
-Version 1 is opt-in and disabled by default.
+Version 1 is opt-out and enabled by default.
 Version 1 includes only room IDs returned by managed room reconciliation.
 Version 1 excludes DMs, temporary rooms, unconfigured external rooms, and nested spaces.
 Version 1 does not automatically prune stale child links for rooms that were previously managed.
@@ -36,7 +36,7 @@ Keep the config intentionally small because this feature manages exactly one roo
 
 ```yaml
 matrix_space:
-  enabled: false
+  enabled: true
   name: MindRoom
 ```
 
@@ -46,7 +46,7 @@ The alias localpart is derived automatically from a reserved internal helper.
 The topic is fixed in code for version 1.
 
 ## Validation Rules
-The default should be disabled so current installs behave exactly as they do today.
+The default should be enabled so existing installs create the workspace shell unless they explicitly disable it.
 Do not require `mindroom_user` when the feature is enabled.
 If `mindroom_user` is absent, the Space is still created and simply skips the internal-user invite step.
 
@@ -85,7 +85,7 @@ Keep the root Space private even when managed rooms are public because the featu
 ## UI And Template Changes
 Add the new config block to `src/mindroom/config_template.yaml`.
 Add the new config block to the generated template output in `src/mindroom/cli/config.py`.
-Keep the default disabled in templates.
+Keep the default enabled in templates.
 Do not make any frontend changes in the first pass because clients like Element or Cinny already render Spaces natively.
 
 ## Tests
@@ -108,6 +108,7 @@ Existing installs may already have manually created Spaces, so reconciliation sh
 Stale room links are possible if managed rooms are removed from config, so version 1 should document that links are additive and non-destructive.
 
 ## Acceptance Criteria
+Existing configs that omit `matrix_space` create or reconcile the root Space by default.
 When `matrix_space.enabled` is `false`, startup and reload behavior remain unchanged.
 When `matrix_space.enabled` is `true`, MindRoom creates or resolves one private root Space and stores its room ID in `MatrixState`.
 If `mindroom_user` is configured, it is invited to the root Space.

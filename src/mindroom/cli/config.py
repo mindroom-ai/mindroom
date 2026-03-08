@@ -615,7 +615,7 @@ matrix_room_access:
   reconcile_existing_rooms: false
 
 matrix_space:
-  enabled: false
+  enabled: true
   name: MindRoom
 
 knowledge_bases:
@@ -725,7 +725,7 @@ mindroom_user:
   display_name: MindRoomUser
 
 matrix_space:
-  enabled: false
+  enabled: true
   name: MindRoom
 
 authorization:
