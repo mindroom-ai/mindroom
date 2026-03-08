@@ -37,6 +37,47 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
+_ROOT_SPACE_AVATAR_KEY = "root_space"
+_AVATARS_DIR = Path(__file__).resolve().parents[3] / "avatars"
+
+
+def _managed_avatar_path(category: str, avatar_name: str) -> Path:
+    """Return the bundled avatar path for a managed room-like entity."""
+    return _AVATARS_DIR / category / f"{avatar_name}.png"
+
+
+async def _set_room_avatar_if_available(
+    client: nio.AsyncClient,
+    room_id: str,
+    *,
+    avatar_category: str,
+    avatar_name: str,
+    context: str,
+) -> None:
+    """Set a room avatar when a bundled asset exists.
+
+    Avatar reconciliation is cosmetic, so failures are logged but do not abort
+    room or Space creation.
+    """
+    avatar_path = _managed_avatar_path(avatar_category, avatar_name)
+    if not avatar_path.exists():
+        return
+
+    if await check_and_set_avatar(client, avatar_path, room_id=room_id):
+        logger.info(
+            "Set avatar for managed Matrix room",
+            room_id=room_id,
+            avatar_path=str(avatar_path),
+            context=context,
+        )
+        return
+
+    logger.warning(
+        "Failed to set avatar for managed Matrix room",
+        room_id=room_id,
+        avatar_path=str(avatar_path),
+        context=context,
+    )
 
 
 async def _configure_managed_room_access(
@@ -303,14 +344,13 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 directory_visibility="private",
             )
 
-        # Set room avatar if available (for newly created rooms)
-        # Note: Avatars can also be updated later using scripts/generate_avatars.py
-        avatar_path = Path(__file__).parent.parent.parent.parent / "avatars" / "rooms" / f"{room_key}.png"
-        if avatar_path.exists():
-            if await check_and_set_avatar(client, avatar_path, room_id=created_room_id):
-                logger.info(f"Set avatar for newly created room {room_key}")
-            else:
-                logger.warning(f"Failed to set avatar for room {room_key}")
+        await _set_room_avatar_if_available(
+            client,
+            created_room_id,
+            avatar_category="rooms",
+            avatar_name=room_key,
+            context=f"managed_room:{room_key}",
+        )
 
         return created_room_id
     logger.error(f"Failed to create room {room_key}")
@@ -440,6 +480,14 @@ async def ensure_root_space(
                 room_id=room_id,
             )
             return None
+
+    await _set_room_avatar_if_available(
+        client,
+        root_space_id,
+        avatar_category="spaces",
+        avatar_name=_ROOT_SPACE_AVATAR_KEY,
+        context="root_space",
+    )
 
     return root_space_id
 

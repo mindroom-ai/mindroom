@@ -162,6 +162,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state() 
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock(return_value="!space:localhost")) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(
             client,
@@ -178,6 +179,13 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state() 
         call(client, "!space:localhost", "!lobby:localhost", "localhost"),
         call(client, "!space:localhost", "!dev:localhost", "localhost"),
     ]
+    mock_avatar.assert_awaited_once_with(
+        client,
+        "!space:localhost",
+        avatar_category="spaces",
+        avatar_name="root_space",
+        context="root_space",
+    )
 
 
 @pytest.mark.asyncio
@@ -205,6 +213,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
 
@@ -215,6 +224,13 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace")
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
+    mock_avatar.assert_awaited_once_with(
+        client,
+        "!space:localhost",
+        avatar_category="spaces",
+        avatar_name="root_space",
+        context="root_space",
+    )
 
 
 @pytest.mark.asyncio
@@ -242,6 +258,7 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() 
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock()) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
 
@@ -252,6 +269,7 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() 
     mock_create.assert_not_awaited()
     mock_name.assert_not_awaited()
     mock_add.assert_not_awaited()
+    mock_avatar.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -271,11 +289,13 @@ async def test_ensure_root_space_returns_none_when_name_write_fails() -> None:
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=False)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
 
     assert space_id is None
     mock_add.assert_not_awaited()
+    mock_avatar.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -295,11 +315,13 @@ async def test_ensure_root_space_returns_none_when_child_link_fails() -> None:
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=False)) as mock_add,
+        patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
         space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
 
     assert space_id is None
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
+    mock_avatar.assert_not_awaited()
 
 
 @pytest.mark.asyncio
