@@ -75,6 +75,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
 
         # Mock client
         client = AsyncMock()
+        client.rooms = {}
         client.user_id = "@mindroom_test:localhost"
         # Mock room_send to return a proper response
         mock_send_response = MagicMock(spec=nio.RoomSendResponse)
@@ -157,6 +158,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
 
         # Mock client and make sure room_send returns a proper response
         client = AsyncMock()
+        client.rooms = {}
         client.user_id = "@mindroom_test:localhost"
 
         # Mock a successful send response with event_id
@@ -253,6 +255,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
 
         # Mock client
         client = AsyncMock()
+        client.rooms = {}
         client.user_id = "@mindroom_test:localhost"
         # Mock room_send to return a proper response
         mock_send_response = MagicMock(spec=nio.RoomSendResponse)

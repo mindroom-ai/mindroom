@@ -32,6 +32,7 @@ def setup_test_bot(
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()
+    bot.client.rooms = {}
 
     # Mock orchestrator
     mock_orchestrator = MagicMock()

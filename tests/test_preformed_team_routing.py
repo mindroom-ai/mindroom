@@ -81,6 +81,7 @@ async def test_router_does_not_route_when_preformed_team_is_mentioned(config_wit
     )
     router = AgentBot(router_user, tmp_path, config_with_team)
     router.client = AsyncMock()
+    router.client.rooms = {}
 
     # Room has router + team + two agents and the human user
     team_user_id = config_with_team.ids["t1"].full_id
@@ -127,6 +128,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         enable_streaming=False,
     )
     bot.client = AsyncMock()
+    bot.client.rooms = {}
 
     # Minimal orchestrator stub is fine because we patch team_response
     bot.orchestrator = MagicMock()
@@ -187,8 +189,9 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         enable_streaming=False,
     )
     bot.client = AsyncMock()
+    bot.client.rooms = {}
     bot.orchestrator = MagicMock()
-    bot._generate_team_response_helper = AsyncMock()
+    bot._generate_team_response_helper = AsyncMock(return_value=None)
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
@@ -250,6 +253,7 @@ async def test_preformed_team_reply_chain_uses_existing_thread_root(config_with_
         enable_streaming=False,
     )
     bot.client = AsyncMock()
+    bot.client.rooms = {}
     bot.orchestrator = MagicMock()
 
     team_user_id = config_with_team.ids["t1"].full_id

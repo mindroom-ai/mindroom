@@ -35,6 +35,8 @@ def mock_agent_bot() -> AgentBot:
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
+    bot.client.rooms = {}
+    bot.client.add_event_callback = MagicMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()
     return bot
@@ -287,6 +289,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.restore_scheduled_tasks", new_callable=AsyncMock) as mock_restore,
             ):
                 mock_client = AsyncMock()
+                mock_client.rooms = {}
+                mock_client.add_event_callback = MagicMock()
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse
@@ -326,6 +330,8 @@ class TestBotTaskRestoration:
                 patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
+                mock_client.rooms = {}
+                mock_client.add_event_callback = MagicMock()
                 mock_login.return_value = mock_client
 
                 # Mock the client.join method to return JoinResponse

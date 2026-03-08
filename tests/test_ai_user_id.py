@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,6 +31,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+@asynccontextmanager
+async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
+    yield
+
+
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
@@ -47,6 +53,10 @@ class TestUserIdPassthrough:
         bot.config = config
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
+        bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
+        bot._agent_has_matrix_messaging_tool = MagicMock(return_value=False)
+        bot.typing_indicator = _noop_typing_indicator
+        bot.show_tool_calls = False
         bot._build_tool_runtime_context = MagicMock(
             return_value=ToolRuntimeContext(
                 agent_name="general",
@@ -62,30 +72,28 @@ class TestUserIdPassthrough:
 
         process_method = AgentBot._process_and_respond
 
-        with patch("mindroom.bot.ai_response") as mock_ai:
+        async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.room_id == "!test:localhost"
+            assert context.thread_id is None
+            assert context.requester_id == "@alice:localhost"
+            return "Hello!"
 
-            async def fake_ai_response(*_args: object, **_kwargs: object) -> str:
-                context = get_tool_runtime_context()
-                assert context is not None
-                assert context.room_id == "!test:localhost"
-                assert context.thread_id is None
-                assert context.requester_id == "@alice:localhost"
-                return "Hello!"
+        bot.ai_response = AsyncMock(side_effect=fake_ai_response)
 
-            mock_ai.side_effect = fake_ai_response
+        await process_method(
+            bot,
+            room_id="!test:localhost",
+            prompt="Hello",
+            reply_to_event_id="$user_msg",
+            thread_id=None,
+            thread_history=[],
+            user_id="@alice:localhost",
+        )
 
-            await process_method(
-                bot,
-                room_id="!test:localhost",
-                prompt="Hello",
-                reply_to_event_id="$user_msg",
-                thread_id=None,
-                thread_history=[],
-                user_id="@alice:localhost",
-            )
-
-            mock_ai.assert_called_once()
-            assert mock_ai.call_args.kwargs["user_id"] == "@alice:localhost"
+        bot.ai_response.assert_awaited_once()
+        assert bot.ai_response.await_args.kwargs["user_id"] == "@alice:localhost"
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -103,6 +111,10 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
+        bot._append_matrix_prompt_context = MagicMock(side_effect=lambda prompt, **_kwargs: prompt)
+        bot._agent_has_matrix_messaging_tool = MagicMock(return_value=False)
+        bot.typing_indicator = _noop_typing_indicator
+        bot.show_tool_calls = False
         bot._build_tool_runtime_context = MagicMock(
             return_value=ToolRuntimeContext(
                 agent_name="general",
@@ -118,37 +130,33 @@ class TestUserIdPassthrough:
 
         streaming_method = AgentBot._process_and_respond_streaming
 
-        with patch("mindroom.bot.stream_agent_response") as mock_stream:
+        def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+            context = get_tool_runtime_context()
+            assert context is not None
+            assert context.room_id == "!test:localhost"
+            assert context.thread_id is None
+            assert context.requester_id == "@bob:localhost"
 
-            def fake_stream_agent_response(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
-                context = get_tool_runtime_context()
-                assert context is not None
-                assert context.room_id == "!test:localhost"
-                assert context.thread_id is None
-                assert context.requester_id == "@bob:localhost"
+            async def fake_stream() -> AsyncIterator[str]:
+                yield "Hello!"
 
-                async def fake_stream() -> AsyncIterator[str]:
-                    yield "Hello!"
+            return fake_stream()
 
-                return fake_stream()
+        bot.stream_agent_response = MagicMock(side_effect=fake_stream_agent_response)
+        bot.send_streaming_response = AsyncMock(return_value=("$msg_id", "Hello!"))
 
-            mock_stream.side_effect = fake_stream_agent_response
+        await streaming_method(
+            bot,
+            room_id="!test:localhost",
+            prompt="Hello",
+            reply_to_event_id="$user_msg",
+            thread_id=None,
+            thread_history=[],
+            user_id="@bob:localhost",
+        )
 
-            with patch("mindroom.bot.send_streaming_response") as mock_send_streaming:
-                mock_send_streaming.return_value = ("$msg_id", "Hello!")
-
-                await streaming_method(
-                    bot,
-                    room_id="!test:localhost",
-                    prompt="Hello",
-                    reply_to_event_id="$user_msg",
-                    thread_id=None,
-                    thread_history=[],
-                    user_id="@bob:localhost",
-                )
-
-                mock_stream.assert_called_once()
-                assert mock_stream.call_args.kwargs["user_id"] == "@bob:localhost"
+        bot.stream_agent_response.assert_called_once()
+        assert bot.stream_agent_response.call_args.kwargs["user_id"] == "@bob:localhost"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:

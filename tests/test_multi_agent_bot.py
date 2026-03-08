@@ -633,6 +633,7 @@ class TestAgentBot:
             config=config,
         )
         bot.client = AsyncMock()
+        bot.client.rooms = {}
 
         # Mock presence check to return user online when streaming is enabled
         # We need to create a proper mock response that will be returned by get_presence
@@ -744,6 +745,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -792,6 +794,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -842,6 +845,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -883,6 +887,7 @@ class TestAgentBot:
         config = Config.from_yaml()
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -893,7 +898,7 @@ class TestAgentBot:
         attachment_ids = ["att_image", "att_zip"]
         with (
             patch("mindroom.bot.typing_indicator", noop_typing_indicator),
-            patch("mindroom.bot.ai_response", new_callable=AsyncMock, side_effect=fake_ai_response),
+            patch("mindroom.bot.ai_response", new=fake_ai_response),
         ):
             await bot._process_and_respond(
                 room_id="!test:localhost",
@@ -927,6 +932,7 @@ class TestAgentBot:
         config = Config.from_yaml()
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
 
@@ -998,6 +1004,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1042,7 +1049,8 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        def discard_background_task(coro: object, *, _name: str) -> None:
+        def discard_background_task(coro: object, *, name: str | None = None) -> None:
+            _ = name
             close = getattr(coro, "close", None)
             if callable(close):
                 close()
@@ -1064,6 +1072,7 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
 
@@ -1738,6 +1747,7 @@ class TestAgentBot:
 
         bot = AgentBot(agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -1818,6 +1828,7 @@ class TestAgentBot:
 
         bot = AgentBot(agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
+        bot.client.rooms = {}
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -2489,6 +2500,7 @@ class TestAgentBot:
             config=config,
         )
         bot.client = AsyncMock()
+        bot.client.rooms = {}
 
         # Mock orchestrator with agent_bots
         mock_orchestrator = MagicMock()
@@ -3136,7 +3148,7 @@ class TestMultiAgentOrchestrator:
                 request = httpx.Request("GET", url)
                 return httpx.Response(200, json={"versions": ["v1.1"]}, request=request)
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
         await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
 
@@ -3202,7 +3214,7 @@ class TestMultiAgentOrchestrator:
                     raise response
                 return response
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
         await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
 
@@ -3229,9 +3241,9 @@ class TestMultiAgentOrchestrator:
                 request = httpx.Request("GET", url)
                 return httpx.Response(503, text="starting", request=request)
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
-        with pytest.raises(RuntimeError, match="Timed out waiting for Matrix homeserver"):
+        with pytest.raises(TimeoutError, match="Timed out waiting for Matrix homeserver"):
             await _wait_for_matrix_homeserver(timeout_seconds=0.01, retry_interval_seconds=0.001)
 
     @pytest.mark.asyncio
@@ -3250,8 +3262,8 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator, "_configure_knowledge", side_effect=_configure),
-            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
         ):
             await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
             task = orchestrator._knowledge_refresh_task
@@ -3400,8 +3412,8 @@ class TestMultiAgentOrchestrator:
                 raise RuntimeError(msg)
 
         with (
-            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
         ):
             await _run_with_retry(
                 "background retry",
@@ -3438,7 +3450,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestration.config_updates.load_plugins"),
             patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
             patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
@@ -3505,10 +3517,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestration.config_updates.load_plugins"),
             patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
+            patch("mindroom.orchestration.runtime._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -3577,10 +3589,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestration.config_updates.load_plugins"),
             patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
+            patch("mindroom.orchestration.runtime._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),

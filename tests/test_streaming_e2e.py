@@ -109,6 +109,10 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     # Create mock clients for each agent
     helper_client = AsyncMock()
     calc_client = AsyncMock()
+    helper_client.rooms = {}
+    calc_client.rooms = {}
+    helper_client.add_event_callback = MagicMock()
+    calc_client.add_event_callback = MagicMock()
 
     # Configure login to return appropriate clients
     def login_side_effect(_homeserver: str, agent_user: object) -> object:
@@ -120,6 +124,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
                 router_client = AsyncMock()
+                router_client.rooms = {}
+                router_client.add_event_callback = MagicMock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
                 return router_client
@@ -369,6 +375,8 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
     # Mock login
     with patch("mindroom.bot.login_agent_user") as mock_login:
         mock_client = AsyncMock()
+        mock_client.rooms = {}
+        mock_client.add_event_callback = MagicMock()
         mock_login.return_value = mock_client
 
         # Track events

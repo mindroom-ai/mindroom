@@ -109,6 +109,7 @@ class TestStreamingBehavior:
             config=config,
         )
         helper_bot.client = AsyncMock()
+        helper_bot.client.rooms = {}
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -126,6 +127,7 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
+        calc_bot.client.rooms = {}
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -248,6 +250,7 @@ class TestStreamingBehavior:
             config=config,
         )
         calc_bot.client = AsyncMock()
+        calc_bot.client.rooms = {}
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()

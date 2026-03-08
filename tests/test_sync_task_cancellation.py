@@ -48,48 +48,50 @@ async def test_cancel_sync_task_missing_entity() -> None:
 @pytest.mark.asyncio
 async def test_stop_entities_cancels_sync_tasks() -> None:
     """Test that _stop_entities properly cancels sync tasks."""
-    # Use patch to mock _cancel_sync_task since we tested it separately
-    with patch("mindroom.orchestrator._cancel_sync_task") as mock_cancel:
-        mock_cancel.side_effect = lambda name, tasks: tasks.pop(name, None)
 
-        # Create mock bots
-        mock_bot1 = AsyncMock()
-        mock_bot1.stop = AsyncMock()
-        mock_bot2 = AsyncMock()
-        mock_bot2.stop = AsyncMock()
+    async def sync_loop() -> None:
+        await asyncio.sleep(60)
 
-        agent_bots = {
-            "agent1": mock_bot1,
-            "agent2": mock_bot2,
-            "agent3": AsyncMock(),  # Not being stopped
-        }
+    task1 = asyncio.create_task(sync_loop())
+    task2 = asyncio.create_task(sync_loop())
+    task3 = asyncio.create_task(sync_loop())
 
-        sync_tasks = {
-            "agent1": MagicMock(),
-            "agent2": MagicMock(),
-            "agent3": MagicMock(),  # Not being stopped
-        }
+    mock_bot1 = AsyncMock()
+    mock_bot1.stop = AsyncMock()
+    mock_bot2 = AsyncMock()
+    mock_bot2.stop = AsyncMock()
 
-        # Stop agents 1 and 2
-        entities_to_restart = {"agent1", "agent2"}
-        await _stop_entities(entities_to_restart, agent_bots, sync_tasks)
+    agent_bots = {
+        "agent1": mock_bot1,
+        "agent2": mock_bot2,
+        "agent3": AsyncMock(),
+    }
+    sync_tasks = {
+        "agent1": task1,
+        "agent2": task2,
+        "agent3": task3,
+    }
 
-        # Verify cancel was called for the right entities
-        assert mock_cancel.call_count == 2
-        mock_cancel.assert_any_call("agent1", sync_tasks)
-        mock_cancel.assert_any_call("agent2", sync_tasks)
+    entities_to_restart = {"agent1", "agent2"}
+    await _stop_entities(entities_to_restart, agent_bots, sync_tasks)
 
-        # Verify bots were stopped
-        mock_bot1.stop.assert_called_once()
-        mock_bot2.stop.assert_called_once()
+    assert task1.cancelled()
+    assert task2.cancelled()
+    assert not task3.cancelled()
 
-        # Verify entities were removed from agent_bots
-        assert "agent1" not in agent_bots
-        assert "agent2" not in agent_bots
+    mock_bot1.stop.assert_called_once()
+    mock_bot2.stop.assert_called_once()
 
-        # Verify agent3 was not touched
-        assert "agent3" in agent_bots
-        assert "agent3" in sync_tasks
+    assert "agent1" not in agent_bots
+    assert "agent2" not in agent_bots
+    assert "agent3" in agent_bots
+
+    assert "agent1" not in sync_tasks
+    assert "agent2" not in sync_tasks
+    assert "agent3" in sync_tasks
+
+    task3.cancel()
+    await asyncio.gather(task3, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -150,7 +152,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         patch("mindroom.orchestrator._stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator._sync_forever_with_restart"),
-        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestration.runtime._create_temp_user") as mock_create_temp_user,
         patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
@@ -216,7 +218,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator._sync_forever_with_restart"),
         patch("mindroom.orchestrator._stop_entities"),
-        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestration.runtime._create_temp_user") as mock_create_temp_user,
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---

@@ -88,6 +88,7 @@ class TestRoutingIntegration:
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = AsyncMock()
+            bot.client.rooms = {}
 
             # Mock orchestrator
             mock_orchestrator = MagicMock()
