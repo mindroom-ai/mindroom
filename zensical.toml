@@ -63,6 +63,7 @@ nav = [
 
 [project.theme]
 custom_dir = "docs/overrides"
+logo = "assets/logo.png"
 language = "en"
 
 features = [
