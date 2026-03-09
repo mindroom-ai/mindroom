@@ -249,26 +249,61 @@ class TestMatrixRegistration:
         monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", registration_token)
 
         mock_client = AsyncMock()
-        mock_client.register_with_token.return_value = nio.RegisterResponse(
+        mock_client.login.return_value = nio.LoginResponse(
             user_id="@test_user:localhost",
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
         mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, dict[str, object]]] = []
 
-        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
+        class _FakeResponse:
+            is_success = True
+            status_code = 200
+            text = ""
+
+            def json(self) -> dict[str, str]:
+                return {"user_id": "@test_user:localhost"}
+
+        class _FakeAsyncClient:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, url: str, json: dict[str, object]) -> _FakeResponse:
+                captured_requests.append((url, json))
+                return _FakeResponse()
+
+        with (
+            patch("mindroom.matrix.users.httpx.AsyncClient", _FakeAsyncClient),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
-            mock_client.register_with_token.assert_called_once_with(
-                username="test_user",
-                password=test_pass,
-                registration_token=registration_token,
-                device_name="mindroom_agent",
-            )
+            assert captured_requests == [
+                (
+                    "http://localhost:8008/_matrix/client/v3/register",
+                    {
+                        "username": "test_user",
+                        "password": test_pass,
+                        "device_name": "mindroom_agent",
+                        "auth": {
+                            "type": "m.login.registration_token",
+                            "token": registration_token,
+                        },
+                    },
+                ),
+            ]
             mock_client.register.assert_not_called()
+            mock_client.login.assert_called_once_with(test_pass)
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio

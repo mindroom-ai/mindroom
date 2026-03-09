@@ -138,6 +138,86 @@ async def _registration_failure_message(
     return None
 
 
+async def _register_user_with_token(
+    *,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+    registration_token: str,
+) -> str:
+    """Register a user with an explicit UIAA token payload.
+
+    Some homeservers require the registration token inside the `auth` object
+    and reject matrix-nio's helper path unless a UIAA session is present.
+    """
+    register_url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
+    request_payload = {
+        "username": username,
+        "password": password,
+        "device_name": "mindroom_agent",
+        "auth": {
+            "type": "m.login.registration_token",
+            "token": registration_token,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=MATRIX_SSL_VERIFY) as client:
+            response = await client.post(register_url, json=request_payload)
+    except httpx.HTTPError as exc:
+        msg = f"Could not reach Matrix homeserver ({homeserver}) during registration: {exc}"
+        raise matrix_startup_error(msg) from exc
+
+    detail = response.text.strip() or "unknown error"
+    errcode = None
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+
+    if isinstance(body, dict):
+        raw_errcode = body.get("errcode")
+        if isinstance(raw_errcode, str) and raw_errcode:
+            errcode = raw_errcode
+        raw_error = body.get("error")
+        if raw_error is not None:
+            detail = str(raw_error)
+
+    if response.is_success:
+        logger.info(f"✅ Successfully registered user with token: {user_id}")
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=display_name,
+            )
+        return user_id
+
+    if errcode == "M_USER_IN_USE":
+        logger.info(f"User {user_id} already exists")
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=display_name,
+            )
+        return user_id
+
+    if errcode == "M_FORBIDDEN" and "Invalid registration token" in detail:
+        msg = (
+            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+            "Generate/issue a valid token for bot provisioning and try again."
+        )
+        raise matrix_startup_error(msg, permanent=True)
+
+    msg = f"Failed to register user {username}: {errcode or detail}"
+    raise matrix_startup_error(msg, permanent=errcode == "M_INVALID_USERNAME")
+
+
 async def _login_and_sync_display_name(
     *,
     client: nio.AsyncClient,
@@ -227,18 +307,20 @@ async def _register_user(
     async with matrix_client(homeserver, user_id=user_id) as client:
         # Try to register the user
         if registration_token:
-            response = await client.register_with_token(
+            return await _register_user_with_token(
+                homeserver=homeserver,
+                user_id=user_id,
                 username=username,
                 password=password,
+                display_name=display_name,
                 registration_token=registration_token,
-                device_name="mindroom_agent",
             )
-        else:
-            response = await client.register(
-                username=username,
-                password=password,
-                device_name="mindroom_agent",
-            )
+
+        response = await client.register(
+            username=username,
+            password=password,
+            device_name="mindroom_agent",
+        )
 
         if isinstance(response, nio.RegisterResponse):
             logger.info(f"✅ Successfully registered user: {user_id}")
