@@ -33,6 +33,29 @@ if TYPE_CHECKING:
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 
 
+def _recording_httpx_async_client(
+    captured_requests: list[tuple[str, dict[str, object]]],
+    response: httpx.Response,
+) -> type[object]:
+    """Build a minimal AsyncClient replacement that records POST payloads."""
+
+    class _FakeAsyncClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
+            captured_requests.append((url, json))
+            return response
+
+    return _FakeAsyncClient
+
+
 @pytest.fixture(autouse=True)
 def _clear_matrix_registration_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep matrix registration tests deterministic unless explicitly overridden."""
@@ -258,22 +281,14 @@ class TestMatrixRegistration:
         mock_client.set_displayname.return_value = AsyncMock()
         captured_requests: list[tuple[str, dict[str, object]]] = []
 
-        class _FakeAsyncClient:
-            def __init__(self, *_: object, **__: object) -> None:
-                pass
-
-            async def __aenter__(self) -> Self:
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                return None
-
-            async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
-                captured_requests.append((url, json))
-                return httpx.Response(200, json={"user_id": "@test_user:localhost"})
-
         with (
-            patch("mindroom.matrix.users.httpx.AsyncClient", _FakeAsyncClient),
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    captured_requests,
+                    httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                ),
+            ),
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
         ):
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
@@ -319,28 +334,20 @@ class TestMatrixRegistration:
         mock_client.set_displayname.return_value = AsyncMock()
         captured_requests: list[tuple[str, dict[str, object]]] = []
 
-        class _FakeAsyncClient:
-            def __init__(self, *_: object, **__: object) -> None:
-                pass
-
-            async def __aenter__(self) -> Self:
-                return self
-
-            async def __aexit__(self, *_: object) -> None:
-                return None
-
-            async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
-                captured_requests.append((url, json))
-                return httpx.Response(
-                    401,
-                    json={
-                        "session": "sess-123",
-                        "flows": [{"stages": ["m.login.registration_token"]}],
-                    },
-                )
-
         with (
-            patch("mindroom.matrix.users.httpx.AsyncClient", _FakeAsyncClient),
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    captured_requests,
+                    httpx.Response(
+                        401,
+                        json={
+                            "session": "sess-123",
+                            "flows": [{"stages": ["m.login.registration_token"]}],
+                        },
+                    ),
+                ),
+            ),
             patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
         ):
             mock_matrix_client.return_value.__aenter__.return_value = mock_client

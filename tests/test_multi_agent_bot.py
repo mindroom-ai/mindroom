@@ -38,9 +38,7 @@ from mindroom.orchestrator import (
     _run_auxiliary_task_forever,
     _run_with_retry,
     _wait_for_matrix_homeserver,
-)
-from mindroom.orchestrator import (
-    main as orchestrator_main,
+    main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -536,7 +534,7 @@ class TestAgentBot:
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
-            await orchestrator_main(
+            await main(
                 log_level="INFO",
                 storage_path=tmp_path,
                 api=False,
