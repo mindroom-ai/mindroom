@@ -322,12 +322,21 @@ async def create_agent_user(
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
-    await _register_user(
-        homeserver=homeserver,
-        username=matrix_username,
-        password=password,
-        display_name=agent_display_name,
-    )
+    if registration_needed:
+        await _register_user(
+            homeserver=homeserver,
+            username=matrix_username,
+            password=password,
+            display_name=agent_display_name,
+        )
+    else:
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            await _login_and_sync_display_name(
+                client=client,
+                user_id=user_id,
+                password=password,
+                display_name=agent_display_name,
+            )
 
     # Save credentials only after registration/verification succeeds.
     if registration_needed:

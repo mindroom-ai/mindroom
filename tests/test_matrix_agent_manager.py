@@ -544,27 +544,58 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
     async def test_create_agent_user_existing(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
-        mock_register: AsyncMock,
+        mock_matrix_client: MagicMock,
     ) -> None:
         """Test creating agent user with existing credentials."""
         mock_get_creds.return_value = {
             "username": "mindroom_calculator",
             "password": "existing_pass",
         }
-        mock_register.return_value = "@mindroom_calculator:localhost"
+        mock_client = AsyncMock()
+        mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
+        mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
 
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_save_creds.assert_not_called()  # Should not save again
-        mock_register.assert_called_once()  # Still tries to register/verify
+        mock_matrix_client.assert_called_once_with(
+            "http://localhost:8008",
+            user_id="@mindroom_calculator:localhost",
+        )
+        mock_client.login.assert_called_once_with("existing_pass")
+        mock_client.set_displayname.assert_called_once_with("CalculatorAgent")
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users.matrix_client")
+    @patch("mindroom.matrix.users._save_agent_credentials")
+    @patch("mindroom.matrix.users._get_agent_credentials")
+    async def test_create_agent_user_existing_invalid_password(
+        self,
+        mock_get_creds: MagicMock,
+        mock_save_creds: MagicMock,
+        mock_matrix_client: MagicMock,
+    ) -> None:
+        """Existing credentials should fail fast when login no longer works."""
+        mock_get_creds.return_value = {
+            "username": "mindroom_calculator",
+            "password": "stale_pass",
+        }
+        mock_client = AsyncMock()
+        mock_client.login.return_value = MagicMock(spec=nio.LoginError)
+        mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+        with pytest.raises(PermanentMatrixStartupError, match="Matrix account collision"):
+            await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
+
+        mock_save_creds.assert_not_called()
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
