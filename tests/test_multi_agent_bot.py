@@ -32,12 +32,14 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import (
-    MultiAgentOrchestrator,
+from mindroom.orchestration.runtime import (
     _matrix_homeserver_startup_timeout_seconds_from_env,
-    _run_auxiliary_task_forever,
     _run_with_retry,
     _wait_for_matrix_homeserver,
+)
+from mindroom.orchestrator import (
+    MultiAgentOrchestrator,
+    _run_auxiliary_task_forever,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode

@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import uvicorn
 
@@ -50,8 +50,6 @@ from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
 from .orchestration.config_updates import (
     ConfigUpdatePlan,
-    _get_changed_agents,
-    _identify_entities_to_restart,
     build_config_update_plan,
 )
 from .orchestration.rooms import (
@@ -67,7 +65,7 @@ from .orchestration.runtime import (
     _create_logged_task,
     _create_temp_user,
     _EntityStartResults,
-    _matrix_homeserver_startup_timeout_seconds_from_env,
+    _is_permanent_startup_error,
     _retry_delay_seconds,
     _run_with_retry,
     _stop_entities,
@@ -85,24 +83,6 @@ logger = get_logger(__name__)
 _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 
-__all__ = [
-    "_STARTUP_RETRY_INITIAL_DELAY_SECONDS",
-    "_STARTUP_RETRY_MAX_DELAY_SECONDS",
-    "Config",
-    "MultiAgentOrchestrator",
-    "_cancel_sync_task",
-    "_create_temp_user",
-    "_get_changed_agents",
-    "_identify_entities_to_restart",
-    "_matrix_homeserver_startup_timeout_seconds_from_env",
-    "_run_with_retry",
-    "_stop_entities",
-    "_sync_forever_with_restart",
-    "_wait_for_matrix_homeserver",
-    "create_bot_for_entity",
-    "main",
-]
-
 
 @dataclass
 class MultiAgentOrchestrator:
@@ -115,7 +95,7 @@ class MultiAgentOrchestrator:
     _sync_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     _bot_start_tasks: dict[str, asyncio.Task] = field(default_factory=dict, init=False)
     knowledge_managers: dict[str, KnowledgeManager] = field(default_factory=dict, init=False)
-    _memory_auto_flush_worker: Any = field(default=None, init=False)
+    _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
 
@@ -158,10 +138,16 @@ class MultiAgentOrchestrator:
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
 
     async def _ensure_user_account(self, config: Config) -> None:
-        """Ensure the internal user account exists when configured."""
+        """Ensure a user account exists, creating one if necessary.
+
+        This reuses the same `create_agent_user` flow that agents use,
+        treating the user as a special internal "agent" account.
+        Skipped when `mindroom_user` is not configured, such as hosted/public profiles.
+        """
         if config.mindroom_user is None:
             logger.debug("mindroom_user not configured, skipping user account creation")
             return
+        # The user account is managed through the same Matrix account lifecycle as bots.
         user_account = await create_agent_user(
             MATRIX_HOMESERVER,
             INTERNAL_USER_AGENT_NAME,
@@ -188,7 +174,7 @@ class MultiAgentOrchestrator:
         await _run_with_retry(
             "Preparing MindRoom user account",
             lambda: self._ensure_user_account(config),
-            permanent_error_check=lambda exc: isinstance(exc, PermanentMatrixStartupError),
+            permanent_error_check=_is_permanent_startup_error,
             update_runtime_state=update_runtime_state,
         )
 
@@ -228,7 +214,7 @@ class MultiAgentOrchestrator:
         )
 
     def _bots_to_setup_after_background_start(self, entity_name: str) -> list[AgentBot | TeamBot]:
-        """Return the bots whose memberships should be reconciled after a background start."""
+        """Return the bots whose room memberships should be reconciled after a background start."""
         if entity_name == ROUTER_AGENT_NAME:
             return self._running_bots_for_entities(self.agent_bots)
         return self._running_bots_for_entities((entity_name,))
@@ -460,7 +446,7 @@ class MultiAgentOrchestrator:
         await _run_with_retry(
             "Starting router Matrix account",
             _start_router,
-            permanent_error_check=lambda exc: isinstance(exc, PermanentMatrixStartupError),
+            permanent_error_check=_is_permanent_startup_error,
         )
         return router_bot
 
@@ -494,6 +480,8 @@ class MultiAgentOrchestrator:
 
         config = self._require_config()
 
+        # Setup rooms and have all bots join them before potentially heavy
+        # knowledge indexing, so new rooms and invites are not delayed by embeddings.
         await _run_with_retry(
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
@@ -501,12 +489,14 @@ class MultiAgentOrchestrator:
 
         self.running = True
 
+        # Knowledge refresh is optional for initial availability.
         set_runtime_starting("Refreshing knowledge bases in background")
         await self._schedule_knowledge_refresh(config, start_watcher=True)
 
         set_runtime_starting("Starting background workers")
         await self._sync_memory_auto_flush_worker()
 
+        # Create sync tasks for each bot with automatic restart on failure.
         set_runtime_starting("Starting Matrix sync loops")
         for entity_name, bot in self.agent_bots.items():
             if bot.running:
@@ -516,6 +506,7 @@ class MultiAgentOrchestrator:
             await self._schedule_bot_start_retry(entity_name)
 
         set_runtime_ready()
+        # Run all sync tasks until shutdown.
         await asyncio.gather(*tuple(self._sync_tasks.values()))
 
     async def _load_initial_config(self, new_config: Config) -> bool:
@@ -582,7 +573,7 @@ class MultiAgentOrchestrator:
             await self._ensure_root_space(room_ids)
 
     async def update_config(self) -> bool:
-        """Update configuration and reconcile runtime entities."""
+        """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = Config.from_yaml()
         load_plugins(new_config)
 
@@ -594,6 +585,7 @@ class MultiAgentOrchestrator:
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
 
+        # Only apply the new config after validation and account checks succeed.
         self.config = new_config
         logger.info(f"Updating config. New authorization: {new_config.authorization.global_users}")
         await self._update_unchanged_bots(plan)
@@ -633,10 +625,15 @@ class MultiAgentOrchestrator:
         return router_bot
 
     async def _setup_rooms_and_memberships(self, bots: list[AgentBot | TeamBot]) -> None:
-        """Setup rooms and ensure all bots have correct memberships."""
+        """Setup rooms and ensure all bots have correct memberships.
+
+        This shared flow is used during both initial startup and config updates.
+        """
+        # Ensure all configured rooms exist before reconciling memberships.
         room_ids = await self._ensure_rooms_exist()
         await self._ensure_root_space(room_ids)
 
+        # Resolve room aliases now that any missing rooms have been created.
         config = self._require_config()
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
@@ -648,14 +645,18 @@ class MultiAgentOrchestrator:
             if all_room_ids and config.mindroom_user is not None:
                 await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
 
+        # First invitation and join pass for rooms the router already manages.
         await self._ensure_room_invitations()
         await _ensure_internal_user_memberships()
         await _ensure_bot_room_memberships(bots)
 
+        # Existing invite-only rooms may only become manageable after the router joins.
+        # Rerun room reconciliation so topic and access policy updates apply in that case.
         if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
             room_ids = await self._ensure_rooms_exist()
             await self._ensure_root_space(room_ids)
 
+        # Retry invitations once the router has completed its first join pass.
         await self._ensure_room_invitations()
         await _ensure_internal_user_memberships()
 
@@ -666,7 +667,10 @@ class MultiAgentOrchestrator:
         logger.info("All agents have joined their configured rooms")
 
     async def _ensure_rooms_exist(self) -> dict[str, str]:
-        """Ensure all configured rooms exist, creating them if necessary."""
+        """Ensure all configured rooms exist, creating them if necessary.
+
+        The router bot performs room creation because it holds the required permissions.
+        """
         router_bot = self._router_bot()
         if router_bot is None:
             return {}
@@ -799,7 +803,11 @@ class MultiAgentOrchestrator:
             )
 
     async def _ensure_room_invitations(self) -> None:
-        """Ensure all agents and the user are invited to their configured rooms."""
+        """Ensure all agents and the internal user are invited to their configured rooms.
+
+        The router client performs these invitations because it has admin privileges
+        across the managed rooms.
+        """
         router_bot = self._router_bot()
         if router_bot is None:
             return
@@ -842,6 +850,7 @@ class MultiAgentOrchestrator:
         await shutdown_knowledge_managers()
         self.knowledge_managers = {}
 
+        # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):
             await _cancel_sync_task(entity_name, self._sync_tasks)
 
@@ -934,13 +943,16 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
+    # Configure logging before any background tasks or account setup begin.
     setup_logging(level=log_level)
 
+    # Canonicalize once at startup so downstream storage paths are cwd-stable.
     storage_path = storage_path.expanduser().resolve()
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials()
 
+    # Ensure storage exists before any runtime components try to write into it.
     storage_path.mkdir(parents=True, exist_ok=True)
 
     config_path = Path(CONFIG_PATH)
@@ -957,6 +969,7 @@ async def main(
         ]
 
         if api:
+            # Optionally run the bundled dashboard/API server alongside the orchestrator.
             logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
             auxiliary_specs.append(
                 ("bundled API server", lambda: _run_api_server(api_host, api_port, log_level), "api_server_supervisor"),
@@ -978,6 +991,7 @@ async def main(
         logger.exception("Error in orchestrator")
         raise
     finally:
+        # Cancel auxiliary supervisors before shutting down the orchestrator itself.
         for task in auxiliary_tasks:
             task.cancel()
         for task in auxiliary_tasks:

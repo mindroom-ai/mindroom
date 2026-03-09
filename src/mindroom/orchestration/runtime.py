@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +13,7 @@ import httpx
 
 from mindroom.constants import MATRIX_HOMESERVER, MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.runtime_state import set_runtime_starting
@@ -55,6 +56,11 @@ def _retry_delay_seconds(
     """Return capped exponential backoff delay for a retry attempt."""
     exponent = max(0, attempt - 1)
     return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
+
+
+def _is_permanent_startup_error(exc: Exception) -> bool:
+    """Return whether a startup exception is clearly non-retryable."""
+    return isinstance(exc, PermanentMatrixStartupError)
 
 
 async def _cancel_task(
@@ -186,18 +192,13 @@ async def _wait_for_matrix_homeserver(
     raise TimeoutError(msg)
 
 
-@dataclass
+@dataclass(slots=True)
 class _EntityStartResults:
-    """Classification of one batch of entity start attempts."""
+    """Result of one pass trying to start a batch of entities."""
 
-    started_bots: list[AgentBot | TeamBot]
-    retryable_entities: list[str]
-    permanently_failed_entities: list[str]
-
-    def __init__(self) -> None:
-        self.started_bots = []
-        self.retryable_entities = []
-        self.permanently_failed_entities = []
+    started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
+    retryable_entities: list[str] = field(default_factory=list)
+    permanently_failed_entities: list[str] = field(default_factory=list)
 
 
 def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
@@ -213,9 +214,9 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
 
     return AgentMatrixUser(
         agent_name=entity_name,
-        user_id="",
+        user_id="",  # Populated later by ensure_user_account.
         display_name=display_name,
-        password="",
+        password="",  # Populated later by ensure_user_account.
     )
 
 
@@ -227,10 +228,11 @@ async def _cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task
 
 async def _stop_entities(
     entities_to_restart: set[str],
-    agent_bots: dict[str, Any],
+    agent_bots: dict[str, AgentBot | TeamBot],
     sync_tasks: dict[str, asyncio.Task],
 ) -> None:
     """Stop a set of entities and remove them from runtime maps."""
+    # Cancel sync tasks first so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:
         await _cancel_sync_task(entity_name, sync_tasks)
 
@@ -249,8 +251,10 @@ async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int =
         try:
             logger.info(f"Starting sync loop for {bot.agent_name}")
             await bot.sync_forever()
+            # sync_forever returned normally, so the bot was stopped intentionally.
             break
         except asyncio.CancelledError:
+            # Task cancellation is part of normal shutdown.
             logger.info(f"Sync task for {bot.agent_name} was cancelled")
             break
         except Exception:
@@ -258,12 +262,14 @@ async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int =
             logger.exception(f"Sync loop failed for {bot.agent_name} (retry {retry_count})")
 
             if not bot.running:
+                # The bot was stopped while handling the failure.
                 break
 
             if max_retries >= 0 and retry_count >= max_retries:
                 logger.exception(f"Max retries ({max_retries}) reached for {bot.agent_name}, giving up")
                 break
 
+            # Use a simple bounded backoff so repeated failures do not thrash the homeserver.
             wait_time = min(60, 5 * retry_count)
             logger.info(f"Restarting sync loop for {bot.agent_name} in {wait_time} seconds...")
             await asyncio.sleep(wait_time)

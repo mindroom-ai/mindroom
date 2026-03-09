@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pydantic import BaseModel
 
+    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.orchestrator import MultiAgentOrchestrator
 
@@ -59,7 +62,7 @@ def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | N
 async def _identify_entities_to_restart(
     config: Config | None,
     new_config: Config,
-    agent_bots: dict[str, Any],
+    agent_bots: Mapping[str, AgentBot | TeamBot],
 ) -> set[str]:
     """Identify entities that need restarting due to config changes."""
     agents_to_restart = _get_changed_agents(config, new_config, agent_bots)
@@ -73,7 +76,11 @@ async def _identify_entities_to_restart(
     return entities_to_restart
 
 
-def _get_changed_agents(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+def _get_changed_agents(
+    config: Config | None,
+    new_config: Config,
+    agent_bots: Mapping[str, AgentBot | TeamBot],
+) -> set[str]:
     """Return agent names whose config or culture changed."""
     if not config:
         return set()
@@ -114,7 +121,11 @@ def _culture_signature_for_agent(agent_name: str, config: Config) -> tuple[str, 
     return (culture_name, culture_config.mode, culture_config.description)
 
 
-def _get_changed_teams(config: Config | None, new_config: Config, agent_bots: dict[str, Any]) -> set[str]:
+def _get_changed_teams(
+    config: Config | None,
+    new_config: Config,
+    agent_bots: Mapping[str, AgentBot | TeamBot],
+) -> set[str]:
     """Return team names whose config changed."""
     if not config:
         return set()
