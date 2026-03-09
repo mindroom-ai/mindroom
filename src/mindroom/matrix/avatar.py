@@ -1,6 +1,7 @@
 """Matrix avatar management helpers."""
 
 import io
+import mimetypes
 from pathlib import Path
 
 import nio
@@ -8,6 +9,23 @@ import nio
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _guess_avatar_content_type(avatar_path: Path) -> str:
+    """Infer the upload MIME type for an avatar file."""
+    guessed_type, _ = mimetypes.guess_type(avatar_path.name)
+    if guessed_type and guessed_type.startswith("image/"):
+        return guessed_type
+
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".ico": "image/x-icon",
+    }.get(avatar_path.suffix.lower(), "application/octet-stream")
 
 
 async def _upload_avatar_file(
@@ -28,14 +46,7 @@ async def _upload_avatar_file(
         logger.warning(f"Avatar file not found: {avatar_path}")
         return None
 
-    extension = avatar_path.suffix.lower()
-    content_type = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-        ".gif": "image/gif",
-    }.get(extension, "image/png")
+    content_type = _guess_avatar_content_type(avatar_path)
 
     with avatar_path.open("rb") as f:
         avatar_data = f.read()
