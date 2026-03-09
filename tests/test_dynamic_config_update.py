@@ -72,7 +72,7 @@ class TestDynamicConfigUpdate:
             # Mock the bot creation and setup methods to avoid actual Matrix operations
             with (
                 patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-                patch("mindroom.orchestrator._identify_entities_to_restart") as mock_identify,
+                patch("mindroom.orchestration.config_updates._identify_entities_to_restart") as mock_identify,
                 patch.object(orchestrator, "_setup_rooms_and_memberships"),
             ):
                 mock_identify.return_value = set()  # No entities need restarting
@@ -208,7 +208,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(Config, "from_yaml", return_value=updated_config),
-            patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         ):
             updated = await orchestrator.update_config()
 
@@ -264,7 +264,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(Config, "from_yaml", return_value=updated_config),
-            patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.update_config()
@@ -316,7 +316,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(Config, "from_yaml", return_value=updated_config),
-            patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.update_config()
@@ -368,7 +368,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(Config, "from_yaml", return_value=updated_config),
-            patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -422,7 +422,7 @@ class TestDynamicConfigUpdate:
 
         with (
             patch.object(Config, "from_yaml", return_value=updated_config),
-            patch("mindroom.orchestrator._identify_entities_to_restart", return_value=set()),
+            patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(
                 orchestrator,
                 "_ensure_user_account",

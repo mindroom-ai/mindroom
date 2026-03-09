@@ -80,20 +80,19 @@ class TestUserIdPassthrough:
             assert context.requester_id == "@alice:localhost"
             return "Hello!"
 
-        bot.ai_response = AsyncMock(side_effect=fake_ai_response)
+        with patch("mindroom.bot.ai_response", new=AsyncMock(side_effect=fake_ai_response)) as mock_ai_response:
+            await process_method(
+                bot,
+                room_id="!test:localhost",
+                prompt="Hello",
+                reply_to_event_id="$user_msg",
+                thread_id=None,
+                thread_history=[],
+                user_id="@alice:localhost",
+            )
 
-        await process_method(
-            bot,
-            room_id="!test:localhost",
-            prompt="Hello",
-            reply_to_event_id="$user_msg",
-            thread_id=None,
-            thread_history=[],
-            user_id="@alice:localhost",
-        )
-
-        bot.ai_response.assert_awaited_once()
-        assert bot.ai_response.await_args.kwargs["user_id"] == "@alice:localhost"
+        mock_ai_response.assert_awaited_once()
+        assert mock_ai_response.await_args.kwargs["user_id"] == "@alice:localhost"
 
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
@@ -142,21 +141,28 @@ class TestUserIdPassthrough:
 
             return fake_stream()
 
-        bot.stream_agent_response = MagicMock(side_effect=fake_stream_agent_response)
-        bot.send_streaming_response = AsyncMock(return_value=("$msg_id", "Hello!"))
+        with (
+            patch(
+                "mindroom.bot.stream_agent_response",
+                new=MagicMock(side_effect=fake_stream_agent_response),
+            ) as mock_stream_agent_response,
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new=AsyncMock(return_value=("$msg_id", "Hello!")),
+            ),
+        ):
+            await streaming_method(
+                bot,
+                room_id="!test:localhost",
+                prompt="Hello",
+                reply_to_event_id="$user_msg",
+                thread_id=None,
+                thread_history=[],
+                user_id="@bob:localhost",
+            )
 
-        await streaming_method(
-            bot,
-            room_id="!test:localhost",
-            prompt="Hello",
-            reply_to_event_id="$user_msg",
-            thread_id=None,
-            thread_history=[],
-            user_id="@bob:localhost",
-        )
-
-        bot.stream_agent_response.assert_called_once()
-        assert bot.stream_agent_response.call_args.kwargs["user_id"] == "@bob:localhost"
+        mock_stream_agent_response.assert_called_once()
+        assert mock_stream_agent_response.call_args.kwargs["user_id"] == "@bob:localhost"
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:

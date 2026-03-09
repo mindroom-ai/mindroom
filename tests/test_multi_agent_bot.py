@@ -3450,8 +3450,11 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
-            patch("mindroom.orchestration.config_updates.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
             patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -3517,10 +3520,13 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
-            patch("mindroom.orchestration.config_updates.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestration.runtime._create_temp_user", return_value=MagicMock()),
+            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -3589,10 +3595,13 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
-            patch("mindroom.orchestration.config_updates.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch("mindroom.orchestrator.load_plugins"),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
-            patch("mindroom.orchestration.runtime._create_temp_user", return_value=MagicMock()),
+            patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()),
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),

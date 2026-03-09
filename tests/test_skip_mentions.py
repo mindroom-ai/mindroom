@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
@@ -57,10 +57,6 @@ async def test_send_response_with_skip_mentions() -> None:
     bot.response_tracker = Mock()
     bot._resolve_reply_thread_id = Mock(return_value=None)
 
-    mock_content = {"body": "test", "msgtype": "m.text"}
-    bot.format_message_with_mentions = Mock(return_value=mock_content.copy())
-    bot.send_message = AsyncMock(return_value="$response123")
-
     room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
     event = nio.RoomMessageText.from_dict(
         {
@@ -75,18 +71,22 @@ async def test_send_response_with_skip_mentions() -> None:
         },
     )
 
-    await AgentBot._send_response(
-        bot,
-        room_id=room.room_id,
-        reply_to_event_id=event.event_id,
-        response_text="✅ Scheduled. Will notify @email_agent",
-        thread_id=None,
-        reply_to_event=event,
-        skip_mentions=True,
-    )
+    with (
+        patch("mindroom.bot.format_message_with_mentions", return_value={"body": "test", "msgtype": "m.text"}),
+        patch("mindroom.bot.send_message", new=AsyncMock(return_value="$response123")) as mock_send_message,
+    ):
+        await AgentBot._send_response(
+            bot,
+            room_id=room.room_id,
+            reply_to_event_id=event.event_id,
+            response_text="✅ Scheduled. Will notify @email_agent",
+            thread_id=None,
+            reply_to_event=event,
+            skip_mentions=True,
+        )
 
-    bot.send_message.assert_awaited_once()
-    sent_content = bot.send_message.await_args.args[2]
+    mock_send_message.assert_awaited_once()
+    sent_content = mock_send_message.await_args.args[2]
     assert sent_content.get("com.mindroom.skip_mentions") is True
 
 
@@ -101,7 +101,6 @@ async def test_extract_context_with_skip_mentions() -> None:
     bot.logger = Mock()
     bot.matrix_id = MatrixID.from_agent("email_agent", "localhost")
     bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
-    bot.check_agent_mentioned = Mock(return_value=([bot.matrix_id], True, False))
 
     room = nio.MatrixRoom(room_id="!test:server", own_user_id="@bot:server")
 
@@ -143,7 +142,8 @@ async def test_extract_context_with_skip_mentions() -> None:
         },
     )
 
-    context = await AgentBot._extract_message_context(bot, room, event_without_skip)
+    with patch("mindroom.bot.check_agent_mentioned", return_value=([bot.matrix_id], True, False)):
+        context = await AgentBot._extract_message_context(bot, room, event_without_skip)
 
     assert context.am_i_mentioned is True
     assert bot.matrix_id in context.mentioned_agents

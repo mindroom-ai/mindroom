@@ -148,11 +148,11 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
     """Test that update_config properly cancels old sync tasks."""
     with (
         patch("mindroom.orchestrator.Config.from_yaml") as mock_from_yaml,
-        patch("mindroom.orchestrator._identify_entities_to_restart") as mock_identify,
+        patch("mindroom.orchestration.config_updates._identify_entities_to_restart") as mock_identify,
         patch("mindroom.orchestrator._stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator._sync_forever_with_restart"),
-        patch("mindroom.orchestration.runtime._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
         patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
@@ -218,7 +218,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator._sync_forever_with_restart"),
         patch("mindroom.orchestrator._stop_entities"),
-        patch("mindroom.orchestration.runtime._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---

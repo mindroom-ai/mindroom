@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -64,17 +64,16 @@ class TestAIErrorDisplay:
 
         process_method = AgentBot._process_and_respond
         error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
-        bot.ai_response = AsyncMock(return_value=error_msg)
-
-        await process_method(
-            bot,
-            room_id="!test:localhost",
-            prompt="Help me with something",
-            reply_to_event_id="$user_msg",
-            thread_id=None,
-            thread_history=[],
-            existing_event_id="$thinking_msg",
-        )
+        with patch("mindroom.bot.ai_response", new=AsyncMock(return_value=error_msg)):
+            await process_method(
+                bot,
+                room_id="!test:localhost",
+                prompt="Help me with something",
+                reply_to_event_id="$user_msg",
+                thread_id=None,
+                thread_history=[],
+                existing_event_id="$thinking_msg",
+            )
 
         assert len(edited_messages) == 1
         event_id, text = edited_messages[0]
@@ -98,6 +97,7 @@ class TestAIErrorDisplay:
             event_id: str,
             text: str,
             thread_id: str | None,  # noqa: ARG001
+            tool_trace: object | None = None,  # noqa: ARG001
             extra_content: object | None = None,  # noqa: ARG001
         ) -> None:
             edited_messages.append((event_id, text))
@@ -111,20 +111,25 @@ class TestAIErrorDisplay:
             yield "[test_agent] 🔴 Rate limited. Please wait before trying again."
 
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
-        bot.stream_agent_response = MagicMock(return_value=error_stream())
-        bot.send_streaming_response = AsyncMock(return_value=("$msg_id", error_text))
+        with (
+            patch("mindroom.bot.stream_agent_response", new=MagicMock(return_value=error_stream())) as mock_stream,
+            patch(
+                "mindroom.bot.send_streaming_response",
+                new=AsyncMock(return_value=("$msg_id", error_text)),
+            ) as mock_send_streaming_response,
+        ):
+            await streaming_method(
+                bot,
+                room_id="!test:localhost",
+                prompt="Help me with something",
+                reply_to_event_id="$user_msg",
+                thread_id=None,
+                thread_history=[],
+                existing_event_id="$thinking_msg",
+            )
 
-        await streaming_method(
-            bot,
-            room_id="!test:localhost",
-            prompt="Help me with something",
-            reply_to_event_id="$user_msg",
-            thread_id=None,
-            thread_history=[],
-            existing_event_id="$thinking_msg",
-        )
-
-        bot.send_streaming_response.assert_awaited_once()
+        mock_stream.assert_called_once()
+        mock_send_streaming_response.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
@@ -138,6 +143,7 @@ class TestAIErrorDisplay:
             event_id: str,
             text: str,
             thread_id: str | None,  # noqa: ARG001
+            tool_trace: object | None = None,  # noqa: ARG001
             extra_content: object | None = None,  # noqa: ARG001
         ) -> None:
             edited_messages.append((event_id, text))
@@ -145,9 +151,10 @@ class TestAIErrorDisplay:
         bot._edit_message = mock_edit_message
 
         process_method = AgentBot._process_and_respond
-        bot.ai_response = AsyncMock(side_effect=asyncio.CancelledError())
-
-        with pytest.raises(asyncio.CancelledError):
+        with (
+            patch("mindroom.bot.ai_response", new=AsyncMock(side_effect=asyncio.CancelledError())),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await process_method(
                 bot,
                 room_id="!test:localhost",
@@ -198,17 +205,16 @@ class TestAIErrorDisplay:
 
         for error_msg in error_messages:
             edited_messages.clear()
-            bot.ai_response = AsyncMock(return_value=error_msg)
-
-            await process_method(
-                bot,
-                room_id="!test:localhost",
-                prompt="Help me",
-                reply_to_event_id="$user_msg",
-                thread_id=None,
-                thread_history=[],
-                existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
-            )
+            with patch("mindroom.bot.ai_response", new=AsyncMock(return_value=error_msg)):
+                await process_method(
+                    bot,
+                    room_id="!test:localhost",
+                    prompt="Help me",
+                    reply_to_event_id="$user_msg",
+                    thread_id=None,
+                    thread_history=[],
+                    existing_event_id=f"$thinking_{error_messages.index(error_msg)}",
+                )
 
             assert len(edited_messages) == 1
             displayed_msg = edited_messages[0]

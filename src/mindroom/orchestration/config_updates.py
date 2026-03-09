@@ -5,13 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.plugins import load_plugins
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
 
+    from mindroom.config.main import Config
     from mindroom.orchestrator import MultiAgentOrchestrator
 
 logger = get_logger(__name__)
@@ -151,7 +150,7 @@ async def build_config_update_plan(orchestrator: MultiAgentOrchestrator, new_con
         msg = "Cannot build update plan without an active config"
         raise RuntimeError(msg)
 
-    entities_to_restart = await orchestrator.identify_entities_to_restart(
+    entities_to_restart = await _identify_entities_to_restart(
         current_config,
         new_config,
         orchestrator.agent_bots,
@@ -173,127 +172,3 @@ async def build_config_update_plan(orchestrator: MultiAgentOrchestrator, new_con
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
         authorization_changed=current_config.authorization != new_config.authorization,
     )
-
-
-async def _load_initial_config(
-    orchestrator: MultiAgentOrchestrator,
-    new_config: Config,
-) -> bool:
-    """Handle config loading before the runtime has an active config."""
-    await orchestrator._prepare_user_account(new_config, update_runtime_state=not orchestrator.running)
-    orchestrator.config = new_config
-    await orchestrator._sync_runtime_support_services(new_config, start_watcher=orchestrator.running)
-    return False
-
-
-async def _update_unchanged_bots(
-    orchestrator: MultiAgentOrchestrator,
-    plan: ConfigUpdatePlan,
-) -> None:
-    """Apply the new config to bots that do not require restart."""
-    for entity_name, bot in orchestrator.agent_bots.items():
-        if entity_name in plan.entities_to_restart:
-            continue
-        bot.config = plan.new_config
-        bot.enable_streaming = plan.new_config.defaults.enable_streaming
-        await bot._set_presence_with_model_info()
-        logger.debug(f"Updated config for {entity_name}")
-
-
-async def _remove_deleted_entities(
-    orchestrator: MultiAgentOrchestrator,
-    removed_entities: set[str],
-) -> None:
-    """Cancel, clean up, and unregister entities removed from config."""
-    for entity_name in removed_entities:
-        await orchestrator._cancel_bot_start_task(entity_name)
-        await orchestrator.cancel_sync_task(entity_name, orchestrator._sync_tasks)
-
-        bot = orchestrator.agent_bots.pop(entity_name, None)
-        if bot is not None:
-            await bot.cleanup()
-
-
-async def _restart_changed_entities(
-    orchestrator: MultiAgentOrchestrator,
-    plan: ConfigUpdatePlan,
-) -> tuple[set[str], list[str], list[str]]:
-    """Restart or create entities affected by the config change."""
-    if plan.entities_to_restart:
-        for entity_name in plan.entities_to_restart:
-            await orchestrator._cancel_bot_start_task(entity_name)
-        await orchestrator.stop_entities(plan.entities_to_restart, orchestrator.agent_bots, orchestrator._sync_tasks)
-
-    entities_to_recreate = plan.entities_to_restart & plan.all_new_entities
-    changed_entities = entities_to_recreate | plan.new_entities
-    start_results = await orchestrator._create_and_start_entities(
-        changed_entities,
-        plan.new_config,
-        start_sync_tasks=True,
-    )
-
-    removed_restarted_entities = plan.entities_to_restart - plan.all_new_entities
-    for entity_name in removed_restarted_entities:
-        orchestrator.agent_bots.pop(entity_name, None)
-
-    await _remove_deleted_entities(orchestrator, plan.removed_entities)
-    return changed_entities, start_results.retryable_entities, start_results.permanently_failed_entities
-
-
-async def _reconcile_post_update_rooms(
-    orchestrator: MultiAgentOrchestrator,
-    plan: ConfigUpdatePlan,
-    changed_entities: set[str],
-) -> None:
-    """Reconcile rooms and memberships after entity/config updates."""
-    bots_to_setup = orchestrator._running_bots_for_entities(changed_entities)
-    if bots_to_setup or plan.mindroom_user_changed or plan.matrix_room_access_changed or plan.authorization_changed:
-        await orchestrator._setup_rooms_and_memberships(bots_to_setup)
-        return
-    if plan.matrix_space_changed:
-        room_ids = await orchestrator._ensure_rooms_exist()
-        await orchestrator._ensure_root_space(room_ids)
-
-
-async def update_config(self: MultiAgentOrchestrator) -> bool:
-    """Update configuration and reconcile runtime entities."""
-    new_config = Config.from_yaml()
-    load_plugins(new_config)
-
-    if not self.config:
-        return await _load_initial_config(self, new_config)
-
-    plan = await build_config_update_plan(self, new_config)
-
-    if plan.mindroom_user_changed:
-        await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-
-    self.config = new_config
-
-    logger.info(
-        f"Updating config. New authorization: {new_config.authorization.global_users}",
-    )
-    await _update_unchanged_bots(self, plan)
-
-    if plan.only_support_service_changes:
-        await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-        return False
-
-    changed_entities, retryable_entities, permanently_failed_entities = await _restart_changed_entities(self, plan)
-    await _reconcile_post_update_rooms(self, plan, changed_entities)
-
-    for entity_name in retryable_entities:
-        await self._schedule_bot_start_retry(entity_name)
-
-    if permanently_failed_entities:
-        logger.warning(
-            "Configuration update left some bots disabled due to permanent startup errors",
-            agent_names=permanently_failed_entities,
-        )
-
-    await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-
-    logger.info(
-        f"Configuration update complete: {len(plan.entities_to_restart) + len(plan.new_entities)} bots affected",
-    )
-    return True
