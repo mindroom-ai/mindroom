@@ -612,9 +612,10 @@ class AgentBot:
             await _start_with_retry()
             return True  # noqa: TRY300
         except Exception as exc:
-            logger.exception(f"Failed to start agent {self.agent_name}")
             if isinstance(exc, PermanentMatrixStartupError):
+                logger.error(f"Failed to start agent {self.agent_name}: {exc}")  # noqa: TRY400
                 raise
+            logger.exception(f"Failed to start agent {self.agent_name}")
             return False
 
     async def cleanup(self) -> None:

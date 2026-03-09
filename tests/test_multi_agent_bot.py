@@ -39,6 +39,9 @@ from mindroom.orchestrator import (
     _run_with_retry,
     _wait_for_matrix_homeserver,
 )
+from mindroom.orchestrator import (
+    main as orchestrator_main,
+)
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
@@ -512,6 +515,47 @@ class TestAgentBot:
             await bot.try_start()
 
         mock_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_stays_alive_on_permanent_startup_error(self, tmp_path: Path) -> None:
+        """Permanent startup errors should not crash-loop the process under systemd."""
+        reset_runtime_state()
+        blocking_event = asyncio.Event()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await blocking_event.wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+        ):
+            task = asyncio.create_task(
+                orchestrator_main(
+                    log_level="INFO",
+                    storage_path=tmp_path,
+                    api=False,
+                ),
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+            state = get_runtime_state()
+            assert state.phase == "failed"
+            assert state.detail == "boom"
+            assert task.done() is False
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mock_orchestrator.stop.assert_awaited_once()
+        reset_runtime_state()
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
