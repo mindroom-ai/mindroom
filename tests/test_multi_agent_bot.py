@@ -3136,7 +3136,7 @@ class TestMultiAgentOrchestrator:
                 request = httpx.Request("GET", url)
                 return httpx.Response(200, json={"versions": ["v1.1"]}, request=request)
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
         await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
 
@@ -3202,7 +3202,7 @@ class TestMultiAgentOrchestrator:
                     raise response
                 return response
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
         await _wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
 
@@ -3229,9 +3229,9 @@ class TestMultiAgentOrchestrator:
                 request = httpx.Request("GET", url)
                 return httpx.Response(503, text="starting", request=request)
 
-        monkeypatch.setattr("mindroom.orchestrator.httpx.AsyncClient", _FakeAsyncClient)
+        monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
 
-        with pytest.raises(RuntimeError, match="Timed out waiting for Matrix homeserver"):
+        with pytest.raises(TimeoutError, match="Timed out waiting for Matrix homeserver"):
             await _wait_for_matrix_homeserver(timeout_seconds=0.01, retry_interval_seconds=0.001)
 
     @pytest.mark.asyncio
@@ -3250,8 +3250,8 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator, "_configure_knowledge", side_effect=_configure),
-            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
         ):
             await orchestrator._schedule_knowledge_refresh(config, start_watcher=True)
             task = orchestrator._knowledge_refresh_task
@@ -3400,8 +3400,8 @@ class TestMultiAgentOrchestrator:
                 raise RuntimeError(msg)
 
         with (
-            patch("mindroom.orchestrator._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
-            patch("mindroom.orchestrator._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestration.runtime._STARTUP_RETRY_MAX_DELAY_SECONDS", 0),
         ):
             await _run_with_retry(
                 "background retry",
@@ -3439,7 +3439,10 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
             patch("mindroom.orchestrator.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch.object(orchestrator, "_schedule_knowledge_refresh", new=AsyncMock()) as mock_schedule_knowledge,
             patch.object(orchestrator, "_configure_knowledge", new=AsyncMock()) as mock_configure_knowledge,
             patch.object(orchestrator, "_sync_memory_auto_flush_worker", new=AsyncMock()),
@@ -3506,7 +3509,10 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
             patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
@@ -3578,7 +3584,10 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
-            patch("mindroom.orchestrator._identify_entities_to_restart", new=AsyncMock(return_value=set())),
+            patch(
+                "mindroom.orchestration.config_updates._identify_entities_to_restart",
+                new=AsyncMock(return_value=set()),
+            ),
             patch("mindroom.orchestrator.create_bot_for_entity", return_value=new_bot),
             patch("mindroom.orchestrator._create_temp_user", return_value=MagicMock()),
             patch.object(orchestrator, "_schedule_bot_start_retry", new=AsyncMock()) as mock_schedule_retry,
