@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 import yaml
@@ -257,14 +258,6 @@ class TestMatrixRegistration:
         mock_client.set_displayname.return_value = AsyncMock()
         captured_requests: list[tuple[str, dict[str, object]]] = []
 
-        class _FakeResponse:
-            is_success = True
-            status_code = 200
-            text = ""
-
-            def json(self) -> dict[str, str]:
-                return {"user_id": "@test_user:localhost"}
-
         class _FakeAsyncClient:
             def __init__(self, *_: object, **__: object) -> None:
                 pass
@@ -275,9 +268,9 @@ class TestMatrixRegistration:
             async def __aexit__(self, *_: object) -> None:
                 return None
 
-            async def post(self, url: str, json: dict[str, object]) -> _FakeResponse:
+            async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
                 captured_requests.append((url, json))
-                return _FakeResponse()
+                return httpx.Response(200, json={"user_id": "@test_user:localhost"})
 
         with (
             patch("mindroom.matrix.users.httpx.AsyncClient", _FakeAsyncClient),
@@ -303,7 +296,79 @@ class TestMatrixRegistration:
                 ),
             ]
             mock_client.register.assert_not_called()
+            mock_client.register_with_token.assert_not_called()
             mock_client.login.assert_called_once_with(test_pass)
+            mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_falls_back_to_matrix_nio_token_flow_on_uiaa_challenge(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec-strict homeservers should fall back to matrix-nio's interactive token flow."""
+        test_pass = "test_pass"  # noqa: S105
+        registration_token = "token-123"  # noqa: S105
+        monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", registration_token)
+
+        mock_client = AsyncMock()
+        mock_client.register_with_token.return_value = nio.RegisterResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, dict[str, object]]] = []
+
+        class _FakeAsyncClient:
+            def __init__(self, *_: object, **__: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
+                captured_requests.append((url, json))
+                return httpx.Response(
+                    401,
+                    json={
+                        "session": "sess-123",
+                        "flows": [{"stages": ["m.login.registration_token"]}],
+                    },
+                )
+
+        with (
+            patch("mindroom.matrix.users.httpx.AsyncClient", _FakeAsyncClient),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+
+            assert user_id == "@test_user:localhost"
+            assert captured_requests == [
+                (
+                    "http://localhost:8008/_matrix/client/v3/register",
+                    {
+                        "username": "test_user",
+                        "password": test_pass,
+                        "device_name": "mindroom_agent",
+                        "auth": {
+                            "type": "m.login.registration_token",
+                            "token": registration_token,
+                        },
+                    },
+                ),
+            ]
+            mock_client.register_with_token.assert_called_once_with(
+                username="test_user",
+                password=test_pass,
+                registration_token=registration_token,
+                device_name="mindroom_agent",
+            )
+            mock_client.login.assert_not_called()
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio

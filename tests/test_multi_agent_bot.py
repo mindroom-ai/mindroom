@@ -517,8 +517,8 @@ class TestAgentBot:
         mock_start.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_stays_alive_on_permanent_startup_error(self, tmp_path: Path) -> None:
-        """Permanent startup errors should not crash-loop the process under systemd."""
+    async def test_orchestrator_main_reraises_permanent_startup_error(self, tmp_path: Path) -> None:
+        """Permanent startup errors should stop the process and surface the failure."""
         reset_runtime_state()
         blocking_event = asyncio.Event()
         mock_orchestrator = MagicMock()
@@ -534,28 +534,18 @@ class TestAgentBot:
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
-            task = asyncio.create_task(
-                orchestrator_main(
-                    log_level="INFO",
-                    storage_path=tmp_path,
-                    api=False,
-                ),
+            await orchestrator_main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
             )
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-
-            state = get_runtime_state()
-            assert state.phase == "failed"
-            assert state.detail == "boom"
-            assert task.done() is False
-
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
 
         mock_orchestrator.stop.assert_awaited_once()
-        reset_runtime_state()
+        state = get_runtime_state()
+        assert state.phase == "idle"
+        assert state.detail is None
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

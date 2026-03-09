@@ -147,11 +147,7 @@ async def _register_user_with_token(
     display_name: str,
     registration_token: str,
 ) -> str:
-    """Register a user with an explicit UIAA token payload.
-
-    Some homeservers require the registration token inside the `auth` object
-    and reject matrix-nio's helper path unless a UIAA session is present.
-    """
+    """Register a user with token auth, supporting both direct and UIAA flows."""
     register_url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
     request_payload = {
         "username": username,
@@ -170,35 +166,30 @@ async def _register_user_with_token(
         msg = f"Could not reach Matrix homeserver ({homeserver}) during registration: {exc}"
         raise matrix_startup_error(msg) from exc
 
-    detail = response.text.strip() or "unknown error"
-    errcode = None
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-
-    if isinstance(body, dict):
-        raw_errcode = body.get("errcode")
-        if isinstance(raw_errcode, str) and raw_errcode:
-            errcode = raw_errcode
-        raw_error = body.get("error")
-        if raw_error is not None:
-            detail = str(raw_error)
-
+    detail, errcode = _registration_http_error_details(response)
     if response.is_success:
         logger.info(f"✅ Successfully registered user with token: {user_id}")
     elif errcode == "M_USER_IN_USE":
         logger.info(f"User {user_id} already exists")
     else:
-        if errcode == "M_FORBIDDEN" and "Invalid registration token" in detail:
-            msg = (
-                "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
-                "Generate/issue a valid token for bot provisioning and try again."
-            )
-            raise matrix_startup_error(msg, permanent=True)
-
-        msg = f"Failed to register user {username}: {errcode or detail}"
-        raise matrix_startup_error(msg, permanent=errcode == "M_INVALID_USERNAME")
+        permanent_error = _direct_token_registration_error(username=username, errcode=errcode, detail=detail)
+        if permanent_error is not None:
+            raise permanent_error
+        logger.info(
+            "Direct token registration failed; falling back to matrix-nio interactive registration",
+            user_id=user_id,
+            status_code=response.status_code,
+            errcode=errcode,
+            detail=detail,
+        )
+        return await _register_user_with_token_via_nio(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=registration_token,
+        )
 
     async with matrix_client(homeserver, user_id=user_id) as client:
         login_response = await _login_and_sync_display_name(
@@ -209,6 +200,74 @@ async def _register_user_with_token(
     if isinstance(login_response, nio.LoginResponse):
         return user_id
     raise _account_collision_error(user_id, login_response)
+
+
+def _registration_http_error_details(response: httpx.Response) -> tuple[str, str | None]:
+    """Extract a human-readable error detail and errcode from an HTTP response."""
+    detail = response.text.strip() or "unknown error"
+    errcode = None
+    try:
+        body = response.json()
+    except ValueError:
+        return detail, errcode
+
+    if not isinstance(body, dict):
+        return detail, errcode
+    raw_errcode = body.get("errcode")
+    if isinstance(raw_errcode, str) and raw_errcode:
+        errcode = raw_errcode
+    raw_error = body.get("error")
+    if raw_error is not None:
+        detail = str(raw_error)
+    return detail, errcode
+
+
+def _direct_token_registration_error(
+    *,
+    username: str,
+    errcode: str | None,
+    detail: str,
+) -> ValueError | None:
+    """Return a permanent startup error for terminal direct token registration failures."""
+    if errcode == "M_FORBIDDEN" and "Invalid registration token" in detail:
+        msg = (
+            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+            "Generate/issue a valid token for bot provisioning and try again."
+        )
+        return matrix_startup_error(msg, permanent=True)
+    if errcode == "M_INVALID_USERNAME":
+        msg = f"Failed to register user {username}: {errcode}"
+        return matrix_startup_error(msg, permanent=True)
+    return None
+
+
+async def _register_user_with_token_via_nio(
+    *,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+    registration_token: str,
+) -> str:
+    """Fallback to matrix-nio's interactive registration for spec-strict homeservers."""
+    async with matrix_client(homeserver, user_id=user_id) as client:
+        response = await client.register_with_token(
+            username=username,
+            password=password,
+            registration_token=registration_token,
+            device_name="mindroom_agent",
+        )
+        return await _handle_register_response(
+            response=response,
+            client=client,
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=registration_token,
+        )
 
 
 def _account_collision_error(user_id: str, login_response: object) -> ValueError:
@@ -224,7 +283,7 @@ async def _login_and_sync_display_name(
     client: nio.AsyncClient,
     password: str,
     display_name: str,
-) -> nio.LoginResponse | object:
+) -> nio.LoginResponse | nio.LoginError:
     """Login with known password and keep display name synchronized."""
     login_response = await client.login(password)
     if isinstance(login_response, nio.LoginResponse):
@@ -232,6 +291,50 @@ async def _login_and_sync_display_name(
         if isinstance(display_response, nio.ErrorResponse):
             logger.warning(f"Failed to set display name for existing user: {display_response}")
     return login_response
+
+
+async def _handle_register_response(
+    *,
+    response: nio.RegisterResponse | nio.ErrorResponse,
+    client: nio.AsyncClient,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+    registration_token: str | None,
+) -> str:
+    """Handle a matrix-nio register response and finalize account setup."""
+    if isinstance(response, nio.RegisterResponse):
+        logger.info(f"✅ Successfully registered user: {user_id}")
+        client.user_id = response.user_id
+        client.access_token = response.access_token
+        client.device_id = response.device_id
+
+        display_response = await client.set_displayname(display_name)
+        if isinstance(display_response, nio.ErrorResponse):
+            logger.warning(f"Failed to set display name: {display_response}")
+
+        return user_id
+    if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
+        logger.info(f"User {user_id} already exists")
+        login_response = await _login_and_sync_display_name(
+            client=client,
+            password=password,
+            display_name=display_name,
+        )
+        if not isinstance(login_response, nio.LoginResponse):
+            raise _account_collision_error(user_id, login_response)
+        return user_id
+
+    if not isinstance(response, nio.ErrorResponse):
+        msg = f"Failed to register user {username}: {response}"
+        raise matrix_startup_error(msg)
+    failure_message = await _registration_failure_message(response, homeserver, registration_token)
+    if failure_message:
+        raise matrix_startup_error(failure_message, permanent=True)
+    msg = f"Failed to register user {username}: {response}"
+    raise matrix_startup_error(msg, response=response)
 
 
 async def _register_user(
@@ -353,37 +456,16 @@ async def _register_user_without_token(
             password=password,
             device_name="mindroom_agent",
         )
-
-        if isinstance(response, nio.RegisterResponse):
-            logger.info(f"✅ Successfully registered user: {user_id}")
-            # After registration, we already have an access token
-            client.user_id = response.user_id
-            client.access_token = response.access_token
-            client.device_id = response.device_id
-
-            # Set display name using the existing session
-            display_response = await client.set_displayname(display_name)
-            if isinstance(display_response, nio.ErrorResponse):
-                logger.warning(f"Failed to set display name: {display_response}")
-
-            return user_id
-        if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
-            logger.info(f"User {user_id} already exists")
-            login_response = await _login_and_sync_display_name(
-                client=client,
-                password=password,
-                display_name=display_name,
-            )
-            if not isinstance(login_response, nio.LoginResponse):
-                raise _account_collision_error(user_id, login_response)
-            return user_id
-
-        if isinstance(response, nio.ErrorResponse):
-            failure_message = await _registration_failure_message(response, homeserver, registration_token=None)
-            if failure_message:
-                raise matrix_startup_error(failure_message, permanent=True)
-        msg = f"Failed to register user {username}: {response}"
-        raise matrix_startup_error(msg, response=response)
+        return await _handle_register_response(
+            response=response,
+            client=client,
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=None,
+        )
 
 
 async def create_agent_user(

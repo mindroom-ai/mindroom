@@ -16,7 +16,6 @@ import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
 from mindroom.runtime_state import (
-    get_runtime_state,
     reset_runtime_state,
     set_runtime_failed,
     set_runtime_ready,
@@ -1198,9 +1197,6 @@ async def _handle_config_change(orchestrator: MultiAgentOrchestrator) -> None:
         else:
             logger.info("No agent changes detected in configuration update")
         return
-    if get_runtime_state().phase == "failed":
-        logger.info("Configuration changed while runtime is failed; restart MindRoom to retry startup")
-        return
     logger.info("Ignoring config change while startup is still in progress")
 
 
@@ -1329,10 +1325,6 @@ async def main(
 
     except KeyboardInterrupt:
         logger.info("Multi-agent bot system stopped by user")
-    except PermanentMatrixStartupError as exc:
-        set_runtime_failed(str(exc))
-        logger.error("Permanent startup error; keeping process alive until manual restart: %s", exc)  # noqa: TRY400
-        await asyncio.Event().wait()
     except Exception:
         logger.exception("Error in orchestrator")
         raise
