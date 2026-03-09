@@ -8,7 +8,7 @@ interface MindRoomLogoProps {
 export function MindRoomLogo({ className = '', size = 32 }: MindRoomLogoProps) {
   return (
     <Image
-      src="/logo.svg"
+      src="/logo.png"
       alt="MindRoom logo"
       width={size}
       height={size}
