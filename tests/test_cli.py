@@ -146,12 +146,12 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_existing_valid(
+    async def test_ensure_user_account_logs_in_with_existing_credentials(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Test ensuring user account when valid credentials exist."""
+        """Existing stored credentials should be used via direct login."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with internal user account
@@ -192,12 +192,12 @@ class TestUserAccountManagement:
                 mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_invalid_credentials(
+    async def test_ensure_user_account_recreates_account_when_stored_login_fails(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Test ensuring user account when stored credentials are invalid."""
+        """Failed login with stored credentials should retry registration."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with invalid credentials

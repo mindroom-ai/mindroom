@@ -582,13 +582,13 @@ class TestAgentUserCreation:
     @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_agent_user_existing(
+    async def test_create_agent_user_existing_credentials_log_in_directly(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
         mock_matrix_client: MagicMock,
     ) -> None:
-        """Test creating agent user with existing credentials."""
+        """Existing credentials should be reused via login without re-registration."""
         mock_get_creds.return_value = {
             "username": "mindroom_calculator",
             "password": "existing_pass",
@@ -613,7 +613,7 @@ class TestAgentUserCreation:
     @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_agent_user_existing_invalid_password(
+    async def test_create_agent_user_existing_credentials_retry_registration_on_login_failure(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
