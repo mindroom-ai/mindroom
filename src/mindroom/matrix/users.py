@@ -187,57 +187,51 @@ async def _register_user_with_token(
 
     if response.is_success:
         logger.info(f"✅ Successfully registered user with token: {user_id}")
-        async with matrix_client(homeserver, user_id=user_id) as client:
-            await _login_and_sync_display_name(
-                client=client,
-                user_id=user_id,
-                password=password,
-                display_name=display_name,
-            )
-        return user_id
-
-    if errcode == "M_USER_IN_USE":
+    elif errcode == "M_USER_IN_USE":
         logger.info(f"User {user_id} already exists")
-        async with matrix_client(homeserver, user_id=user_id) as client:
-            await _login_and_sync_display_name(
-                client=client,
-                user_id=user_id,
-                password=password,
-                display_name=display_name,
+    else:
+        if errcode == "M_FORBIDDEN" and "Invalid registration token" in detail:
+            msg = (
+                "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
+                "Generate/issue a valid token for bot provisioning and try again."
             )
-        return user_id
+            raise matrix_startup_error(msg, permanent=True)
 
-    if errcode == "M_FORBIDDEN" and "Invalid registration token" in detail:
-        msg = (
-            "Matrix registration failed: MATRIX_REGISTRATION_TOKEN is invalid. "
-            "Generate/issue a valid token for bot provisioning and try again."
+        msg = f"Failed to register user {username}: {errcode or detail}"
+        raise matrix_startup_error(msg, permanent=errcode == "M_INVALID_USERNAME")
+
+    async with matrix_client(homeserver, user_id=user_id) as client:
+        login_response = await _login_and_sync_display_name(
+            client=client,
+            password=password,
+            display_name=display_name,
         )
-        raise matrix_startup_error(msg, permanent=True)
+    if isinstance(login_response, nio.LoginResponse):
+        return user_id
+    raise _account_collision_error(user_id, login_response)
 
-    msg = f"Failed to register user {username}: {errcode or detail}"
-    raise matrix_startup_error(msg, permanent=errcode == "M_INVALID_USERNAME")
+
+def _account_collision_error(user_id: str, login_response: object) -> ValueError:
+    msg = (
+        f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
+        f"({login_response}). Set a unique MINDROOM_NAMESPACE (or choose different names) and retry."
+    )
+    return matrix_startup_error(msg, permanent=True)
 
 
 async def _login_and_sync_display_name(
     *,
     client: nio.AsyncClient,
-    user_id: str,
     password: str,
     display_name: str,
-) -> None:
+) -> nio.LoginResponse | object:
     """Login with known password and keep display name synchronized."""
     login_response = await client.login(password)
     if isinstance(login_response, nio.LoginResponse):
         display_response = await client.set_displayname(display_name)
         if isinstance(display_response, nio.ErrorResponse):
             logger.warning(f"Failed to set display name for existing user: {display_response}")
-        return
-
-    msg = (
-        f"Matrix account collision for {user_id}: the user already exists but login with the configured password failed "
-        f"({login_response}). Set a unique MINDROOM_NAMESPACE (or choose different names) and retry."
-    )
-    raise matrix_startup_error(msg, permanent=True)
+    return login_response
 
 
 async def _register_user(
@@ -261,61 +255,99 @@ async def _register_user(
         ValueError: If registration fails
 
     """
-    # Extract server name from homeserver URL
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
-
     registration_token = provisioning.registration_token_from_env()
+
+    provisioning_result = await _register_user_via_provisioning_if_configured(
+        homeserver=homeserver,
+        user_id=user_id,
+        username=username,
+        password=password,
+        display_name=display_name,
+        registration_token=registration_token,
+    )
+    if provisioning_result is not None:
+        return provisioning_result
+    if registration_token:
+        return await _register_user_with_token(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=registration_token,
+        )
+    return await _register_user_without_token(
+        homeserver=homeserver,
+        user_id=user_id,
+        username=username,
+        password=password,
+        display_name=display_name,
+    )
+
+
+async def _register_user_via_provisioning_if_configured(
+    *,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+    registration_token: str | None,
+) -> str | None:
+    """Register through the provisioning service when local client creds are configured."""
     provisioning_url = provisioning.provisioning_url_from_env()
     creds = provisioning.required_local_provisioning_client_credentials_for_registration(
         provisioning_url=provisioning_url,
         registration_token=registration_token,
     )
-    if creds and provisioning_url:
-        client_id, client_secret = creds
-        provisioning_result = await provisioning.register_user_via_provisioning_service(
-            provisioning_url=provisioning_url,
-            client_id=client_id,
-            client_secret=client_secret,
-            homeserver=homeserver,
-            username=username,
+    if not (creds and provisioning_url):
+        return None
+
+    client_id, client_secret = creds
+    provisioning_result = await provisioning.register_user_via_provisioning_service(
+        provisioning_url=provisioning_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        homeserver=homeserver,
+        username=username,
+        password=password,
+        display_name=display_name,
+    )
+    if provisioning_result.status == "created":
+        logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
+        return provisioning_result.user_id
+
+    login_user_id = user_id
+    if provisioning_result.user_id != user_id:
+        logger.warning(
+            "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
+            provisioning_user_id=provisioning_result.user_id,
+            expected_user_id=user_id,
+        )
+    logger.info(f"User {login_user_id} already exists (provisioning service)")
+    async with matrix_client(homeserver, user_id=login_user_id) as client:
+        login_response = await _login_and_sync_display_name(
+            client=client,
             password=password,
             display_name=display_name,
         )
-        if provisioning_result.status == "created":
-            logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
-            return provisioning_result.user_id
+    if not isinstance(login_response, nio.LoginResponse):
+        raise _account_collision_error(login_user_id, login_response)
+    return login_user_id
 
-        login_user_id = user_id
-        if provisioning_result.user_id != user_id:
-            logger.warning(
-                "Provisioning service returned mismatched user_id for user_in_use; using local server_name-derived ID",
-                provisioning_user_id=provisioning_result.user_id,
-                expected_user_id=user_id,
-            )
 
-        logger.info(f"User {login_user_id} already exists (provisioning service)")
-        async with matrix_client(homeserver, user_id=login_user_id) as client:
-            await _login_and_sync_display_name(
-                client=client,
-                user_id=login_user_id,
-                password=password,
-                display_name=display_name,
-            )
-        return login_user_id
-
+async def _register_user_without_token(
+    *,
+    homeserver: str,
+    user_id: str,
+    username: str,
+    password: str,
+    display_name: str,
+) -> str:
+    """Register directly against the Matrix homeserver without token auth."""
     async with matrix_client(homeserver, user_id=user_id) as client:
-        # Try to register the user
-        if registration_token:
-            return await _register_user_with_token(
-                homeserver=homeserver,
-                user_id=user_id,
-                username=username,
-                password=password,
-                display_name=display_name,
-                registration_token=registration_token,
-            )
-
         response = await client.register(
             username=username,
             password=password,
@@ -337,16 +369,17 @@ async def _register_user(
             return user_id
         if isinstance(response, nio.ErrorResponse) and response.status_code == "M_USER_IN_USE":
             logger.info(f"User {user_id} already exists")
-            await _login_and_sync_display_name(
+            login_response = await _login_and_sync_display_name(
                 client=client,
-                user_id=user_id,
                 password=password,
                 display_name=display_name,
             )
+            if not isinstance(login_response, nio.LoginResponse):
+                raise _account_collision_error(user_id, login_response)
             return user_id
 
         if isinstance(response, nio.ErrorResponse):
-            failure_message = await _registration_failure_message(response, homeserver, registration_token)
+            failure_message = await _registration_failure_message(response, homeserver, registration_token=None)
             if failure_message:
                 raise matrix_startup_error(failure_message, permanent=True)
         msg = f"Failed to register user {username}: {response}"
@@ -413,9 +446,20 @@ async def create_agent_user(
         )
     else:
         async with matrix_client(homeserver, user_id=user_id) as client:
-            await _login_and_sync_display_name(
+            login_response = await _login_and_sync_display_name(
                 client=client,
+                password=password,
+                display_name=agent_display_name,
+            )
+        if not isinstance(login_response, nio.LoginResponse):
+            logger.info(
+                "Existing Matrix credentials failed login; attempting registration to recover account",
+                agent_name=agent_name,
                 user_id=user_id,
+            )
+            await _register_user(
+                homeserver=homeserver,
+                username=matrix_username,
                 password=password,
                 display_name=agent_display_name,
             )
