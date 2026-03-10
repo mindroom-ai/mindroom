@@ -2,7 +2,7 @@
 
 Last updated: 2026-03-10
 Owner: MindRoom backend
-Status: Phase 2 largely implemented, with explicit shared-only exceptions for OAuth-heavy dashboard integrations
+Status: Phase 2 largely implemented, with explicit shared-only exceptions for dashboard-managed credentials and OAuth-heavy integrations
 
 ## Objective
 
@@ -30,6 +30,8 @@ The current prototype aligns file-backed memory reads and writes with worker-own
 Sessions, learning, and most credentials are now worker-scope-aware.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
+Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
+The dashboard does not manage credentials for `user`, `user_agent`, or `room_thread` workers.
 
 ## Product Boundary
 
@@ -112,6 +114,8 @@ The OpenAI-compatible path must not use a request-body `user` field as a durable
 The final design should allow user-scoped workers on `/v1` only when a trusted authenticated principal is present.
 If `/v1` lacks a trusted requester identity, only scopes that do not require a requester identity should be allowed.
 The practical rule is that `shared` and session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
+The dashboard also has an authenticated user identity, but that identity is a dashboard principal rather than the Matrix requester identity used by runtime worker routing.
+That means the dashboard must not read or write credentials for `user`, `user_agent`, or `room_thread` workers until there is a deliberate identity-linking model for those scopes.
 
 ## Tool Execution Policy
 
@@ -235,6 +239,24 @@ OAuth-heavy dashboard integrations are an explicit exception to isolated worker 
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user`, `user_agent`, and `room_thread`.
 They only support unscoped agents and agents with `worker_scope=shared`.
 This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
+Dashboard credential management follows the same product boundary more generally.
+The dashboard may only read, write, test, or disconnect credentials for unscoped agents and agents with `worker_scope=shared`.
+Isolated worker scopes remain runtime-owned state rather than dashboard-managed state.
+
+## Dashboard Credential Boundary
+
+The runtime and the dashboard do not currently resolve requester identity from the same trust source.
+Matrix worker routing resolves `user` and `user_agent` workers from the Matrix sender.
+The dashboard resolves from its own authenticated dashboard principal.
+Those identities are not interchangeable and are not guaranteed to map to the same worker namespace.
+Because of that, the dashboard must not present itself as a management surface for isolated worker-scoped credentials.
+The current product rule is:
+
+- Unscoped agents can use the dashboard credential UI.
+- Agents with `worker_scope=shared` can use the dashboard credential UI.
+- Agents with `worker_scope=user`, `worker_scope=user_agent`, or `worker_scope=room_thread` must treat credentials as runtime-owned state.
+- Shared-only integrations are hidden or disabled for unsupported worker scopes.
+- `/api/tools` may still render a read-only view for unsupported scopes, but it must not imply that dashboard edits will affect the live runtime worker.
 
 ## Local Development Backend
 
@@ -391,6 +413,7 @@ Phase 2 work items were:
 - Enforce file-backed memory for worker-editable agents.
 - Block direct worker mutation of unsupported memory backends.
 - Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
+- Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
 - Add migration behavior for `shared` scope and explicit-import behavior for isolated scopes.
 
 ### Phase 3: Policy Expansion And Lifecycle
@@ -423,8 +446,10 @@ Phase 4 work items are:
 
 ## Recommended Immediate Next Step
 
-The next implementation step should be Phase 3.
-The first concrete target inside Phase 3 should be a first-class worker manager with explicit lifecycle, health, and cleanup behavior.
+The next step should be live validation of the current implementation before more architecture work lands.
+Run a local Matrix or Matty smoke test first, then validate the same flows in Kubernetes.
+After that, move into Phase 3.
+The first concrete Phase 3 target should be a first-class worker manager with explicit lifecycle, health, and cleanup behavior.
 
 ## File Map For Remaining Work
 
