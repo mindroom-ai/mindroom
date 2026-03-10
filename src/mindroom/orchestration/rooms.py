@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -51,8 +49,3 @@ def _get_root_space_user_ids_to_invite(config: Config) -> set[str]:
     if internal_user_id is not None:
         user_ids.add(internal_user_id)
     return user_ids
-
-
-async def _ensure_bot_room_memberships(bots: list[AgentBot | TeamBot]) -> None:
-    """Ensure each bot has joined its assigned rooms."""
-    await asyncio.gather(*(bot.ensure_rooms() for bot in bots))

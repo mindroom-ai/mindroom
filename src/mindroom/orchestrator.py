@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import uvicorn
 
@@ -53,7 +53,6 @@ from .orchestration.config_updates import (
     build_config_update_plan,
 )
 from .orchestration.rooms import (
-    _ensure_bot_room_memberships,
     _get_authorized_user_ids_to_invite,
     _get_root_space_user_ids_to_invite,
 )
@@ -233,7 +232,7 @@ class MultiAgentOrchestrator:
         try:
             return bool(await bot.try_start())
         except PermanentMatrixStartupError:
-            logger.exception(
+            logger.error(  # noqa: TRY400
                 "Bot startup failed permanently; leaving bot disabled until configuration changes",
                 agent_name=entity_name,
             )
@@ -352,10 +351,7 @@ class MultiAgentOrchestrator:
     def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
         temp_user = _create_temp_user(entity_name, config)
-        bot = create_bot_for_entity(entity_name, temp_user, config, self.storage_path)
-        if bot is None:
-            msg = f"Entity '{entity_name}' could not be created"
-            raise RuntimeError(msg)
+        bot = cast("AgentBot | TeamBot", create_bot_for_entity(entity_name, temp_user, config, self.storage_path))
         bot.orchestrator = self
         self.agent_bots[entity_name] = bot
         return bot
@@ -400,10 +396,9 @@ class MultiAgentOrchestrator:
         start_sync_tasks: bool,
     ) -> _EntityStartResults:
         """Create configured entities and try to start them once."""
-        created_entities = [
-            entity_name for entity_name in entity_names if self._create_managed_bot(entity_name, config)
-        ]
-        return await self._start_entities_once(created_entities, start_sync_tasks=start_sync_tasks)
+        for entity_name in entity_names:
+            self._create_managed_bot(entity_name, config)
+        return await self._start_entities_once(entity_names, start_sync_tasks=start_sync_tasks)
 
     async def initialize(self) -> None:
         """Initialize all managed bots from configuration."""
@@ -580,7 +575,14 @@ class MultiAgentOrchestrator:
         if not self.config:
             return await self._load_initial_config(new_config)
 
-        plan = await build_config_update_plan(self, new_config)
+        current_config = self._require_config()
+        plan = build_config_update_plan(
+            current_config=current_config,
+            new_config=new_config,
+            configured_entities=set(self._configured_entity_names(new_config)),
+            existing_entities=set(self.agent_bots.keys()),
+            agent_bots=self.agent_bots,
+        )
 
         if plan.mindroom_user_changed:
             await self._prepare_user_account(new_config, update_runtime_state=not self.running)
@@ -648,7 +650,7 @@ class MultiAgentOrchestrator:
         # First invitation and join pass for rooms the router already manages.
         await self._ensure_room_invitations()
         await _ensure_internal_user_memberships()
-        await _ensure_bot_room_memberships(bots)
+        await asyncio.gather(*(bot.ensure_rooms() for bot in bots))
 
         # Existing invite-only rooms may only become manageable after the router joins.
         # Rerun room reconciliation so topic and access policy updates apply in that case.
@@ -662,7 +664,7 @@ class MultiAgentOrchestrator:
 
         follow_up_bots = [bot for bot in bots if bot.agent_name != ROUTER_AGENT_NAME]
         if follow_up_bots:
-            await _ensure_bot_room_memberships(follow_up_bots)
+            await asyncio.gather(*(bot.ensure_rooms() for bot in follow_up_bots))
 
         logger.info("All agents have joined their configured rooms")
 

@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
-    from mindroom.orchestrator import MultiAgentOrchestrator
 
 logger = get_logger(__name__)
 
@@ -23,10 +22,8 @@ logger = get_logger(__name__)
 class ConfigUpdatePlan:
     """Computed impact of one config reload."""
 
-    current_config: Config
     new_config: Config
     all_new_entities: set[str]
-    existing_entities: set[str]
     entities_to_restart: set[str]
     new_entities: set[str]
     removed_entities: set[str]
@@ -59,7 +56,7 @@ def _config_entries_differ(old_entry: BaseModel | None, new_entry: BaseModel | N
     return old_entry.model_dump(exclude_none=True) != new_entry.model_dump(exclude_none=True)
 
 
-async def _identify_entities_to_restart(
+def _identify_entities_to_restart(
     config: Config | None,
     new_config: Config,
     agent_bots: Mapping[str, AgentBot | TeamBot],
@@ -154,30 +151,28 @@ def _router_needs_restart(config: Config | None, new_config: Config) -> bool:
     return old_rooms != new_rooms
 
 
-async def build_config_update_plan(orchestrator: MultiAgentOrchestrator, new_config: Config) -> ConfigUpdatePlan:
+def build_config_update_plan(
+    *,
+    current_config: Config,
+    new_config: Config,
+    configured_entities: set[str],
+    existing_entities: set[str],
+    agent_bots: Mapping[str, AgentBot | TeamBot],
+) -> ConfigUpdatePlan:
     """Compute the effect of reloading config for the current runtime state."""
-    current_config = orchestrator.config
-    if current_config is None:
-        msg = "Cannot build update plan without an active config"
-        raise RuntimeError(msg)
-
-    entities_to_restart = await _identify_entities_to_restart(
+    entities_to_restart = _identify_entities_to_restart(
         current_config,
         new_config,
-        orchestrator.agent_bots,
+        agent_bots,
     )
-    all_new_entities = set(orchestrator._configured_entity_names(new_config))
-    existing_entities = set(orchestrator.agent_bots.keys())
-    new_entities = all_new_entities - existing_entities - entities_to_restart
+    new_entities = configured_entities - existing_entities - entities_to_restart
 
     return ConfigUpdatePlan(
-        current_config=current_config,
         new_config=new_config,
-        all_new_entities=all_new_entities,
-        existing_entities=existing_entities,
+        all_new_entities=configured_entities,
         entities_to_restart=entities_to_restart,
         new_entities=new_entities,
-        removed_entities=existing_entities - all_new_entities,
+        removed_entities=existing_entities - configured_entities,
         mindroom_user_changed=current_config.mindroom_user != new_config.mindroom_user,
         matrix_room_access_changed=current_config.matrix_room_access != new_config.matrix_room_access,
         matrix_space_changed=current_config.matrix_space != new_config.matrix_space,
