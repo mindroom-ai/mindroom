@@ -433,12 +433,21 @@ describe('Integrations', () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/only supported for shared deployment credentials/i)
+        screen.getByText(/dashboard credential setup, editing, and disconnect are only supported/i)
       ).toBeInTheDocument();
     });
 
+    expect(
+      screen.getByText(
+        /google services, home assistant, spotify, gmail, google calendar, and google sheets/i
+      )
+    ).toBeInTheDocument();
     expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
     expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
     expect(screen.queryByText('Weather')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /shared-only config/i })).toHaveLength(2);
+    for (const button of screen.getAllByRole('button', { name: /shared-only config/i })) {
+      expect(button).toBeDisabled();
+    }
   });
 });

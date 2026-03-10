@@ -72,6 +72,7 @@ export function Integrations() {
   const selectedWorkerScope = selectedScopeAgent?.worker_scope ?? null;
   const hidesSharedOnlyIntegrations =
     selectedScopeAgent !== null && selectedWorkerScope !== null && selectedWorkerScope !== 'shared';
+  const disablesDashboardCredentialManagement = hidesSharedOnlyIntegrations;
 
   // Fetch tools from backend
   const {
@@ -177,7 +178,31 @@ export function Integrations() {
     }
   };
 
+  const integrationNeedsDashboardCredentials = (
+    integration: Integration & { auth_provider?: string }
+  ) => {
+    const tool = integration as any;
+    return (
+      integration.setup_type !== 'none' ||
+      Boolean(tool.auth_provider) ||
+      Boolean(tool.config_fields && tool.config_fields.length > 0)
+    );
+  };
+
   const handleIntegrationAction = async (integration: Integration) => {
+    if (
+      disablesDashboardCredentialManagement &&
+      integrationNeedsDashboardCredentials(integration)
+    ) {
+      toast({
+        title: 'Shared-only dashboard configuration',
+        description:
+          'Dashboard credential setup is only supported for shared deployment credentials.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
     const scope = { agentName: scopeAgentName };
@@ -245,6 +270,19 @@ export function Integrations() {
   };
 
   const handleDisconnect = async (integration: Integration) => {
+    if (
+      disablesDashboardCredentialManagement &&
+      integrationNeedsDashboardCredentials(integration)
+    ) {
+      toast({
+        title: 'Shared-only dashboard configuration',
+        description:
+          'Dashboard credential editing is only supported for shared deployment credentials.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     const provider = integrationProviders[integration.id];
     const scope = { agentName: scopeAgentName };
 
@@ -286,6 +324,17 @@ export function Integrations() {
   };
 
   const getActionButton = (integration: Integration) => {
+    if (
+      disablesDashboardCredentialManagement &&
+      integrationNeedsDashboardCredentials(integration)
+    ) {
+      return (
+        <Button disabled variant="outline" size="sm">
+          Shared-only config
+        </Button>
+      );
+    }
+
     // Check if there's a custom action button
     const provider = integrationProviders[integration.id];
     const config = provider?.getConfig({ agentName: scopeAgentName });
@@ -686,6 +735,14 @@ export function Integrations() {
               <AlertDescription>
                 Room-thread scoped agents are not configurable here because their worker is selected
                 at runtime from a room and thread.
+              </AlertDescription>
+            </Alert>
+          )}
+          {hidesSharedOnlyIntegrations && (
+            <Alert className="mt-3">
+              <AlertDescription>
+                Dashboard credential setup, editing, and disconnect are only supported for shared
+                deployment credentials.
               </AlertDescription>
             </Alert>
           )}
