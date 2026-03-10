@@ -749,6 +749,77 @@ class TestMemoryFunctions:
         assert alice_memory_file.exists()
 
     @pytest.mark.asyncio
+    async def test_file_backend_team_conversation_memory_uses_worker_storage(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Worker-scoped team file memory should be written into the same worker root later reads use."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["calculator"].memory_backend = "file"
+        config.agents["general"].worker_scope = "user"
+        config.agents["calculator"].worker_scope = "user"
+        config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-alice",
+        )
+        bob_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-bob",
+        )
+
+        with tool_execution_identity(alice_identity):
+            await store_conversation_memory(
+                "Alice team private memory",
+                ["general", "calculator"],
+                storage_path,
+                "session-alice",
+                config,
+                room_id="!room:example.org",
+            )
+            alice_results = await search_agent_memories(
+                "Alice team private",
+                "general",
+                storage_path,
+                config,
+                limit=5,
+            )
+
+        with tool_execution_identity(bob_identity):
+            bob_results = await search_agent_memories(
+                "Alice team private",
+                "general",
+                storage_path,
+                config,
+                limit=5,
+            )
+
+        assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
+        assert not any(result.get("memory") == "Alice team private memory" for result in bob_results)
+
+        alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+        assert alice_worker_key is not None
+        alice_team_memory_file = (
+            worker_root_path(storage_path, alice_worker_key) / "memory_files" / "team_calculator+general" / "MEMORY.md"
+        )
+        assert alice_team_memory_file.exists()
+        shared_team_memory_file = storage_path / "memory_files" / "team_calculator+general" / "MEMORY.md"
+        assert not shared_team_memory_file.exists()
+
+    @pytest.mark.asyncio
     async def test_agent_memory_backend_override_to_file_uses_file_storage(
         self,
         mock_memory: AsyncMock,

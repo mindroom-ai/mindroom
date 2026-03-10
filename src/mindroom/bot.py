@@ -2800,21 +2800,29 @@ class TeamBot(AgentBot):
 
         # Store memory once for the entire team (avoids duplicate LLM processing)
         session_id = create_session_id(room_id, thread_id)
+        execution_identity = self._build_tool_execution_identity(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
         # Convert MatrixID list to agent names for memory storage
         agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
-        create_background_task(
-            store_conversation_memory(
-                prompt,
-                agent_names,  # Pass list of agent names for team storage
-                self.storage_path,
-                session_id,
-                self.config,
-                room_id,
-                thread_history,
-                user_id,
-            ),
-            name=f"memory_save_team_{session_id}",
-        )
+        with tool_execution_identity(execution_identity):
+            create_background_task(
+                store_conversation_memory(
+                    prompt,
+                    agent_names,  # Pass list of agent names for team storage
+                    self.storage_path,
+                    session_id,
+                    self.config,
+                    room_id,
+                    thread_history,
+                    user_id,
+                ),
+                name=f"memory_save_team_{session_id}",
+            )
         self.logger.info(f"Storing memory for team: {agent_names}")
 
         media_inputs = media or MediaInputs()

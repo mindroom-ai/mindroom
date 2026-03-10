@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_worker_key
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -455,3 +455,58 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
         TOOL_METADATA.update(original_metadata)
 
     assert result == "@alice:example.org:!room:example.org:$thread:skill:dispatch:hello"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() -> None:
+    """Skill tool dispatch should resolve the same tenant-scoped worker key as normal Matrix routing."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: ARG002, N803
+            identity = get_tool_execution_identity()
+            assert identity is not None
+            worker_key = resolve_worker_key("user_agent", identity, agent_name="code")
+            assert worker_key is not None
+            return worker_key
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="demo_toolkit",
+            display_name="Demo",
+            description="Demo tool",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def demo_toolkit() -> type[Toolkit]:
+            return DemoTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["demo_toolkit"]
+        config.agents["code"].worker_tools = ["demo_toolkit"]
+        config.agents["code"].worker_scope = "user_agent"
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+            monkeypatch.setenv("ACCOUNT_ID", "account-456")
+            result = await _run_skill_command_tool(
+                config=config,
+                agent_name="code",
+                command_tool="demo",
+                skill_name="dispatch",
+                args_text="hello",
+                requester_user_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id="$thread",
+            )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "v1:tenant-123:user_agent:@alice:example.org:code"

@@ -99,6 +99,19 @@ def _effective_storage_path_for_context(
     return storage_path
 
 
+def _effective_storage_paths_for_team(
+    agent_names: list[str],
+    storage_path: Path,
+    config: Config,
+) -> list[Path]:
+    effective_paths: list[Path] = []
+    for agent_name in agent_names:
+        effective_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+        if effective_path not in effective_paths:
+            effective_paths.append(effective_path)
+    return effective_paths or [storage_path]
+
+
 def _should_use_configured_file_memory_path(original_storage_path: Path, effective_storage_path: Path) -> bool:
     return original_storage_path.expanduser().resolve() == effective_storage_path.expanduser().resolve()
 
@@ -1171,40 +1184,45 @@ def _store_file_conversation_memory(
         return
 
     original_storage_path = storage_path
-    if isinstance(agent_name, str):
-        storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
-    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
+    target_storage_paths = (
+        [_effective_storage_path_for_agent(agent_name, storage_path, config)]
+        if isinstance(agent_name, str)
+        else _effective_storage_paths_for_team(agent_name, storage_path, config)
+    )
+
+    scope_user_id = _build_team_user_id(agent_name) if isinstance(agent_name, list) else f"agent_{agent_name}"
+
+    safe_room_id = room_id.replace(":", "_").replace("!", "") if room_id else None
+    for target_storage_path in target_storage_paths:
+        use_configured_path = _should_use_configured_file_memory_path(original_storage_path, target_storage_path)
+        _append_scope_memory_entry(
+            scope_user_id,
+            condensed_prompt,
+            target_storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
+        if safe_room_id is not None:
+            _append_scope_memory_entry(
+                f"room_{safe_room_id}",
+                condensed_prompt,
+                target_storage_path,
+                config,
+                use_configured_path=use_configured_path,
+            )
+
     if isinstance(agent_name, list):
-        scope_user_id = _build_team_user_id(agent_name)
-        _append_scope_memory_entry(
-            scope_user_id,
-            condensed_prompt,
-            storage_path,
-            config,
-            use_configured_path=use_configured_path,
+        logger.info(
+            "File team memory added",
+            team_id=scope_user_id,
+            members=agent_name,
+            storage_targets=len(target_storage_paths),
         )
-        logger.info("File team memory added", team_id=scope_user_id, members=agent_name)
     else:
-        scope_user_id = f"agent_{agent_name}"
-        _append_scope_memory_entry(
-            scope_user_id,
-            condensed_prompt,
-            storage_path,
-            config,
-            use_configured_path=use_configured_path,
-        )
         logger.info("File memory added", agent=agent_name)
 
     if room_id:
-        safe_room_id = room_id.replace(":", "_").replace("!", "")
-        _append_scope_memory_entry(
-            f"room_{safe_room_id}",
-            condensed_prompt,
-            storage_path,
-            config,
-            use_configured_path=use_configured_path,
-        )
-        logger.debug("File room memory added", room_id=room_id)
+        logger.debug("File room memory added", room_id=room_id, storage_targets=len(target_storage_paths))
 
 
 async def _store_mem0_conversation_memory(

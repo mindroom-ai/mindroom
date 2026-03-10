@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -386,6 +387,8 @@ async def _run_skill_command_tool(
             thread_id=thread_id,
             resolved_thread_id=thread_id,
             session_id=thread_id or room_id,
+            tenant_id=os.getenv("CUSTOMER_ID"),
+            account_id=os.getenv("ACCOUNT_ID"),
         )
 
     try:
