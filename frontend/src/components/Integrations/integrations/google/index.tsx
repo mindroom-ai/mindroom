@@ -1,11 +1,16 @@
 import { FaGoogle } from 'react-icons/fa';
-import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
+import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
+import { withAgentName } from '@/lib/api';
 
 // Wrapper component to handle the dialog integration
-function GoogleConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
+function GoogleConfigDialog(props: {
+  onClose: () => void;
+  onSuccess?: () => void;
+  agentName?: string | null;
+}) {
   // Pass the onSuccess callback to the GoogleIntegrationComponent
-  return <GoogleIntegrationComponent onSuccess={props.onSuccess} />;
+  return <GoogleIntegrationComponent onSuccess={props.onSuccess} agentName={props.agentName} />;
 }
 
 class GoogleIntegrationProvider implements IntegrationProvider {
@@ -20,7 +25,8 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     connected: false,
   };
 
-  getConfig(): IntegrationConfig {
+  getConfig(scope?: IntegrationScope): IntegrationConfig {
+    const agentName = scope?.agentName ?? null;
     return {
       integration: this.integration,
       onAction: async () => {
@@ -28,21 +34,22 @@ class GoogleIntegrationProvider implements IntegrationProvider {
         // This is handled via the ConfigComponent
       },
       onDisconnect: async () => {
-        const response = await fetch('/api/google/disconnect', {
+        const response = await fetch(withAgentName('/api/google/disconnect', agentName), {
           method: 'POST',
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Google services');
         }
       },
-      ConfigComponent: GoogleConfigDialog,
-      checkConnection: this.checkConnection.bind(this),
+      ConfigComponent: props => <GoogleConfigDialog {...props} agentName={agentName} />,
+      checkConnection: () => this.checkConnection(agentName),
     };
   }
 
-  async loadStatus(): Promise<Partial<Integration>> {
+  async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
+    const agentName = scope?.agentName ?? null;
     try {
-      const response = await fetch('/api/google/status');
+      const response = await fetch(withAgentName('/api/google/status', agentName));
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
@@ -61,9 +68,9 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     };
   }
 
-  private async checkConnection(): Promise<boolean> {
+  private async checkConnection(agentName?: string | null): Promise<boolean> {
     try {
-      const response = await fetch('/api/google/status');
+      const response = await fetch(withAgentName('/api/google/status', agentName));
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

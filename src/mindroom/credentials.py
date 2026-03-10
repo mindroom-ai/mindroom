@@ -15,6 +15,7 @@ from typing import Any
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
     WorkerScope,
     get_tool_execution_identity,
     resolve_worker_key,
@@ -194,12 +195,13 @@ def _resolve_worker_credentials_manager(
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
     credentials_manager: CredentialsManager,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> CredentialsManager | None:
     """Return the worker-scoped credentials manager for the current execution, if any."""
     if worker_scope is None:
         return None
 
-    execution_identity = get_tool_execution_identity()
+    execution_identity = execution_identity or get_tool_execution_identity()
     if execution_identity is None:
         return None
 
@@ -216,6 +218,7 @@ def load_scoped_credentials(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> dict[str, Any] | None:
     """Load credentials for a service, resolving worker-scoped overrides when available."""
     manager = credentials_manager or get_credentials_manager()
@@ -233,6 +236,7 @@ def load_scoped_credentials(
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
+        execution_identity=execution_identity,
     )
     if worker_manager is None:
         return merged_credentials or None
@@ -250,6 +254,7 @@ def save_scoped_credentials(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
     manager = credentials_manager or get_credentials_manager()
@@ -257,6 +262,7 @@ def save_scoped_credentials(
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
+        execution_identity=execution_identity,
     )
     target_manager = worker_manager or manager
     target_manager.save_credentials(service, credentials)

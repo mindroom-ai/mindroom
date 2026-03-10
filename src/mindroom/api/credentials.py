@@ -1,13 +1,20 @@
 """Unified credentials management API."""
 
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager, get_credentials_manager, validate_service_name
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
+
+_UNSUPPORTED_DASHBOARD_WORKER_SCOPES = {"room_thread"}
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -28,6 +35,133 @@ def _manager_for_worker(worker_key: str | None) -> CredentialsManager:
     if not normalized_worker_key:
         return manager
     return manager.for_worker(normalized_worker_key)
+
+
+@dataclass(frozen=True)
+class RequestCredentialsTarget:
+    """Resolved credential target for one dashboard/API request."""
+
+    base_manager: CredentialsManager
+    target_manager: CredentialsManager
+    worker_scope: WorkerScope | None
+    agent_name: str | None
+    execution_identity: ToolExecutionIdentity | None
+
+
+def _request_auth_user(request: Request) -> dict[str, Any] | None:
+    auth_user = getattr(request.state, "auth_user", None)
+    return auth_user if isinstance(auth_user, dict) else None
+
+
+def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+    auth_user = _request_auth_user(request) or {}
+    user_id = auth_user.get("user_id")
+    requester_id = user_id if isinstance(user_id, str) and user_id else None
+    account_id = os.getenv("ACCOUNT_ID")
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id=account_id,
+        account_id=account_id,
+    )
+
+
+def resolve_request_credentials_target(
+    request: Request,
+    *,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+    credentials_manager: CredentialsManager | None = None,
+) -> RequestCredentialsTarget:
+    """Resolve the credential storage target for one authenticated dashboard request."""
+    if worker_key and agent_name:
+        raise HTTPException(status_code=400, detail="Use either worker_key or agent_name, not both")
+
+    base_manager = credentials_manager or get_credentials_manager()
+
+    if worker_key:
+        normalized_worker_key = worker_key.strip()
+        target_manager = base_manager if not normalized_worker_key else base_manager.for_worker(normalized_worker_key)
+        return RequestCredentialsTarget(
+            base_manager=base_manager,
+            target_manager=target_manager,
+            worker_scope=None,
+            agent_name=None,
+            execution_identity=None,
+        )
+
+    if not agent_name:
+        return RequestCredentialsTarget(
+            base_manager=base_manager,
+            target_manager=base_manager,
+            worker_scope=None,
+            agent_name=None,
+            execution_identity=None,
+        )
+
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+
+    config, _ = load_runtime_config()
+    if agent_name not in config.agents:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+
+    worker_scope = config.get_agent_worker_scope(agent_name)
+    if worker_scope is None:
+        return RequestCredentialsTarget(
+            base_manager=base_manager,
+            target_manager=base_manager,
+            worker_scope=None,
+            agent_name=agent_name,
+            execution_identity=None,
+        )
+
+    if worker_scope in _UNSUPPORTED_DASHBOARD_WORKER_SCOPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Dashboard credential management does not support "
+                f"worker_scope={worker_scope} for agent '{agent_name}'."
+            ),
+        )
+
+    execution_identity = _build_dashboard_execution_identity(request, agent_name)
+    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=agent_name)
+    if worker_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not resolve worker credentials for agent '{agent_name}'.",
+        )
+
+    return RequestCredentialsTarget(
+        base_manager=base_manager,
+        target_manager=base_manager.for_worker(worker_key),
+        worker_scope=worker_scope,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
+
+
+def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:
+    """Load credentials for the resolved target, including scoped overlays when needed."""
+    if target.worker_scope is None or target.agent_name is None or target.execution_identity is None:
+        return target.target_manager.load_credentials(service)
+
+    shared_credentials = target.base_manager.load_credentials(service)
+    merged_credentials: dict[str, Any] = {}
+    if isinstance(shared_credentials, dict) and (
+        target.worker_scope == "shared" or shared_credentials.get("_source") == "env"
+    ):
+        merged_credentials.update(shared_credentials)
+
+    worker_credentials = target.target_manager.load_credentials(service)
+    if isinstance(worker_credentials, dict):
+        merged_credentials.update(worker_credentials)
+    return merged_credentials or None
 
 
 class SetApiKeyRequest(BaseModel):
@@ -53,18 +187,29 @@ class SetCredentialsRequest(BaseModel):
 
 
 @router.get("/list")
-async def list_services(worker_key: str | None = None) -> list[str]:
+async def list_services(
+    request: Request,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+) -> list[str]:
     """List all services with stored credentials."""
-    manager = _manager_for_worker(worker_key)
-    return manager.list_services()
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    if target.worker_scope is None:
+        return target.target_manager.list_services()
+    return sorted(set(target.base_manager.list_services()) | set(target.target_manager.list_services()))
 
 
 @router.get("/{service}/status")
-async def get_credential_status(service: str, worker_key: str | None = None) -> CredentialStatus:
+async def get_credential_status(
+    service: str,
+    request: Request,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    manager = _manager_for_worker(worker_key)
-    credentials = manager.load_credentials(service)
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target)
 
     if credentials:
         filtered = _filter_internal_keys(credentials) if isinstance(credentials, dict) else {}
@@ -80,16 +225,18 @@ async def get_credential_status(service: str, worker_key: str | None = None) -> 
 @router.post("/{service}")
 async def set_credentials(
     service: str,
-    request: SetCredentialsRequest,
+    http_request: Request,
+    payload: SetCredentialsRequest,
     worker_key: str | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    manager = _manager_for_worker(worker_key)
+    target = resolve_request_credentials_target(http_request, worker_key=worker_key, agent_name=agent_name)
 
     # Mark as UI-sourced and save
-    creds = {**request.credentials, "_source": "ui"}
-    manager.save_credentials(service, creds)
+    creds = {**payload.credentials, "_source": "ui"}
+    target.target_manager.save_credentials(service, creds)
 
     return {"status": "success", "message": f"Credentials saved for {service}"}
 
@@ -97,8 +244,10 @@ async def set_credentials(
 @router.post("/{service}/api-key")
 async def set_api_key(
     service: str,
+    http_request: Request,
     request: SetApiKeyRequest,
     worker_key: str | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set an API key for a service."""
     service = _validated_service(service)
@@ -106,11 +255,11 @@ async def set_api_key(
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
-    manager = _manager_for_worker(worker_key)
-    credentials = manager.load_credentials(service) or {}
+    target = resolve_request_credentials_target(http_request, worker_key=worker_key, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target) or {}
     credentials[request.key_name] = request.api_key
     credentials["_source"] = "ui"
-    manager.save_credentials(service, credentials)
+    target.target_manager.save_credentials(service, credentials)
 
     return {"status": "success", "message": f"API key set for {service}"}
 
@@ -118,14 +267,16 @@ async def set_api_key(
 @router.get("/{service}/api-key")
 async def get_api_key(
     service: str,
+    request: Request,
     key_name: str = "api_key",
     include_value: bool = False,
     worker_key: str | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    manager = _manager_for_worker(worker_key)
-    credentials = manager.load_credentials(service) or {}
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target) or {}
     api_key = credentials.get(key_name)
 
     if api_key:
@@ -146,11 +297,16 @@ async def get_api_key(
 
 
 @router.get("/{service}")
-async def get_credentials(service: str, worker_key: str | None = None) -> dict[str, Any]:
+async def get_credentials(
+    service: str,
+    request: Request,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    manager = _manager_for_worker(worker_key)
-    credentials = manager.load_credentials(service)
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target)
 
     if not credentials:
         return {"service": service, "credentials": {}}
@@ -159,11 +315,16 @@ async def get_credentials(service: str, worker_key: str | None = None) -> dict[s
 
 
 @router.delete("/{service}")
-async def delete_credentials(service: str, worker_key: str | None = None) -> dict[str, str]:
+async def delete_credentials(
+    service: str,
+    request: Request,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    manager = _manager_for_worker(worker_key)
-    manager.delete_credentials(service)
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target.target_manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
@@ -172,7 +333,9 @@ async def delete_credentials(service: str, worker_key: str | None = None) -> dic
 async def copy_credentials(
     service: str,
     source_service: str,
+    request: Request,
     worker_key: str | None = None,
+    agent_name: str | None = None,
     source_worker_key: str | None = None,
 ) -> dict[str, str]:
     """Copy credentials from one service to another."""
@@ -187,19 +350,24 @@ async def copy_credentials(
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
-    manager = _manager_for_worker(worker_key)
-    manager.save_credentials(service, target_creds)
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target.target_manager.save_credentials(service, target_creds)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 
 
 @router.post("/{service}/test")
-async def validate_credentials(service: str, worker_key: str | None = None) -> dict[str, Any]:
+async def validate_credentials(
+    service: str,
+    request: Request,
+    worker_key: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
-    manager = _manager_for_worker(worker_key)
-    credentials = manager.load_credentials(service)
+    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target)
 
     if not credentials:
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")

@@ -9,14 +9,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from mindroom.credentials import CredentialsManager
+from mindroom.api.credentials import load_credentials_for_target, resolve_request_credentials_target
 from mindroom.tool_system.dependencies import ensure_tool_deps
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
-
-# Initialize credentials manager
-_creds_manager = CredentialsManager()
 
 
 def get_dashboard_url(request: Request) -> str:
@@ -41,7 +38,7 @@ class _SpotifyClientFactoryProtocol(Protocol):
 
 
 class _SpotifyOAuthClientProtocol(Protocol):
-    def get_authorize_url(self) -> str: ...
+    def get_authorize_url(self, state: str | None = None) -> str: ...
 
     def get_access_token(self, code: str) -> dict[str, Any]: ...
 
@@ -103,19 +100,30 @@ class _ApiKeyRequest(BaseModel):
     api_secret: str | None = None
 
 
-def _get_service_credentials(service: str) -> dict[str, Any]:
+def _get_service_credentials(service: str, request: Request, agent_name: str | None = None) -> dict[str, Any]:
     """Get stored credentials for a service."""
-    credentials = _creds_manager.load_credentials(service)
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    credentials = load_credentials_for_target(service, target)
     return credentials if credentials else {}
 
 
-def _save_service_credentials(service: str, credentials: dict[str, Any]) -> None:
+def _save_service_credentials(
+    service: str,
+    credentials: dict[str, Any],
+    request: Request,
+    agent_name: str | None = None,
+) -> None:
     """Save service credentials."""
-    _creds_manager.save_credentials(service, credentials)
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target.target_manager.save_credentials(service, credentials)
 
 
 @router.get("/{service}/status")
-async def get_service_status(service: str) -> ServiceStatus:
+async def get_service_status(
+    service: str,
+    request: Request,
+    agent_name: str | None = None,
+) -> ServiceStatus:
     """Get connection status for a specific service."""
     # Get tool metadata from single source of truth
     tools_metadata = _get_tools_metadata()
@@ -134,7 +142,7 @@ async def get_service_status(service: str) -> ServiceStatus:
         requires_api_key=tool.get("setup_type") == "api_key",
     )
 
-    creds = _get_service_credentials(service)
+    creds = _get_service_credentials(service, request, agent_name)
     if creds:
         if service == "spotify":
             status.connected = "access_token" in creds
@@ -160,7 +168,7 @@ async def get_service_status(service: str) -> ServiceStatus:
 
 # Spotify
 @router.post("/spotify/connect")
-async def connect_spotify(request: Request) -> dict[str, str]:
+async def connect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Start Spotify OAuth flow."""
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
@@ -171,6 +179,7 @@ async def connect_spotify(request: Request) -> dict[str, str]:
             detail="Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.",
         )
 
+    resolve_request_credentials_target(request, agent_name=agent_name)
     _, spotify_oauth_cls = _ensure_spotify_packages()
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
@@ -179,13 +188,19 @@ async def connect_spotify(request: Request) -> dict[str, str]:
         scope="user-read-private user-read-email user-read-playback-state user-read-currently-playing user-top-read",
     )
 
-    auth_url = sp_oauth.get_authorize_url()
+    auth_url = sp_oauth.get_authorize_url(state=agent_name or None)
     return {"auth_url": auth_url}
 
 
 @router.get("/spotify/callback")
 async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     """Handle Spotify OAuth callback."""
+    agent_name = request.query_params.get("state") or None
+    if agent_name:
+        from mindroom.api.main import verify_user  # noqa: PLC0415
+
+        await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
 
@@ -213,7 +228,7 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
             "expires_at": token_info.get("expires_at"),
             "username": user["display_name"],
         }
-        _save_service_credentials("spotify", credentials)
+        _save_service_credentials("spotify", credentials, request, agent_name)
 
         return RedirectResponse(url=f"{get_dashboard_url(request)}/?spotify=connected")
     except Exception as e:
@@ -221,7 +236,11 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
 
 
 @router.post("/{service}/disconnect")
-async def disconnect_service(service: str) -> dict[str, str]:
+async def disconnect_service(
+    service: str,
+    request: Request,
+    agent_name: str | None = None,
+) -> dict[str, str]:
     """Disconnect a service by removing stored credentials."""
     # Get tool metadata from single source of truth
     tools_metadata = _get_tools_metadata()
@@ -229,7 +248,7 @@ async def disconnect_service(service: str) -> dict[str, str]:
     if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
-    # Delete credentials using the manager
-    _creds_manager.delete_credentials(service)
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target.target_manager.delete_credentials(service)
 
     return {"status": "disconnected"}

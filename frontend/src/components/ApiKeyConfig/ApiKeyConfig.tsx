@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/components/ui/use-toast';
 import { Badge } from '@/components/ui/badge';
+import { withAgentName } from '@/lib/api';
 
 interface ApiKeyConfigProps {
   service: string;
@@ -13,6 +14,7 @@ interface ApiKeyConfigProps {
   description?: string;
   keyName?: string;
   onConfigured?: () => void;
+  agentName?: string | null;
 }
 
 export function ApiKeyConfig({
@@ -21,6 +23,7 @@ export function ApiKeyConfig({
   description,
   keyName = 'api_key',
   onConfigured,
+  agentName,
 }: ApiKeyConfigProps) {
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
@@ -33,11 +36,13 @@ export function ApiKeyConfig({
   // Check if API key is already configured
   useEffect(() => {
     checkApiKey();
-  }, [service]);
+  }, [service, agentName]);
 
   const checkApiKey = async () => {
     try {
-      const response = await fetch(`/api/credentials/${service}/api-key?key_name=${keyName}`);
+      const response = await fetch(
+        withAgentName(`/api/credentials/${service}/api-key?key_name=${keyName}`, agentName)
+      );
       if (response.ok) {
         const data = await response.json();
         setHasKey(data.has_key);
@@ -61,15 +66,18 @@ export function ApiKeyConfig({
 
     setLoading(true);
     try {
-      const response = await fetch(`/api/credentials/${service}/api-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          service,
-          api_key: apiKey,
-          key_name: keyName,
-        }),
-      });
+      const response = await fetch(
+        withAgentName(`/api/credentials/${service}/api-key`, agentName),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            service,
+            api_key: apiKey,
+            key_name: keyName,
+          }),
+        }
+      );
 
       if (response.ok) {
         toast({
@@ -100,7 +108,7 @@ export function ApiKeyConfig({
 
     setLoading(true);
     try {
-      const response = await fetch(`/api/credentials/${service}`, {
+      const response = await fetch(withAgentName(`/api/credentials/${service}`, agentName), {
         method: 'DELETE',
       });
 
@@ -128,7 +136,7 @@ export function ApiKeyConfig({
   const handleTest = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/credentials/${service}/test`, {
+      const response = await fetch(withAgentName(`/api/credentials/${service}/test`, agentName), {
         method: 'POST',
       });
 

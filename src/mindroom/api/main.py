@@ -424,15 +424,22 @@ def _render_standalone_login_page(next_path: str) -> str:
 </html>"""
 
 
-async def verify_user(request: Request, authorization: str | None = Header(None)) -> dict:
+async def verify_user(
+    request: Request,
+    authorization: str | None = Header(None),
+    *,
+    allow_public_paths: bool = True,
+) -> dict:
     """Validate bearer or cookie auth and enforce owner if ACCOUNT_ID is set.
 
     In standalone mode (no Supabase), returns a default user to allow access.
     """
     if _supabase_auth is None:
         # Standalone mode
-        if request.url.path in _STANDALONE_PUBLIC_PATHS:
-            return {"user_id": "standalone", "email": None}
+        if allow_public_paths and request.url.path in _STANDALONE_PUBLIC_PATHS:
+            auth_user = {"user_id": "standalone", "email": None}
+            request.state.auth_user = auth_user
+            return auth_user
 
         if _MINDROOM_API_KEY:
             token = _get_request_token(
@@ -444,7 +451,9 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
             if not secrets.compare_digest(token, _MINDROOM_API_KEY):
                 raise HTTPException(status_code=401, detail="Invalid API key")
-        return {"user_id": "standalone", "email": None}
+        auth_user = {"user_id": "standalone", "email": None}
+        request.state.auth_user = auth_user
+        return auth_user
 
     token = _get_request_token(
         request,
@@ -461,7 +470,9 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
     if _ACCOUNT_ID and user.id != _ACCOUNT_ID:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    return {"user_id": user.id, "email": user.email}
+    auth_user = {"user_id": user.id, "email": user.email}
+    request.state.auth_user = auth_user
+    return auth_user
 
 
 def _load_config_from_file() -> None:

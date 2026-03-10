@@ -69,5 +69,18 @@ describe('HomeAssistantIntegrationProvider', () => {
       expect(status.status).toBe('available');
       expect(status.connected).toBe(false);
     });
+
+    it('appends agent_name when checking scoped status', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ connected: false }),
+      });
+
+      await homeAssistantIntegration.loadStatus!({ agentName: 'code' });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/homeassistant/status?agent_name=code')
+      );
+    });
   });
 });

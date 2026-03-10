@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Dialog,
   DialogContent,
@@ -19,11 +20,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
+import { useConfigStore } from '@/store/configStore';
 import { getIconForTool } from './iconMapping';
-import { API_BASE_URL } from '@/lib/api';
+import { API_BASE_URL, withAgentName } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
@@ -34,8 +43,31 @@ import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 
 export function Integrations() {
+  const { agents } = useConfigStore();
+  const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
+  const scopedAgents = useMemo(
+    () =>
+      agents
+        .filter(agent => agent.worker_scope !== 'room_thread')
+        .sort((a, b) => a.display_name.localeCompare(b.display_name)),
+    [agents]
+  );
+  const roomThreadAgents = useMemo(
+    () => agents.filter(agent => agent.worker_scope === 'room_thread'),
+    [agents]
+  );
+  const selectedScopeAgent = useMemo(
+    () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
+    [scopedAgents, scopeAgentName]
+  );
+  const selectedWorkerScope = selectedScopeAgent?.worker_scope ?? null;
+
   // Fetch tools from backend
-  const { tools: backendTools, loading: toolsLoading, refetch: refetchTools } = useTools();
+  const {
+    tools: backendTools,
+    loading: toolsLoading,
+    refetch: refetchTools,
+  } = useTools(scopeAgentName);
 
   // State
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -61,10 +93,16 @@ export function Integrations() {
   const [searchTerm, setSearchTerm] = useState('');
   const { toast } = useToast();
 
+  useEffect(() => {
+    if (scopeAgentName && !scopedAgents.some(agent => agent.id === scopeAgentName)) {
+      setScopeAgentName(null);
+    }
+  }, [scopeAgentName, scopedAgents]);
+
   // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
-  }, [backendTools]);
+  }, [backendTools, scopeAgentName]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
@@ -79,11 +117,12 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
+      const scope = { agentName: scopeAgentName };
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
-        const config = provider.getConfig();
-        const status = provider.loadStatus ? await provider.loadStatus() : {};
+        const config = provider.getConfig(scope);
+        const status = provider.loadStatus ? await provider.loadStatus(scope) : {};
         loadedIntegrations.push({
           ...config.integration,
           ...status,
@@ -124,9 +163,10 @@ export function Integrations() {
   const handleIntegrationAction = async (integration: Integration) => {
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
+    const scope = { agentName: scopeAgentName };
 
     if (provider) {
-      const config = provider.getConfig();
+      const config = provider.getConfig(scope);
 
       // If there's a custom config component, show it in a dialog
       if (config.ConfigComponent) {
@@ -189,17 +229,21 @@ export function Integrations() {
 
   const handleDisconnect = async (integration: Integration) => {
     const provider = integrationProviders[integration.id];
+    const scope = { agentName: scopeAgentName };
 
     setLoading(true);
     try {
-      if (provider?.getConfig().onDisconnect) {
+      if (provider?.getConfig(scope).onDisconnect) {
         // Use provider's disconnect method if available
-        await provider.getConfig().onDisconnect!(integration.id);
+        await provider.getConfig(scope).onDisconnect!(integration.id);
       } else {
         // For generic tools, delete credentials via API
-        const response = await fetch(`${API_BASE_URL}/api/credentials/${integration.id}`, {
-          method: 'DELETE',
-        });
+        const response = await fetch(
+          withAgentName(`${API_BASE_URL}/api/credentials/${integration.id}`, scopeAgentName),
+          {
+            method: 'DELETE',
+          }
+        );
 
         if (!response.ok) {
           throw new Error('Failed to disconnect');
@@ -227,7 +271,7 @@ export function Integrations() {
   const getActionButton = (integration: Integration) => {
     // Check if there's a custom action button
     const provider = integrationProviders[integration.id];
-    const config = provider?.getConfig();
+    const config = provider?.getConfig({ agentName: scopeAgentName });
 
     if (config?.ActionButton) {
       const ActionButton = config.ActionButton;
@@ -575,6 +619,22 @@ export function Integrations() {
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-2xl font-bold">Tools</h2>
             <div className="flex items-center gap-2">
+              <Select
+                value={scopeAgentName ?? 'shared'}
+                onValueChange={value => setScopeAgentName(value === 'shared' ? null : value)}
+              >
+                <SelectTrigger className="w-72">
+                  <SelectValue placeholder="Shared deployment credentials" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="shared">Shared deployment credentials</SelectItem>
+                  {scopedAgents.map(agent => (
+                    <SelectItem key={agent.id} value={agent.id}>
+                      {agent.display_name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Input
                 type="search"
                 placeholder="Search tools..."
@@ -598,8 +658,20 @@ export function Integrations() {
             </div>
           </div>
           <p className="text-gray-600 dark:text-gray-400">
-            Connect external services to enable agent capabilities
+            {selectedScopeAgent
+              ? `Configuring tools for ${selectedScopeAgent.display_name} (${
+                  selectedWorkerScope ?? 'shared'
+                } worker scope).`
+              : 'Connect external services to enable agent capabilities'}
           </p>
+          {roomThreadAgents.length > 0 && (
+            <Alert className="mt-3">
+              <AlertDescription>
+                Room-thread scoped agents are not configurable here because their worker is selected
+                at runtime from a room and thread.
+              </AlertDescription>
+            </Alert>
+          )}
         </div>
 
         <div className="flex-1 overflow-auto">
@@ -648,6 +720,7 @@ export function Integrations() {
             {activeDialog.config.ConfigComponent && (
               <activeDialog.config.ConfigComponent
                 onClose={() => setActiveDialog(null)}
+                agentName={scopeAgentName}
                 onSuccess={async () => {
                   setActiveDialog(null);
                   // Force refresh to get updated Google tools status
@@ -673,6 +746,7 @@ export function Integrations() {
           helperText={configDialog.helperText}
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
+          agentName={scopeAgentName}
           onSuccess={async () => {
             setConfigDialog(null);
             // Refetch tools to get updated status

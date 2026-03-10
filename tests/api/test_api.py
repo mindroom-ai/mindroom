@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, NoReturn
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -11,7 +12,28 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import main
+from mindroom.config.main import Config
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+
+
+def _config_with_worker_scope(worker_scope: str | None) -> Config:
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "role": "test",
+                    "tools": ["homeassistant"],
+                    "instructions": ["hi"],
+                    "rooms": ["lobby"],
+                },
+            },
+            "defaults": {"markdown": True},
+        },
+    )
+    config.agents["general"].worker_scope = worker_scope
+    return config
 
 
 def test_init_supabase_auth_returns_none_without_credentials() -> None:
@@ -335,6 +357,112 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "description" in first_tool
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
+
+
+def test_get_tools_uses_agent_scoped_credentials(test_client: TestClient) -> None:
+    """Agent-scoped tool status checks should resolve worker credentials for the dashboard user."""
+    config = _config_with_worker_scope("user")
+    manager = MagicMock()
+    manager.load_credentials.return_value = None
+    worker_manager = MagicMock()
+    worker_manager.load_credentials.side_effect = lambda service: (
+        {
+            "instance_url": "https://ha.example.com",
+            "access_token": "token",
+        }
+        if service == "homeassistant"
+        else None
+    )
+    manager.for_worker.return_value = worker_manager
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.credentials.get_credentials_manager", return_value=manager),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert tools_by_name["homeassistant"]["status"] == "available"
+    manager.for_worker.assert_called_once()
+
+
+def test_google_disconnect_uses_agent_scoped_credentials(test_client: TestClient) -> None:
+    """Google dashboard actions should delete worker-scoped credentials for scoped agents."""
+    config = _config_with_worker_scope("user")
+    manager = MagicMock()
+    worker_manager = MagicMock()
+    manager.for_worker.return_value = worker_manager
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.credentials.get_credentials_manager", return_value=manager),
+    ):
+        response = test_client.post("/api/google/disconnect?agent_name=general")
+
+    assert response.status_code == 200
+    manager.for_worker.assert_called_once()
+    worker_manager.delete_credentials.assert_called_once_with("google")
+
+
+def test_homeassistant_connect_oauth_saves_worker_scoped_temp_config(test_client: TestClient) -> None:
+    """Home Assistant OAuth temp config should be written into the scoped worker store."""
+    config = _config_with_worker_scope("user")
+    manager = MagicMock()
+    worker_manager = MagicMock()
+    manager.for_worker.return_value = worker_manager
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.credentials.get_credentials_manager", return_value=manager),
+    ):
+        response = test_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "https://ha.example.com",
+                "client_id": "client-id",
+            },
+        )
+
+    assert response.status_code == 200
+    manager.for_worker.assert_called_once()
+    worker_manager.save_credentials.assert_called_once()
+    service, saved = worker_manager.save_credentials.call_args.args
+    assert service == "homeassistant"
+    assert saved["instance_url"] == "https://ha.example.com"
+    assert saved["client_id"] == "client-id"
+    assert saved["redirect_uri"].endswith("/api/homeassistant/callback?agent_name=general")
+
+
+def test_spotify_status_uses_agent_scoped_credentials(test_client: TestClient) -> None:
+    """Integration status endpoints should read worker-scoped credentials for scoped agents."""
+    config = _config_with_worker_scope("user")
+    manager = MagicMock()
+    manager.load_credentials.return_value = None
+    worker_manager = MagicMock()
+    worker_manager.load_credentials.side_effect = lambda service: (
+        {"access_token": "token"} if service == "spotify" else None
+    )
+    manager.for_worker.return_value = worker_manager
+    spotify_client = MagicMock()
+    spotify_client.current_user.return_value = {
+        "display_name": "Scoped User",
+        "email": "scoped@example.com",
+        "product": "premium",
+    }
+    spotify_cls = MagicMock(return_value=spotify_client)
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.credentials.get_credentials_manager", return_value=manager),
+        patch("mindroom.api.integrations._ensure_spotify_packages", return_value=(spotify_cls, MagicMock())),
+    ):
+        response = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert response.json()["details"]["username"] == "Scoped User"
+    manager.for_worker.assert_called_once()
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:

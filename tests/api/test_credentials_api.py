@@ -1,12 +1,35 @@
 """Tests for the credentials API endpoints."""
 
 from collections.abc import Generator
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from mindroom.api.main import app
+from mindroom.config.main import Config
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+
+
+def _config_with_worker_scope(worker_scope: str | None) -> Config:
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "role": "test",
+                    "tools": ["calculator"],
+                    "instructions": ["hi"],
+                    "rooms": ["lobby"],
+                },
+            },
+            "defaults": {"markdown": True},
+        },
+    )
+    config.agents["general"].worker_scope = worker_scope
+    return config
 
 
 @pytest.fixture
@@ -116,6 +139,58 @@ class TestCredentialsAPI:
             "openai",
             {"api_key": "sk-test123", "_source": "ui"},
         )
+
+    def test_agent_name_uses_authenticated_user_worker_scope(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """agent_name should resolve a worker key from the authenticated dashboard user."""
+        config = _config_with_worker_scope("user")
+
+        worker_manager = MagicMock()
+        worker_manager.load_credentials.return_value = {
+            "api_key": "sk-worker-scope",
+            "_source": "ui",
+        }
+        mock_credentials_manager.for_worker.return_value = worker_manager
+
+        expected_worker_key = resolve_worker_key(
+            "user",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="standalone",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+                tenant_id=None,
+                account_id=None,
+            ),
+            agent_name="general",
+        )
+        assert expected_worker_key is not None
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai/api-key?agent_name=general")
+
+        assert response.status_code == 200
+        mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
+        assert response.json()["has_key"] is True
+
+    def test_agent_name_rejects_room_thread_scope(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Dashboard credential management should reject room_thread scoped agents."""
+        config = _config_with_worker_scope("room_thread")
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai?agent_name=general")
+
+        assert response.status_code == 400
+        assert "worker_scope=room_thread" in response.json()["detail"]
 
     def test_get_credentials(
         self,

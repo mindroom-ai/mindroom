@@ -15,6 +15,10 @@ describe('ApiKeyConfig', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (global.fetch as any).mockClear();
+    (global.fetch as any).mockResolvedValue({
+      ok: false,
+      json: async () => ({}),
+    });
   });
 
   it('renders with service name and description', () => {
@@ -252,6 +256,47 @@ describe('ApiKeyConfig', () => {
       expect(global.fetch).toHaveBeenCalledWith(
         '/api/credentials/custom/api-key?key_name=custom_token'
       );
+    });
+  });
+
+  it('appends agent_name for scoped credential requests', async () => {
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ has_key: false }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 'success' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ has_key: true, masked_key: 'sk-...xyz' }),
+      });
+
+    render(<ApiKeyConfig service="openai" displayName="OpenAI" agentName="code" />);
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/credentials/openai/api-key?key_name=api_key&agent_name=code'
+      );
+    });
+
+    fireEvent.change(screen.getByPlaceholderText('Enter API key'), {
+      target: { value: 'sk-test-key-123' },
+    });
+    fireEvent.click(screen.getByText('Save API Key'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('/api/credentials/openai/api-key?agent_name=code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service: 'openai',
+          api_key: 'sk-test-key-123',
+          key_name: 'api_key',
+        }),
+      });
     });
   });
 });

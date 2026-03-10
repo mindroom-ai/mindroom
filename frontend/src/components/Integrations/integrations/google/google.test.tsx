@@ -75,6 +75,19 @@ describe('GoogleIntegrationProvider', () => {
       expect(status.status).toBe('available');
       expect(status.connected).toBe(false);
     });
+
+    it('appends agent_name when checking scoped status', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ connected: false }),
+      });
+
+      await googleIntegration.loadStatus({ agentName: 'code' });
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/google/status?agent_name=code')
+      );
+    });
   });
 
   describe('checkConnection', () => {
@@ -109,6 +122,18 @@ describe('GoogleIntegrationProvider', () => {
       const isConnected = await config.checkConnection!();
 
       expect(isConnected).toBe(false);
+    });
+
+    it('appends agent_name for scoped disconnect', async () => {
+      (global.fetch as any).mockResolvedValueOnce({ ok: true });
+
+      const config = googleIntegration.getConfig({ agentName: 'code' });
+      await config.onDisconnect!('google');
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/google/disconnect?agent_name=code'),
+        expect.objectContaining({ method: 'POST' })
+      );
     });
   });
 });

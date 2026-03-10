@@ -2,6 +2,7 @@ import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
+export type WorkerScope = 'shared' | 'user' | 'user_agent' | 'room_thread';
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -92,6 +93,7 @@ export interface Agent {
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)
+  worker_scope?: WorkerScope | null;
   delegate_to?: string[]; // Agent names this agent can delegate tasks to
   thread_mode?: ThreadMode; // Conversation threading mode
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides

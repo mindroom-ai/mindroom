@@ -10,6 +10,8 @@ This module provides OAuth2 integration with Home Assistant, supporting:
 Uses the official Home Assistant REST API.
 """
 
+from __future__ import annotations
+
 from typing import Any
 from urllib.parse import urljoin
 
@@ -18,13 +20,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from mindroom.api.credentials import (
+    RequestCredentialsTarget,
+    load_credentials_for_target,
+    resolve_request_credentials_target,
+)
 from mindroom.api.integrations import get_dashboard_url
-from mindroom.credentials import CredentialsManager
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
-
-# Initialize credentials manager
-_creds_manager = CredentialsManager()
 
 # OAuth scopes for Home Assistant
 # Home Assistant doesn't use traditional OAuth scopes, but we request full API access
@@ -57,14 +60,14 @@ class HomeAssistantConfig(BaseModel):
     long_lived_token: str | None = None
 
 
-def _get_stored_config() -> dict[str, Any] | None:
+def _get_stored_config(target: RequestCredentialsTarget) -> dict[str, Any] | None:
     """Get stored Home Assistant configuration."""
-    return _creds_manager.load_credentials("homeassistant")
+    return load_credentials_for_target("homeassistant", target)
 
 
-def _save_config(config: dict[str, Any]) -> None:
+def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
-    _creds_manager.save_credentials("homeassistant", config)
+    target.target_manager.save_credentials("homeassistant", config)
 
 
 async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
@@ -126,9 +129,10 @@ async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
 
 
 @router.get("/status")
-async def get_status() -> HomeAssistantStatus:
+async def get_status(request: Request, agent_name: str | None = None) -> HomeAssistantStatus:
     """Check Home Assistant integration status."""
-    config = _get_stored_config()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    config = _get_stored_config(target)
 
     if not config:
         return HomeAssistantStatus(
@@ -174,7 +178,11 @@ async def get_status() -> HomeAssistantStatus:
 
 
 @router.post("/connect/oauth")
-async def connect_oauth(request: Request, config: HomeAssistantConfig) -> HomeAssistantAuthUrl:
+async def connect_oauth(
+    request: Request,
+    config: HomeAssistantConfig,
+    agent_name: str | None = None,
+) -> HomeAssistantAuthUrl:
     """Start Home Assistant OAuth flow."""
     if not config.instance_url:
         raise HTTPException(
@@ -190,7 +198,10 @@ async def connect_oauth(request: Request, config: HomeAssistantConfig) -> HomeAs
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    redirect_uri = f"{get_dashboard_url(request)}/homeassistant-callback"
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
+    if agent_name:
+        redirect_uri = f"{redirect_uri}?agent_name={agent_name}"
 
     auth_params = {
         "client_id": config.client_id,
@@ -208,13 +219,17 @@ async def connect_oauth(request: Request, config: HomeAssistantConfig) -> HomeAs
         "client_id": config.client_id,
         "redirect_uri": redirect_uri,
     }
-    _save_config(temp_config)
+    _save_config(target, temp_config)
 
     return HomeAssistantAuthUrl(auth_url=auth_url)
 
 
 @router.post("/connect/token")
-async def connect_token(config: HomeAssistantConfig) -> dict[str, str]:
+async def connect_token(
+    request: Request,
+    config: HomeAssistantConfig,
+    agent_name: str | None = None,
+) -> dict[str, str]:
     """Connect using a long-lived access token."""
     if not config.instance_url:
         raise HTTPException(
@@ -245,7 +260,9 @@ async def connect_token(config: HomeAssistantConfig) -> dict[str, str]:
         ) from e
 
     # Save configuration
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
     _save_config(
+        target,
         {
             "instance_url": instance_url,
             "long_lived_token": config.long_lived_token,
@@ -263,8 +280,15 @@ async def callback(request: Request) -> RedirectResponse:
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
+    agent_name = request.query_params.get("agent_name") or None
+    if agent_name:
+        from mindroom.api.main import verify_user  # noqa: PLC0415
+
+        await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+
     # Get stored config
-    config = _get_stored_config()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=503, detail="No configuration found")
 
@@ -297,6 +321,7 @@ async def callback(request: Request) -> RedirectResponse:
 
             # Save the access token
             _save_config(
+                target,
                 {
                     "instance_url": instance_url,
                     "client_id": client_id,
@@ -313,11 +338,11 @@ async def callback(request: Request) -> RedirectResponse:
 
 
 @router.post("/disconnect")
-async def disconnect() -> dict[str, str]:
+async def disconnect(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Home Assistant by removing stored tokens."""
     try:
-        # Remove credentials using the manager
-        _creds_manager.delete_credentials("homeassistant")
+        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        target.target_manager.delete_credentials("homeassistant")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
@@ -325,9 +350,14 @@ async def disconnect() -> dict[str, str]:
 
 
 @router.get("/entities")
-async def get_entities(domain: str | None = None) -> list[dict[str, Any]]:
+async def get_entities(
+    request: Request,
+    domain: str | None = None,
+    agent_name: str | None = None,
+) -> list[dict[str, Any]]:
     """Get Home Assistant entities."""
-    config = _get_stored_config()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
 
@@ -374,13 +404,16 @@ async def get_entities(domain: str | None = None) -> list[dict[str, Any]]:
 
 @router.post("/service")
 async def call_service(
+    request: Request,
     domain: str,
     service: str,
     entity_id: str | None = None,
     data: dict[str, Any] | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Call a Home Assistant service."""
-    config = _get_stored_config()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
 

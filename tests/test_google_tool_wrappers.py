@@ -63,7 +63,7 @@ def test_google_wrappers_reload_scoped_credentials_per_requester(
     """A shared tool instance must reload credentials when the requester changes."""
     manager = MagicMock()
 
-    def fake_load_scoped_credentials(_service: str, **_kwargs: Any) -> dict[str, Any] | None:
+    def fake_load_scoped_credentials(_service: str, **_kwargs: object) -> dict[str, Any] | None:
         identity = get_tool_execution_identity()
         if identity is None:
             return None
@@ -84,11 +84,11 @@ def test_google_wrappers_reload_scoped_credentials_per_requester(
         ):
             with tool_execution_identity(_worker_identity("@alice:example.org")):
                 tool._auth()
-                assert tool.creds.token == "alice-token"
+                assert tool.creds.token == "alice-token"  # noqa: S105
 
             with tool_execution_identity(_worker_identity("@bob:example.org")):
                 tool._auth()
-                assert tool.creds.token == "bob-token"
+                assert tool.creds.token == "bob-token"  # noqa: S105
 
 
 @pytest.mark.parametrize(
@@ -107,13 +107,13 @@ def test_google_wrappers_refresh_tokens_in_scoped_store(
     manager = MagicMock()
     token_data = {"token": "alice-token", "refresh_token": "refresh-token"}
     fake_creds = _FakeGoogleCreds(
-        token="alice-token",
-        refresh_token="refresh-token",
+        token="alice-token",  # noqa: S106
+        refresh_token="refresh-token",  # noqa: S106
         expired=True,
         valid=False,
     )
 
-    def fake_load_scoped_credentials(_service: str, **_kwargs: Any) -> dict[str, Any] | None:
+    def fake_load_scoped_credentials(_service: str, **_kwargs: object) -> dict[str, Any] | None:
         return token_data.copy() if get_tool_execution_identity() is not None else None
 
     with (
@@ -123,9 +123,11 @@ def test_google_wrappers_refresh_tokens_in_scoped_store(
         patch(f"{module_path}.ensure_tool_deps"),
     ):
         tool = tool_class(worker_scope="user", routing_agent_name="general")
-        with patch.object(tool, "_build_credentials", return_value=fake_creds):
-            with tool_execution_identity(_worker_identity("@alice:example.org")):
-                tool._auth()
+        with (
+            patch.object(tool, "_build_credentials", return_value=fake_creds),
+            tool_execution_identity(_worker_identity("@alice:example.org")),
+        ):
+            tool._auth()
 
     mock_save_scoped_credentials.assert_called_once_with(
         "google",

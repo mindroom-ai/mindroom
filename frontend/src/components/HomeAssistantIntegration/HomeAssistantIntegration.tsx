@@ -20,7 +20,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL } from '@/lib/api';
+import { API_BASE_URL, withAgentName } from '@/lib/api';
 
 interface HomeAssistantStatus {
   connected: boolean;
@@ -34,9 +34,13 @@ interface HomeAssistantStatus {
 
 interface HomeAssistantIntegrationProps {
   onSuccess?: () => void;
+  agentName?: string | null;
 }
 
-export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegrationProps = {}) {
+export function HomeAssistantIntegration({
+  onSuccess,
+  agentName,
+}: HomeAssistantIntegrationProps = {}) {
   const [status, setStatus] = useState<HomeAssistantStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -53,7 +57,9 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
   const checkStatus = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/homeassistant/status`);
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+      );
       if (response.ok) {
         const data = await response.json();
         setStatus(data);
@@ -86,14 +92,17 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
 
     setConnecting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/homeassistant/connect/oauth`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instance_url: instanceUrl,
-          client_id: clientId,
-        }),
-      });
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/homeassistant/connect/oauth`, agentName),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            instance_url: instanceUrl,
+            client_id: clientId,
+          }),
+        }
+      );
 
       if (!response.ok) {
         const error = await response.json();
@@ -116,7 +125,9 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
           await checkStatus();
 
           // Check the status again to see if we're now connected
-          const statusResponse = await fetch(`${API_BASE_URL}/api/homeassistant/status`);
+          const statusResponse = await fetch(
+            withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+          );
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
             if (newStatus.connected && !previousStatus) {
@@ -165,14 +176,17 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
 
     setConnecting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/homeassistant/connect/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instance_url: instanceUrl,
-          long_lived_token: longLivedToken,
-        }),
-      });
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/homeassistant/connect/token`, agentName),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            instance_url: instanceUrl,
+            long_lived_token: longLivedToken,
+          }),
+        }
+      );
 
       if (!response.ok) {
         const error = await response.json();
@@ -209,9 +223,12 @@ export function HomeAssistantIntegration({ onSuccess }: HomeAssistantIntegration
   const disconnect = async () => {
     setConnecting(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/homeassistant/disconnect`, {
-        method: 'POST',
-      });
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/homeassistant/disconnect`, agentName),
+        {
+          method: 'POST',
+        }
+      );
 
       if (!response.ok) {
         throw new Error('Failed to disconnect');

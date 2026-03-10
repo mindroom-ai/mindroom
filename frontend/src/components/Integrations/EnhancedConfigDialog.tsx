@@ -25,7 +25,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL } from '@/lib/api';
+import { API_BASE_URL, withAgentName } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface ConfigField {
@@ -55,6 +55,7 @@ interface EnhancedConfigDialogProps {
   helperText?: string | null;
   icon?: any;
   iconColor?: string;
+  agentName?: string | null;
 }
 
 export function EnhancedConfigDialog({
@@ -70,6 +71,7 @@ export function EnhancedConfigDialog({
   helperText,
   icon: Icon,
   iconColor,
+  agentName,
 }: EnhancedConfigDialogProps) {
   const [configValues, setConfigValues] = useState<Record<string, string | boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -117,7 +119,9 @@ export function EnhancedConfigDialog({
 
       try {
         // Try to load existing credentials
-        const response = await fetch(`${API_BASE_URL}/api/credentials/${service}`);
+        const response = await fetch(
+          withAgentName(`${API_BASE_URL}/api/credentials/${service}`, agentName)
+        );
         if (response.ok) {
           const data = await response.json();
           if (data.credentials) {
@@ -167,7 +171,7 @@ export function EnhancedConfigDialog({
     };
 
     loadExistingCredentials();
-  }, [service, open, configFields]); // Use stable dependencies
+  }, [service, open, configFields, agentName]); // Use stable dependencies
 
   const validateField = (field: ConfigField, value: string | boolean): string | null => {
     // Boolean fields don't need validation
@@ -231,13 +235,16 @@ export function EnhancedConfigDialog({
     setLoading(true);
     try {
       // Save all config values as environment variables using our credentials API
-      const response = await fetch(`${API_BASE_URL}/api/credentials/${service}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          credentials: configValues,
-        }),
-      });
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/credentials/${service}`, agentName),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            credentials: configValues,
+          }),
+        }
+      );
 
       if (!response.ok) {
         throw new Error(`Failed to save configuration`);

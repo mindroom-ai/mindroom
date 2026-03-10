@@ -1,11 +1,18 @@
 import { SiHomeassistant } from 'react-icons/si';
-import { Integration, IntegrationProvider, IntegrationConfig } from '../types';
+import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
+import { withAgentName } from '@/lib/api';
 
 // Wrapper component to handle the dialog integration
-function HomeAssistantConfigDialog(props: { onClose: () => void; onSuccess?: () => void }) {
+function HomeAssistantConfigDialog(props: {
+  onClose: () => void;
+  onSuccess?: () => void;
+  agentName?: string | null;
+}) {
   // Pass the onSuccess callback to the HomeAssistantIntegrationComponent
-  return <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} />;
+  return (
+    <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} agentName={props.agentName} />
+  );
 }
 
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
@@ -20,7 +27,8 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     connected: false,
   };
 
-  getConfig(): IntegrationConfig {
+  getConfig(scope?: IntegrationScope): IntegrationConfig {
+    const agentName = scope?.agentName ?? null;
     return {
       integration: this.integration,
       onAction: async () => {
@@ -28,21 +36,22 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
         // This is handled via the ConfigComponent
       },
       onDisconnect: async () => {
-        const response = await fetch('/api/homeassistant/disconnect', {
+        const response = await fetch(withAgentName('/api/homeassistant/disconnect', agentName), {
           method: 'POST',
         });
         if (!response.ok) {
           throw new Error('Failed to disconnect Home Assistant');
         }
       },
-      ConfigComponent: HomeAssistantConfigDialog,
-      checkConnection: this.checkConnection.bind(this),
+      ConfigComponent: props => <HomeAssistantConfigDialog {...props} agentName={agentName} />,
+      checkConnection: () => this.checkConnection(agentName),
     };
   }
 
-  async loadStatus(): Promise<Partial<Integration>> {
+  async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
+    const agentName = scope?.agentName ?? null;
     try {
-      const response = await fetch('/api/homeassistant/status');
+      const response = await fetch(withAgentName('/api/homeassistant/status', agentName));
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
@@ -67,9 +76,9 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     };
   }
 
-  private async checkConnection(): Promise<boolean> {
+  private async checkConnection(agentName?: string | null): Promise<boolean> {
     try {
-      const response = await fetch('/api/homeassistant/status');
+      const response = await fetch(withAgentName('/api/homeassistant/status', agentName));
       if (response.ok) {
         const data = await response.json();
         return data.connected === true;

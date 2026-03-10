@@ -20,7 +20,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from mindroom.credentials import CredentialsManager
+from mindroom.api.credentials import (
+    RequestCredentialsTarget,
+    load_credentials_for_target,
+    resolve_request_credentials_target,
+)
+from mindroom.credentials import get_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -29,9 +34,6 @@ if TYPE_CHECKING:
     from google_auth_oauthlib.flow import Flow
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
-
-# Initialize credentials manager
-_creds_manager = CredentialsManager()
 
 # OAuth scopes for all Google services needed by MindRoom
 _SCOPES = [
@@ -109,9 +111,26 @@ def _get_oauth_credentials() -> dict[str, Any] | None:
     }
 
 
-def _get_google_credentials() -> Credentials | None:
+def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
+    """Convert Google credentials to the stored token payload."""
+    token_data = {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": creds.scopes,
+    }
+
+    id_token = creds.id_token
+    if id_token:
+        token_data["_id_token"] = id_token
+    return token_data
+
+
+def _get_google_credentials(target: RequestCredentialsTarget) -> Credentials | None:
     """Get Google credentials from stored token."""
-    token_data = _creds_manager.load_credentials("google")
+    token_data = load_credentials_for_target("google", target)
     if not token_data:
         return None
 
@@ -130,32 +149,28 @@ def _get_google_credentials() -> Credentials | None:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(google_request_cls())
             # Save refreshed credentials
-            _save_credentials(creds)
+            _save_credentials(creds, target)
     except Exception:
         return None
     else:
         return creds if creds and creds.valid else None
 
 
-def _save_credentials(creds: Credentials) -> None:
+def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> None:
     """Save credentials using the unified credentials manager."""
-    # Full token with all scopes
-    token_data = {
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": creds.scopes,
-    }
+    token_data = _build_google_token_data(creds)
+    if target.worker_scope is None or target.agent_name is None:
+        target.target_manager.save_credentials("google", token_data)
+        return
 
-    # Add ID token if available for user info
-    id_token = creds.id_token
-    if id_token:
-        token_data["_id_token"] = id_token
-
-    # Save using the unified credentials manager.
-    _creds_manager.save_credentials("google", token_data)
+    save_scoped_credentials(
+        "google",
+        token_data,
+        worker_scope=target.worker_scope,
+        routing_agent_name=target.agent_name,
+        credentials_manager=target.base_manager,
+        execution_identity=target.execution_identity,
+    )
 
 
 def _save_env_credentials(client_id: str, client_secret: str, project_id: str | None = None) -> None:
@@ -196,7 +211,7 @@ def _save_env_credentials(client_id: str, client_secret: str, project_id: str | 
 
 
 @router.get("/status")
-async def get_status() -> GoogleStatus:
+async def get_status(request: Request, agent_name: str | None = None) -> GoogleStatus:
     """Check Google integration status."""
     # Check environment variables
     client_id = os.getenv("GOOGLE_CLIENT_ID")
@@ -204,7 +219,8 @@ async def get_status() -> GoogleStatus:
     has_credentials = bool(client_id and client_secret)
 
     # Get current credentials
-    creds = _get_google_credentials()
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    creds = _get_google_credentials(target)
 
     if not creds:
         return GoogleStatus(
@@ -249,7 +265,7 @@ async def get_status() -> GoogleStatus:
 
 
 @router.post("/connect")
-async def connect() -> GoogleAuthUrl:
+async def connect(request: Request, agent_name: str | None = None) -> GoogleAuthUrl:
     """Start Google OAuth flow."""
     oauth_config = _get_oauth_credentials()
     if not oauth_config:
@@ -259,6 +275,7 @@ async def connect() -> GoogleAuthUrl:
         )
 
     try:
+        resolve_request_credentials_target(request, agent_name=agent_name)
         _, _, flow_cls = _ensure_google_packages()
 
         # Create OAuth flow with all scopes
@@ -271,6 +288,7 @@ async def connect() -> GoogleAuthUrl:
             access_type="offline",
             include_granted_scopes="true",
             prompt="consent",
+            state=agent_name or "",
         )
 
         return GoogleAuthUrl(auth_url=auth_url)
@@ -288,6 +306,12 @@ async def callback(request: Request) -> RedirectResponse:
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
+    agent_name = request.query_params.get("state") or None
+    if agent_name:
+        from mindroom.api.main import verify_user  # noqa: PLC0415
+
+        await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+
     oauth_config = _get_oauth_credentials()
     if not oauth_config:
         raise HTTPException(status_code=503, detail="OAuth not configured")
@@ -302,7 +326,8 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        _save_credentials(flow.credentials)
+        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect
         parsed_uri = urlparse(current_redirect_uri)
@@ -322,11 +347,11 @@ async def callback(request: Request) -> RedirectResponse:
 
 
 @router.post("/disconnect")
-async def disconnect() -> dict[str, str]:
+async def disconnect(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Google services by removing stored tokens."""
     try:
-        # Remove credentials using the manager
-        _creds_manager.delete_credentials("google")
+        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        target.target_manager.delete_credentials("google")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
@@ -360,7 +385,7 @@ async def reset() -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
         # Remove credentials using the manager
-        _creds_manager.delete_credentials("google")
+        get_credentials_manager().delete_credentials("google")
 
         # Remove from environment variables
         if _ENV_PATH.exists():

@@ -17,6 +17,10 @@ export interface Integration {
   helper_text?: string | null;
 }
 
+export interface IntegrationScope {
+  agentName?: string | null;
+}
+
 export interface IntegrationConfig {
   /**
    * The integration definition
@@ -39,6 +43,7 @@ export interface IntegrationConfig {
   ConfigComponent?: React.ComponentType<{
     onClose: () => void;
     onSuccess?: () => void;
+    agentName?: string | null;
   }>;
 
   /**
@@ -60,10 +65,10 @@ export interface IntegrationProvider {
   /**
    * Get the configuration for this integration
    */
-  getConfig(): IntegrationConfig;
+  getConfig(scope?: IntegrationScope): IntegrationConfig;
 
   /**
    * Load the current status of this integration
    */
-  loadStatus?: () => Promise<Partial<Integration>>;
+  loadStatus?: (scope?: IntegrationScope) => Promise<Partial<Integration>>;
 }
