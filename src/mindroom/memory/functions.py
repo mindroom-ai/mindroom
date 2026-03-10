@@ -12,12 +12,17 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.memory.config import create_memory_instance
-from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import (
+    get_tool_execution_identity,
+    resolve_agent_state_storage_path,
+    tool_execution_identity,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 class _MemoryResult(TypedDict, total=False):
@@ -1372,6 +1377,7 @@ async def store_conversation_memory(
     room_id: str | None = None,
     thread_history: list[dict] | None = None,
     user_id: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Store conversation in memory for future recall.
 
@@ -1391,21 +1397,25 @@ async def store_conversation_memory(
         room_id: Optional room ID for room memory
         thread_history: Optional thread history for context
         user_id: Optional user ID to identify user messages in thread
+        execution_identity: Optional explicit worker-routing identity for
+            deferred/background writes that execute outside the original
+            ContextVar scope
 
     """
     if not prompt:
         return
 
-    messages = _build_memory_messages(prompt, thread_history, user_id)
+    with tool_execution_identity(execution_identity or get_tool_execution_identity()):
+        messages = _build_memory_messages(prompt, thread_history, user_id)
 
-    use_file_backend = (
-        _use_file_memory_backend(config, agent_name=agent_name)
-        if isinstance(agent_name, str)
-        else _team_uses_file_memory_backend(config, agent_name)
-    )
+        use_file_backend = (
+            _use_file_memory_backend(config, agent_name=agent_name)
+            if isinstance(agent_name, str)
+            else _team_uses_file_memory_backend(config, agent_name)
+        )
 
-    if use_file_backend:
-        _store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
-        return
+        if use_file_backend:
+            _store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
+            return
 
-    await _store_mem0_conversation_memory(messages, agent_name, storage_path, session_id, config, room_id)
+        await _store_mem0_conversation_memory(messages, agent_name, storage_path, session_id, config, room_id)

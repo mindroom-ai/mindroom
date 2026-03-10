@@ -57,7 +57,7 @@ export function Integrations() {
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => agent.worker_scope !== 'room_thread')
+        .filter(agent => agent.worker_scope != null && agent.worker_scope !== 'room_thread')
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
     [agents]
   );

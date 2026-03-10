@@ -2121,6 +2121,7 @@ class AgentBot:
                         room_id,
                         thread_history,
                         user_id,
+                        execution_identity=execution_identity,
                     ),
                     name=f"memory_save_{agent_name}_{session_id}",
                 )
@@ -2398,6 +2399,7 @@ class AgentBot:
                         room_id,
                         thread_history,
                         user_id,
+                        execution_identity=execution_identity,
                     ),
                     name=f"memory_save_{self.agent_name}_{session_id}",
                 )
@@ -2820,6 +2822,7 @@ class TeamBot(AgentBot):
                     room_id,
                     thread_history,
                     user_id,
+                    execution_identity=execution_identity,
                 ),
                 name=f"memory_save_team_{session_id}",
             )

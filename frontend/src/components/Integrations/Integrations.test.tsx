@@ -403,6 +403,44 @@ describe('Integrations', () => {
     }
   });
 
+  it('lists only explicitly worker-scoped agents in the scope selector', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'general',
+          display_name: 'Unscoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: null,
+        },
+        {
+          id: 'code',
+          display_name: 'Scoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: 'shared',
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Unscoped Agent')).not.toBeInTheDocument();
+  });
+
   it('hides shared-only integrations for isolating worker scopes', async () => {
     useConfigStore.setState({
       agents: [
