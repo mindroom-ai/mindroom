@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.memory._policy import get_team_ids_for_agent
 from mindroom.memory.functions import (
-    _MemoryResult,
     add_agent_memory,
     add_room_memory,
     append_agent_daily_memory,
@@ -33,6 +33,8 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.memory._shared import MemoryResult
+
 
 class MockTeamConfig:
     """Mock team configuration for tests."""
@@ -43,8 +45,9 @@ class MockTeamConfig:
 
 
 class _FakeMem0ScopedMemory:
-    def __init__(self) -> None:
-        self._entries: dict[str, _MemoryResult] = {}
+    def __init__(self, *, id_prefix: str = "mem") -> None:
+        self._id_prefix = id_prefix
+        self._entries: dict[str, MemoryResult] = {}
         self._next_id = 1
 
     async def add(
@@ -54,7 +57,7 @@ class _FakeMem0ScopedMemory:
         user_id: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> None:
-        memory_id = f"mem-{self._next_id}"
+        memory_id = f"{self._id_prefix}-{self._next_id}"
         self._next_id += 1
         self._entries[memory_id] = {
             "id": memory_id,
@@ -63,10 +66,10 @@ class _FakeMem0ScopedMemory:
             "metadata": metadata,
         }
 
-    async def get(self, memory_id: str) -> _MemoryResult | None:
+    async def get(self, memory_id: str) -> MemoryResult | None:
         return self._entries.get(memory_id)
 
-    async def get_all(self, *, user_id: str | None = None, limit: int = 100) -> dict[str, list[_MemoryResult]]:
+    async def get_all(self, *, user_id: str | None = None, limit: int = 100) -> dict[str, list[MemoryResult]]:
         entries = [entry for entry in self._entries.values() if user_id is None or entry.get("user_id") == user_id]
         return {"results": entries[:limit]}
 
@@ -76,9 +79,9 @@ class _FakeMem0ScopedMemory:
         *,
         user_id: str | None = None,
         limit: int = 100,
-    ) -> dict[str, list[_MemoryResult]]:
+    ) -> dict[str, list[MemoryResult]]:
         lowered = query.lower()
-        entries: list[_MemoryResult] = []
+        entries: list[MemoryResult] = []
         for entry in self._entries.values():
             if user_id is not None and entry.get("user_id") != user_id:
                 continue
@@ -366,7 +369,7 @@ class TestMemoryFunctions:
 
     def test_format_memories_as_context(self) -> None:
         """Test formatting memories into context string."""
-        memories: list[_MemoryResult] = [
+        memories: list[MemoryResult] = [
             {"memory": "First memory", "id": "1"},
             {"memory": "Second memory", "id": "2"},
         ]
@@ -1389,7 +1392,8 @@ class TestMemoryFunctions:
         memories_by_path: dict[Path, _FakeMem0ScopedMemory] = {}
 
         async def _create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> _FakeMem0ScopedMemory:
-            return memories_by_path.setdefault(scope_storage_path, _FakeMem0ScopedMemory())
+            id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
+            return memories_by_path.setdefault(scope_storage_path, _FakeMem0ScopedMemory(id_prefix=id_prefix))
 
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -1426,6 +1430,7 @@ class TestMemoryFunctions:
             )
             assert len(general_results) == 1
             assert len(calculator_results) == 1
+            assert general_results[0]["id"] != calculator_results[0]["id"]
             memory_id = general_results[0]["id"]
 
             loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
@@ -1453,14 +1458,10 @@ class TestMemoryFunctions:
 
             await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
-            general_deleted = await search_agent_memories("updated team", "general", storage_path, config, limit=10)
-            calculator_deleted = await search_agent_memories(
-                "updated team",
-                "calculator",
-                storage_path,
-                config,
-                limit=10,
-            )
+            general_deleted = await search_agent_memories("team", "general", storage_path, config, limit=10)
+            calculator_deleted = await search_agent_memories("team", "calculator", storage_path, config, limit=10)
+            assert not any(result.get("memory") == "Team shared note" for result in general_deleted)
+            assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
             assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)
             assert not any(result.get("memory") == "Updated team shared note" for result in calculator_deleted)
 
@@ -1510,8 +1511,6 @@ class TestMemoryFunctions:
 
     def test_get_team_ids_for_agent(self, config: Config) -> None:
         """Test getting team IDs for an agent."""
-        from mindroom.memory.functions import _get_team_ids_for_agent  # noqa: PLC0415
-
         # Setup config with multiple teams
         config.teams = {
             "finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"]),
@@ -1520,18 +1519,18 @@ class TestMemoryFunctions:
         }
 
         # Calculator is in two teams
-        team_ids = _get_team_ids_for_agent("calculator", config)
+        team_ids = get_team_ids_for_agent("calculator", config)
         assert len(team_ids) == 2
         assert "team_calculator+data_analyst+finance" in team_ids
         assert "team_calculator+researcher" in team_ids
 
         # General is in one team
-        team_ids = _get_team_ids_for_agent("general", config)
+        team_ids = get_team_ids_for_agent("general", config)
         assert len(team_ids) == 1
         assert "team_assistant+general" in team_ids  # Sorted alphabetically
 
         # Unknown agent has no teams
-        team_ids = _get_team_ids_for_agent("unknown", config)
+        team_ids = get_team_ids_for_agent("unknown", config)
         assert len(team_ids) == 0
 
     @pytest.mark.asyncio
@@ -1617,7 +1616,7 @@ class TestMemoryFunctions:
     def test_memory_result_typed_dict(self) -> None:
         """Test MemoryResult TypedDict structure."""
         # This is mainly for documentation, but ensures the type is importable
-        result: _MemoryResult = {
+        result: MemoryResult = {
             "id": "123",
             "memory": "Test memory",
             "score": 0.95,

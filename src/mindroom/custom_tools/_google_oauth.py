@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
@@ -13,6 +12,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from loguru import Logger
 
     from mindroom.credentials import CredentialsManager
