@@ -18,6 +18,7 @@ from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.tool_system.worker_routing import resolve_agent_worker_key, worker_root_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -38,6 +40,7 @@ class _FlushSessionEntry(TypedDict, total=False):
 
     agent_name: str
     session_id: str
+    worker_key: str | None
     room_id: str | None
     thread_id: str | None
     dirty: bool
@@ -75,8 +78,15 @@ def _empty_state() -> _FlushState:
     return {"version": 1, "sessions": {}}
 
 
-def _session_key(agent_name: str, session_id: str) -> str:
-    return f"{agent_name}:{session_id}"
+def _session_key(agent_name: str, session_id: str, *, worker_key: str | None) -> str:
+    scope_key = worker_key or "shared"
+    return f"{scope_key}:{agent_name}:{session_id}"
+
+
+def _entry_storage_path(storage_path: Path, worker_key: str | None) -> Path:
+    if worker_key is None:
+        return storage_path
+    return worker_root_path(storage_path, worker_key)
 
 
 def _read_state_unlocked(storage_path: Path) -> _FlushState:
@@ -131,13 +141,19 @@ def mark_auto_flush_dirty_session(
     session_id: str,
     room_id: str | None,
     thread_id: str | None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
     now = _now_ts()
-    key = _session_key(agent_name, session_id)
+    worker_key = resolve_agent_worker_key(
+        agent_name=agent_name,
+        config=config,
+        execution_identity=execution_identity,
+    )
+    key = _session_key(agent_name, session_id, worker_key=worker_key)
 
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
@@ -154,6 +170,7 @@ def mark_auto_flush_dirty_session(
             **existing,
             "agent_name": agent_name,
             "session_id": session_id,
+            "worker_key": worker_key,
             "room_id": room_id,
             "thread_id": thread_id,
             "dirty": True,
@@ -175,6 +192,7 @@ def reprioritize_auto_flush_sessions(
     *,
     agent_name: str,
     active_session_id: str,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Raise priority of other dirty sessions for the same agent."""
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
@@ -185,6 +203,11 @@ def reprioritize_auto_flush_sessions(
         return
 
     now = _now_ts()
+    worker_key = resolve_agent_worker_key(
+        agent_name=agent_name,
+        config=config,
+        execution_identity=execution_identity,
+    )
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
         sessions = state["sessions"]
@@ -192,6 +215,7 @@ def reprioritize_auto_flush_sessions(
             (key, entry)
             for key, entry in sessions.items()
             if entry.get("agent_name") == agent_name
+            and entry.get("worker_key") == worker_key
             and entry.get("session_id") != active_session_id
             and entry.get("dirty", False)
         ]
@@ -213,8 +237,15 @@ def _coerce_agent_session(raw_session: object) -> AgentSession | None:
     return None
 
 
-def _load_agent_session(storage_path: Path, agent_name: str, session_id: str) -> AgentSession | None:
-    storage = create_session_storage(agent_name, storage_path)
+def _load_agent_session(
+    storage_path: Path,
+    config: Config,
+    agent_name: str,
+    session_id: str,
+    *,
+    worker_key: str | None = None,
+) -> AgentSession | None:
+    storage = create_session_storage(agent_name, _entry_storage_path(storage_path, worker_key), config)
     raw_session = storage.get_session(session_id, SessionType.AGENT)
     return _coerce_agent_session(raw_session)
 
@@ -461,13 +492,21 @@ class MemoryAutoFlushWorker:
 
             agent_name = entry.get("agent_name")
             session_id = entry.get("session_id")
+            worker_key = entry.get("worker_key") if isinstance(entry.get("worker_key"), str) else None
             if not isinstance(agent_name, str) or not isinstance(session_id, str):
                 continue
 
-            if per_agent_count.get(agent_name, 0) >= max_per_agent:
+            agent_scope_key = f"{worker_key or 'shared'}:{agent_name}"
+            if per_agent_count.get(agent_scope_key, 0) >= max_per_agent:
                 continue
 
-            session = _load_agent_session(self.storage_path, agent_name, session_id)
+            session = _load_agent_session(
+                self.storage_path,
+                config,
+                agent_name,
+                session_id,
+                worker_key=worker_key,
+            )
             if session is None:
                 continue
             session_updated_at = session.updated_at
@@ -491,7 +530,7 @@ class MemoryAutoFlushWorker:
                 continue
 
             selected_keys.append(key)
-            per_agent_count[agent_name] = per_agent_count.get(agent_name, 0) + 1
+            per_agent_count[agent_scope_key] = per_agent_count.get(agent_scope_key, 0) + 1
             with _STATE_LOCK:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)
@@ -522,10 +561,11 @@ class MemoryAutoFlushWorker:
         if not isinstance(agent_name, str) or not isinstance(session_id, str):
             return
 
+        worker_key = entry.get("worker_key") if isinstance(entry.get("worker_key"), str) else None
         wrote_memory = False
         try:
             wrote_memory = await asyncio.wait_for(
-                self._flush_session(config, agent_name=agent_name, session_id=session_id),
+                self._flush_session(config, agent_name=agent_name, session_id=session_id, worker_key=worker_key),
                 timeout=settings.extractor.max_extraction_seconds,
             )
         except TimeoutError:
@@ -563,7 +603,13 @@ class MemoryAutoFlushWorker:
             return
 
         latest_session_updated_at: int | None = None
-        latest_session = _load_agent_session(self.storage_path, agent_name, session_id)
+        latest_session = _load_agent_session(
+            self.storage_path,
+            config,
+            agent_name,
+            session_id,
+            worker_key=worker_key,
+        )
         if latest_session is not None and isinstance(latest_session.updated_at, int):
             latest_session_updated_at = latest_session.updated_at
 
@@ -606,8 +652,22 @@ class MemoryAutoFlushWorker:
             wrote_memory=wrote_memory,
         )
 
-    async def _flush_session(self, config: Config, *, agent_name: str, session_id: str) -> bool:
-        session = _load_agent_session(self.storage_path, agent_name, session_id)
+    async def _flush_session(
+        self,
+        config: Config,
+        *,
+        agent_name: str,
+        session_id: str,
+        worker_key: str | None,
+    ) -> bool:
+        effective_storage_path = _entry_storage_path(self.storage_path, worker_key)
+        session = _load_agent_session(
+            self.storage_path,
+            config,
+            agent_name,
+            session_id,
+            worker_key=worker_key,
+        )
         if session is None:
             return False
 
@@ -619,7 +679,7 @@ class MemoryAutoFlushWorker:
         )
         memory_summary = await _extract_memory_summary(
             config=config,
-            storage_path=self.storage_path,
+            storage_path=effective_storage_path,
             agent_name=agent_name,
             session_id=session_id,
             lines=lines,
@@ -634,7 +694,7 @@ class MemoryAutoFlushWorker:
         append_agent_daily_memory(
             memory_content,
             agent_name=agent_name,
-            storage_path=self.storage_path,
+            storage_path=effective_storage_path,
             config=config,
         )
         return True

@@ -14,6 +14,7 @@ from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,8 +79,8 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
 
     state_file = storage_path / "memory_flush_state.json"
     payload = state_file.read_text(encoding="utf-8")
-    assert '"general:s1"' in payload
-    assert '"general:s2"' in payload
+    assert '"shared:general:s1"' in payload
+    assert '"shared:general:s2"' in payload
     assert '"priority_boost_at"' in payload
 
 
@@ -99,7 +100,7 @@ def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config)
     )
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert "general:s1" in payload["sessions"]
+    assert "shared:general:s1" in payload["sessions"]
 
 
 def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config) -> None:
@@ -151,7 +152,7 @@ async def test_worker_respects_batch_limits(
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
-        lambda _storage, _agent, _sid: fake_session,
+        lambda _storage, _config, _agent, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -199,7 +200,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         thread_id="t1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+    def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="important detail")],
@@ -221,7 +222,8 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
 
     worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
 
-    async def _fake_flush(config: Config, *, agent_name: str, session_id: str) -> bool:
+    async def _fake_flush(config: Config, *, agent_name: str, session_id: str, worker_key: str | None) -> bool:
+        assert worker_key is None
         nonlocal session_updated_at
         session_updated_at = 200
         mark_auto_flush_dirty_session(
@@ -238,7 +240,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
+    session_state = payload["sessions"]["shared:general:s1"]
     assert session_state["dirty"] is True
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
@@ -263,7 +265,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         thread_id="t1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+    def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="no durable memory here")],
@@ -289,9 +291,54 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
+    session_state = payload["sessions"]["shared:general:s1"]
     assert session_state["dirty"] is False
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
     assert session_state["last_session_updated_at"] == 200
     assert append_calls == []
+
+
+def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config) -> None:
+    """Two users with the same session ID should get separate auto-flush entries under worker scope."""
+    config.agents["general"].worker_scope = "user"
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-bob",
+    )
+
+    with tool_execution_identity(alice_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="shared-session-id",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+    with tool_execution_identity(bob_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="shared-session-id",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+
+    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    assert len(payload["sessions"]) == 2

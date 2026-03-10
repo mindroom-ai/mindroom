@@ -2017,12 +2017,6 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        reprioritize_auto_flush_sessions(
-            self.storage_path,
-            self.config,
-            agent_name=agent_name,
-            active_session_id=session_id,
-        )
         knowledge = self._knowledge_for_agent(agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
@@ -2045,6 +2039,13 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
             agent_name=agent_name,
+        )
+        reprioritize_auto_flush_sessions(
+            self.storage_path,
+            self.config,
+            agent_name=agent_name,
+            active_session_id=session_id,
+            execution_identity=execution_identity,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
@@ -2107,6 +2108,7 @@ class AgentBot:
                 session_id=session_id,
                 room_id=room_id,
                 thread_id=thread_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
@@ -2308,11 +2310,19 @@ class AgentBot:
 
         # Prepare session id for memory storage (store after sending response)
         session_id = create_session_id(room_id, thread_id)
+        execution_identity = self._build_tool_execution_identity(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
             agent_name=self.agent_name,
             active_session_id=session_id,
+            execution_identity=execution_identity,
         )
 
         # Dynamically determine whether to use streaming based on user presence
@@ -2375,6 +2385,7 @@ class AgentBot:
                 session_id=session_id,
                 room_id=room_id,
                 thread_id=thread_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
@@ -2694,17 +2705,25 @@ class AgentBot:
         # Remove the stale run from Agno history before regenerating.
         # The original run stored reply_to_event_id (= original_event_id) as
         # matrix_event_id in its metadata, so we look up by that key.
-        storage = create_session_storage(self.agent_name, self.storage_path)
-        session_ids_to_check = [
-            create_session_id(room.room_id, context.thread_id),
-            create_session_id(room.room_id, None),
+        session_contexts = [
+            (context.thread_id, create_session_id(room.room_id, context.thread_id)),
+            (None, create_session_id(room.room_id, None)),
         ]
         checked_session_ids: set[str] = set()
-        for session_id in session_ids_to_check:
+        for candidate_thread_id, session_id in session_contexts:
             if session_id in checked_session_ids:
                 continue
             checked_session_ids.add(session_id)
-            removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+            execution_identity = self._build_tool_execution_identity(
+                room_id=room.room_id,
+                thread_id=candidate_thread_id,
+                reply_to_event_id=event_info.original_event_id,
+                user_id=requester_user_id,
+                session_id=session_id,
+            )
+            with tool_execution_identity(execution_identity):
+                storage = create_session_storage(self.agent_name, self.storage_path, self.config)
+                removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",

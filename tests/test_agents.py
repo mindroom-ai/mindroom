@@ -19,6 +19,12 @@ from mindroom.config.agent import AgentConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
+)
 
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
@@ -386,6 +392,32 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert tmp_path / "sessions" / "general.db" in db_files
     assert tmp_path / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
+    """Worker-scoped agents should keep session and learning DBs inside the resolved worker root."""
+    config = Config.from_yaml()
+    config.agents["general"].worker_scope = "user"
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    with tool_execution_identity(execution_identity):
+        create_agent("general", config=config, storage_path=tmp_path)
+
+    worker_root = worker_root_path(tmp_path, worker_key)
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert worker_root / "sessions" / "general.db" in db_files
+    assert worker_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.agents.SqliteDb")

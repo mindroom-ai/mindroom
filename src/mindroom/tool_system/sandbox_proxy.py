@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from mindroom.constants import env_flag
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     get_tool_execution_identity,
@@ -160,7 +160,13 @@ def _filter_internal_credential_keys(credentials: Mapping[str, object]) -> dict[
     return {str(key): value for key, value in credentials.items() if not str(key).startswith("_")}
 
 
-def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> dict[str, object]:
+def _collect_credential_overrides(
+    tool_name: str,
+    function_name: str,
+    *,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> dict[str, object]:
     services = _credential_services_for_call(tool_name, function_name)
     if not services:
         return {}
@@ -168,10 +174,14 @@ def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> 
     credentials_manager = get_credentials_manager()
     merged_overrides: dict[str, object] = {}
     for service in services:
-        credentials = credentials_manager.load_credentials(service)
-        if not isinstance(credentials, Mapping):
-            continue
-        merged_overrides.update(_filter_internal_credential_keys(credentials))
+        credentials = load_scoped_credentials(
+            service,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=credentials_manager,
+        )
+        if isinstance(credentials, Mapping):
+            merged_overrides.update(_filter_internal_credential_keys(credentials))
     return merged_overrides
 
 
@@ -182,8 +192,15 @@ def _create_credential_lease(
     headers: Mapping[str, str],
     tool_name: str,
     function_name: str,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
 ) -> str | None:
-    credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
+    credential_overrides = _collect_credential_overrides(
+        tool_name,
+        function_name,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
     if not credential_overrides:
         return None
 
@@ -286,6 +303,8 @@ def _call_proxy_sync(
             headers=headers,
             tool_name=tool_name,
             function_name=function_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
         payload: dict[str, object] = {
             "tool_name": tool_name,

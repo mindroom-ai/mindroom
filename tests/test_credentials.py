@@ -156,6 +156,18 @@ class TestCredentialsManager:
         assert credentials_manager.load_credentials("google") is None
         assert credentials_manager.load_credentials("homeassistant") == ha_creds
 
+    def test_worker_credentials_are_isolated_from_shared(self, temp_credentials_dir: Path) -> None:
+        """Worker-scoped credentials should not overwrite or read from the shared credential directory."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key", "_source": "ui"})
+
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.save_credentials("openai", {"api_key": "worker-key", "_source": "ui"})
+
+        assert manager.load_credentials("openai") == {"api_key": "shared-key", "_source": "ui"}
+        assert worker_manager.load_credentials("openai") == {"api_key": "worker-key", "_source": "ui"}
+        assert worker_manager.get_credentials_path("openai").parent != manager.get_credentials_path("openai").parent
+
     def test_complex_credentials_structure(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading complex nested credentials."""
         complex_creds: dict[str, Any] = {

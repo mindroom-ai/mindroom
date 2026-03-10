@@ -172,6 +172,80 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
         entrypoint(1, 2)
 
 
+def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed credential leases should prefer credentials stored in the resolved worker scope."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _FakeResponse:
+        def __init__(self, data: dict[str, object]) -> None:
+            self._data = data
+
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> dict[str, object]:
+            return self._data
+
+    class _FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            _ = headers
+            captured_calls.append((url, json))
+            if url.endswith("/leases"):
+                return _FakeResponse({"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1})
+            return _FakeResponse({"ok": True, "result": "proxied"})
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="code")
+    assert worker_key is not None
+    fake_credentials = FakeCredentialsManager(
+        {"openai": {"api_key": "shared-key", "_source": "ui"}},
+        worker_managers={
+            worker_key: FakeCredentialsManager({"openai": {"api_key": "worker-key", "_source": "ui"}}),
+        },
+    )
+
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+    tool = get_tool_by_name(
+        "calculator",
+        sandbox_tools_override=["calculator"],
+        worker_scope="user",
+        routing_agent_name="code",
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+    with tool_execution_identity(execution_identity):
+        result = entrypoint(1, 2)
+
+    assert result == "proxied"
+    lease_url, lease_payload = captured_calls[0]
+    assert lease_url.endswith("/api/sandbox-runner/leases")
+    assert lease_payload["credential_overrides"] == {"api_key": "worker-key"}
+
+
 def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tool calls should include scope, key, and execution identity."""
     captured: dict[str, Any] = {}

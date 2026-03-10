@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -59,7 +59,15 @@ def _build_tool_instance(
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     tool_class = _TOOL_REGISTRY[tool_name]()
     creds_manager = get_credentials_manager()
-    credentials = creds_manager.load_credentials(tool_name) or {}
+    credentials = (
+        load_scoped_credentials(
+            tool_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=creds_manager,
+        )
+        or {}
+    )
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]

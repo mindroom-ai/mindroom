@@ -114,6 +114,27 @@ def resolve_worker_key(
     return worker_key
 
 
+def resolve_agent_worker_key(
+    *,
+    agent_name: str,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> str | None:
+    """Resolve the current worker key for an agent when worker routing is active."""
+    if agent_name not in config.agents:
+        return None
+
+    worker_scope = config.get_agent_worker_scope(agent_name)
+    if worker_scope is None:
+        return None
+
+    identity = execution_identity or get_tool_execution_identity()
+    if identity is None:
+        return None
+
+    return resolve_worker_key(worker_scope, identity, agent_name=agent_name)
+
+
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_key_part(worker_key)
@@ -134,24 +155,37 @@ def resolve_agent_worker_root(
     agent_name: str,
     base_storage_path: Path,
     config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path | None:
     """Resolve the current worker root for an agent when worker routing is active."""
-    if agent_name not in config.agents:
-        return None
-
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    if worker_scope is None:
-        return None
-
-    identity = get_tool_execution_identity()
-    if identity is None:
-        return None
-
-    worker_key = resolve_worker_key(worker_scope, identity, agent_name=agent_name)
+    worker_key = resolve_agent_worker_key(
+        agent_name=agent_name,
+        config=config,
+        execution_identity=execution_identity,
+    )
     if worker_key is None:
         return None
 
     return worker_root_path(base_storage_path, worker_key)
+
+
+def resolve_agent_state_storage_path(
+    *,
+    agent_name: str,
+    base_storage_path: Path,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Path:
+    """Return the storage path that should back the agent's mutable state."""
+    return (
+        resolve_agent_worker_root(
+            agent_name=agent_name,
+            base_storage_path=base_storage_path,
+            config=config,
+            execution_identity=execution_identity,
+        )
+        or base_storage_path
+    )
 
 
 def resolve_agent_memory_storage_path(
@@ -159,13 +193,12 @@ def resolve_agent_memory_storage_path(
     agent_name: str,
     base_storage_path: Path,
     config: Config,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     """Return the storage path that should back the agent's mutable memory state."""
-    return (
-        resolve_agent_worker_root(
-            agent_name=agent_name,
-            base_storage_path=base_storage_path,
-            config=config,
-        )
-        or base_storage_path
+    return resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=base_storage_path,
+        config=config,
+        execution_identity=execution_identity,
     )

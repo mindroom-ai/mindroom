@@ -91,6 +91,32 @@ class TestCredentialsAPI:
             {"api_key": "sk-test123", "_source": "ui"},
         )
 
+    def test_worker_key_uses_worker_scoped_manager(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """worker_key should redirect credential writes to the worker-scoped manager."""
+        worker_manager = MagicMock()
+        worker_manager.load_credentials.return_value = None
+        mock_credentials_manager.for_worker.return_value = worker_manager
+
+        response = client.post(
+            "/api/credentials/openai/api-key?worker_key=worker-a",
+            json={
+                "service": "openai",
+                "api_key": "sk-test123",
+                "key_name": "api_key",
+            },
+        )
+
+        assert response.status_code == 200
+        mock_credentials_manager.for_worker.assert_called_once_with("worker-a")
+        worker_manager.save_credentials.assert_called_once_with(
+            "openai",
+            {"api_key": "sk-test123", "_source": "ui"},
+        )
+
     def test_get_credentials(
         self,
         client: TestClient,

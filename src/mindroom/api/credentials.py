@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from mindroom.credentials import get_credentials_manager, validate_service_name
+from mindroom.credentials import CredentialsManager, get_credentials_manager, validate_service_name
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
@@ -20,6 +20,14 @@ def _validated_service(service: str) -> str:
         return validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _manager_for_worker(worker_key: str | None) -> CredentialsManager:
+    normalized_worker_key = worker_key.strip() if worker_key is not None else ""
+    manager = get_credentials_manager()
+    if not normalized_worker_key:
+        return manager
+    return manager.for_worker(normalized_worker_key)
 
 
 class SetApiKeyRequest(BaseModel):
@@ -45,17 +53,17 @@ class SetCredentialsRequest(BaseModel):
 
 
 @router.get("/list")
-async def list_services() -> list[str]:
+async def list_services(worker_key: str | None = None) -> list[str]:
     """List all services with stored credentials."""
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     return manager.list_services()
 
 
 @router.get("/{service}/status")
-async def get_credential_status(service: str) -> CredentialStatus:
+async def get_credential_status(service: str, worker_key: str | None = None) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     credentials = manager.load_credentials(service)
 
     if credentials:
@@ -70,10 +78,14 @@ async def get_credential_status(service: str) -> CredentialStatus:
 
 
 @router.post("/{service}")
-async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[str, str]:
+async def set_credentials(
+    service: str,
+    request: SetCredentialsRequest,
+    worker_key: str | None = None,
+) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
 
     # Mark as UI-sourced and save
     creds = {**request.credentials, "_source": "ui"}
@@ -83,14 +95,18 @@ async def set_credentials(service: str, request: SetCredentialsRequest) -> dict[
 
 
 @router.post("/{service}/api-key")
-async def set_api_key(service: str, request: SetApiKeyRequest) -> dict[str, str]:
+async def set_api_key(
+    service: str,
+    request: SetApiKeyRequest,
+    worker_key: str | None = None,
+) -> dict[str, str]:
     """Set an API key for a service."""
     service = _validated_service(service)
     request_service = _validated_service(request.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     credentials = manager.load_credentials(service) or {}
     credentials[request.key_name] = request.api_key
     credentials["_source"] = "ui"
@@ -104,10 +120,11 @@ async def get_api_key(
     service: str,
     key_name: str = "api_key",
     include_value: bool = False,
+    worker_key: str | None = None,
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     credentials = manager.load_credentials(service) or {}
     api_key = credentials.get(key_name)
 
@@ -129,10 +146,10 @@ async def get_api_key(
 
 
 @router.get("/{service}")
-async def get_credentials(service: str) -> dict[str, Any]:
+async def get_credentials(service: str, worker_key: str | None = None) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     credentials = manager.load_credentials(service)
 
     if not credentials:
@@ -142,22 +159,27 @@ async def get_credentials(service: str) -> dict[str, Any]:
 
 
 @router.delete("/{service}")
-async def delete_credentials(service: str) -> dict[str, str]:
+async def delete_credentials(service: str, worker_key: str | None = None) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
 
 
 @router.post("/{service}/copy-from/{source_service}")
-async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
+async def copy_credentials(
+    service: str,
+    source_service: str,
+    worker_key: str | None = None,
+    source_worker_key: str | None = None,
+) -> dict[str, str]:
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    manager = get_credentials_manager()
-    source_creds = manager.load_credentials(source_service)
+    source_manager = _manager_for_worker(source_worker_key)
+    source_creds = source_manager.load_credentials(source_service)
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
@@ -165,17 +187,18 @@ async def copy_credentials(service: str, source_service: str) -> dict[str, str]:
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
+    manager = _manager_for_worker(worker_key)
     manager.save_credentials(service, target_creds)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
 
 
 @router.post("/{service}/test")
-async def test_credentials(service: str) -> dict[str, Any]:
+async def validate_credentials(service: str, worker_key: str | None = None) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
-    manager = get_credentials_manager()
+    manager = _manager_for_worker(worker_key)
     credentials = manager.load_credentials(service)
 
     if not credentials:
