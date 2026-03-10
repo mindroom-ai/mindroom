@@ -23,6 +23,7 @@ from mindroom.scheduling import (
 from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.skills import resolve_skill_command_spec
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -354,6 +355,9 @@ async def _run_skill_command_tool(
     skill_name: str,
     args_text: str,
     command_name: str = "skill",
+    requester_user_id: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
 ) -> str:
     toolkits = _collect_agent_toolkits(config, agent_name)
     function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
@@ -372,15 +376,28 @@ async def _run_skill_command_tool(
         return f"❌ {call_args.error}"
     assert entrypoint is not None
 
+    execution_identity: ToolExecutionIdentity | None = None
+    if requester_user_id is not None and room_id is not None:
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name,
+            requester_id=requester_user_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            session_id=thread_id or room_id,
+        )
+
     try:
-        if toolkit and toolkit.requires_connect:
-            await _maybe_await(toolkit.connect())
-            try:
+        with tool_execution_identity(execution_identity):
+            if toolkit and toolkit.requires_connect:
+                await _maybe_await(toolkit.connect())
+                try:
+                    result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
+                finally:
+                    await _maybe_await(toolkit.close())
+            else:
                 result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
-            finally:
-                await _maybe_await(toolkit.close())
-        else:
-            result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
     except Exception as exc:
         logger.warning(
             "Skill command tool dispatch failed",
@@ -556,6 +573,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
                         args_text=args_text,
+                        requester_user_id=requester_user_id,
+                        room_id=room.room_id,
+                        thread_id=effective_thread_id,
                     )
                 elif spec.disable_model_invocation:
                     response_text = (

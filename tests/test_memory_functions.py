@@ -700,6 +700,55 @@ class TestMemoryFunctions:
         assert alice_memory_file.exists()
 
     @pytest.mark.asyncio
+    async def test_file_backend_worker_scope_ignores_global_memory_file_path(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Worker-scoped memory must not escape into the shared configured file-memory root."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "shared-memory")
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].worker_scope = "user"
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-alice",
+        )
+        bob_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-bob",
+        )
+
+        with tool_execution_identity(alice_identity):
+            await add_agent_memory("Alice private memory", "general", storage_path, config)
+
+        with tool_execution_identity(bob_identity):
+            bob_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+
+        assert not any(result.get("memory") == "Alice private memory" for result in bob_results)
+
+        shared_memory_file = storage_path / "shared-memory" / "agent_general" / "MEMORY.md"
+        assert not shared_memory_file.exists()
+
+        alice_worker_key = resolve_worker_key("user", alice_identity)
+        assert alice_worker_key is not None
+        alice_memory_file = (
+            worker_root_path(storage_path, alice_worker_key) / "memory_files" / "agent_general" / "MEMORY.md"
+        )
+        assert alice_memory_file.exists()
+
+    @pytest.mark.asyncio
     async def test_agent_memory_backend_override_to_file_uses_file_storage(
         self,
         mock_memory: AsyncMock,

@@ -455,13 +455,14 @@ def _build_tool_execution_identity(
     *,
     agent_name: str,
     session_id: str,
-    user: str | None,
 ) -> ToolExecutionIdentity:
     """Build the execution identity used for worker-routed tool calls."""
     return ToolExecutionIdentity(
         channel="openai_compat",
         agent_name=agent_name,
-        requester_id=user,
+        # The OpenAI-compatible request-body `user` field is caller-supplied and
+        # not a trusted identity source for worker routing.
+        requester_id=None,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -653,11 +654,21 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
-            user=req.user,
         )
-        with tool_execution_identity(execution_identity):
-            if req.stream:
-                return await _stream_team_completion(
+        if req.stream:
+            response: JSONResponse | StreamingResponse = await _stream_team_completion(
+                team_name,
+                agent_name,
+                prompt,
+                session_id,
+                config,
+                thread_history,
+                req.user,
+                execution_identity=execution_identity,
+            )
+        else:
+            with tool_execution_identity(execution_identity):
+                response = await _non_stream_team_completion(
                     team_name,
                     agent_name,
                     prompt,
@@ -666,31 +677,42 @@ async def chat_completions(
                     thread_history,
                     req.user,
                 )
-            return await _non_stream_team_completion(
-                team_name,
+    else:
+        # Resolve knowledge base for this agent
+        try:
+            knowledge = _resolve_knowledge(agent_name, config)
+        except Exception:
+            logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
+            knowledge = None
+
+        execution_identity = _build_tool_execution_identity(
+            agent_name=agent_name,
+            session_id=session_id,
+        )
+        if req.stream:
+            response = await _stream_completion(
                 agent_name,
                 prompt,
                 session_id,
                 config,
                 thread_history,
                 req.user,
+                knowledge,
+                execution_identity=execution_identity,
             )
+        else:
+            with tool_execution_identity(execution_identity):
+                response = await _non_stream_completion(
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    thread_history,
+                    req.user,
+                    knowledge,
+                )
 
-    # Resolve knowledge base for this agent
-    try:
-        knowledge = _resolve_knowledge(agent_name, config)
-    except Exception:
-        logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
-        knowledge = None
-
-    handler = _stream_completion if req.stream else _non_stream_completion
-    execution_identity = _build_tool_execution_identity(
-        agent_name=agent_name,
-        session_id=session_id,
-        user=req.user,
-    )
-    with tool_execution_identity(execution_identity):
-        return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -882,23 +904,25 @@ async def _stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
-    stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
-        agent_name=agent_name,
-        prompt=prompt,
-        session_id=session_id,
-        storage_path=STORAGE_PATH_OBJ,
-        config=config,
-        thread_history=thread_history,
-        room_id=None,
-        knowledge=knowledge,
-        user_id=user,
-        include_interactive_questions=False,
-    )
+    with tool_execution_identity(execution_identity):
+        stream = stream_agent_response(
+            agent_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            storage_path=STORAGE_PATH_OBJ,
+            config=config,
+            thread_history=thread_history,
+            room_id=None,
+            knowledge=knowledge,
+            user_id=user,
+            include_interactive_questions=False,
+        )
 
-    # Peek at first event to detect errors before committing to SSE
-    first_event = await anext(aiter(stream), None)
+        # Peek at first event to detect errors before committing to SSE
+        first_event = await anext(aiter(stream), None)
     if first_event is None:
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
@@ -911,29 +935,29 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
+        with tool_execution_identity(execution_identity):
+            # 1. Initial role announcement
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
-        # 1. Initial role announcement
-        yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
-
-        # 2. Yield the peeked first event
-        text = _extract_stream_text(first_event, tool_state)
-        if text:
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
-
-        # 3. Stream remaining content
-        # Error strings after the first event are sent as content chunks
-        # since we can't switch to an error HTTP status mid-stream.
-        async for event in stream:
-            text = _extract_stream_text(event, tool_state)
+            # 2. Yield the peeked first event
+            text = _extract_stream_text(first_event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # 4. Final chunk with finish_reason
-        logger.info("Chat completion sent", model=agent_name, stream=True)
-        yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+            # 3. Stream remaining content
+            # Error strings after the first event are sent as content chunks
+            # since we can't switch to an error HTTP status mid-stream.
+            async for event in stream:
+                text = _extract_stream_text(event, tool_state)
+                if text:
+                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # 5. Stream terminator
-        yield "data: [DONE]\n\n"
+            # 4. Final chunk with finish_reason
+            logger.info("Chat completion sent", model=agent_name, stream=True)
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+
+            # 5. Stream terminator
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1045,6 +1069,7 @@ async def _stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     agents, team, mode = _build_team(team_name, config)
@@ -1056,9 +1081,10 @@ async def _stream_team_completion(
     team_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
-        stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
-        # Peek at first event
-        first_event = await anext(aiter(stream), None)
+        with tool_execution_identity(execution_identity):
+            stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+            # Peek at first event
+            first_event = await anext(aiter(stream), None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
@@ -1079,6 +1105,7 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
+            execution_identity=execution_identity,
         ),
         media_type="text/event-stream",
     )
@@ -1151,6 +1178,7 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
@@ -1167,41 +1195,42 @@ async def _team_stream_event_generator(
     def _chunk(content: str) -> str:
         return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
 
-    # 1. Role announcement
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+    with tool_execution_identity(execution_identity):
+        # 1. Role announcement
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
-    # 2. First event (guaranteed non-error by preflight)
-    text = _classify_team_event(first_event, tool_state)
-    if text:
-        yield _chunk(text)
+        # 2. First event (guaranteed non-error by preflight)
+        text = _classify_team_event(first_event, tool_state)
+        if text:
+            yield _chunk(text)
 
-    # 3. Remaining events
-    try:
-        async for event in stream:
-            if _extract_team_stream_error(event) is not None:
-                logger.warning("Team stream emitted error event", team=team_name)
-                pending = _finalize_pending_tools(tool_state)
-                if pending:
-                    yield _chunk(pending)
-                yield _chunk("Team execution failed.")
-                break
+        # 3. Remaining events
+        try:
+            async for event in stream:
+                if _extract_team_stream_error(event) is not None:
+                    logger.warning("Team stream emitted error event", team=team_name)
+                    pending = _finalize_pending_tools(tool_state)
+                    if pending:
+                        yield _chunk(pending)
+                    yield _chunk("Team execution failed.")
+                    break
 
-            text = _classify_team_event(event, tool_state)
-            if text:
-                yield _chunk(text)
-    except Exception:
-        logger.exception("Team stream failed during iteration", team=team_name)
+                text = _classify_team_event(event, tool_state)
+                if text:
+                    yield _chunk(text)
+        except Exception:
+            logger.exception("Team stream failed during iteration", team=team_name)
+            pending = _finalize_pending_tools(tool_state)
+            if pending:
+                yield _chunk(pending)
+            yield _chunk("Team execution failed.")
+
+        # 4. Finalize any tool calls that started but never completed
         pending = _finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)
-        yield _chunk("Team execution failed.")
 
-    # 4. Finalize any tool calls that started but never completed
-    pending = _finalize_pending_tools(tool_state)
-    if pending:
-        yield _chunk(pending)
-
-    # 5. Finish
-    logger.info("Team completion sent", team=team_name, stream=True)
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
-    yield "data: [DONE]\n\n"
+        # 5. Finish
+        logger.info("Team completion sent", team=team_name, stream=True)
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"

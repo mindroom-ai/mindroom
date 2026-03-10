@@ -99,8 +99,17 @@ def _effective_storage_path_for_context(
     return storage_path
 
 
-def _file_memory_root(storage_path: Path, config: Config) -> Path:
-    configured_path = config.memory.file.path
+def _should_use_configured_file_memory_path(original_storage_path: Path, effective_storage_path: Path) -> bool:
+    return original_storage_path.expanduser().resolve() == effective_storage_path.expanduser().resolve()
+
+
+def _file_memory_root(
+    storage_path: Path,
+    config: Config,
+    *,
+    use_configured_path: bool,
+) -> Path:
+    configured_path = config.memory.file.path if use_configured_path else None
     if configured_path:
         return resolve_config_relative_path(configured_path)
     return (storage_path.expanduser().resolve() / _FILE_MEMORY_DEFAULT_DIRNAME).resolve()
@@ -129,7 +138,14 @@ def _agent_name_from_scope_id(scope_user_id: str) -> str | None:
     return None
 
 
-def _scope_dir(scope_user_id: str, storage_path: Path, config: Config, *, create: bool) -> Path:
+def _scope_dir(
+    scope_user_id: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    create: bool,
+    use_configured_path: bool,
+) -> Path:
     agent_name = _agent_name_from_scope_id(scope_user_id)
     if agent_name is not None:
         agent_config = config.agents.get(agent_name)
@@ -142,14 +158,29 @@ def _scope_dir(scope_user_id: str, storage_path: Path, config: Config, *, create
             if create:
                 scope_path.mkdir(parents=True, exist_ok=True)
             return scope_path
-    scope_path = _file_memory_root(storage_path, config) / _scope_dir_name(scope_user_id)
+    scope_path = _file_memory_root(storage_path, config, use_configured_path=use_configured_path) / _scope_dir_name(
+        scope_user_id,
+    )
     if create:
         scope_path.mkdir(parents=True, exist_ok=True)
     return scope_path
 
 
-def _scope_entrypoint_path(scope_user_id: str, storage_path: Path, config: Config, *, create: bool) -> Path:
-    scope_path = _scope_dir(scope_user_id, storage_path, config, create=create)
+def _scope_entrypoint_path(
+    scope_user_id: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    create: bool,
+    use_configured_path: bool,
+) -> Path:
+    scope_path = _scope_dir(
+        scope_user_id,
+        storage_path,
+        config,
+        create=create,
+        use_configured_path=use_configured_path,
+    )
     entrypoint_path = scope_path / _FILE_MEMORY_ENTRYPOINT
     if create and not entrypoint_path.exists():
         entrypoint_path.write_text("# Memory\n\n", encoding="utf-8")
@@ -167,8 +198,16 @@ def _load_scope_id_entries(
     scope_user_id: str,
     storage_path: Path,
     config: Config,
+    *,
+    use_configured_path: bool,
 ) -> tuple[list[_MemoryResult], dict[str, Path]]:
-    scope_path = _scope_dir(scope_user_id, storage_path, config, create=False)
+    scope_path = _scope_dir(
+        scope_user_id,
+        storage_path,
+        config,
+        create=False,
+        use_configured_path=use_configured_path,
+    )
     if not scope_path.exists():
         return [], {}
 
@@ -233,8 +272,15 @@ def _append_scope_memory_entry(
     config: Config,
     *,
     target_relative_path: str | None = None,
+    use_configured_path: bool,
 ) -> _MemoryResult:
-    scope_path = _scope_dir(scope_user_id, storage_path, config, create=True)
+    scope_path = _scope_dir(
+        scope_user_id,
+        storage_path,
+        config,
+        create=True,
+        use_configured_path=use_configured_path,
+    )
     if target_relative_path is None:
         target_path = scope_path / _FILE_MEMORY_ENTRYPOINT
         if not target_path.exists():
@@ -272,8 +318,14 @@ def _search_scope_memory_entries(  # noqa: C901
     config: Config,
     *,
     limit: int,
+    use_configured_path: bool,
 ) -> list[_MemoryResult]:
-    id_entries, _ = _load_scope_id_entries(scope_user_id, storage_path, config)
+    id_entries, _ = _load_scope_id_entries(
+        scope_user_id,
+        storage_path,
+        config,
+        use_configured_path=use_configured_path,
+    )
     query_tokens = _extract_query_tokens(query)
 
     scored_entries: list[_MemoryResult] = []
@@ -295,7 +347,13 @@ def _search_scope_memory_entries(  # noqa: C901
     scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     scored_entries = scored_entries[:limit]
 
-    scope_path = _scope_dir(scope_user_id, storage_path, config, create=False)
+    scope_path = _scope_dir(
+        scope_user_id,
+        storage_path,
+        config,
+        create=False,
+        use_configured_path=use_configured_path,
+    )
     if not scope_path.exists() or limit <= len(scored_entries):
         return scored_entries
 
@@ -343,8 +401,16 @@ def _get_scope_memory_by_path_id(
     memory_id: str,
     storage_path: Path,
     config: Config,
+    *,
+    use_configured_path: bool,
 ) -> _MemoryResult | None:
-    scope_path = _scope_dir(scope_user_id, storage_path, config, create=False)
+    scope_path = _scope_dir(
+        scope_user_id,
+        storage_path,
+        config,
+        create=False,
+        use_configured_path=use_configured_path,
+    )
     match = _FILE_MEMORY_PATH_ID_PATTERN.match(memory_id)
     if not scope_path.exists() or match is None:
         return None
@@ -375,11 +441,24 @@ def _get_scope_memory_by_id(
     memory_id: str,
     storage_path: Path,
     config: Config,
+    *,
+    use_configured_path: bool,
 ) -> _MemoryResult | None:
     if _FILE_MEMORY_PATH_ID_PATTERN.match(memory_id):
-        return _get_scope_memory_by_path_id(scope_user_id, memory_id, storage_path, config)
+        return _get_scope_memory_by_path_id(
+            scope_user_id,
+            memory_id,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
 
-    entries, _ = _load_scope_id_entries(scope_user_id, storage_path, config)
+    entries, _ = _load_scope_id_entries(
+        scope_user_id,
+        storage_path,
+        config,
+        use_configured_path=use_configured_path,
+    )
     for entry in entries:
         if entry.get("id") == memory_id:
             return entry
@@ -392,8 +471,15 @@ def _replace_scope_memory_entry(
     content: str | None,
     storage_path: Path,
     config: Config,
+    *,
+    use_configured_path: bool,
 ) -> bool:
-    _, id_to_file = _load_scope_id_entries(scope_user_id, storage_path, config)
+    _, id_to_file = _load_scope_id_entries(
+        scope_user_id,
+        storage_path,
+        config,
+        use_configured_path=use_configured_path,
+    )
     target_file = id_to_file.get(memory_id)
     if target_file is None:
         return False
@@ -419,8 +505,20 @@ def _replace_scope_memory_entry(
     return True
 
 
-def _load_scope_entrypoint_context(scope_user_id: str, storage_path: Path, config: Config) -> str:
-    entrypoint_path = _scope_entrypoint_path(scope_user_id, storage_path, config, create=False)
+def _load_scope_entrypoint_context(
+    scope_user_id: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    use_configured_path: bool,
+) -> str:
+    entrypoint_path = _scope_entrypoint_path(
+        scope_user_id,
+        storage_path,
+        config,
+        create=False,
+        use_configured_path=use_configured_path,
+    )
     if not entrypoint_path.is_file():
         return ""
 
@@ -491,9 +589,17 @@ async def add_agent_memory(
         metadata: Optional metadata to store with memory
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _use_file_memory_backend(config, agent_name=agent_name):
-        _append_scope_memory_entry(f"agent_{agent_name}", content, storage_path, config)
+        _append_scope_memory_entry(
+            f"agent_{agent_name}",
+            content,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         logger.info("File memory added", agent=agent_name)
         return
 
@@ -521,7 +627,9 @@ def append_agent_daily_memory(
     config: Config,
 ) -> _MemoryResult:
     """Append one memory entry to today's per-agent daily memory file."""
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{_FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     result = _append_scope_memory_entry(
@@ -530,6 +638,7 @@ def append_agent_daily_memory(
         storage_path,
         config,
         target_relative_path=daily_relative_path,
+        use_configured_path=use_configured_path,
     )
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
@@ -581,12 +690,28 @@ async def search_agent_memories(
         List of relevant memories from both individual and team contexts
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _use_file_memory_backend(config, agent_name=agent_name):
-        results = _search_scope_memory_entries(f"agent_{agent_name}", query, storage_path, config, limit=limit)
+        results = _search_scope_memory_entries(
+            f"agent_{agent_name}",
+            query,
+            storage_path,
+            config,
+            limit=limit,
+            use_configured_path=use_configured_path,
+        )
         existing_memories = {r.get("memory", "") for r in results}
         for team_id in _get_team_ids_for_agent(agent_name, config):
-            team_results = _search_scope_memory_entries(team_id, query, storage_path, config, limit=limit)
+            team_results = _search_scope_memory_entries(
+                team_id,
+                query,
+                storage_path,
+                config,
+                limit=limit,
+                use_configured_path=use_configured_path,
+            )
             for mem in team_results:
                 memory_text = mem.get("memory", "")
                 if memory_text in existing_memories:
@@ -640,9 +765,16 @@ async def list_all_agent_memories(
         List of all agent memories
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _use_file_memory_backend(config, agent_name=agent_name):
-        results, _ = _load_scope_id_entries(f"agent_{agent_name}", storage_path, config)
+        results, _ = _load_scope_id_entries(
+            f"agent_{agent_name}",
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         return results[:limit]
 
     memory = await create_memory_instance(storage_path, config)
@@ -668,10 +800,18 @@ async def get_agent_memory(
         The memory dict, or None if not found
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_context(caller_context, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            result = _get_scope_memory_by_id(scope_user_id, memory_id, storage_path, config)
+            result = _get_scope_memory_by_id(
+                scope_user_id,
+                memory_id,
+                storage_path,
+                config,
+                use_configured_path=use_configured_path,
+            )
             if result is not None:
                 return result
         return None
@@ -697,10 +837,19 @@ async def update_agent_memory(
         config: Application configuration
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_context(caller_context, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            if _replace_scope_memory_entry(scope_user_id, memory_id, content, storage_path, config):
+            if _replace_scope_memory_entry(
+                scope_user_id,
+                memory_id,
+                content,
+                storage_path,
+                config,
+                use_configured_path=use_configured_path,
+            ):
                 logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
                 return
         raise _MemoryNotFoundError(memory_id)
@@ -728,10 +877,19 @@ async def delete_agent_memory(
         config: Application configuration
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_context(caller_context, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if _caller_uses_file_memory_backend(config, caller_context):
         for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            if _replace_scope_memory_entry(scope_user_id, memory_id, None, storage_path, config):
+            if _replace_scope_memory_entry(
+                scope_user_id,
+                memory_id,
+                None,
+                storage_path,
+                config,
+                use_configured_path=use_configured_path,
+            ):
                 logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
                 return
         raise _MemoryNotFoundError(memory_id)
@@ -763,11 +921,19 @@ async def add_room_memory(
         metadata: Optional metadata to store with memory
 
     """
+    original_storage_path = storage_path
     if agent_name is not None:
         storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     if _use_file_memory_backend(config, agent_name=agent_name):
-        _append_scope_memory_entry(f"room_{safe_room_id}", content, storage_path, config)
+        _append_scope_memory_entry(
+            f"room_{safe_room_id}",
+            content,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         logger.debug("File room memory added", room_id=room_id)
         return
 
@@ -807,11 +973,20 @@ async def search_room_memories(
         List of relevant memories
 
     """
+    original_storage_path = storage_path
     if agent_name is not None:
         storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     safe_room_id = room_id.replace(":", "_").replace("!", "")
     if _use_file_memory_backend(config, agent_name=agent_name):
-        return _search_scope_memory_entries(f"room_{safe_room_id}", query, storage_path, config, limit=limit)
+        return _search_scope_memory_entries(
+            f"room_{safe_room_id}",
+            query,
+            storage_path,
+            config,
+            limit=limit,
+            use_configured_path=use_configured_path,
+        )
 
     memory = await create_memory_instance(storage_path, config)
     search_result = await memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
@@ -867,10 +1042,19 @@ async def build_memory_enhanced_prompt(
         Enhanced prompt with memory context
 
     """
+    original_storage_path = storage_path
     storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     logger.debug("Building enhanced prompt", agent=agent_name)
     if _use_file_memory_backend(config, agent_name=agent_name):
-        return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
+        return await _build_file_memory_enhanced_prompt(
+            prompt,
+            agent_name,
+            storage_path,
+            config,
+            room_id,
+            use_configured_path=use_configured_path,
+        )
 
     enhanced_prompt = prompt
     agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
@@ -895,10 +1079,17 @@ async def _build_file_memory_enhanced_prompt(
     storage_path: Path,
     config: Config,
     room_id: str | None,
+    *,
+    use_configured_path: bool,
 ) -> str:
     context_chunks: list[str] = []
 
-    agent_entrypoint = _load_scope_entrypoint_context(f"agent_{agent_name}", storage_path, config)
+    agent_entrypoint = _load_scope_entrypoint_context(
+        f"agent_{agent_name}",
+        storage_path,
+        config,
+        use_configured_path=use_configured_path,
+    )
     if agent_entrypoint:
         context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")
 
@@ -908,7 +1099,12 @@ async def _build_file_memory_enhanced_prompt(
 
     if room_id:
         safe_room_id = room_id.replace(":", "_").replace("!", "")
-        room_entrypoint = _load_scope_entrypoint_context(f"room_{safe_room_id}", storage_path, config)
+        room_entrypoint = _load_scope_entrypoint_context(
+            f"room_{safe_room_id}",
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         if room_entrypoint:
             context_chunks.append(f"[File memory entrypoint (room)]\n{room_entrypoint}")
 
@@ -974,20 +1170,40 @@ def _store_file_conversation_memory(
     if not condensed_prompt:
         return
 
+    original_storage_path = storage_path
     if isinstance(agent_name, str):
         storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
     if isinstance(agent_name, list):
         scope_user_id = _build_team_user_id(agent_name)
-        _append_scope_memory_entry(scope_user_id, condensed_prompt, storage_path, config)
+        _append_scope_memory_entry(
+            scope_user_id,
+            condensed_prompt,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         logger.info("File team memory added", team_id=scope_user_id, members=agent_name)
     else:
         scope_user_id = f"agent_{agent_name}"
-        _append_scope_memory_entry(scope_user_id, condensed_prompt, storage_path, config)
+        _append_scope_memory_entry(
+            scope_user_id,
+            condensed_prompt,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         logger.info("File memory added", agent=agent_name)
 
     if room_id:
         safe_room_id = room_id.replace(":", "_").replace("!", "")
-        _append_scope_memory_entry(f"room_{safe_room_id}", condensed_prompt, storage_path, config)
+        _append_scope_memory_entry(
+            f"room_{safe_room_id}",
+            condensed_prompt,
+            storage_path,
+            config,
+            use_configured_path=use_configured_path,
+        )
         logger.debug("File room memory added", room_id=room_id)
 
 
