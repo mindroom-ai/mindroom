@@ -214,19 +214,3 @@ def resolve_agent_state_storage_path(
         )
         or base_storage_path
     )
-
-
-def resolve_agent_memory_storage_path(
-    *,
-    agent_name: str,
-    base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path:
-    """Return the storage path that should back the agent's mutable memory state."""
-    return resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=base_storage_path,
-        config=config,
-        execution_identity=execution_identity,
-    )

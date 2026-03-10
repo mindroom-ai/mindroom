@@ -119,16 +119,14 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
     with _pending_oauth_state_lock:
         _prune_expired_pending_oauth_states(now)
         pending = _pending_oauth_states.get(state)
-
-    if pending is None:
-        raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
-    if pending.service != service:
-        raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
-    if pending.user_id != user_id:
-        raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
-    with _pending_oauth_state_lock:
+        if pending is None:
+            raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
+        if pending.service != service:
+            raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
+        if pending.user_id != user_id:
+            raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
         _pending_oauth_states.pop(state, None)
-    return pending
+        return pending
 
 
 def consume_pending_oauth_state(request: Request, service: str, state: str) -> str | None:
@@ -361,18 +359,18 @@ async def set_credentials(
 async def set_api_key(
     service: str,
     http_request: Request,
-    request: SetApiKeyRequest,
+    payload: SetApiKeyRequest,
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set an API key for a service."""
     service = _validated_service(service)
-    request_service = _validated_service(request.service)
+    request_service = _validated_service(payload.service)
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
     target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
-    credentials[request.key_name] = request.api_key
+    credentials[payload.key_name] = payload.api_key
     credentials["_source"] = "ui"
     target.target_manager.save_credentials(service, credentials)
 

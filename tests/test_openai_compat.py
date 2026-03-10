@@ -151,6 +151,30 @@ class TestListModels:
         assert "code" not in model_ids
         assert "team/dev-team" not in model_ids
 
+    def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
+        """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.agents["research"].worker_scope = "room_thread"
+
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "auto" not in model_ids
+
     def test_empty_role_is_none(self, app_client: TestClient) -> None:
         """Agents with empty role have description=None."""
         response = app_client.get("/v1/models")
@@ -175,8 +199,8 @@ class TestListModels:
         assert first["name"] == "Auto"
         assert "routes" in first["description"].lower() or "auto" in first["description"].lower()
 
-    def test_empty_agents_still_has_auto(self) -> None:
-        """With no agents configured, only auto is listed."""
+    def test_empty_agents_list_is_empty(self) -> None:
+        """With no agents configured, /v1/models should not advertise auto-routing."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
@@ -197,8 +221,7 @@ class TestListModels:
             response = client.get("/v1/models")
             assert response.status_code == 200
             data = response.json()["data"]
-            assert len(data) == 1
-            assert data[0]["id"] == "auto"
+            assert data == []
 
 
 class TestChatCompletions:

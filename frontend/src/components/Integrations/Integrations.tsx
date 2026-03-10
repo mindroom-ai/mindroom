@@ -744,11 +744,7 @@ export function Integrations() {
                 Dashboard credential setup, editing, and disconnect are only supported for shared
                 deployment credentials.
               </AlertDescription>
-            </Alert>
-          )}
-          {hidesSharedOnlyIntegrations && (
-            <Alert className="mt-3">
-              <AlertDescription>
+              <AlertDescription className="mt-2">
                 Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
                 are only supported for shared deployment credentials or agents with
                 `worker_scope=shared`.

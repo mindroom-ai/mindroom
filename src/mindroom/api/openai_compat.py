@@ -623,14 +623,16 @@ async def list_models(
         created = 0
 
     compatible_agents = set(_openai_compatible_agent_names(config))
-    models: list[_ModelObject] = [
-        _ModelObject(
-            id=_AUTO_MODEL_NAME,
-            name="Auto",
-            description="Automatically routes to the best agent for your message",
-            created=created,
-        ),
-    ]
+    models: list[_ModelObject] = []
+    if compatible_agents:
+        models.append(
+            _ModelObject(
+                id=_AUTO_MODEL_NAME,
+                name="Auto",
+                description="Automatically routes to the best agent for your message",
+                created=created,
+            ),
+        )
     for agent_name, agent_config in config.agents.items():
         if (
             agent_name == ROUTER_AGENT_NAME

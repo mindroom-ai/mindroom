@@ -116,6 +116,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     lease_id: str | None = None
     worker_key: str | None = None
     worker_scope: WorkerScope | None = None
+    routing_agent_name: str | None = None
     execution_identity: dict[str, Any] = Field(default_factory=dict)
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -172,6 +173,8 @@ def _resolve_entrypoint(
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config()
     try:
@@ -180,6 +183,8 @@ def _resolve_entrypoint(
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             runtime_overrides=runtime_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -345,6 +350,8 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
             function_name=request.function_name,
             credential_overrides=request.credential_overrides or None,
             runtime_overrides=runtime_overrides,
+            worker_scope=request.worker_scope,
+            routing_agent_name=request.routing_agent_name,
         )
 
         try:

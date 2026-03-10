@@ -199,8 +199,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`, which in turn over
 
 ## Worker Scope
 
-`worker_tools` chooses which tools execute through the sandbox proxy.
-`worker_scope` chooses which proxied calls share the same worker-owned storage root.
+`worker_tools` chooses which tools execute through the sandbox proxy. `worker_scope` chooses which proxied calls share the same worker-owned storage root.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -225,17 +224,14 @@ agents:
 
 The supported values are:
 
-| Value | Behavior |
-|-------|----------|
-| `shared` | One shared worker state per agent |
-| `user` | One worker state per requester |
-| `user_agent` | One worker state per requester and agent |
+| Value         | Behavior                                                       |
+| ------------- | -------------------------------------------------------------- |
+| `shared`      | One shared worker state per agent                              |
+| `user`        | One worker state per requester                                 |
+| `user_agent`  | One worker state per requester and agent                       |
 | `room_thread` | One worker state per thread, or per room when no thread exists |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected.
-`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
-The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`.
-Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
+If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
 
 ## Without sandbox proxy
 

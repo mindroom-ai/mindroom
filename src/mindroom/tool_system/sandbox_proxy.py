@@ -245,6 +245,7 @@ def _build_worker_routing_payload(
 
     return {
         "worker_scope": worker_scope,
+        "routing_agent_name": routing_agent_name,
         "worker_key": worker_key,
         "execution_identity": to_json_compatible(asdict(execution_identity)),
     }

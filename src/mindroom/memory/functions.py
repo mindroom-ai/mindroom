@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.memory.config import create_memory_instance
-from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_agent_memory_storage_path
+from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_agent_state_storage_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,7 +82,7 @@ def _agent_uses_worker_scoped_memory(agent_name: str, config: Config) -> bool:
 
 
 def _effective_storage_path_for_agent(agent_name: str, storage_path: Path, config: Config) -> Path:
-    return resolve_agent_memory_storage_path(
+    return resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
         config=config,

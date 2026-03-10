@@ -32,6 +32,17 @@ class ScopedGoogleOAuthMixin:
     _routing_agent_name: str | None
     _provided_creds: bool
 
+    def _validate_google_oauth_contract(self) -> None:
+        """Fail fast when a subclass does not provide the required OAuth metadata."""
+        missing = [
+            name
+            for name in ("_oauth_tool_name", "_oauth_log_name", "DEFAULT_SCOPES", "_creds_manager")
+            if not hasattr(self, name)
+        ]
+        if missing:
+            msg = f"{type(self).__name__} is missing required Google OAuth attributes: {', '.join(missing)}"
+            raise TypeError(msg)
+
     def _initialize_google_oauth(
         self,
         *,
@@ -41,6 +52,7 @@ class ScopedGoogleOAuthMixin:
         logger: Logger,
     ) -> Any:  # noqa: ANN401
         """Validate scope and prepare initial Google credentials for the tool."""
+        self._validate_google_oauth_contract()
         if not worker_scope_allows_shared_only_integrations(worker_scope):
             msg = unsupported_shared_only_integration_message(
                 self._oauth_tool_name,

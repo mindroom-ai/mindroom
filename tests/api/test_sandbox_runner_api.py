@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -224,6 +225,42 @@ def test_sandbox_runner_unknown_tool_returns_404(runner_client: TestClient, monk
     )
     assert response.status_code == 404
     assert "Unknown tool" in response.json()["detail"]
+
+
+def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandbox runner should rebuild tools with worker scope and routing agent context."""
+    _set_sandbox_token(monkeypatch)
+    captured_kwargs: dict[str, object] = {}
+    toolkit = SimpleNamespace(
+        requires_connect=False,
+        functions={"ping": SimpleNamespace(entrypoint=lambda: {"ok": True})},
+        async_functions={},
+    )
+
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> SimpleNamespace:
+        assert tool_name == "homeassistant"
+        captured_kwargs.update(kwargs)
+        return toolkit
+
+    monkeypatch.setattr("mindroom.api.sandbox_runner.get_tool_by_name", fake_get_tool_by_name)
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "homeassistant",
+            "function_name": "ping",
+            "worker_scope": "shared",
+            "routing_agent_name": "general",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert captured_kwargs["worker_scope"] == "shared"
+    assert captured_kwargs["routing_agent_name"] == "general"
 
 
 def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
