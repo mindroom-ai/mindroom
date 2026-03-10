@@ -71,7 +71,7 @@ class RequestCredentialsTarget:
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
-    auth_user = getattr(request.state, "auth_user", None)
+    auth_user = request.scope.get("auth_user")
     return auth_user if isinstance(auth_user, dict) else None
 
 

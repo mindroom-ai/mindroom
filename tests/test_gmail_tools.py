@@ -209,24 +209,22 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
 
-            # Mock the parent's _auth method
-            with patch("mindroom.custom_tools.gmail.AgnoGmailTools._auth") as mock_parent_auth:
-                gmail_tools = GmailTools()
-                gmail_tools.creds = None
+            gmail_tools = GmailTools()
+            gmail_tools.creds = None
 
-                # Store the original auth for testing
-                gmail_tools._original_auth = mock_parent_auth
+            mock_parent_auth = Mock()
+            gmail_tools._original_auth = mock_parent_auth
 
-                # Call _auth
-                gmail_tools._auth()
+            # Call _auth
+            gmail_tools._auth()
 
-                # Verify warning was logged
-                mock_logger.warning.assert_called_with(
-                    "No stored credentials found, initiating OAuth flow",
-                )
+            # Verify warning was logged
+            mock_logger.warning.assert_called_with(
+                "No stored credentials found, initiating OAuth flow",
+            )
 
-                # Verify original auth was called
-                mock_parent_auth.assert_called_once()
+            # Verify original auth was called
+            mock_parent_auth.assert_called_once()
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
     def test_auth_error_handling(

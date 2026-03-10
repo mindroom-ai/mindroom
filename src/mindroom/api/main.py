@@ -438,7 +438,7 @@ async def verify_user(
         # Standalone mode
         if allow_public_paths and request.url.path in _STANDALONE_PUBLIC_PATHS:
             auth_user = {"user_id": "standalone", "email": None}
-            request.state.auth_user = auth_user
+            request.scope["auth_user"] = auth_user
             return auth_user
 
         if _MINDROOM_API_KEY:
@@ -452,7 +452,7 @@ async def verify_user(
             if not secrets.compare_digest(token, _MINDROOM_API_KEY):
                 raise HTTPException(status_code=401, detail="Invalid API key")
         auth_user = {"user_id": "standalone", "email": None}
-        request.state.auth_user = auth_user
+        request.scope["auth_user"] = auth_user
         return auth_user
 
     token = _get_request_token(
@@ -471,7 +471,7 @@ async def verify_user(
         raise HTTPException(status_code=403, detail="Forbidden")
 
     auth_user = {"user_id": user.id, "email": user.email}
-    request.state.auth_user = auth_user
+    request.scope["auth_user"] = auth_user
     return auth_user
 
 

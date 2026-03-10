@@ -322,12 +322,12 @@ def test_pending_oauth_state_binds_agent_name_and_user() -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
-        request.state.auth_user = {"user_id": user_id}
+        request.scope["auth_user"] = {"user_id": user_id}
         return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
-        request.state.auth_user = {"user_id": user_id}
+        request.scope["auth_user"] = {"user_id": user_id}
         return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
@@ -346,12 +346,12 @@ def test_pending_oauth_state_rejects_different_user() -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
-        request.state.auth_user = {"user_id": user_id}
+        request.scope["auth_user"] = {"user_id": user_id}
         return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
-        request.state.auth_user = {"user_id": user_id}
+        request.scope["auth_user"] = {"user_id": user_id}
         return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
@@ -373,7 +373,7 @@ def test_pending_oauth_request_preserves_payload() -> None:
 
     @app.post("/issue/{service}")
     async def issue(service: str, request: Request) -> dict[str, str]:
-        request.state.auth_user = {"user_id": "alice"}
+        request.scope["auth_user"] = {"user_id": "alice"}
         return {
             "state": credentials_api.issue_pending_oauth_state(
                 request,
@@ -385,7 +385,7 @@ def test_pending_oauth_request_preserves_payload() -> None:
 
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str) -> dict[str, str | dict[str, str] | None]:
-        request.state.auth_user = {"user_id": "alice"}
+        request.scope["auth_user"] = {"user_id": "alice"}
         pending = credentials_api.consume_pending_oauth_request(request, service, state)
         return {
             "agent_name": pending.agent_name,

@@ -41,13 +41,6 @@ class _MemoryResult(TypedDict, total=False):
 logger = get_logger(__name__)
 
 
-class _ScopedMemoryReader(Protocol):
-    """Minimal protocol for reading a memory by ID."""
-
-    async def get(self, memory_id: str) -> dict[str, Any] | None:
-        """Return the memory payload for a given memory ID."""
-
-
 class _ScopedMemoryWriter(Protocol):
     """Minimal protocol for writing scoped memory entries."""
 
@@ -59,6 +52,27 @@ class _ScopedMemoryWriter(Protocol):
         metadata: dict[str, object] | None = None,
     ) -> object:
         """Persist messages for a scoped memory user ID."""
+
+
+class _ScopedMemoryCrud(_ScopedMemoryWriter, Protocol):
+    """Minimal protocol for mem0 CRUD operations used by this module."""
+
+    async def get(self, memory_id: str) -> dict[str, Any] | None:
+        """Return the memory payload for a given memory ID."""
+
+    async def get_all(
+        self,
+        *,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, list[_MemoryResult]]:
+        """List memories for one scoped user ID."""
+
+    async def update(self, memory_id: str, data: str) -> object:
+        """Update one memory by its backend-native ID."""
+
+    async def delete(self, memory_id: str) -> object:
+        """Delete one memory by its backend-native ID."""
 
 
 class _MemoryNotFoundError(ValueError):
@@ -632,7 +646,7 @@ def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config
 
 
 async def _get_scoped_memory_by_id(
-    memory: _ScopedMemoryReader,
+    memory: _ScopedMemoryCrud,
     memory_id: str,
     caller_context: str | list[str],
     config: Config,
@@ -640,13 +654,9 @@ async def _get_scoped_memory_by_id(
     """Fetch a memory and ensure it belongs to the caller's allowed scopes."""
     result = await memory.get(memory_id)
     if not isinstance(result, dict):
-        get_all = getattr(memory, "get_all", None)
-        if not callable(get_all):
-            return None
-
         allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
         for scope_user_id in sorted(allowed_user_ids):
-            scoped_result = await get_all(user_id=scope_user_id, limit=1000)
+            scoped_result = await memory.get_all(user_id=scope_user_id, limit=1000)
             scoped_results = (
                 scoped_result["results"]
                 if isinstance(scoped_result, dict) and isinstance(scoped_result.get("results"), list)
@@ -714,16 +724,12 @@ def _mem0_replica_key(result: _MemoryResult) -> str | None:
 
 async def _find_mem0_replica_memory_ids(
     *,
-    memory: object,
+    memory: _ScopedMemoryCrud,
     scope_user_id: str,
     anchor_result: _MemoryResult,
 ) -> list[str]:
     """Find matching mem0 replica IDs for one scope on one storage root."""
-    get_all = getattr(memory, "get_all", None)
-    if not callable(get_all):
-        return []
-
-    result = await get_all(user_id=scope_user_id, limit=1000)
+    result = await memory.get_all(user_id=scope_user_id, limit=1000)
     scoped_results = result["results"] if isinstance(result, dict) and isinstance(result.get("results"), list) else []
     replica_key = _mem0_replica_key(anchor_result)
 
@@ -801,7 +807,7 @@ def _file_mutation_target_ids(
 
 
 async def _mem0_mutation_target_ids(
-    memory: _ScopedMemoryReader,
+    memory: _ScopedMemoryCrud,
     memory_id: str,
     scope_user_id: str,
     caller_context: str | list[str],

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
@@ -20,6 +21,13 @@ if TYPE_CHECKING:
 GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
+class _AuthDescriptor(Protocol):
+    """Descriptor contract for unbound tool auth methods."""
+
+    def __get__(self, instance: object, owner: type[object] | None = None) -> Callable[[], None]:
+        """Bind the auth method to one tool instance."""
+
+
 class ScopedGoogleOAuthMixin:
     """Shared scoped credential loading and refresh logic for Google-backed tools."""
 
@@ -31,17 +39,8 @@ class ScopedGoogleOAuthMixin:
     _worker_scope: WorkerScope | None
     _routing_agent_name: str | None
     _provided_creds: bool
-
-    def _validate_google_oauth_contract(self) -> None:
-        """Fail fast when a subclass does not provide the required OAuth metadata."""
-        missing = [
-            name
-            for name in ("_oauth_tool_name", "_oauth_log_name", "DEFAULT_SCOPES", "_creds_manager")
-            if not hasattr(self, name)
-        ]
-        if missing:
-            msg = f"{type(self).__name__} is missing required Google OAuth attributes: {', '.join(missing)}"
-            raise TypeError(msg)
+    _original_auth: Callable[[], None]
+    creds: Any | None
 
     def _initialize_google_oauth(
         self,
@@ -52,7 +51,6 @@ class ScopedGoogleOAuthMixin:
         logger: Logger,
     ) -> Any:  # noqa: ANN401
         """Validate scope and prepare initial Google credentials for the tool."""
-        self._validate_google_oauth_contract()
         if not worker_scope_allows_shared_only_integrations(worker_scope):
             msg = unsupported_shared_only_integration_message(
                 self._oauth_tool_name,
@@ -125,10 +123,9 @@ class ScopedGoogleOAuthMixin:
         """Return whether the tool should defer to its original OAuth flow."""
         return False
 
-    def _set_original_auth(self, auth_method: Any) -> None:  # noqa: ANN401
-        """Store the parent auth callable, binding descriptors when needed."""
-        binder = getattr(auth_method, "__get__", None)
-        self._original_auth = binder(self, type(self)) if callable(binder) else auth_method
+    def _set_original_auth(self, auth_method: _AuthDescriptor) -> None:
+        """Store the bound parent auth callable for fallback."""
+        self._original_auth = auth_method.__get__(self, type(self))
 
     def _should_skip_auth(self) -> bool:
         """Return whether tool auth can return early with already-valid provided credentials."""
