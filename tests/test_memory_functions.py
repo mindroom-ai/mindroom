@@ -109,7 +109,6 @@ class TestMemoryFunctions:
         memory = AsyncMock()
         memory.add.return_value = None
         memory.search.return_value = {"results": []}
-        memory.get_all.return_value = {"results": []}
         return memory
 
     @pytest.fixture
@@ -232,16 +231,14 @@ class TestMemoryFunctions:
         config: Config,
     ) -> None:
         """Test get by ID allows memories in the caller's agent scope."""
-        mock_memory.get_all.return_value = {
-            "results": [{"id": "mem-1", "memory": "Own memory", "user_id": "agent_test_agent"}],
-        }
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Own memory", "user_id": "agent_test_agent"}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
 
             assert result is not None
             assert result["id"] == "mem-1"
-            mock_memory.get_all.assert_called_once_with(user_id="agent_test_agent", limit=1000)
+            mock_memory.get.assert_called_once_with("mem-1")
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_rejects_other_agent_scope(
@@ -251,15 +248,13 @@ class TestMemoryFunctions:
         config: Config,
     ) -> None:
         """Test get by ID rejects memories outside caller scope."""
-        mock_memory.get_all.return_value = {
-            "results": [{"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}],
-        }
+        mock_memory.get.return_value = {"id": "mem-1", "memory": "Other memory", "user_id": "agent_other_agent"}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-1", "test_agent", storage_path, config)
 
             assert result is None
-            mock_memory.get_all.assert_called_once_with(user_id="agent_test_agent", limit=1000)
+            mock_memory.get.assert_called_once_with("mem-1")
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_allows_team_scope(
@@ -272,21 +267,14 @@ class TestMemoryFunctions:
         config.teams = {
             "test_team": MockTeamConfig(agents=["helper", "test_agent"]),
         }
-
-        async def _get_all(*, user_id: str | None = None, limit: int = 100) -> dict[str, list[dict[str, str]]]:
-            del limit
-            if user_id == "team_helper+test_agent":
-                return {"results": [{"id": "mem-team", "memory": "Team memory", "user_id": user_id}]}
-            return {"results": []}
-
-        mock_memory.get_all.side_effect = _get_all
+        mock_memory.get.return_value = {"id": "mem-team", "memory": "Team memory", "user_id": "team_helper+test_agent"}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-team", "test_agent", storage_path, config)
 
             assert result is not None
             assert result["id"] == "mem-team"
-            assert mock_memory.get_all.await_count == 2
+            mock_memory.get.assert_called_once_with("mem-team")
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_team_context_rejects_member_scope_by_default(
@@ -296,15 +284,13 @@ class TestMemoryFunctions:
         config: Config,
     ) -> None:
         """Team caller context should not read member agent scope by default."""
-        mock_memory.get_all.return_value = {
-            "results": [{"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}],
-        }
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
 
             assert result is None
-            mock_memory.get_all.assert_called_once_with(user_id="team_helper+test_agent", limit=1000)
+            mock_memory.get.assert_called_once_with("mem-member")
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_team_context_allows_member_scope_when_enabled(
@@ -315,21 +301,14 @@ class TestMemoryFunctions:
     ) -> None:
         """Team caller context can read member scopes when explicitly enabled."""
         config.memory.team_reads_member_memory = True
-
-        async def _get_all(*, user_id: str | None = None, limit: int = 100) -> dict[str, list[dict[str, str]]]:
-            del limit
-            if user_id == "agent_helper":
-                return {"results": [{"id": "mem-member", "memory": "Member memory", "user_id": user_id}]}
-            return {"results": []}
-
-        mock_memory.get_all.side_effect = _get_all
+        mock_memory.get.return_value = {"id": "mem-member", "memory": "Member memory", "user_id": "agent_helper"}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
 
             assert result is not None
             assert result["id"] == "mem-member"
-            assert mock_memory.get_all.await_count == 3
+            mock_memory.get.assert_called_once_with("mem-member")
 
     @pytest.mark.asyncio
     async def test_update_agent_memory_rejects_other_agent_scope(

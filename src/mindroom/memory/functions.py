@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -41,6 +41,13 @@ class _MemoryResult(TypedDict, total=False):
 logger = get_logger(__name__)
 
 
+class _ScopedMemoryReader(Protocol):
+    """Minimal protocol for reading a memory by ID."""
+
+    async def get(self, memory_id: str) -> dict[str, Any] | None:
+        """Return the memory payload for a given memory ID."""
+
+
 class _ScopedMemoryWriter(Protocol):
     """Minimal protocol for writing scoped memory entries."""
 
@@ -52,24 +59,6 @@ class _ScopedMemoryWriter(Protocol):
         metadata: dict[str, object] | None = None,
     ) -> object:
         """Persist messages for a scoped memory user ID."""
-
-
-class _ScopedMemoryCrud(_ScopedMemoryWriter, Protocol):
-    """Minimal protocol for mem0 CRUD operations used by this module."""
-
-    async def get_all(
-        self,
-        *,
-        user_id: str | None = None,
-        limit: int = 100,
-    ) -> dict[str, list[_MemoryResult]]:
-        """List memories for one scoped user ID."""
-
-    async def update(self, memory_id: str, data: str) -> object:
-        """Update one memory by its backend-native ID."""
-
-    async def delete(self, memory_id: str) -> object:
-        """Delete one memory by its backend-native ID."""
 
 
 class _MemoryNotFoundError(ValueError):
@@ -85,15 +74,6 @@ _FILE_MEMORY_DAILY_DIR = "memory"
 _FILE_MEMORY_ENTRY_PATTERN = re.compile(r"^- \[id=(?P<id>[^\]]+)\]\s*(?P<memory>.+?)\s*$")
 _FILE_MEMORY_PATH_ID_PATTERN = re.compile(r"^file:(?P<path>[^:]+):(?P<line>\d+)$")
 _MEM0_REPLICA_KEY = "mindroom_replica_key"
-_MEM0_SCAN_LIMIT = 1000
-
-
-@dataclass(frozen=True)
-class _Mem0Match:
-    storage_path: Path
-    memory: _ScopedMemoryCrud
-    native_id: str
-    result: _MemoryResult
 
 
 @dataclass(frozen=True)
@@ -651,57 +631,49 @@ def _get_allowed_memory_user_ids(caller_context: str | list[str], config: Config
     return allowed_user_ids
 
 
-def _mem0_replica_key(result: _MemoryResult) -> str | None:
-    metadata = result.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    replica_key = metadata.get(_MEM0_REPLICA_KEY)
-    return replica_key if isinstance(replica_key, str) and replica_key else None
-
-
-async def _list_mem0_scope_results(
-    memory: _ScopedMemoryCrud,
-    scope_user_id: str,
-) -> list[_MemoryResult]:
-    # Mem0 does not expose a direct scope+metadata lookup, so CRUD by ID resolves
-    # within one bounded scope listing before applying the backend-native ID.
-    result = await memory.get_all(user_id=scope_user_id, limit=_MEM0_SCAN_LIMIT)
-    return result["results"] if isinstance(result, dict) and isinstance(result.get("results"), list) else []
-
-
-async def _find_mem0_matches_by_id(
+async def _get_scoped_memory_by_id(
+    memory: _ScopedMemoryReader,
     memory_id: str,
-    *,
-    storage_paths: list[Path],
-    scope_user_ids: list[str],
+    caller_context: str | list[str],
     config: Config,
-) -> list[_Mem0Match]:
-    matches: list[_Mem0Match] = []
-    seen_targets: set[tuple[Path, str]] = set()
-    for target_storage_path in storage_paths:
-        memory = await create_memory_instance(target_storage_path, config)
-        for scope_user_id in scope_user_ids:
-            for entry in await _list_mem0_scope_results(memory, scope_user_id):
-                if not isinstance(entry, dict) or entry.get("user_id") != scope_user_id:
+) -> _MemoryResult | None:
+    """Fetch a memory and ensure it belongs to the caller's allowed scopes."""
+    result = await memory.get(memory_id)
+    if not isinstance(result, dict):
+        get_all = getattr(memory, "get_all", None)
+        if not callable(get_all):
+            return None
+
+        allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
+        for scope_user_id in sorted(allowed_user_ids):
+            scoped_result = await get_all(user_id=scope_user_id, limit=1000)
+            scoped_results = (
+                scoped_result["results"]
+                if isinstance(scoped_result, dict) and isinstance(scoped_result.get("results"), list)
+                else []
+            )
+            for entry in scoped_results:
+                if not isinstance(entry, dict):
                     continue
-                native_id = entry.get("id")
-                if not isinstance(native_id, str):
+                metadata = entry.get("metadata")
+                if not isinstance(metadata, dict):
                     continue
-                if memory_id != native_id and _mem0_replica_key(cast("_MemoryResult", entry)) != memory_id:
-                    continue
-                target_key = (target_storage_path, native_id)
-                if target_key in seen_targets:
-                    continue
-                seen_targets.add(target_key)
-                matches.append(
-                    _Mem0Match(
-                        storage_path=target_storage_path,
-                        memory=memory,
-                        native_id=native_id,
-                        result=cast("_MemoryResult", entry),
-                    ),
-                )
-    return matches
+                if metadata.get(_MEM0_REPLICA_KEY) == memory_id:
+                    return cast("_MemoryResult", entry)
+        return None
+
+    allowed_user_ids = _get_allowed_memory_user_ids(caller_context, config)
+    memory_user_id = result.get("user_id")
+    if memory_user_id not in allowed_user_ids:
+        logger.warning(
+            "Memory access denied",
+            memory_id=memory_id,
+            memory_user_id=memory_user_id,
+            allowed_user_ids=sorted(allowed_user_ids),
+        )
+        return None
+
+    return cast("_MemoryResult", result)
 
 
 def _find_file_replica_memory_ids(
@@ -732,6 +704,55 @@ def _find_file_replica_memory_ids(
     return matches if len(matches) == 1 else []
 
 
+def _mem0_replica_key(result: _MemoryResult) -> str | None:
+    metadata = result.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    replica_key = metadata.get(_MEM0_REPLICA_KEY)
+    return replica_key if isinstance(replica_key, str) and replica_key else None
+
+
+async def _find_mem0_replica_memory_ids(
+    *,
+    memory: object,
+    scope_user_id: str,
+    anchor_result: _MemoryResult,
+) -> list[str]:
+    """Find matching mem0 replica IDs for one scope on one storage root."""
+    get_all = getattr(memory, "get_all", None)
+    if not callable(get_all):
+        return []
+
+    result = await get_all(user_id=scope_user_id, limit=1000)
+    scoped_results = result["results"] if isinstance(result, dict) and isinstance(result.get("results"), list) else []
+    replica_key = _mem0_replica_key(anchor_result)
+
+    matches: list[str] = []
+    for entry in scoped_results:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("user_id") != scope_user_id:
+            continue
+        entry_id = entry.get("id")
+        if not isinstance(entry_id, str):
+            continue
+
+        if replica_key is not None:
+            metadata = entry.get("metadata")
+            if isinstance(metadata, dict) and metadata.get(_MEM0_REPLICA_KEY) == replica_key:
+                matches.append(entry_id)
+            continue
+
+        if entry.get("memory") == anchor_result.get("memory") and entry.get("metadata") == anchor_result.get(
+            "metadata",
+        ):
+            matches.append(entry_id)
+
+    if replica_key is None and len(matches) != 1:
+        return []
+    return matches
+
+
 def _find_file_anchor_memory_result(
     memory_id: str,
     caller_context: str | list[str],
@@ -749,6 +770,19 @@ def _find_file_anchor_memory_result(
     return None
 
 
+async def _find_mem0_anchor_memory_result(
+    memory_id: str,
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+) -> _MemoryResult | None:
+    for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+        memory = await create_memory_instance(target_storage_path, config)
+        if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
+            return result
+    return None
+
+
 def _file_mutation_target_ids(
     scope_user_id: str,
     memory_id: str,
@@ -763,6 +797,24 @@ def _file_mutation_target_ids(
         anchor_result=anchor_result,
         resolution=resolution,
         config=config,
+    )
+
+
+async def _mem0_mutation_target_ids(
+    memory: _ScopedMemoryReader,
+    memory_id: str,
+    scope_user_id: str,
+    caller_context: str | list[str],
+    anchor_result: _MemoryResult,
+    config: Config,
+) -> list[str]:
+    direct_match = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+    if direct_match is not None and isinstance(direct_match.get("id"), str):
+        return [direct_match["id"]]
+    return await _find_mem0_replica_memory_ids(
+        memory=memory,
+        scope_user_id=scope_user_id,
+        anchor_result=anchor_result,
     )
 
 
@@ -795,14 +847,39 @@ def _mutate_file_memory_targets(
     return scope_user_id, updated_targets
 
 
-async def _mutate_mem0_matches(matches: list[_Mem0Match], *, content: str | None) -> int:
+async def _mutate_mem0_memory_targets(
+    *,
+    memory_id: str,
+    content: str | None,
+    operation: Literal["update", "delete"],
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+    anchor_result: _MemoryResult,
+) -> int:
     mutated_targets = 0
-    for match in matches:
-        if content is None:
-            await match.memory.delete(match.native_id)
-        else:
-            await match.memory.update(match.native_id, content)
-        mutated_targets += 1
+    scope_user_id = anchor_result["user_id"]
+    for target_storage_path in _mutation_target_storage_paths(
+        scope_user_id,
+        caller_context,
+        storage_path,
+        config,
+    ):
+        memory = await create_memory_instance(target_storage_path, config)
+        target_ids = await _mem0_mutation_target_ids(
+            memory,
+            memory_id,
+            scope_user_id,
+            caller_context,
+            anchor_result,
+            config,
+        )
+        for target_id in dict.fromkeys(target_ids):
+            if operation == "update":
+                await memory.update(target_id, cast("str", content))
+            else:
+                await memory.delete(target_id)
+            mutated_targets += 1
     return mutated_targets
 
 
@@ -1053,13 +1130,12 @@ async def get_agent_memory(
                     return result
         return None
 
-    matches = await _find_mem0_matches_by_id(
-        memory_id,
-        storage_paths=_effective_storage_paths_for_context(caller_context, storage_path, config),
-        scope_user_ids=sorted(_get_allowed_memory_user_ids(caller_context, config)),
-        config=config,
-    )
-    return matches[0].result if matches else None
+    for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+        memory = await create_memory_instance(target_storage_path, config)
+        result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+        if result is not None:
+            return result
+    return None
 
 
 async def update_agent_memory(
@@ -1101,24 +1177,19 @@ async def update_agent_memory(
             return
         raise _MemoryNotFoundError(memory_id)
 
-    anchor_matches = await _find_mem0_matches_by_id(
-        memory_id,
-        storage_paths=_effective_storage_paths_for_context(caller_context, storage_path, config),
-        scope_user_ids=sorted(_get_allowed_memory_user_ids(caller_context, config)),
-        config=config,
-    )
-    if not anchor_matches:
+    if (
+        anchor_result := await _find_mem0_anchor_memory_result(memory_id, caller_context, storage_path, config)
+    ) is None:
         raise _MemoryNotFoundError(memory_id)
 
-    anchor_scope_user_id = anchor_matches[0].result["user_id"]
-    updated_targets = await _mutate_mem0_matches(
-        await _find_mem0_matches_by_id(
-            memory_id,
-            storage_paths=_mutation_target_storage_paths(anchor_scope_user_id, caller_context, storage_path, config),
-            scope_user_ids=[anchor_scope_user_id],
-            config=config,
-        ),
+    updated_targets = await _mutate_mem0_memory_targets(
+        memory_id=memory_id,
         content=content,
+        operation="update",
+        caller_context=caller_context,
+        storage_path=storage_path,
+        config=config,
+        anchor_result=anchor_result,
     )
     if updated_targets > 0:
         logger.info("Memory updated", memory_id=memory_id, storage_targets=updated_targets)
@@ -1163,24 +1234,19 @@ async def delete_agent_memory(
             return
         raise _MemoryNotFoundError(memory_id)
 
-    anchor_matches = await _find_mem0_matches_by_id(
-        memory_id,
-        storage_paths=_effective_storage_paths_for_context(caller_context, storage_path, config),
-        scope_user_ids=sorted(_get_allowed_memory_user_ids(caller_context, config)),
-        config=config,
-    )
-    if not anchor_matches:
+    if (
+        anchor_result := await _find_mem0_anchor_memory_result(memory_id, caller_context, storage_path, config)
+    ) is None:
         raise _MemoryNotFoundError(memory_id)
 
-    anchor_scope_user_id = anchor_matches[0].result["user_id"]
-    deleted_targets = await _mutate_mem0_matches(
-        await _find_mem0_matches_by_id(
-            memory_id,
-            storage_paths=_mutation_target_storage_paths(anchor_scope_user_id, caller_context, storage_path, config),
-            scope_user_ids=[anchor_scope_user_id],
-            config=config,
-        ),
+    deleted_targets = await _mutate_mem0_memory_targets(
+        memory_id=memory_id,
         content=None,
+        operation="delete",
+        caller_context=caller_context,
+        storage_path=storage_path,
+        config=config,
+        anchor_result=anchor_result,
     )
     if deleted_targets > 0:
         logger.info("Memory deleted", memory_id=memory_id, storage_targets=deleted_targets)
