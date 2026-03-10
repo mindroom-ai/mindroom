@@ -17,7 +17,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
-    get_tool_execution_identity,
+    resolve_execution_identity_for_worker_scope,
     resolve_worker_key,
     worker_root_path,
 )
@@ -201,13 +201,21 @@ def _resolve_worker_credentials_manager(
     if worker_scope is None:
         return None
 
-    execution_identity = execution_identity or get_tool_execution_identity()
+    execution_identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=routing_agent_name,
+        execution_identity=execution_identity,
+    )
     if execution_identity is None:
         return None
 
     worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
     if worker_key is None:
         return None
+
+    expected_worker_root = worker_root_path(credentials_manager.storage_root, worker_key)
+    if credentials_manager.storage_root.expanduser().resolve() == expected_worker_root:
+        return credentials_manager
 
     return credentials_manager.for_worker(worker_key)
 

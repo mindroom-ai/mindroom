@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -145,6 +146,41 @@ def resolve_worker_key(
     return worker_key
 
 
+def resolve_execution_identity_for_worker_scope(
+    worker_scope: WorkerScope | None,
+    *,
+    agent_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> ToolExecutionIdentity | None:
+    """Resolve the execution identity used for worker scope decisions.
+
+    Shared-scope state can be resolved from agent identity plus tenant/account
+    even when no live request context exists yet. Isolating scopes still
+    require an active execution identity.
+    """
+    if execution_identity is not None:
+        return execution_identity
+
+    current_identity = get_tool_execution_identity()
+    if current_identity is not None:
+        return current_identity
+
+    if worker_scope != "shared" or agent_name is None:
+        return None
+
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id=os.getenv("CUSTOMER_ID"),
+        account_id=os.getenv("ACCOUNT_ID"),
+    )
+
+
 def resolve_agent_worker_key(
     *,
     agent_name: str,
@@ -159,7 +195,11 @@ def resolve_agent_worker_key(
     if worker_scope is None:
         return None
 
-    identity = execution_identity or get_tool_execution_identity()
+    identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
     if identity is None:
         return None
 
@@ -178,7 +218,11 @@ def worker_dir_name(worker_key: str) -> str:
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the persistent state root path for a worker key."""
-    return base_storage_path.expanduser().resolve() / "workers" / worker_dir_name(worker_key)
+    resolved_base_path = base_storage_path.expanduser().resolve()
+    workers_dir = (
+        resolved_base_path.parent if resolved_base_path.parent.name == "workers" else resolved_base_path / "workers"
+    )
+    return workers_dir / worker_dir_name(worker_key)
 
 
 def resolve_agent_worker_root(

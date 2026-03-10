@@ -265,6 +265,37 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
 
+    def test_load_scoped_credentials_uses_worker_rooted_manager_without_nesting(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker-rooted managers should resolve scoped credentials from the current worker root."""
+        base_manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = "v1:tenant-123:user:@alice:example.org"
+        worker_manager = base_manager.for_worker(worker_key)
+        worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
+
+        loaded_credentials = load_scoped_credentials(
+            "openweather",
+            worker_scope="user",
+            routing_agent_name="general",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
+
     def test_merge_scoped_credentials_overlays_worker_credentials(
         self,
         temp_credentials_dir: Path,

@@ -19,6 +19,7 @@ from mindroom.config.agent import AgentConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_key,
@@ -418,6 +419,99 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert worker_root / "sessions" / "general.db" in db_files
     assert worker_root / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_uses_shared_worker_storage_without_execution_identity(
+    mock_storage: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-scope agents should resolve worker-owned state even before a live request context exists."""
+    config = Config.from_yaml()
+    config.agents["general"].worker_scope = "shared"
+    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+
+    create_agent("general", config=config, storage_path=tmp_path)
+
+    shared_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+        account_id=None,
+    )
+    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
+    assert worker_key is not None
+
+    worker_root = worker_root_path(tmp_path, worker_key)
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert worker_root / "sessions" / "general.db" in db_files
+    assert worker_root / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execution_identity(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared worker credentials should be available during agent construction outside request context."""
+    config = Config.from_yaml()
+    config.defaults.tools = []
+    config.agents["general"].tools = ["credentialed_toolkit"]
+    config.agents["general"].worker_scope = "shared"
+    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    shared_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+        account_id=None,
+    )
+    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
+    assert worker_key is not None
+    credentials_manager.for_worker(worker_key).save_credentials(
+        "credentialed_toolkit",
+        {"api_key": "worker-key", "_source": "ui"},
+    )
+
+    def _get_tool_by_name(
+        tool_name: str,
+        *,
+        worker_tools_override: list[str] | None = None,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+    ) -> MagicMock:
+        del worker_tools_override
+        credentials = load_scoped_credentials(
+            tool_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=credentials_manager,
+        )
+        if not isinstance(credentials, dict) or "api_key" not in credentials:
+            msg = "API key required"
+            raise ValueError(msg)
+        tool = MagicMock()
+        tool.name = tool_name
+        return tool
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
+
+    agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 
 
 def test_resolve_worker_key_rejects_unknown_scope() -> None:
