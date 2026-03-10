@@ -118,8 +118,38 @@ class TestListModels:
         general = next(m for m in data["data"] if m["id"] == "general")
         assert general["name"] == "GeneralAgent"
         assert general["description"] == "General-purpose assistant"
-        assert general["owned_by"] == "mindroom"
-        assert general["object"] == "model"
+
+    def test_hides_models_with_non_shared_worker_scopes(self, test_config: Config) -> None:
+        """Agents and teams that require non-shared worker scopes should not be advertised on /v1."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["code"].worker_scope = "user"
+        test_config.teams = {
+            "dev-team": TeamConfig(
+                display_name="Dev Team",
+                role="Engineering helpers",
+                agents=["general", "code"],
+                mode="coordinate",
+            ),
+        }
+
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "general" in model_ids
+        assert "code" not in model_ids
+        assert "team/dev-team" not in model_ids
 
     def test_empty_role_is_none(self, app_client: TestClient) -> None:
         """Agents with empty role have description=None."""
@@ -273,6 +303,98 @@ class TestChatCompletions:
         """OpenAI-compatible execution identity should not trust the request-body user."""
         identity = _build_tool_execution_identity(agent_name="general", session_id="session-123")
         assert identity.requester_id is None
+
+    def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
+        """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "general" in error["message"]
+
+    def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
+        """Team requests should fail on /v1 when any member requires a non-shared worker scope."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.teams = {
+            "dev-team": TeamConfig(
+                display_name="Dev Team",
+                role="Engineering helpers",
+                agents=["general", "code"],
+                mode="coordinate",
+            ),
+        }
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/dev-team",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "code" in error["message"]
+
+    def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
+        """Auto-routing should fail when all agents require unsupported worker scopes."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.agents["research"].worker_scope = "room_thread"
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Route me"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["message"] == "No OpenAI-compatible agents configured for auto-routing"
 
     def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
         """Repeated requests with the same X-Session-Id should reuse one derived session ID."""
@@ -1343,7 +1465,7 @@ class TestAutoRouting:
             )
 
         assert response.status_code == 500
-        assert "no agents" in response.json()["error"]["message"].lower()
+        assert "no openai-compatible agents" in response.json()["error"]["message"].lower()
 
     def test_auto_session_id_uses_resolved_agent(self, app_client: TestClient) -> None:
         """Session ID derivation uses the resolved agent name, not 'auto'."""

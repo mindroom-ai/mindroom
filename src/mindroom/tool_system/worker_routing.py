@@ -65,11 +65,6 @@ def _normalize_worker_key_part(value: str) -> str:
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_key_part(identity.requester_id)
-    if identity.channel == "openai_compat" and identity.session_id:
-        # Best-effort fallback for OpenAI-compatible clients that do not supply
-        # a trusted user identifier. This keeps scoped workers usable for the
-        # prototype while preserving stable routing across repeated session IDs.
-        return _normalize_worker_key_part(f"session:{identity.session_id}")
     return None
 
 
@@ -99,10 +94,7 @@ def resolve_worker_key(
     else:
         room_key = identity.room_id
         if room_key is None:
-            if identity.channel == "openai_compat" and identity.session_id:
-                room_key = f"session:{identity.session_id}"
-            else:
-                return None
+            return None
 
         thread_key = identity.resolved_thread_id or identity.thread_id or room_key
         worker_key = (

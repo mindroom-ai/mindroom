@@ -43,7 +43,7 @@ from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, tool_execution_identity
 
 _AUTO_MODEL_NAME = "auto"
 _TEAM_MODEL_PREFIX = "team/"
@@ -63,6 +63,8 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
+_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: set[WorkerScope | None] = {None, "shared"}
+
 
 @dataclass(slots=True)
 class _ToolStreamState:
@@ -79,6 +81,62 @@ def _load_config() -> tuple[Config, Path]:
     loader to avoid circular imports (main.py imports this router).
     """
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+
+
+def _openai_compatible_agent_names(config: Config) -> list[str]:
+    return [
+        agent_name
+        for agent_name in config.agents
+        if agent_name != ROUTER_AGENT_NAME
+        and config.get_agent_worker_scope(agent_name) in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+    ]
+
+
+def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+    return [
+        agent_name
+        for agent_name in agent_names
+        if agent_name in config.agents
+        and config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+    ]
+
+
+def _unsupported_worker_scope_error(agent_names: list[str]) -> JSONResponse:
+    invalid_agents = ", ".join(agent_names)
+    return _error_response(
+        400,
+        (f"OpenAI-compatible chat completions only support worker_scope=shared. Unsupported agents: {invalid_agents}"),
+        param="model",
+        code="unsupported_worker_scope",
+    )
+
+
+def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse | None:
+    if not config.teams or team_name not in config.teams:
+        return _error_response(
+            404,
+            f"Team '{team_name}' not found",
+            param="model",
+            code="model_not_found",
+        )
+    invalid_agents = _openai_incompatible_agents(config.teams[team_name].agents, config)
+    if invalid_agents:
+        return _unsupported_worker_scope_error(invalid_agents)
+    return None
+
+
+def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
+    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
+        return _error_response(
+            404,
+            f"Model '{agent_name}' not found",
+            param="model",
+            code="model_not_found",
+        )
+    invalid_agents = _openai_incompatible_agents([agent_name], config)
+    if invalid_agents:
+        return _unsupported_worker_scope_error(invalid_agents)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -427,28 +485,12 @@ def _validate_chat_request(
     agent_name = req.model
 
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        if not config.teams or team_name not in config.teams:
-            return _error_response(
-                404,
-                f"Team '{team_name}' not found",
-                param="model",
-                code="model_not_found",
-            )
-        return None  # team execution handled in chat_completions
+        return _validate_team_model_request(agent_name.removeprefix(_TEAM_MODEL_PREFIX), config)
 
     if agent_name == _AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
 
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
-        return _error_response(
-            404,
-            f"Model '{agent_name}' not found",
-            param="model",
-            code="model_not_found",
-        )
-
-    return None
+    return _validate_agent_model_request(agent_name, config)
 
 
 def _build_tool_execution_identity(
@@ -506,11 +548,15 @@ async def _resolve_auto_route(
     Returns the resolved agent name, or a JSONResponse error if routing fails
     and no agents are available.
     """
-    available = [n for n in config.agents if n != ROUTER_AGENT_NAME]
+    available = _openai_compatible_agent_names(config)
     routed = await suggest_agent(prompt, available, config, thread_history)
     if routed is None:
         if not available:
-            return _error_response(500, "No agents configured for auto-routing", error_type="server_error")
+            return _error_response(
+                500,
+                "No OpenAI-compatible agents configured for auto-routing",
+                error_type="server_error",
+            )
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)
     else:
@@ -573,6 +619,7 @@ async def list_models(
     except OSError:
         created = 0
 
+    compatible_agents = set(_openai_compatible_agent_names(config))
     models: list[_ModelObject] = [
         _ModelObject(
             id=_AUTO_MODEL_NAME,
@@ -582,7 +629,11 @@ async def list_models(
         ),
     ]
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
+        if (
+            agent_name == ROUTER_AGENT_NAME
+            or agent_name in _RESERVED_MODEL_NAMES
+            or agent_name not in compatible_agents
+        ):
             continue
         models.append(
             _ModelObject(
@@ -595,6 +646,8 @@ async def list_models(
 
     # Add teams
     for team_name, team_config in (config.teams or {}).items():
+        if _openai_incompatible_agents(team_config.agents, config):
+            continue
         models.append(
             _ModelObject(
                 id=f"{_TEAM_MODEL_PREFIX}{team_name}",
