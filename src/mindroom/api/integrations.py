@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom.api.credentials import (
-    consume_pending_oauth_state,
+    consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
@@ -157,7 +157,8 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     from mindroom.api.main import verify_user  # noqa: PLC0415
 
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
-    agent_name = consume_pending_oauth_state(request, "spotify", state)
+    pending = consume_pending_oauth_request(request, "spotify", state)
+    agent_name = pending.agent_name
 
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")

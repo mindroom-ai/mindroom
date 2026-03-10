@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
-_GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
+GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
 class ScopedGoogleOAuthMixin:
@@ -89,7 +89,7 @@ class ScopedGoogleOAuthMixin:
 
     def _build_credentials(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401
         """Create a Google Credentials object from stored token data."""
-        ensure_tool_deps(_GOOGLE_DEPS, self._oauth_tool_name)
+        ensure_tool_deps(GOOGLE_OAUTH_DEPS, self._oauth_tool_name)
         from google.oauth2.credentials import Credentials  # noqa: PLC0415
 
         scopes = token_data.get("scopes")
@@ -147,7 +147,7 @@ class ScopedGoogleOAuthMixin:
         token_data = self._load_token_data()
         if token_data:
             try:
-                ensure_tool_deps(_GOOGLE_DEPS, self._oauth_tool_name)
+                ensure_tool_deps(GOOGLE_OAUTH_DEPS, self._oauth_tool_name)
                 from google.auth.transport.requests import Request  # noqa: PLC0415
 
                 self.creds = self._build_credentials(token_data)

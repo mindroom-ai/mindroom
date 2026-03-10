@@ -22,12 +22,13 @@ from pydantic import BaseModel
 
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
-    consume_pending_oauth_state,
+    consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
 from mindroom.credentials import get_credentials_manager, save_scoped_credentials
+from mindroom.custom_tools._google_oauth import GOOGLE_OAUTH_DEPS
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -63,12 +64,9 @@ _MINDROOM_PORT = os.getenv("MINDROOM_PORT", "8765")
 _REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_MINDROOM_PORT}/api/google/callback")
 
 
-_GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
-
-
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    ensure_tool_deps(_GOOGLE_DEPS, "gmail")
+    ensure_tool_deps(GOOGLE_OAUTH_DEPS, "gmail")
 
     from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
     from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415
@@ -160,14 +158,9 @@ def _get_google_credentials(target: RequestCredentialsTarget) -> Credentials | N
 
 def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> None:
     """Save credentials using the unified credentials manager."""
-    token_data = _build_google_token_data(creds)
-    if target.worker_scope is None:
-        target.target_manager.save_credentials("google", token_data)
-        return
-
     save_scoped_credentials(
         "google",
-        token_data,
+        _build_google_token_data(creds),
         worker_scope=target.worker_scope,
         routing_agent_name=target.agent_name,
         credentials_manager=target.base_manager,
@@ -318,7 +311,8 @@ async def callback(request: Request) -> RedirectResponse:
     from mindroom.api.main import verify_user  # noqa: PLC0415
 
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
-    agent_name = consume_pending_oauth_state(request, "google", state)
+    pending = consume_pending_oauth_request(request, "google", state)
+    agent_name = pending.agent_name
 
     oauth_config = _get_oauth_credentials()
     if not oauth_config:

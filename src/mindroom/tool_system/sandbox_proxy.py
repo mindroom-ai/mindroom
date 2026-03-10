@@ -17,6 +17,7 @@ import httpx
 from mindroom.constants import env_flag
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
+    SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
     resolve_worker_key,
@@ -32,14 +33,7 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
-_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(
-    {
-        "gmail",
-        "google_calendar",
-        "google_sheets",
-        "homeassistant",
-    },
-)
+_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
 
 _SANDBOX_RUNNER_MODE = env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
 

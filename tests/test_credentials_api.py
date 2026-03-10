@@ -328,7 +328,7 @@ def test_pending_oauth_state_binds_agent_name_and_user() -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.state.auth_user = {"user_id": user_id}
-        return {"agent_name": credentials_api.consume_pending_oauth_state(request, service, state)}
+        return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
@@ -352,7 +352,7 @@ def test_pending_oauth_state_rejects_different_user() -> None:
     @app.post("/consume/{service}")
     async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
         request.state.auth_user = {"user_id": user_id}
-        return {"agent_name": credentials_api.consume_pending_oauth_state(request, service, state)}
+        return {"agent_name": credentials_api.consume_pending_oauth_request(request, service, state).agent_name}
 
     client = TestClient(app)
     issue_response = client.post("/issue/google?user_id=alice&agent_name=general")

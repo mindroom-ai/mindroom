@@ -134,11 +134,6 @@ def _consume_pending_oauth_request(request: Request, service: str, state: str) -
         return pending
 
 
-def consume_pending_oauth_state(request: Request, service: str, state: str) -> str | None:
-    """Consume and validate a previously issued dashboard OAuth state token."""
-    return _consume_pending_oauth_request(request, service, state).agent_name
-
-
 def consume_pending_oauth_request(
     request: Request,
     service: str,

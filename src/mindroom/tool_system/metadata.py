@@ -34,24 +34,6 @@ from mindroom.credentials import get_credentials_manager, load_scoped_credential
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 
 
-def _register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
-    """Decorator to register a tool factory function.
-
-    Args:
-        name: The name to register the tool under
-
-    Returns:
-        Decorator function
-
-    """
-
-    def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
-        _TOOL_REGISTRY[name] = func
-        return func
-
-    return decorator
-
-
 def _build_tool_instance(
     tool_name: str,
     *,
@@ -321,16 +303,6 @@ def register_tool_with_metadata(
         return func
 
     return decorator
-
-
-def _get_tool_metadata(name: str) -> ToolMetadata | None:
-    """Get metadata for a tool by name."""
-    return TOOL_METADATA.get(name)
-
-
-def _get_all_tool_metadata() -> dict[str, ToolMetadata]:
-    """Get all tool metadata."""
-    return TOOL_METADATA.copy()
 
 
 def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:

@@ -733,80 +733,6 @@ class TestMemoryFunctions:
         assert "Worker daily note" in prompt
 
     @pytest.mark.asyncio
-    async def test_store_conversation_memory_uses_explicit_execution_identity_for_deferred_mem0_writes(
-        self,
-        storage_path: Path,
-        config: Config,
-    ) -> None:
-        """Explicit execution identity should preserve worker routing for deferred mem0 writes."""
-        config.memory.backend = "mem0"
-        config.agents["general"].worker_scope = "user"
-
-        captured_calls: list[tuple[Path, str | None, dict[str, object]]] = []
-
-        class FakeScopedMemory:
-            def __init__(self, scope_storage_path: Path) -> None:
-                self.scope_storage_path = scope_storage_path
-
-            async def add(
-                self,
-                messages: list[dict],
-                *,
-                user_id: str | None = None,
-                metadata: dict[str, object] | None = None,
-            ) -> None:
-                del messages
-                captured_calls.append((self.scope_storage_path, user_id, metadata or {}))
-
-        async def _create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
-            return FakeScopedMemory(scope_storage_path)
-
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id="session-alice",
-        )
-        worker_key = resolve_worker_key("user", execution_identity)
-        assert worker_key is not None
-
-        with patch(
-            "mindroom.memory.functions.create_memory_instance",
-            side_effect=_create_fake_memory_instance,
-        ):
-            await store_conversation_memory(
-                "Alice private memory",
-                "general",
-                storage_path,
-                "session-alice",
-                config,
-                room_id="!room:example.org",
-                execution_identity=execution_identity,
-            )
-
-        expected_storage_path = worker_root_path(storage_path, worker_key)
-        assert captured_calls == [
-            (
-                expected_storage_path,
-                "agent_general",
-                {"type": "conversation", "session_id": "session-alice", "agent": "general"},
-            ),
-            (
-                expected_storage_path,
-                "room_room_example.org",
-                {
-                    "type": "conversation",
-                    "session_id": "session-alice",
-                    "room_id": "!room:example.org",
-                    "contributed_by": "general",
-                },
-            ),
-        ]
-
-    @pytest.mark.asyncio
     async def test_file_backend_worker_scope_ignores_global_memory_file_path(
         self,
         storage_path: Path,
@@ -1232,6 +1158,60 @@ class TestMemoryFunctions:
         allowed = await get_agent_memory(helper_memory_id, ["helper", "test_agent"], storage_path, config)
         assert allowed is not None
         assert allowed["memory"] == "Helper private memory"
+
+    @pytest.mark.asyncio
+    async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Team-context file memory should resolve through the worker-scoped storage root."""
+        config.memory.backend = "file"
+        config.agents["general"].worker_scope = "user"
+        config.agents["calculator"].worker_scope = "user"
+        config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="!room:example.org:$thread",
+        )
+
+        with tool_execution_identity(execution_identity):
+            await store_conversation_memory(
+                "Team shared note",
+                ["general", "calculator"],
+                storage_path,
+                "session-alice",
+                config,
+            )
+
+            results = await search_agent_memories("shared note", "general", storage_path, config, limit=10)
+            assert len(results) == 1
+            memory_id = results[0]["id"]
+
+            loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+            assert loaded is not None
+            assert loaded["memory"] == "Team shared note"
+
+            await update_agent_memory(
+                memory_id,
+                "Updated team shared note",
+                ["general", "calculator"],
+                storage_path,
+                config,
+            )
+            updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+            assert updated is not None
+            assert updated["memory"] == "Updated team shared note"
+
+            await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+            deleted = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+            assert deleted is None
 
     @pytest.mark.asyncio
     async def test_team_context_resolves_file_backend_from_agent_overrides(

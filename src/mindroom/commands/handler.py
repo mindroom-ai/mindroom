@@ -21,7 +21,7 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
+from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -369,7 +369,7 @@ async def _run_skill_command_tool(
             room_id=room_id,
             thread_id=thread_id,
             resolved_thread_id=thread_id,
-            session_id=thread_id or room_id,
+            session_id=create_session_id(room_id, thread_id),
             tenant_id=os.getenv("CUSTOMER_ID"),
             account_id=os.getenv("ACCOUNT_ID"),
         )

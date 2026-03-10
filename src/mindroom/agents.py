@@ -269,15 +269,14 @@ def create_session_storage(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
-    state_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-        config=config,
+    return _create_agent_state_db(
+        agent_name,
+        storage_path,
+        config,
+        subdir="sessions",
+        session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
     )
-    sessions_dir = state_storage_path / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(sessions_dir / f"{agent_name}.db"))
 
 
 def _create_learning_storage(
@@ -288,15 +287,35 @@ def _create_learning_storage(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent learning storage for an agent."""
+    return _create_agent_state_db(
+        agent_name,
+        storage_path,
+        config,
+        subdir="learning",
+        session_table=f"{agent_name}_learning_sessions",
+        execution_identity=execution_identity,
+    )
+
+
+def _create_agent_state_db(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    subdir: str,
+    session_table: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> SqliteDb:
+    """Create a scope-aware SQLite database for one agent state category."""
     state_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
         config=config,
         execution_identity=execution_identity,
     )
-    learning_dir = state_storage_path / "learning"
-    learning_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
+    db_dir = state_storage_path / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
 
 
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:

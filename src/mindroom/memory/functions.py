@@ -12,17 +12,12 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.memory.config import create_memory_instance
-from mindroom.tool_system.worker_routing import (
-    get_tool_execution_identity,
-    resolve_agent_state_storage_path,
-    tool_execution_identity,
-)
+from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_agent_state_storage_path
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 class _MemoryResult(TypedDict, total=False):
@@ -117,14 +112,14 @@ def _effective_storage_path_for_agent(agent_name: str, storage_path: Path, confi
     )
 
 
-def _effective_storage_path_for_context(
+def _effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
-) -> Path:
+) -> list[Path]:
     if isinstance(caller_context, str):
-        return _effective_storage_path_for_agent(caller_context, storage_path, config)
-    return storage_path
+        return [_effective_storage_path_for_agent(caller_context, storage_path, config)]
+    return _effective_storage_paths_for_team(caller_context, storage_path, config)
 
 
 def _effective_storage_paths_for_team(
@@ -168,12 +163,9 @@ def _resolve_file_memory_resolution(
     config: Config,
     *,
     agent_name: str | None = None,
-    caller_context: str | list[str] | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> _FileMemoryResolution:
-    if caller_context is not None:
-        resolved_storage_path = _effective_storage_path_for_context(caller_context, storage_path, config)
-    elif agent_name is not None:
+    if agent_name is not None:
         resolved_storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
     else:
         resolved_storage_path = storage_path
@@ -863,21 +855,29 @@ async def get_agent_memory(
         The memory dict, or None if not found
 
     """
-    resolution = _resolve_file_memory_resolution(storage_path, config, caller_context=caller_context)
     if _caller_uses_file_memory_backend(config, caller_context):
-        for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            result = _get_scope_memory_by_id(
-                scope_user_id,
-                memory_id,
-                resolution,
-                config,
+        for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+            resolution = _file_memory_resolution_from_paths(
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
             )
-            if result is not None:
-                return result
+            for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
+                result = _get_scope_memory_by_id(
+                    scope_user_id,
+                    memory_id,
+                    resolution,
+                    config,
+                )
+                if result is not None:
+                    return result
         return None
 
-    memory = await create_memory_instance(resolution.storage_path, config)
-    return await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+    for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+        memory = await create_memory_instance(target_storage_path, config)
+        result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+        if result is not None:
+            return result
+    return None
 
 
 async def update_agent_memory(
@@ -897,26 +897,33 @@ async def update_agent_memory(
         config: Application configuration
 
     """
-    resolution = _resolve_file_memory_resolution(storage_path, config, caller_context=caller_context)
     if _caller_uses_file_memory_backend(config, caller_context):
-        for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            if _replace_scope_memory_entry(
-                scope_user_id,
-                memory_id,
-                content,
-                resolution,
-                config,
-            ):
-                logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
-                return
+        for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+            resolution = _file_memory_resolution_from_paths(
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
+            )
+            for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
+                if _replace_scope_memory_entry(
+                    scope_user_id,
+                    memory_id,
+                    content,
+                    resolution,
+                    config,
+                ):
+                    logger.info("File memory updated", memory_id=memory_id, scope=scope_user_id)
+                    return
         raise _MemoryNotFoundError(memory_id)
 
-    memory = await create_memory_instance(resolution.storage_path, config)
-    scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
-    if scoped_memory is None:
-        raise _MemoryNotFoundError(memory_id)
-    await memory.update(memory_id, content)
-    logger.info("Memory updated", memory_id=memory_id)
+    for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+        memory = await create_memory_instance(target_storage_path, config)
+        scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+        if scoped_memory is None:
+            continue
+        await memory.update(memory_id, content)
+        logger.info("Memory updated", memory_id=memory_id)
+        return
+    raise _MemoryNotFoundError(memory_id)
 
 
 async def delete_agent_memory(
@@ -934,26 +941,33 @@ async def delete_agent_memory(
         config: Application configuration
 
     """
-    resolution = _resolve_file_memory_resolution(storage_path, config, caller_context=caller_context)
     if _caller_uses_file_memory_backend(config, caller_context):
-        for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
-            if _replace_scope_memory_entry(
-                scope_user_id,
-                memory_id,
-                None,
-                resolution,
-                config,
-            ):
-                logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
-                return
+        for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+            resolution = _file_memory_resolution_from_paths(
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
+            )
+            for scope_user_id in sorted(_get_allowed_memory_user_ids(caller_context, config)):
+                if _replace_scope_memory_entry(
+                    scope_user_id,
+                    memory_id,
+                    None,
+                    resolution,
+                    config,
+                ):
+                    logger.info("File memory deleted", memory_id=memory_id, scope=scope_user_id)
+                    return
         raise _MemoryNotFoundError(memory_id)
 
-    memory = await create_memory_instance(resolution.storage_path, config)
-    scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
-    if scoped_memory is None:
-        raise _MemoryNotFoundError(memory_id)
-    await memory.delete(memory_id)
-    logger.info("Memory deleted", memory_id=memory_id)
+    for target_storage_path in _effective_storage_paths_for_context(caller_context, storage_path, config):
+        memory = await create_memory_instance(target_storage_path, config)
+        scoped_memory = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+        if scoped_memory is None:
+            continue
+        await memory.delete(memory_id)
+        logger.info("Memory deleted", memory_id=memory_id)
+        return
+    raise _MemoryNotFoundError(memory_id)
 
 
 async def add_room_memory(
@@ -1224,11 +1238,7 @@ def _store_file_conversation_memory(
         return
 
     original_storage_path = storage_path
-    target_storage_paths = (
-        [_effective_storage_path_for_agent(agent_name, storage_path, config)]
-        if isinstance(agent_name, str)
-        else _effective_storage_paths_for_team(agent_name, storage_path, config)
-    )
+    target_storage_paths = _conversation_memory_target_paths(agent_name, storage_path, config)
 
     scope_user_id = _build_team_user_id(agent_name) if isinstance(agent_name, list) else f"agent_{agent_name}"
 
@@ -1271,9 +1281,7 @@ def _conversation_memory_target_paths(
     storage_path: Path,
     config: Config,
 ) -> list[Path]:
-    if isinstance(agent_name, str):
-        return [_effective_storage_path_for_agent(agent_name, storage_path, config)]
-    return _effective_storage_paths_for_team(agent_name, storage_path, config)
+    return _effective_storage_paths_for_context(agent_name, storage_path, config)
 
 
 async def _add_mem0_scope_messages(
@@ -1377,7 +1385,6 @@ async def store_conversation_memory(
     room_id: str | None = None,
     thread_history: list[dict] | None = None,
     user_id: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Store conversation in memory for future recall.
 
@@ -1397,25 +1404,21 @@ async def store_conversation_memory(
         room_id: Optional room ID for room memory
         thread_history: Optional thread history for context
         user_id: Optional user ID to identify user messages in thread
-        execution_identity: Optional explicit worker-routing identity for
-            deferred/background writes that execute outside the original
-            ContextVar scope
 
     """
     if not prompt:
         return
 
-    with tool_execution_identity(execution_identity or get_tool_execution_identity()):
-        messages = _build_memory_messages(prompt, thread_history, user_id)
+    messages = _build_memory_messages(prompt, thread_history, user_id)
 
-        use_file_backend = (
-            _use_file_memory_backend(config, agent_name=agent_name)
-            if isinstance(agent_name, str)
-            else _team_uses_file_memory_backend(config, agent_name)
-        )
+    use_file_backend = (
+        _use_file_memory_backend(config, agent_name=agent_name)
+        if isinstance(agent_name, str)
+        else _team_uses_file_memory_backend(config, agent_name)
+    )
 
-        if use_file_backend:
-            _store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
-            return
+    if use_file_backend:
+        _store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
+        return
 
-        await _store_mem0_conversation_memory(messages, agent_name, storage_path, session_id, config, room_id)
+    await _store_mem0_conversation_memory(messages, agent_name, storage_path, session_id, config, room_id)

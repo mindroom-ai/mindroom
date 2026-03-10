@@ -319,7 +319,7 @@ describe('AgentEditor', () => {
     render(<AgentEditor />);
 
     // Find the calculator checkbox (should be checked) — use exact name to
-    // distinguish from the sandbox-tools checkboxes which have "sandbox ..." labels
+    // distinguish from the worker-tools checkboxes which have "worker ..." labels
     const calculatorCheckbox = screen.getByRole('checkbox', { name: 'Calculator' });
     expect(calculatorCheckbox).toBeChecked();
 

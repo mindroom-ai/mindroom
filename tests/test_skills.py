@@ -13,6 +13,7 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
     TOOL_METADATA,
@@ -426,7 +427,8 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
             identity = get_tool_execution_identity()
             assert identity is not None
             return (
-                f"{identity.requester_id}:{identity.room_id}:{identity.thread_id}:{commandName}:{skillName}:{command}"
+                f"{identity.requester_id}:{identity.room_id}:{identity.thread_id}:{identity.session_id}:"
+                f"{commandName}:{skillName}:{command}"
             )
 
     original_registry = _TOOL_REGISTRY.copy()
@@ -463,7 +465,10 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
 
-    assert result == "@alice:example.org:!room:example.org:$thread:skill:dispatch:hello"
+    assert result == (
+        f"@alice:example.org:!room:example.org:$thread:{create_session_id('!room:example.org', '$thread')}:"
+        "skill:dispatch:hello"
+    )
 
 
 @pytest.mark.asyncio
