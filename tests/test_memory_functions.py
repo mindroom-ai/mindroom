@@ -1430,15 +1430,29 @@ class TestMemoryFunctions:
             )
             assert len(general_results) == 1
             assert len(calculator_results) == 1
-            assert general_results[0]["id"] != calculator_results[0]["id"]
-            memory_id = general_results[0]["id"]
+            general_memory_id = general_results[0]["id"]
+            calculator_memory_id = calculator_results[0]["id"]
+            assert general_memory_id != calculator_memory_id
 
-            loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
-            assert loaded is not None
-            assert loaded["memory"] == "Team shared note"
+            general_loaded = await get_agent_memory(
+                general_memory_id,
+                ["general", "calculator"],
+                storage_path,
+                config,
+            )
+            calculator_loaded = await get_agent_memory(
+                calculator_memory_id,
+                ["general", "calculator"],
+                storage_path,
+                config,
+            )
+            assert general_loaded is not None
+            assert calculator_loaded is not None
+            assert general_loaded["memory"] == "Team shared note"
+            assert calculator_loaded["memory"] == "Team shared note"
 
             await update_agent_memory(
-                memory_id,
+                calculator_memory_id,
                 "Updated team shared note",
                 ["general", "calculator"],
                 storage_path,
@@ -1456,7 +1470,7 @@ class TestMemoryFunctions:
             assert any(result.get("memory") == "Updated team shared note" for result in general_updated)
             assert any(result.get("memory") == "Updated team shared note" for result in calculator_updated)
 
-            await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+            await delete_agent_memory(general_memory_id, ["general", "calculator"], storage_path, config)
 
             general_deleted = await search_agent_memories("team", "general", storage_path, config, limit=10)
             calculator_deleted = await search_agent_memories("team", "calculator", storage_path, config, limit=10)
