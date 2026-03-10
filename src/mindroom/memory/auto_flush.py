@@ -696,5 +696,6 @@ class MemoryAutoFlushWorker:
             agent_name=agent_name,
             storage_path=effective_storage_path,
             config=config,
+            preserve_resolved_storage_path=True,
         )
         return True

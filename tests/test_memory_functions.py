@@ -820,6 +820,105 @@ class TestMemoryFunctions:
         assert not shared_team_memory_file.exists()
 
     @pytest.mark.asyncio
+    async def test_mem0_team_conversation_memory_uses_worker_storage(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Worker-scoped team mem0 memory should be written into the same worker roots later reads use."""
+        config.memory.backend = "mem0"
+        config.agents["general"].worker_scope = "user"
+        config.agents["calculator"].worker_scope = "user"
+        config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-alice",
+        )
+        bob_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="team",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-bob",
+        )
+
+        stored_memories: dict[tuple[Path, str], list[dict[str, object]]] = {}
+
+        class FakeScopedMemory:
+            def __init__(self, scope_storage_path: Path) -> None:
+                self.scope_storage_path = scope_storage_path
+
+            async def add(self, messages: list[dict], user_id: str, metadata: dict) -> None:
+                entry = {
+                    "id": f"{user_id}-{len(stored_memories)}",
+                    "memory": " ".join(
+                        str(message["content"]).strip() for message in messages if message.get("content")
+                    ),
+                    "user_id": user_id,
+                    "metadata": metadata,
+                }
+                stored_memories.setdefault((self.scope_storage_path, user_id), []).append(entry)
+
+            async def search(self, query: str, user_id: str, limit: int = 3) -> dict[str, list[dict[str, object]]]:
+                matches = [
+                    dict(entry)
+                    for entry in stored_memories.get((self.scope_storage_path, user_id), [])
+                    if query.lower() in str(entry["memory"]).lower()
+                ]
+                return {"results": matches[:limit]}
+
+        async def _create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
+            return FakeScopedMemory(scope_storage_path)
+
+        with patch(
+            "mindroom.memory.functions.create_memory_instance",
+            side_effect=_create_fake_memory_instance,
+        ):
+            with tool_execution_identity(alice_identity):
+                await store_conversation_memory(
+                    "Alice team private memory",
+                    ["general", "calculator"],
+                    storage_path,
+                    "session-alice",
+                    config,
+                    room_id="!room:example.org",
+                )
+                alice_results = await search_agent_memories(
+                    "Alice team private",
+                    "general",
+                    storage_path,
+                    config,
+                    limit=5,
+                )
+
+            with tool_execution_identity(bob_identity):
+                bob_results = await search_agent_memories(
+                    "Alice team private",
+                    "general",
+                    storage_path,
+                    config,
+                    limit=5,
+                )
+
+        assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
+        assert not any(result.get("memory") == "Alice team private memory" for result in bob_results)
+
+        alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+        assert alice_worker_key is not None
+        alice_worker_root = worker_root_path(storage_path, alice_worker_key)
+        team_id = "team_calculator+general"
+        assert (alice_worker_root, team_id) in stored_memories
+        assert (storage_path, team_id) not in stored_memories
+
+    @pytest.mark.asyncio
     async def test_agent_memory_backend_override_to_file_uses_file_storage(
         self,
         mock_memory: AsyncMock,

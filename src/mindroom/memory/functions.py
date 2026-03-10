@@ -42,6 +42,19 @@ class _ScopedMemoryReader(Protocol):
         """Return the memory payload for a given memory ID."""
 
 
+class _ScopedMemoryWriter(Protocol):
+    """Minimal protocol for writing scoped memory entries."""
+
+    async def add(
+        self,
+        messages: list[dict],
+        *,
+        user_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> object:
+        """Persist messages for a scoped memory user ID."""
+
+
 class _MemoryNotFoundError(ValueError):
     """Raised when a memory ID does not exist in the caller's allowed scope."""
 
@@ -158,12 +171,14 @@ def _scope_dir(
     *,
     create: bool,
     use_configured_path: bool,
+    allow_agent_memory_file_path_override: bool = True,
 ) -> Path:
     agent_name = _agent_name_from_scope_id(scope_user_id)
     if agent_name is not None:
         agent_config = config.agents.get(agent_name)
         if (
-            agent_config is not None
+            allow_agent_memory_file_path_override
+            and agent_config is not None
             and agent_config.memory_file_path is not None
             and not _agent_uses_worker_scoped_memory(agent_name, config)
         ):
@@ -286,6 +301,7 @@ def _append_scope_memory_entry(
     *,
     target_relative_path: str | None = None,
     use_configured_path: bool,
+    allow_agent_memory_file_path_override: bool = True,
 ) -> _MemoryResult:
     scope_path = _scope_dir(
         scope_user_id,
@@ -293,6 +309,7 @@ def _append_scope_memory_entry(
         config,
         create=True,
         use_configured_path=use_configured_path,
+        allow_agent_memory_file_path_override=allow_agent_memory_file_path_override,
     )
     if target_relative_path is None:
         target_path = scope_path / _FILE_MEMORY_ENTRYPOINT
@@ -638,11 +655,18 @@ def append_agent_daily_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    *,
+    preserve_resolved_storage_path: bool = False,
 ) -> _MemoryResult:
     """Append one memory entry to today's per-agent daily memory file."""
     original_storage_path = storage_path
-    storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
-    use_configured_path = _should_use_configured_file_memory_path(original_storage_path, storage_path)
+    if not preserve_resolved_storage_path:
+        storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+    use_configured_path = (
+        False
+        if preserve_resolved_storage_path
+        else _should_use_configured_file_memory_path(original_storage_path, storage_path)
+    )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{_FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     result = _append_scope_memory_entry(
@@ -652,6 +676,7 @@ def append_agent_daily_memory(
         config,
         target_relative_path=daily_relative_path,
         use_configured_path=use_configured_path,
+        allow_agent_memory_file_path_override=not preserve_resolved_storage_path,
     )
     logger.info("File daily memory added", agent=agent_name, date=current_date)
     return result
@@ -1225,6 +1250,31 @@ def _store_file_conversation_memory(
         logger.debug("File room memory added", room_id=room_id, storage_targets=len(target_storage_paths))
 
 
+def _conversation_memory_target_paths(
+    agent_name: str | list[str],
+    storage_path: Path,
+    config: Config,
+) -> list[Path]:
+    if isinstance(agent_name, str):
+        return [_effective_storage_path_for_agent(agent_name, storage_path, config)]
+    return _effective_storage_paths_for_team(agent_name, storage_path, config)
+
+
+async def _add_mem0_scope_messages(
+    *,
+    memory: _ScopedMemoryWriter,
+    messages: list[dict],
+    user_id: str,
+    metadata: dict[str, object],
+    failure_log: str,
+    failure_context: dict[str, object],
+) -> None:
+    try:
+        await memory.add(messages, user_id=user_id, metadata=metadata)
+    except Exception as e:
+        logger.exception(failure_log, error=str(e), **failure_context)
+
+
 async def _store_mem0_conversation_memory(
     messages: list[dict],
     agent_name: str | list[str],
@@ -1233,35 +1283,31 @@ async def _store_mem0_conversation_memory(
     config: Config,
     room_id: str | None,
 ) -> None:
-    if isinstance(agent_name, str):
-        storage_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
-    memory = await create_memory_instance(storage_path, config)
+    target_storage_paths = _conversation_memory_target_paths(agent_name, storage_path, config)
 
     if isinstance(agent_name, list):
         team_id = _build_team_user_id(agent_name)
+        scope_user_id = team_id
         metadata = {
             "type": "conversation",
             "session_id": session_id,
             "is_team": True,
             "team_members": agent_name,
         }
-        try:
-            await memory.add(messages, user_id=team_id, metadata=metadata)
-            logger.info("Team memory added", team_id=team_id, members=agent_name)
-        except Exception as e:
-            logger.exception("Failed to add team memory", team_id=team_id, error=str(e))
+        failure_log = "Failed to add team memory"
+        failure_context: dict[str, object] = {"team_id": team_id}
     else:
+        scope_user_id = f"agent_{agent_name}"
         metadata = {
             "type": "conversation",
             "session_id": session_id,
             "agent": agent_name,
         }
-        try:
-            await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
-            logger.info("Memory added", agent=agent_name)
-        except Exception as e:
-            logger.exception("Failed to add memory", agent=agent_name, error=str(e))
+        failure_log = "Failed to add memory"
+        failure_context = {"agent": agent_name}
 
+    room_scope_user_id: str | None = None
+    room_metadata: dict[str, object] | None = None
     if room_id:
         contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
         room_metadata = {
@@ -1270,12 +1316,40 @@ async def _store_mem0_conversation_memory(
             "room_id": room_id,
             "contributed_by": contributed_by,
         }
-        safe_room_id = room_id.replace(":", "_").replace("!", "")
-        try:
-            await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=room_metadata)
-            logger.debug("Room memory added", room_id=room_id)
-        except Exception as e:
-            logger.exception("Failed to add room memory", room_id=room_id, error=str(e))
+        room_scope_user_id = f"room_{room_id.replace(':', '_').replace('!', '')}"
+
+    for target_storage_path in target_storage_paths:
+        memory = await create_memory_instance(target_storage_path, config)
+        await _add_mem0_scope_messages(
+            memory=memory,
+            messages=messages,
+            user_id=scope_user_id,
+            metadata=metadata,
+            failure_log=failure_log,
+            failure_context=failure_context,
+        )
+        if room_scope_user_id is not None and room_metadata is not None:
+            await _add_mem0_scope_messages(
+                memory=memory,
+                messages=messages,
+                user_id=room_scope_user_id,
+                metadata=room_metadata,
+                failure_log="Failed to add room memory",
+                failure_context={"room_id": room_id},
+            )
+
+    if isinstance(agent_name, list):
+        logger.info(
+            "Team memory added",
+            team_id=scope_user_id,
+            members=agent_name,
+            storage_targets=len(target_storage_paths),
+        )
+    else:
+        logger.info("Memory added", agent=agent_name)
+
+    if room_id:
+        logger.debug("Room memory added", room_id=room_id, storage_targets=len(target_storage_paths))
 
 
 async def store_conversation_memory(

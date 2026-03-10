@@ -14,7 +14,12 @@ from mindroom.memory.auto_flush import (
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -175,6 +180,63 @@ async def test_worker_respects_batch_limits(
     await worker._run_cycle(config)
 
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-scoped flushes should keep daily file memory inside the worker root."""
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.memory.file.path = str(tmp_path / "shared-memory")
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+
+    with tool_execution_identity(alice_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="session-alice",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this worker-isolated detail")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._load_agent_session",
+        lambda _storage, _config, _agent, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+
+    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    await worker._run_cycle(config)
+
+    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    assert worker_key is not None
+    worker_daily_files = list((worker_root_path(tmp_path, worker_key) / "memory_files").rglob("*.md"))
+    assert len(worker_daily_files) == 1
+    assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
+
+    assert not list((tmp_path / "shared-memory").rglob("*.md"))
+    assert not list((tmp_path / "custom-agent-memory").rglob("*.md"))
 
 
 async def _fake_extract_memory_summary(**_: object) -> str:
