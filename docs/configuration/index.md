@@ -74,7 +74,8 @@ agents:
     instructions: []               # Optional: Custom instructions
     rooms: [lobby]                 # Optional: Rooms to auto-join
     markdown: true                 # Optional: Override default (inherits from defaults section)
-    sandbox_tools: [shell, file]   # Optional: Override default (inherits from defaults section)
+    worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
+    worker_scope: user_agent       # Optional: Scope proxied tool state per requester+agent
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
@@ -153,7 +154,8 @@ defaults:
   enable_session_summaries: false  # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
-  sandbox_tools: null              # Default: null (tool names to sandbox; null = use env var config, [] = disable)
+  worker_tools: null               # Default: null (tool names to route through workers; null = use env var config, [] = disable)
+  worker_scope: null               # Default: null (shared runtime state unless an agent opts into worker isolation)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.

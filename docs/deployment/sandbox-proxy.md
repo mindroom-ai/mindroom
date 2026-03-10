@@ -187,35 +187,75 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 
 ## Per-agent configuration
 
-By default, all agents share the same sandbox behavior from environment variables. You can override which tools are sandboxed per agent (or set a default for all agents) in `config.yaml`:
+By default, all agents share the same sandbox behavior from environment variables. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
 
 ```yaml
 defaults:
-  sandbox_tools: [shell, file]       # sandbox shell+file for all agents by default
+  worker_tools: [shell, file]        # route shell+file through the sandbox proxy for all agents by default
 
 agents:
   code:
     tools: [file, shell, calculator]
-    # inherits sandbox_tools from defaults → shell and file sandboxed
+    # inherits worker_tools from defaults → shell and file proxied
 
   research:
     tools: [web_search, calculator]
-    sandbox_tools: []                # explicitly no sandboxing
+    worker_tools: []                 # explicitly no proxying
 
   untrusted:
     tools: [shell, file, python]
-    sandbox_tools: [shell, file, python]  # sandbox everything
+    worker_tools: [shell, file, python]   # proxy everything
 ```
 
-The `sandbox_tools` field has three states:
+The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
 | `null` (omitted) | Defer to env var globals (`MINDROOM_SANDBOX_EXECUTION_MODE` / `MINDROOM_SANDBOX_PROXY_TOOLS`) |
-| `[]` (empty list) | Explicitly disable sandboxing for this agent, even if env vars enable it |
-| `["shell", "file"]` | Sandbox exactly these tools, overriding env vars |
+| `[]` (empty list) | Explicitly disable sandbox proxying for this agent, even if env vars enable it |
+| `["shell", "file"]` | Proxy exactly these tools, overriding env vars |
 
-Agent-level `sandbox_tools` overrides `defaults.sandbox_tools`, which in turn overrides env vars. A sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for any sandboxing to take effect.
+Agent-level `worker_tools` overrides `defaults.worker_tools`, which in turn overrides env vars. A sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for any proxying to take effect.
+
+## Worker Scope
+
+`worker_tools` chooses which tools execute through the sandbox proxy.
+`worker_scope` chooses which proxied calls share the same worker-owned storage root.
+
+You can set `worker_scope` per agent or in `defaults`:
+
+```yaml
+defaults:
+  worker_tools: [shell, file]
+  worker_scope: user_agent
+
+agents:
+  code:
+    tools: [shell, file]
+    # inherits worker_scope=user_agent
+
+  reviewer:
+    tools: [shell, file]
+    worker_scope: shared
+
+  bridge_helper:
+    tools: [shell]
+    worker_scope: room_thread
+```
+
+The supported values are:
+
+| Value | Behavior |
+|-------|----------|
+| `shared` | One shared worker state per agent |
+| `user` | One worker state per requester |
+| `user_agent` | One worker state per requester and agent |
+| `room_thread` | One worker state per thread, or per room when no thread exists |
+
+If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected.
+`worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
+The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`.
+Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
 
 ## Without sandbox proxy
 

@@ -121,7 +121,7 @@ That means the dashboard must not read or write credentials for `user`, `user_ag
 
 Tool execution policy should become an explicit concept rather than a side effect of the old sandbox settings.
 The minimum policy categories are local execution in the primary runtime and worker-routed execution in a scoped worker.
-The initial compatibility path can continue honoring `sandbox_tools`, but the source of truth should move to `worker_tools` and `worker_scope`.
+The source of truth should be `worker_tools` and `worker_scope`.
 
 The final policy model should support these per-tool decisions.
 
@@ -327,7 +327,7 @@ The migration rules should be:
 - `shared` scope may migrate existing agent-scoped sessions, learning, and file memory into the shared worker root on first activation.
 - `user`, `user_agent`, and `room_thread` should not automatically clone shared historical state into every new worker.
 - Isolated scopes should start with empty mutable state unless an explicit import is requested.
-- Compatibility fallback from legacy `sandbox_tools` to `worker_tools` should remain during the transition window.
+- No compatibility fallback should remain between legacy sandbox config and `worker_tools`.
 
 ## Observability
 

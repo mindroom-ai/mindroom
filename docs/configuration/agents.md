@@ -93,8 +93,11 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Tools to execute through the sandbox proxy (optional, inherits from defaults)
-    sandbox_tools: [shell, file]
+    # Tools to route through scoped workers via the sandbox proxy (optional, inherits from defaults)
+    worker_tools: [shell, file]
+
+    # How proxied tool state is shared (optional, inherits from defaults)
+    worker_scope: user_agent
 
     # Allow this agent to read and modify its own config at runtime
     allow_self_config: false
@@ -140,7 +143,8 @@ agents:
 | `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `sandbox_tools` | list | `null` | Tool names to execute through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.sandbox_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable sandboxing for this agent |
+| `worker_tools` | list | `null` | Tool names to route through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.worker_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable proxy routing for this agent |
+| `worker_scope` | string | `null` | Worker-state sharing mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, `user_agent`, and `room_thread` |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
@@ -153,6 +157,25 @@ Per-agent values override them.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+
+## Worker Routing
+
+`worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process.
+`worker_scope` decides which proxied calls share the same worker-owned state directory.
+
+The supported `worker_scope` values are:
+
+- `shared`: one shared worker state per agent.
+- `user`: one worker state per requester.
+- `user_agent`: one worker state per requester and agent.
+- `room_thread`: one worker state per room thread, or per room when no thread ID exists.
+
+Leave `worker_scope` unset to keep proxied calls unscoped.
+They still run in the sandbox runner, but they do not get a worker-specific storage root.
+`worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
+
+The dashboard credential UI can only manage credentials for unscoped agents and agents with `worker_scope=shared`.
+Agents using `user`, `user_agent`, or `room_thread` treat credentials as runtime-owned worker state instead of dashboard-managed state.
 
 ## Thread Mode Resolution
 
@@ -248,7 +271,8 @@ defaults:
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
-  sandbox_tools: null                    # Tool names to sandbox (null = use env var config, [] = disable)
+  worker_tools: null                     # Tool names to route through workers (null = use env var config, [] = disable)
+  worker_scope: null                     # Worker state scope for proxied tools (shared, user, user_agent, room_thread)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
 
