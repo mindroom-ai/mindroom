@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -16,6 +18,7 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from pydantic import ValidationError
 
+import mindroom
 from mindroom.agents import (
     _get_agent_session,
     create_agent,
@@ -39,6 +42,15 @@ from mindroom.response_tracker import ResponseTracker
 # ---------------------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------------------
+
+
+def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MindRoom startup hard-disables Agno telemetry regardless of env state."""
+    monkeypatch.setenv("AGNO_TELEMETRY", "true")
+
+    importlib.reload(mindroom)
+
+    assert os.environ["AGNO_TELEMETRY"] == "false"
 
 
 class TestHistoryConfig:
