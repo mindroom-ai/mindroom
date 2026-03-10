@@ -50,7 +50,7 @@ _VOICE_HELP_INTENT_PATTERN = re.compile(
 
 
 @dataclass(frozen=True)
-class PreparedVoiceMessage:
+class _PreparedVoiceMessage:
     """Normalized text + attachment metadata derived from one audio event."""
 
     text: str
@@ -131,7 +131,7 @@ async def _compute_normalized_voice_message(
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
     """Download, register, and transcribe one audio event."""
-    audio = await download_audio(client, event)
+    audio = await _download_audio(client, event)
     if audio is None or audio.content is None:
         logger.error("Failed to download audio file")
         return None
@@ -147,7 +147,7 @@ async def _compute_normalized_voice_message(
         filename=event.body if isinstance(event.body, str) else None,
     )
 
-    transcribed_message = await handle_voice_message(client, room, event, config, audio=audio)
+    transcribed_message = await _handle_voice_message(client, room, event, config, audio=audio)
     if not isinstance(transcribed_message, str) or not transcribed_message.strip():
         transcribed_message = None
 
@@ -199,7 +199,7 @@ async def prepare_voice_message(
     *,
     sender_domain: str,
     thread_id: str | None,
-) -> PreparedVoiceMessage | None:
+) -> _PreparedVoiceMessage | None:
     """Download/register audio and normalize it into a synthetic text event."""
     normalized = await _normalize_voice_message(
         client,
@@ -243,13 +243,13 @@ async def prepare_voice_message(
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     source["content"] = content
 
-    return PreparedVoiceMessage(
+    return _PreparedVoiceMessage(
         text=text,
         source=source,
     )
 
 
-async def handle_voice_message(
+async def _handle_voice_message(
     client: nio.AsyncClient,
     room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
@@ -273,7 +273,7 @@ async def handle_voice_message(
         return None
 
     try:
-        voice_audio = audio or await download_audio(client, event)
+        voice_audio = audio or await _download_audio(client, event)
         if voice_audio is None or voice_audio.content is None:
             logger.error("Failed to download audio file")
             return None
@@ -308,7 +308,7 @@ async def handle_voice_message(
     return None
 
 
-async def download_audio(
+async def _download_audio(
     client: nio.AsyncClient,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
 ) -> Audio | None:

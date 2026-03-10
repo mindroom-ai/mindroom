@@ -88,7 +88,7 @@ if _config_dotenv.is_file():
 # exist yet. Defaults to the same location as CONFIG_PATH so the
 # behaviour is unchanged when no overrides are provided.
 _CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE")
-CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else CONFIG_PATH
+_CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else CONFIG_PATH
 
 _STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
 STORAGE_PATH = _STORAGE_PATH_ENV or str(CONFIG_PATH.parent / "mindroom_data")
@@ -237,10 +237,10 @@ def ensure_writable_config_path(*, create_minimal: bool = False) -> bool:
     if CONFIG_PATH.exists():
         return True
 
-    if CONFIG_TEMPLATE_PATH != CONFIG_PATH and CONFIG_TEMPLATE_PATH.exists():
-        shutil.copyfile(CONFIG_TEMPLATE_PATH, CONFIG_PATH)
+    if _CONFIG_TEMPLATE_PATH != CONFIG_PATH and _CONFIG_TEMPLATE_PATH.exists():
+        shutil.copyfile(_CONFIG_TEMPLATE_PATH, CONFIG_PATH)
         CONFIG_PATH.chmod(0o600)
-        print(f"Seeded config from template {CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
+        print(f"Seeded config from template {_CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
         return True
 
     if not create_minimal:

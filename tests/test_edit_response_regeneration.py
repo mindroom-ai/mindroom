@@ -789,10 +789,10 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         "sender": "@user:example.com",
     }
 
-    # Mock voice_handler.handle_voice_message to return a transcription
+    # Mock voice_handler._handle_voice_message to return a transcription
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
@@ -897,10 +897,10 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         "sender": "@user:example.com",
     }
 
-    # Mock voice_handler.handle_voice_message to return None (no transcription)
+    # Mock voice_handler._handle_voice_message to return None (no transcription)
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
         patch.object(bot, "_generate_response", new_callable=AsyncMock) as mock_generate_response,
@@ -1087,7 +1087,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     # Mock is_authorized_sender to return False
     with (
         patch("mindroom.bot.is_authorized_sender", return_value=False) as mock_is_authorized,
-        patch("mindroom.bot.voice_handler.handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
+        patch("mindroom.bot.voice_handler._handle_voice_message", new_callable=AsyncMock) as mock_handle_voice,
     ):
         # Process the voice event
         await bot._on_media_message(room, voice_event)

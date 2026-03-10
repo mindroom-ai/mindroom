@@ -73,8 +73,8 @@ async def test_voice_message_in_main_room_creates_thread(mock_home_bot: AgentBot
     voice_event = _make_voice_event(event_id="$voice123", source={"content": {}})
 
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 what is the weather"),
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 what is the weather"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
@@ -112,8 +112,8 @@ async def test_voice_message_in_thread_continues_thread(mock_home_bot: AgentBot)
     )
 
     with (
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 show me the forecast"),
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 show me the forecast"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
@@ -167,8 +167,8 @@ async def test_voice_plain_reply_to_thread_message_uses_thread_root(mock_home_bo
 
     with (
         patch("mindroom.bot.fetch_thread_history", AsyncMock(return_value=[])),
-        patch("mindroom.bot.voice_handler.download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.bot.voice_handler.handle_voice_message", return_value="🎤 continue the same thread"),
+        patch("mindroom.bot.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
+        patch("mindroom.bot.voice_handler._handle_voice_message", return_value="🎤 continue the same thread"),
         patch("mindroom.bot.is_authorized_sender", return_value=True),
         patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
