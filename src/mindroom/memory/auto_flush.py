@@ -333,13 +333,20 @@ async def _build_existing_memory_context(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    preserve_resolved_storage_path: bool = False,
 ) -> str:
     context_config = config.memory.auto_flush.extractor.include_memory_context
     if context_config.memory_snippets <= 0:
         return ""
 
     max_memories = max(context_config.memory_snippets * 8, context_config.memory_snippets)
-    memories = await list_all_agent_memories(agent_name, storage_path, config, limit=max_memories)
+    memories = await list_all_agent_memories(
+        agent_name,
+        storage_path,
+        config,
+        limit=max_memories,
+        preserve_resolved_storage_path=preserve_resolved_storage_path,
+    )
     if not memories:
         return ""
 
@@ -365,6 +372,7 @@ async def _extract_memory_summary(
     agent_name: str,
     session_id: str,
     lines: list[str],
+    preserve_resolved_storage_path: bool = False,
 ) -> str | None:
     extractor = config.memory.auto_flush.extractor
     if not lines:
@@ -374,6 +382,7 @@ async def _extract_memory_summary(
         agent_name=agent_name,
         storage_path=storage_path,
         config=config,
+        preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
         f"\nExisting memory snippets (avoid duplicates):\n{existing_context}\n"
@@ -683,6 +692,7 @@ class MemoryAutoFlushWorker:
             agent_name=agent_name,
             session_id=session_id,
             lines=lines,
+            preserve_resolved_storage_path=worker_key is not None,
         )
         if memory_summary is None:
             return False
@@ -696,6 +706,6 @@ class MemoryAutoFlushWorker:
             agent_name=agent_name,
             storage_path=effective_storage_path,
             config=config,
-            preserve_resolved_storage_path=True,
+            preserve_resolved_storage_path=worker_key is not None,
         )
         return True

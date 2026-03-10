@@ -360,23 +360,6 @@ async def _run_skill_command_tool(
     room_id: str | None = None,
     thread_id: str | None = None,
 ) -> str:
-    toolkits = _collect_agent_toolkits(config, agent_name)
-    function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
-    if error:
-        return f"❌ {error}"
-    assert function is not None
-
-    base_args = {
-        "command": args_text,
-        "commandName": command_name,
-        "skillName": skill_name,
-    }
-    entrypoint = function.entrypoint
-    call_args = _prepare_tool_call_arguments(entrypoint, base_args)
-    if call_args.error:
-        return f"❌ {call_args.error}"
-    assert entrypoint is not None
-
     execution_identity: ToolExecutionIdentity | None = None
     if requester_user_id is not None and room_id is not None:
         execution_identity = ToolExecutionIdentity(
@@ -393,6 +376,23 @@ async def _run_skill_command_tool(
 
     try:
         with tool_execution_identity(execution_identity):
+            toolkits = _collect_agent_toolkits(config, agent_name)
+            function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
+            if error:
+                return f"❌ {error}"
+            assert function is not None
+
+            base_args = {
+                "command": args_text,
+                "commandName": command_name,
+                "skillName": skill_name,
+            }
+            entrypoint = function.entrypoint
+            call_args = _prepare_tool_call_arguments(entrypoint, base_args)
+            if call_args.error:
+                return f"❌ {call_args.error}"
+            assert entrypoint is not None
+
             if toolkit and toolkit.requires_connect:
                 await _maybe_await(toolkit.connect())
                 try:

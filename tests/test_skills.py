@@ -13,9 +13,18 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, ToolCategory, register_tool_with_metadata
+from mindroom.tool_system.metadata import (
+    _TOOL_REGISTRY,
+    TOOL_METADATA,
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_worker_key
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity, resolve_worker_key
+from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -510,3 +519,95 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
         TOOL_METADATA.update(original_metadata)
 
     assert result == "v1:tenant-123:user_agent:@alice:example.org:code"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skill dispatch should build config-field tools inside execution identity."""
+
+    class CredentialedTools(Toolkit):
+        def __init__(self, api_key: str | None = None) -> None:
+            if not api_key:
+                msg = "Credentialed API key is required"
+                raise ValueError(msg)
+            self.api_key = api_key
+            super().__init__(name="credentialed_tools", tools=[self.lookup])
+
+        def lookup(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{self.api_key}:{commandName}:{skillName}:{command}"
+
+    original_registry = _TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    try:
+
+        @register_tool_with_metadata(
+            name="credentialed_toolkit",
+            display_name="Credentialed",
+            description="Credentialed tool",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.REQUIRES_CONFIG,
+            setup_type=SetupType.API_KEY,
+            config_fields=[
+                ConfigField(
+                    name="api_key",
+                    label="API Key",
+                    type="password",
+                    required=False,
+                    default=None,
+                ),
+            ],
+        )
+        def credentialed_toolkit() -> type[Toolkit]:
+            return CredentialedTools
+
+        config = _base_config(["dispatch"])
+        config.agents["code"].tools = ["credentialed_toolkit"]
+        config.agents["code"].worker_scope = "shared"
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="code",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="$thread",
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = resolve_worker_key("shared", identity, agent_name="code")
+        assert worker_key is not None
+        fake_credentials = FakeCredentialsManager(
+            {},
+            worker_managers={
+                worker_key: FakeCredentialsManager(
+                    {"credentialed_toolkit": {"api_key": "worker-key", "_source": "ui"}},
+                ),
+            },
+        )
+
+        monkeypatch.setattr(
+            "mindroom.tool_system.metadata.get_credentials_manager",
+            lambda: fake_credentials,
+        )
+        monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+        monkeypatch.setenv("ACCOUNT_ID", "account-456")
+
+        result = await _run_skill_command_tool(
+            config=config,
+            agent_name="code",
+            command_tool="lookup",
+            skill_name="dispatch",
+            args_text="hello",
+            requester_user_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+    finally:
+        _TOOL_REGISTRY.clear()
+        _TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+
+    assert result == "worker-key:skill:dispatch:hello"
