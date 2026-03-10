@@ -434,4 +434,3 @@ The first concrete target inside Phase 2 should be session and learning storage 
 - Decide whether `room_thread` on `/v1` should key from conversation ID, session ID, or a distinct thread identifier.
 - Decide the long-term worker retention policy for hosted deployments.
 - Decide whether explicit user-facing worker reset commands should exist in the product.
-
