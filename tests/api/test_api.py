@@ -475,7 +475,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
         response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
-                "instance_url": "https://ha.example.com",
+                "instance_url": "homeassistant.local:8123",
                 "client_id": "client-id",
             },
         )
@@ -484,6 +484,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     auth_url = response.json()["auth_url"]
     parsed = urlparse(auth_url)
     params = parse_qs(parsed.query)
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://homeassistant.local:8123/auth/authorize"
     assert params["state"][0]
     assert params["state"][0] != "general"
     assert "agent_name=general" not in params["redirect_uri"][0]
@@ -517,7 +518,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
-                "instance_url": "https://ha.example.com",
+                "instance_url": "homeassistant.local:8123",
                 "client_id": "client-id",
             },
         )
@@ -530,10 +531,19 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
         )
 
     assert callback_response.status_code in {302, 307}
+    async_client.__aenter__.return_value.post.assert_called_once_with(
+        "http://homeassistant.local:8123/auth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": "test-code",
+            "client_id": "client-id",
+        },
+        timeout=10.0,
+    )
     target.target_manager.save_credentials.assert_called_once_with(
         "homeassistant",
         {
-            "instance_url": "https://ha.example.com",
+            "instance_url": "http://homeassistant.local:8123",
             "client_id": "client-id",
             "access_token": "ha-access",
             "refresh_token": "ha-refresh",

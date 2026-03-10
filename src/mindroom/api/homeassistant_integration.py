@@ -62,6 +62,14 @@ class HomeAssistantConfig(BaseModel):
     long_lived_token: str | None = None
 
 
+def _normalize_instance_url(instance_url: str) -> str:
+    """Normalize a Home Assistant instance URL."""
+    normalized = instance_url.strip().rstrip("/")
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"http://{normalized}"
+    return normalized
+
+
 def _get_stored_config(target: RequestCredentialsTarget) -> dict[str, Any] | None:
     """Get stored Home Assistant configuration."""
     return load_credentials_for_target("homeassistant", target)
@@ -69,7 +77,11 @@ def _get_stored_config(target: RequestCredentialsTarget) -> dict[str, Any] | Non
 
 def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
-    target.target_manager.save_credentials("homeassistant", config)
+    config_to_save = dict(config)
+    instance_url = config_to_save.get("instance_url")
+    if isinstance(instance_url, str):
+        config_to_save["instance_url"] = _normalize_instance_url(instance_url)
+    target.target_manager.save_credentials("homeassistant", config_to_save)
 
 
 async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
@@ -154,6 +166,7 @@ async def get_status(request: Request, agent_name: str | None = None) -> HomeAss
                 error="Missing instance URL or token",
             )
 
+        instance_url = _normalize_instance_url(instance_url)
         info = await _test_connection(instance_url, token)
 
         return HomeAssistantStatus(
@@ -198,6 +211,8 @@ async def connect_oauth(
             detail="OAuth Client ID is required for OAuth flow",
         )
 
+    instance_url = _normalize_instance_url(config.instance_url)
+
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
@@ -207,7 +222,7 @@ async def connect_oauth(
         "homeassistant",
         agent_name,
         payload={
-            "instance_url": config.instance_url,
+            "instance_url": instance_url,
             "client_id": config.client_id,
         },
     )
@@ -220,7 +235,7 @@ async def connect_oauth(
     }
 
     # Build query string
-    auth_url = f"{config.instance_url}/auth/authorize?{urlencode(auth_params)}"
+    auth_url = f"{instance_url}/auth/authorize?{urlencode(auth_params)}"
 
     return HomeAssistantAuthUrl(auth_url=auth_url)
 
@@ -245,9 +260,7 @@ async def connect_token(
         )
 
     # Normalize the instance URL
-    instance_url = config.instance_url.rstrip("/")
-    if not instance_url.startswith(("http://", "https://")):
-        instance_url = f"http://{instance_url}"
+    instance_url = _normalize_instance_url(config.instance_url)
 
     # Test the connection
     try:
@@ -297,6 +310,7 @@ async def callback(request: Request) -> RedirectResponse:
 
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
+    instance_url = _normalize_instance_url(instance_url)
 
     try:
         # Exchange code for access token
@@ -368,6 +382,7 @@ async def get_entities(
 
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
+    instance_url = _normalize_instance_url(instance_url)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -424,6 +439,7 @@ async def call_service(
 
     if not instance_url or not token:
         raise HTTPException(status_code=401, detail="Missing credentials")
+    instance_url = _normalize_instance_url(instance_url)
 
     # Build service data
     service_data = data or {}

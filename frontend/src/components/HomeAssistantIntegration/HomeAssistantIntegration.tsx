@@ -37,6 +37,16 @@ interface HomeAssistantIntegrationProps {
   agentName?: string | null;
 }
 
+function getHomeAssistantCallbackUrl(): string {
+  const baseUrl =
+    API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)
+      ? API_BASE_URL
+      : typeof window !== 'undefined'
+        ? window.location.origin
+        : 'http://localhost:5173';
+  return new URL('/api/homeassistant/callback', baseUrl).toString();
+}
+
 export function HomeAssistantIntegration({
   onSuccess,
   agentName,
@@ -49,6 +59,7 @@ export function HomeAssistantIntegration({
   const [longLivedToken, setLongLivedToken] = useState('');
   const [activeTab, setActiveTab] = useState('oauth');
   const { toast } = useToast();
+  const callbackUrl = getHomeAssistantCallbackUrl();
 
   useEffect(() => {
     checkStatus();
@@ -385,8 +396,7 @@ export function HomeAssistantIntegration({
                       Go to Profile → Security → Long-Lived Access Tokens → Add OAuth Application
                     </li>
                     <li>
-                      Set the redirect URI to:{' '}
-                      <code className="text-xs">http://localhost:5173/homeassistant-callback</code>
+                      Set the redirect URI to: <code className="text-xs">{callbackUrl}</code>
                     </li>
                     <li>Copy the Client ID from the created application</li>
                   </ol>
