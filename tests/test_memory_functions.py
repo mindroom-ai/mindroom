@@ -23,6 +23,12 @@ from mindroom.memory.functions import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -631,6 +637,67 @@ class TestMemoryFunctions:
         assert memory_file.exists()
         content = memory_file.read_text(encoding="utf-8")
         assert "User prefers concise responses" in content
+
+    @pytest.mark.asyncio
+    async def test_file_backend_worker_scope_isolates_memory_by_requester(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Worker-scoped file memory should follow requester isolation instead of shared storage."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].worker_scope = "user"
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-alice",
+        )
+        bob_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-bob",
+        )
+
+        with tool_execution_identity(alice_identity):
+            await add_agent_memory("Alice private memory", "general", storage_path, config)
+            alice_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+            alice_prompt = await build_memory_enhanced_prompt(
+                "What do you remember?",
+                "general",
+                storage_path,
+                config,
+            )
+
+        with tool_execution_identity(bob_identity):
+            bob_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+            bob_prompt = await build_memory_enhanced_prompt(
+                "What do you remember?",
+                "general",
+                storage_path,
+                config,
+            )
+
+        assert any(result.get("memory") == "Alice private memory" for result in alice_results)
+        assert not any(result.get("memory") == "Alice private memory" for result in bob_results)
+        assert "Alice private memory" in alice_prompt
+        assert "Alice private memory" not in bob_prompt
+
+        alice_worker_key = resolve_worker_key("user", alice_identity)
+        assert alice_worker_key is not None
+        alice_memory_file = (
+            worker_root_path(storage_path, alice_worker_key) / "memory_files" / "agent_general" / "MEMORY.md"
+        )
+        assert alice_memory_file.exists()
 
     @pytest.mark.asyncio
     async def test_agent_memory_backend_override_to_file_uses_file_storage(

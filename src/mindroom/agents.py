@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.worker_routing import resolve_agent_memory_storage_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -432,7 +433,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     load_plugins(config)
 
     tool_names = config.get_agent_tools(agent_name)
-    sandbox_tools = config.get_agent_sandbox_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_scope = config.get_agent_worker_scope(agent_name)
+    memory_storage_path = resolve_agent_memory_storage_path(
+        agent_name=agent_name,
+        base_storage_path=resolved_storage_path,
+        config=config,
+    )
 
     # Create tools
     tools: list[Toolkit] = []
@@ -444,7 +451,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     MemoryTools(
                         agent_name=agent_name,
-                        storage_path=resolved_storage_path,
+                        storage_path=memory_storage_path,
                         config=config,
                     ),
                 )
@@ -476,7 +483,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
                 tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
-                tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
+                tools.append(
+                    get_tool_by_name(
+                        tool_name,
+                        sandbox_tools_override=worker_tools,
+                        worker_scope=worker_scope,
+                        routing_agent_name=agent_name,
+                    ),
+                )
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 

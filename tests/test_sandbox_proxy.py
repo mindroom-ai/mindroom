@@ -9,6 +9,7 @@ import pytest
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from tests.conftest import FakeCredentialsManager
 
 
@@ -169,6 +170,81 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert entrypoint is not None
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
         entrypoint(1, 2)
+
+
+def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed tool calls should include scope, key, and execution identity."""
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "result": "sandbox-result"}
+
+    class _FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+    tool = get_tool_by_name(
+        "calculator",
+        sandbox_tools_override=["calculator"],
+        worker_scope="user_agent",
+        routing_agent_name="code",
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="shared_agent",
+        requester_id="alice",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
+    assert expected_worker_key is not None
+
+    with tool_execution_identity(execution_identity):
+        result = entrypoint(1, 2)
+
+    assert result == "sandbox-result"
+    assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
+    assert captured["json"]["worker_scope"] == "user_agent"
+    assert captured["json"]["worker_key"] == expected_worker_key
+    assert captured["json"]["execution_identity"] == {
+        "channel": "matrix",
+        "agent_name": "shared_agent",
+        "requester_id": "alice",
+        "room_id": "!room:example.org",
+        "thread_id": "$thread",
+        "resolved_thread_id": "$thread",
+        "session_id": "session-1",
+        "tenant_id": None,
+        "account_id": None,
+    }
 
 
 class TestSandboxToolsOverride:

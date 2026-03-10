@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,9 @@ from mindroom.config.agent import AgentConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -181,7 +185,14 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 ) -> None:
     """Optional dependency import failures should not abort agent creation with implied tools."""
 
-    def _lookup_tool(name: str, *, sandbox_tools_override: list[str] | None = None) -> MagicMock:  # noqa: ARG001
+    def _lookup_tool(
+        name: str,
+        *,
+        sandbox_tools_override: list[str] | None = None,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+    ) -> MagicMock:
+        del sandbox_tools_override, worker_scope, routing_agent_name
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)

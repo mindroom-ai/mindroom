@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
+from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 
@@ -84,6 +85,14 @@ class AgentConfig(BaseModel):
     sandbox_tools: list[str] | None = Field(
         default=None,
         description="Tool names to execute through sandbox proxy (overrides defaults; None = inherit)",
+    )
+    worker_tools: list[str] | None = Field(
+        default=None,
+        description="Tool names to route through scoped workers (overrides defaults; falls back to sandbox_tools when omitted)",
+    )
+    worker_scope: WorkerScope | None = Field(
+        default=None,
+        description="Worker scope for routed tools: user, user_agent, room_thread, or shared",
     )
     allow_self_config: bool | None = Field(
         default=None,

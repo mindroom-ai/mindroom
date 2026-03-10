@@ -6,6 +6,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
+
 AgentLearningMode = Literal["always", "agentic"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 
@@ -53,6 +55,14 @@ class DefaultsConfig(BaseModel):
     sandbox_tools: list[str] | None = Field(
         default=None,
         description="Tool names to sandbox by default for all agents (None = use env var config)",
+    )
+    worker_tools: list[str] | None = Field(
+        default=None,
+        description="Tool names to route through scoped workers by default (falls back to sandbox_tools when omitted)",
+    )
+    worker_scope: WorkerScope | None = Field(
+        default=None,
+        description="Worker scope for routed tools: user, user_agent, room_thread, or shared",
     )
     allow_self_config: bool = Field(
         default=False,

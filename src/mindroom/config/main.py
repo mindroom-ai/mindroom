@@ -25,6 +25,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -420,6 +421,33 @@ class Config(BaseModel):
         if configured is None:
             return None
         return self.expand_tool_names(list(configured))
+
+    def get_agent_worker_tools(self, agent_name: str) -> list[str] | None:
+        """Get effective worker-routed tools for an agent, including preset expansion.
+
+        Falls back to the legacy sandbox_tools fields when worker_tools are not
+        explicitly configured so existing configs keep working during the
+        worker-routing transition.
+
+        """
+        agent_config = self.get_agent(agent_name)
+        configured = agent_config.worker_tools
+        if configured is None:
+            configured = self.defaults.worker_tools
+        if configured is None:
+            configured = agent_config.sandbox_tools
+        if configured is None:
+            configured = self.defaults.sandbox_tools
+        if configured is None:
+            return None
+        return self.expand_tool_names(list(configured))
+
+    def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:
+        """Get the effective worker scope for an agent."""
+        agent_config = self.get_agent(agent_name)
+        if agent_config.worker_scope is not None:
+            return agent_config.worker_scope
+        return self.defaults.worker_scope
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.

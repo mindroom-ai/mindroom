@@ -14,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
+from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,6 +52,9 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     sandbox_tools_override: list[str] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     tool_class = _TOOL_REGISTRY[tool_name]()
@@ -62,14 +66,29 @@ def _build_tool_instance(
 
     init_kwargs = {}
     if metadata.config_fields:
+        config_field_names = {field.name for field in metadata.config_fields}
         for field in metadata.config_fields:
             if field.name in credentials:
                 init_kwargs[field.name] = credentials[field.name]
+        if runtime_overrides:
+            init_kwargs.update(
+                {
+                    field_name: value
+                    for field_name, value in runtime_overrides.items()
+                    if field_name in config_field_names
+                },
+            )
 
     toolkit = tool_class(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
-    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit, sandbox_tools_override=sandbox_tools_override)
+    return maybe_wrap_toolkit_for_sandbox_proxy(
+        tool_name,
+        toolkit,
+        sandbox_tools_override=sandbox_tools_override,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
 
 
 def get_tool_by_name(
@@ -78,6 +97,9 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     sandbox_tools_override: list[str] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:
@@ -91,6 +113,9 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         sandbox_tools_override=sandbox_tools_override,
+        runtime_overrides=runtime_overrides,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing

@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,11 @@ import httpx
 
 from mindroom.constants import env_flag
 from mindroom.credentials import get_credentials_manager
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    get_tool_execution_identity,
+    resolve_worker_key,
+)
 
 if TYPE_CHECKING:
     from agno.tools.function import Function
@@ -169,6 +175,64 @@ def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> 
     return merged_overrides
 
 
+def _create_credential_lease(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    headers: Mapping[str, str],
+    tool_name: str,
+    function_name: str,
+) -> str | None:
+    credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
+    if not credential_overrides:
+        return None
+
+    lease_payload = {
+        "tool_name": tool_name,
+        "function_name": function_name,
+        "credential_overrides": to_json_compatible(credential_overrides),
+        "ttl_seconds": _CREDENTIAL_LEASE_TTL,
+        "max_uses": 1,
+    }
+    response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
+    response.raise_for_status()
+    lease_data = response.json()
+    if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
+        msg = "Sandbox proxy lease response is missing lease_id."
+        raise TypeError(msg)
+    return lease_data["lease_id"]
+
+
+def _build_worker_routing_payload(
+    *,
+    tool_name: str,
+    function_name: str,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> dict[str, object]:
+    if worker_scope is None:
+        return {}
+
+    execution_identity = get_tool_execution_identity()
+    if execution_identity is None:
+        msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
+        raise RuntimeError(msg)
+
+    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    if worker_key is None:
+        msg = (
+            f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+            "could not be resolved from the current execution identity."
+        )
+        raise RuntimeError(msg)
+
+    return {
+        "worker_scope": worker_scope,
+        "worker_key": worker_key,
+        "execution_identity": to_json_compatible(asdict(execution_identity)),
+    }
+
+
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
@@ -203,6 +267,8 @@ def _call_proxy_sync(
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> object:
     if _PROXY_TOKEN is None:
         msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
@@ -213,31 +279,28 @@ def _call_proxy_sync(
     headers = {_SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
     base_url = _PROXY_URL
 
-    credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
     with httpx.Client(timeout=_PROXY_TIMEOUT) as client:
-        lease_id: str | None = None
-        if credential_overrides:
-            lease_payload = {
-                "tool_name": tool_name,
-                "function_name": function_name,
-                "credential_overrides": to_json_compatible(credential_overrides),
-                "ttl_seconds": _CREDENTIAL_LEASE_TTL,
-                "max_uses": 1,
-            }
-            response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
-            response.raise_for_status()
-            lease_data = response.json()
-            if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
-                msg = "Sandbox proxy lease response is missing lease_id."
-                raise RuntimeError(msg)
-            lease_id = lease_data["lease_id"]
-
+        lease_id = _create_credential_lease(
+            client,
+            base_url=base_url,
+            headers=headers,
+            tool_name=tool_name,
+            function_name=function_name,
+        )
         payload: dict[str, object] = {
             "tool_name": tool_name,
             "function_name": function_name,
             "args": [to_json_compatible(arg) for arg in args],
             "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
         }
+        payload.update(
+            _build_worker_routing_payload(
+                tool_name=tool_name,
+                function_name=function_name,
+                worker_scope=worker_scope,
+                routing_agent_name=routing_agent_name,
+            ),
+        )
         if lease_id is not None:
             payload["lease_id"] = lease_id
 
@@ -254,7 +317,14 @@ def _call_proxy_sync(
     raise RuntimeError(str(error))
 
 
-def _wrap_sync_function(function: Function, tool_name: str, function_name: str) -> Function:
+def _wrap_sync_function(
+    function: Function,
+    tool_name: str,
+    function_name: str,
+    *,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
+) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
 
@@ -265,13 +335,22 @@ def _wrap_sync_function(function: Function, tool_name: str, function_name: str) 
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
 
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
 
-def _wrap_async_function(function: Function, tool_name: str, function_name: str) -> Function:
+def _wrap_async_function(
+    function: Function,
+    tool_name: str,
+    function_name: str,
+    *,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
+) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
 
@@ -283,6 +362,8 @@ def _wrap_async_function(function: Function, tool_name: str, function_name: str)
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -294,6 +375,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     toolkit: Toolkit,
     *,
     sandbox_tools_override: list[str] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
@@ -304,11 +387,23 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         return toolkit
 
     toolkit.functions = {
-        function_name: _wrap_sync_function(function, tool_name, function_name)
+        function_name: _wrap_sync_function(
+            function,
+            tool_name,
+            function_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+        )
         for function_name, function in toolkit.functions.items()
     }
     toolkit.async_functions = {
-        function_name: _wrap_async_function(function, tool_name, function_name)
+        function_name: _wrap_async_function(
+            function,
+            tool_name,
+            function_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+        )
         for function_name, function in toolkit.async_functions.items()
     }
     return toolkit

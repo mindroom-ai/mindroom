@@ -43,6 +43,7 @@ from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 _AUTO_MODEL_NAME = "auto"
 _TEAM_MODEL_PREFIX = "team/"
@@ -450,6 +451,26 @@ def _validate_chat_request(
     return None
 
 
+def _build_tool_execution_identity(
+    *,
+    agent_name: str,
+    session_id: str,
+    user: str | None,
+) -> ToolExecutionIdentity:
+    """Build the execution identity used for worker-routed tool calls."""
+    return ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name=agent_name,
+        requester_id=user,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id,
+        tenant_id=os.getenv("CUSTOMER_ID"),
+        account_id=os.getenv("ACCOUNT_ID"),
+    )
+
+
 def _parse_chat_request(
     body: bytes,
 ) -> tuple[_ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
@@ -629,8 +650,23 @@ async def chat_completions(
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        if req.stream:
-            return await _stream_team_completion(
+        execution_identity = _build_tool_execution_identity(
+            agent_name=agent_name,
+            session_id=session_id,
+            user=req.user,
+        )
+        with tool_execution_identity(execution_identity):
+            if req.stream:
+                return await _stream_team_completion(
+                    team_name,
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    thread_history,
+                    req.user,
+                )
+            return await _non_stream_team_completion(
                 team_name,
                 agent_name,
                 prompt,
@@ -639,15 +675,6 @@ async def chat_completions(
                 thread_history,
                 req.user,
             )
-        return await _non_stream_team_completion(
-            team_name,
-            agent_name,
-            prompt,
-            session_id,
-            config,
-            thread_history,
-            req.user,
-        )
 
     # Resolve knowledge base for this agent
     try:
@@ -657,7 +684,13 @@ async def chat_completions(
         knowledge = None
 
     handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
+    execution_identity = _build_tool_execution_identity(
+        agent_name=agent_name,
+        session_id=session_id,
+        user=req.user,
+    )
+    with tool_execution_identity(execution_identity):
+        return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
 
 
 # ---------------------------------------------------------------------------

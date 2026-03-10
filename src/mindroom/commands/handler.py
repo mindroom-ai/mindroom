@@ -205,11 +205,22 @@ def _resolve_skill_command_agent(  # noqa: C901
 
 
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
-    sandbox_tools = config.get_agent_sandbox_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_scope = config.get_agent_worker_scope(agent_name)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in config.get_agent_tools(agent_name):
         try:
-            toolkits.append((tool_name, get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools)))
+            toolkits.append(
+                (
+                    tool_name,
+                    get_tool_by_name(
+                        tool_name,
+                        sandbox_tools_override=worker_tools,
+                        worker_scope=worker_scope,
+                        routing_agent_name=agent_name,
+                    ),
+                ),
+            )
         except ValueError as exc:
             logger.warning(
                 "Failed to load tool for skill dispatch",

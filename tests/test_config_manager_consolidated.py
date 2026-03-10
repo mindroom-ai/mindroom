@@ -667,3 +667,79 @@ class TestGetAgentSandboxTools:
             "matrix_message",
             "attachments",
         ]
+
+
+class TestGetAgentWorkerTools:
+    """Tests for Config.get_agent_worker_tools and get_agent_worker_scope."""
+
+    def test_agent_worker_tools_override_takes_precedence(self) -> None:
+        """Agent-level worker_tools should override defaults."""
+        config = Config(
+            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
+            agents={
+                "code": AgentConfig(display_name="Code", worker_tools=["python"]),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == ["python"]
+
+    def test_worker_tools_fall_back_to_defaults(self) -> None:
+        """When agent has no worker_tools, defaults should apply."""
+        config = Config(
+            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == ["shell", "file"]
+
+    def test_worker_tools_fall_back_to_legacy_sandbox_fields(self) -> None:
+        """Worker tools should reuse legacy sandbox config when worker_tools are omitted."""
+        config = Config(
+            defaults=DefaultsConfig(sandbox_tools=["shell"]),
+            agents={
+                "code": AgentConfig(display_name="Code", sandbox_tools=["python"]),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == ["python"]
+
+    def test_worker_tools_expand_implied_tools(self) -> None:
+        """Worker tool resolution should preserve the normal preset expansion behavior."""
+        config = Config(
+            defaults=DefaultsConfig(worker_tools=["openclaw_compat", "python", "shell"]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == [
+            "openclaw_compat",
+            "python",
+            "shell",
+            "coding",
+            "duckduckgo",
+            "website",
+            "browser",
+            "scheduler",
+            "subagents",
+            "matrix_message",
+            "attachments",
+        ]
+
+    def test_worker_scope_prefers_agent_override(self) -> None:
+        """Agent-level worker_scope should override defaults."""
+        config = Config(
+            defaults=DefaultsConfig(worker_scope="shared"),
+            agents={
+                "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
+            },
+        )
+        assert config.get_agent_worker_scope("code") == "user_agent"
+
+    def test_worker_scope_falls_back_to_defaults(self) -> None:
+        """Worker scope should inherit from defaults when agent config omits it."""
+        config = Config(
+            defaults=DefaultsConfig(worker_scope="room_thread"),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_worker_scope("code") == "room_thread"
