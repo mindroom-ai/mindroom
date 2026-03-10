@@ -1,4 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@/lib/api', () => ({
+  API_BASE_URL: 'https://backend.example.test',
+  withAgentName: (url: string, agentName?: string | null) => {
+    const parsed = new URL(url);
+    if (agentName) {
+      parsed.searchParams.set('agent_name', agentName);
+    }
+    return parsed.toString();
+  },
+}));
+
 import { homeAssistantIntegration } from './index';
 
 // Mock fetch
@@ -46,6 +58,9 @@ describe('HomeAssistantIntegrationProvider', () => {
         location_name: 'Home',
         entities_count: 42,
       });
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://backend.example.test/api/homeassistant/status'
+      );
     });
 
     it('should return available status when not connected', async () => {
@@ -78,7 +93,21 @@ describe('HomeAssistantIntegrationProvider', () => {
       await homeAssistantIntegration.loadStatus!({ agentName: 'code' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/homeassistant/status?agent_name=code')
+        'https://backend.example.test/api/homeassistant/status?agent_name=code'
+      );
+    });
+  });
+
+  describe('disconnect', () => {
+    it('appends agent_name to the API_BASE_URL-backed disconnect request', async () => {
+      (global.fetch as any).mockResolvedValueOnce({ ok: true });
+
+      const config = homeAssistantIntegration.getConfig({ agentName: 'code' });
+      await config.onDisconnect!('homeassistant');
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://backend.example.test/api/homeassistant/disconnect?agent_name=code',
+        expect.objectContaining({ method: 'POST' })
       );
     });
   });

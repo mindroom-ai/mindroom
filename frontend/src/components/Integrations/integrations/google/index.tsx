@@ -1,7 +1,7 @@
 import { FaGoogle } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
-import { withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentName } from '@/lib/api';
 
 class GoogleIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -20,9 +20,12 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     return {
       integration: this.integration,
       onDisconnect: async () => {
-        const response = await fetch(withAgentName('/api/google/disconnect', agentName), {
-          method: 'POST',
-        });
+        const response = await fetch(
+          withAgentName(`${API_BASE_URL}/api/google/disconnect`, agentName),
+          {
+            method: 'POST',
+          }
+        );
         if (!response.ok) {
           throw new Error('Failed to disconnect Google services');
         }
@@ -36,7 +39,7 @@ class GoogleIntegrationProvider implements IntegrationProvider {
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
     const agentName = scope?.agentName ?? null;
     try {
-      const response = await fetch(withAgentName('/api/google/status', agentName));
+      const response = await fetch(withAgentName(`${API_BASE_URL}/api/google/status`, agentName));
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {

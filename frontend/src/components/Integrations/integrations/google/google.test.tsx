@@ -1,4 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@/lib/api', () => ({
+  API_BASE_URL: 'https://backend.example.test',
+  withAgentName: (url: string, agentName?: string | null) => {
+    const parsed = new URL(url);
+    if (agentName) {
+      parsed.searchParams.set('agent_name', agentName);
+    }
+    return parsed.toString();
+  },
+}));
+
 import { googleIntegration } from './index';
 
 // Mock fetch
@@ -40,7 +52,7 @@ describe('GoogleIntegrationProvider', () => {
 
       expect(status.status).toBe('connected');
       expect(status.connected).toBe(true);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/google/status'));
+      expect(global.fetch).toHaveBeenCalledWith('https://backend.example.test/api/google/status');
     });
 
     it('should return available status when not configured', async () => {
@@ -73,7 +85,7 @@ describe('GoogleIntegrationProvider', () => {
       await googleIntegration.loadStatus({ agentName: 'code' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/google/status?agent_name=code')
+        'https://backend.example.test/api/google/status?agent_name=code'
       );
     });
   });
@@ -86,7 +98,7 @@ describe('GoogleIntegrationProvider', () => {
       await config.onDisconnect!('google');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/google/disconnect?agent_name=code'),
+        'https://backend.example.test/api/google/disconnect?agent_name=code',
         expect.objectContaining({ method: 'POST' })
       );
     });

@@ -1,7 +1,7 @@
 import { SiHomeassistant } from 'react-icons/si';
 import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
-import { withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentName } from '@/lib/api';
 
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -20,9 +20,12 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     return {
       integration: this.integration,
       onDisconnect: async () => {
-        const response = await fetch(withAgentName('/api/homeassistant/disconnect', agentName), {
-          method: 'POST',
-        });
+        const response = await fetch(
+          withAgentName(`${API_BASE_URL}/api/homeassistant/disconnect`, agentName),
+          {
+            method: 'POST',
+          }
+        );
         if (!response.ok) {
           throw new Error('Failed to disconnect Home Assistant');
         }
@@ -36,7 +39,9 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
     const agentName = scope?.agentName ?? null;
     try {
-      const response = await fetch(withAgentName('/api/homeassistant/status', agentName));
+      const response = await fetch(
+        withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+      );
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {
