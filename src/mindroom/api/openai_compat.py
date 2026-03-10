@@ -1125,7 +1125,8 @@ async def _stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    agents, team, mode = _build_team(team_name, config)
+    with tool_execution_identity(execution_identity):
+        agents, team, mode = _build_team(team_name, config)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 

@@ -7,7 +7,12 @@ import pytest
 
 import mindroom.credentials
 from mindroom.constants import CREDENTIALS_DIR
-from mindroom.credentials import CredentialsManager, get_credentials_manager
+from mindroom.credentials import (
+    CredentialsManager,
+    get_credentials_manager,
+    save_scoped_credentials,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 
 @pytest.fixture
@@ -167,6 +172,38 @@ class TestCredentialsManager:
         assert manager.load_credentials("openai") == {"api_key": "shared-key", "_source": "ui"}
         assert worker_manager.load_credentials("openai") == {"api_key": "worker-key", "_source": "ui"}
         assert worker_manager.get_credentials_path("openai").parent != manager.get_credentials_path("openai").parent
+
+    def test_save_scoped_credentials_writes_to_worker_manager(self, temp_credentials_dir: Path) -> None:
+        """Scoped saves should target the worker-owned credentials store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+
+        with tool_execution_identity(execution_identity):
+            save_scoped_credentials(
+                "google",
+                {"token": "worker-token", "_source": "ui"},
+                worker_scope="user",
+                routing_agent_name="general",
+                credentials_manager=manager,
+            )
+
+        shared_credentials = manager.load_credentials("google")
+        worker_credentials = manager.for_worker(
+            "v1:tenant-123:user:@alice:example.org",
+        ).load_credentials("google")
+
+        assert shared_credentials is None
+        assert worker_credentials == {"token": "worker-token", "_source": "ui"}
 
     def test_complex_credentials_structure(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading complex nested credentials."""

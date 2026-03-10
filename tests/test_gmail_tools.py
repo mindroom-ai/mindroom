@@ -90,10 +90,9 @@ class TestGmailTools:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools()  # noqa: F841
 
-            # Verify warning was logged
-            mock_logger.warning.assert_called_once_with(
-                "Gmail credentials not found in MindRoom storage",
-            )
+            # Construction is allowed to stay silent because worker-scoped creds
+            # may only be resolvable once execution identity exists.
+            mock_logger.warning.assert_not_called()
 
             # Verify parent was initialized with None credentials
             mock_parent_init.assert_called_once_with(creds=None)

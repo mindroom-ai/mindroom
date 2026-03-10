@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import inspect
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -86,6 +87,12 @@ def _build_tool_instance(
                     if field_name in config_field_names
                 },
             )
+
+    init_signature = inspect.signature(tool_class.__init__)
+    if "worker_scope" in init_signature.parameters:
+        init_kwargs["worker_scope"] = worker_scope
+    if "routing_agent_name" in init_signature.parameters:
+        init_kwargs["routing_agent_name"] = routing_agent_name
 
     toolkit = tool_class(**init_kwargs)
     if disable_sandbox_proxy:

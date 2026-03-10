@@ -1706,6 +1706,42 @@ class TestTeamCompletion:
         assert len(observed_session_ids) == 2
         assert all(session_id is not None for session_id in observed_session_ids)
 
+    def test_team_streaming_builds_team_inside_execution_identity(self, team_app_client: TestClient) -> None:
+        """Streamed team requests must establish execution identity before member agents are built."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        observed_agent_names: list[str | None] = []
+        observed_session_ids: list[str | None] = []
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Hello world!")
+
+        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[list[MagicMock], MagicMock, TeamMode]:
+            identity = get_tool_execution_identity()
+            observed_agent_names.append(identity.agent_name if identity is not None else None)
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            return [MagicMock(name="GeneralAgent")], mock_team, TeamMode.COORDINATE
+
+        mock_team.arun = mock_stream_events
+
+        with patch("mindroom.api.openai_compat._build_team", side_effect=fake_build_team):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert observed_agent_names == ["team/super_team"]
+        assert len(observed_session_ids) == 1
+        assert observed_session_ids[0] is not None
+
     def test_team_streaming_tool_events_emit_start_and_done_with_ids(
         self,
         team_app_client: TestClient,

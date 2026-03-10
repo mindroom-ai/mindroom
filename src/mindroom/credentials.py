@@ -189,6 +189,27 @@ def get_credentials_manager() -> CredentialsManager:
     return _credentials_manager
 
 
+def _resolve_worker_credentials_manager(
+    *,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    credentials_manager: CredentialsManager,
+) -> CredentialsManager | None:
+    """Return the worker-scoped credentials manager for the current execution, if any."""
+    if worker_scope is None:
+        return None
+
+    execution_identity = get_tool_execution_identity()
+    if execution_identity is None:
+        return None
+
+    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    if worker_key is None:
+        return None
+
+    return credentials_manager.for_worker(worker_key)
+
+
 def load_scoped_credentials(
     service: str,
     *,
@@ -208,15 +229,34 @@ def load_scoped_credentials(
     ):
         merged_credentials.update(shared_credentials)
 
-    execution_identity = get_tool_execution_identity()
-    if execution_identity is None:
+    worker_manager = _resolve_worker_credentials_manager(
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+        credentials_manager=manager,
+    )
+    if worker_manager is None:
         return merged_credentials or None
 
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
-    if worker_key is None:
-        return merged_credentials or None
-
-    worker_credentials = manager.for_worker(worker_key).load_credentials(service)
+    worker_credentials = worker_manager.load_credentials(service)
     if isinstance(worker_credentials, Mapping):
         merged_credentials.update(worker_credentials)
     return merged_credentials or None
+
+
+def save_scoped_credentials(
+    service: str,
+    credentials: dict[str, Any],
+    *,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
+    credentials_manager: CredentialsManager | None = None,
+) -> None:
+    """Save credentials for a service to the current worker scope when available."""
+    manager = credentials_manager or get_credentials_manager()
+    worker_manager = _resolve_worker_credentials_manager(
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+        credentials_manager=manager,
+    )
+    target_manager = worker_manager or manager
+    target_manager.save_credentials(service, credentials)

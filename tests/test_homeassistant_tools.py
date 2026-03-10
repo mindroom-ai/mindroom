@@ -9,6 +9,8 @@ from httpx import Response
 
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import TEST_PASSWORD
 
 
@@ -70,6 +72,14 @@ class TestHomeAssistantTools:
             for expected in expected_methods:
                 assert expected in method_names
 
+    def test_tool_metadata_passes_worker_scope_to_wrapper(self) -> None:
+        """Tool construction must propagate worker routing metadata into the wrapper."""
+        tool = get_tool_by_name("homeassistant", worker_scope="user", routing_agent_name="general")
+
+        assert isinstance(tool, HomeAssistantTools)
+        assert tool._worker_scope == "user"
+        assert tool._routing_agent_name == "general"
+
     def test_load_config_with_stored_credentials(
         self,
         ha_tools_with_mocked_creds: HomeAssistantTools,
@@ -81,9 +91,62 @@ class TestHomeAssistantTools:
         assert config["instance_url"] == "http://homeassistant.local:8123"
         assert config["access_token"] == TEST_PASSWORD
 
-        # Should return cached config on second call
+        # A second lookup should return the same values.
         config2 = ha_tools_with_mocked_creds._load_config()
-        assert config2 is config
+        assert config2 == config
+
+    def test_load_config_uses_worker_scoped_credentials_without_leaking_between_users(self, tmp_path: Path) -> None:
+        """Worker-scoped Home Assistant config should resolve per requester, not from shared cache."""
+        manager = CredentialsManager(base_path=tmp_path / "credentials")
+        manager.save_credentials(
+            "homeassistant",
+            {"instance_url": "http://shared.local", "access_token": "shared-token", "_source": "ui"},
+        )
+        manager.for_worker("v1:tenant-123:user:@alice:example.org").save_credentials(
+            "homeassistant",
+            {"instance_url": "http://alice.local", "access_token": "alice-token", "_source": "ui"},
+        )
+        manager.for_worker("v1:tenant-123:user:@bob:example.org").save_credentials(
+            "homeassistant",
+            {"instance_url": "http://bob.local", "access_token": "bob-token", "_source": "ui"},
+        )
+
+        with patch("mindroom.custom_tools.homeassistant.get_credentials_manager", return_value=manager):
+            tool = HomeAssistantTools(worker_scope="user", routing_agent_name="general")
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        bob_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+
+        with tool_execution_identity(alice_identity):
+            alice_config = tool._load_config()
+
+        with tool_execution_identity(bob_identity):
+            bob_config = tool._load_config()
+
+        assert alice_config is not None
+        assert bob_config is not None
+        assert alice_config["instance_url"] == "http://alice.local"
+        assert bob_config["instance_url"] == "http://bob.local"
 
     def test_load_config_without_credentials(self) -> None:
         """Test loading configuration when no credentials exist."""
