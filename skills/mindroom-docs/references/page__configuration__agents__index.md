@@ -151,7 +151,7 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 
 ## Worker Routing
 
-`worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process. `worker_scope` decides which proxied calls share the same worker-owned state directory.
+`worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process. `worker_scope` decides which proxied calls share the same worker-owned state directory. Some credential-backed custom tools stay local even if they are listed in `worker_tools`. Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 
 The supported `worker_scope` values are:
 

@@ -221,6 +221,8 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`, which in turn over
 
 `worker_tools` chooses which tools execute through the sandbox proxy.
 `worker_scope` chooses which proxied calls share the same worker-owned storage root.
+Some credential-backed custom tools stay local even if they are listed in `worker_tools`.
+Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 
 You can set `worker_scope` per agent or in `defaults`:
 

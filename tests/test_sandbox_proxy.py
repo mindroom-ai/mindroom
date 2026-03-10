@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Self
 
 import pytest
@@ -377,6 +378,58 @@ class TestWorkerToolsOverride:
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
 
         assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is False
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["gmail", "google_calendar", "google_sheets", "homeassistant"],
+    )
+    def test_local_only_tools_never_proxy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tool_name: str,
+    ) -> None:
+        """Credential-backed custom tools should stay in the primary runtime."""
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+
+        assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=None) is False
+        assert (
+            sandbox_proxy_module._sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=[tool_name]) is False
+        )
+
+    def test_get_tool_by_name_keeps_homeassistant_local_even_when_listed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Home Assistant should execute locally even if it appears in worker_tools."""
+
+        class _ForbiddenClient:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                msg = "Sandbox proxy should not be used for local-only tools."
+                raise AssertionError(msg)
+
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
+
+        fake_credentials = FakeCredentialsManager({})
+        monkeypatch.setattr("mindroom.custom_tools.homeassistant.get_credentials_manager", lambda: fake_credentials)
+
+        tool = get_tool_by_name(
+            "homeassistant",
+            worker_tools_override=["homeassistant"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.async_functions["list_entities"].entrypoint
+        assert entrypoint is not None
+
+        result = asyncio.run(entrypoint())
+        assert "Home Assistant is not configured" in result
 
     def test_get_tool_by_name_passes_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_tool_by_name should pass worker_tools_override through to the proxy wrapper."""

@@ -240,6 +240,7 @@ The target credentials model is:
 OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user`, `user_agent`, and `room_thread`.
 They only support unscoped agents and agents with `worker_scope=shared`.
+The credential-backed `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` tools also stay local even for `worker_scope=shared` rather than being routed through the sandbox runner.
 This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
 Dashboard credential management follows the same product boundary more generally.
 The dashboard may only read, write, test, or disconnect credentials for unscoped agents and agents with `worker_scope=shared`.

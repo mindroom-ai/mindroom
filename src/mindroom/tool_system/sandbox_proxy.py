@@ -32,6 +32,14 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
+_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(
+    {
+        "gmail",
+        "google_calendar",
+        "google_sheets",
+        "homeassistant",
+    },
+)
 
 _SANDBOX_RUNNER_MODE = env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
 
@@ -262,10 +270,7 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
-    if _SANDBOX_RUNNER_MODE:
-        return False
-
-    if _PROXY_URL is None:
+    if _SANDBOX_RUNNER_MODE or _PROXY_URL is None or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
     if worker_tools_override is not None:
@@ -273,10 +278,12 @@ def _sandbox_proxy_enabled_for_tool(
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
-    if _EXECUTION_MODE in {"all", "sandbox_all"}:
-        return True
 
-    return _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+    enabled = _EXECUTION_MODE in {"all", "sandbox_all"}
+    if not enabled:
+        enabled = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+
+    return enabled
 
 
 def _call_proxy_sync(
