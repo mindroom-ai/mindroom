@@ -700,6 +700,39 @@ class TestMemoryFunctions:
         assert alice_memory_file.exists()
 
     @pytest.mark.asyncio
+    async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_storage_path(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Worker-scoped prompt building should not re-resolve an already worker-scoped daily memory root."""
+        config.memory.backend = "file"
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].worker_scope = "user"
+        config.memory.file.max_entrypoint_lines = 0
+
+        alice_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session-alice",
+        )
+
+        with tool_execution_identity(alice_identity):
+            append_agent_daily_memory("Worker daily note", "general", storage_path, config)
+            prompt = await build_memory_enhanced_prompt(
+                "daily note",
+                "general",
+                storage_path,
+                config,
+            )
+
+        assert "Worker daily note" in prompt
+
+    @pytest.mark.asyncio
     async def test_file_backend_worker_scope_ignores_global_memory_file_path(
         self,
         storage_path: Path,

@@ -1089,13 +1089,14 @@ async def build_memory_enhanced_prompt(
         return await _build_file_memory_enhanced_prompt(
             prompt,
             agent_name,
+            storage_path,
             resolution,
             config,
             room_id,
         )
 
     enhanced_prompt = prompt
-    agent_memories = await search_agent_memories(prompt, agent_name, resolution.storage_path, config)
+    agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
     if agent_memories:
         agent_context = format_memories_as_context(agent_memories, "agent")
         enhanced_prompt = f"{agent_context}\n\n{prompt}"
@@ -1105,7 +1106,7 @@ async def build_memory_enhanced_prompt(
         room_memories = await search_room_memories(
             prompt,
             room_id,
-            resolution.storage_path,
+            storage_path,
             config,
             agent_name=agent_name,
         )
@@ -1120,6 +1121,7 @@ async def build_memory_enhanced_prompt(
 async def _build_file_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
+    base_storage_path: Path,
     resolution: _FileMemoryResolution,
     config: Config,
     room_id: str | None,
@@ -1134,7 +1136,7 @@ async def _build_file_memory_enhanced_prompt(
     if agent_entrypoint:
         context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")
 
-    agent_memories = await search_agent_memories(prompt, agent_name, resolution.storage_path, config)
+    agent_memories = await search_agent_memories(prompt, agent_name, base_storage_path, config)
     if agent_memories:
         context_chunks.append(format_memories_as_context(agent_memories, "agent file"))
 
@@ -1151,7 +1153,7 @@ async def _build_file_memory_enhanced_prompt(
         room_memories = await search_room_memories(
             prompt,
             room_id,
-            resolution.storage_path,
+            base_storage_path,
             config,
             agent_name=agent_name,
         )
