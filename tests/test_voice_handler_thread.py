@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom import voice_handler
 from mindroom.config.main import Config
-from mindroom.voice_handler import handle_voice_message
 
 
 @pytest.mark.asyncio
@@ -50,7 +50,7 @@ async def test_voice_handler_returns_transcription() -> None:
         patch("mindroom.voice_handler._transcribe_audio", return_value="what is the weather today"),
         patch("mindroom.voice_handler._process_transcription", return_value="what is the weather today"),
     ):
-        result = await handle_voice_message(client, room, voice_event, config)
+        result = await voice_handler._handle_voice_message(client, room, voice_event, config)
 
         # Verify the handler returns the transcribed message with voice prefix
         assert result == "🎤 what is the weather today"

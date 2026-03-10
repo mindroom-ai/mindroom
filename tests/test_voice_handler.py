@@ -53,7 +53,7 @@ class TestVoiceHandler:
         event = MagicMock()
 
         # Should return immediately without processing
-        await voice_handler.handle_voice_message(client, room, event, config)
+        await voice_handler._handle_voice_message(client, room, event, config)
 
         # Verify no processing occurred
         client.download.assert_not_called()
@@ -108,14 +108,14 @@ class TestVoiceHandler:
 
         with (
             patch(
-                "mindroom.voice_handler.download_audio",
+                "mindroom.voice_handler._download_audio",
                 new=AsyncMock(return_value=Audio(content=b"audio", mime_type="audio/ogg")),
             ),
             patch("mindroom.voice_handler._transcribe_audio", return_value="help me"),
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
-            result = await voice_handler.handle_voice_message(client, room, event, config)
+            result = await voice_handler._handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
         assert mock_process.await_count == 1
@@ -138,7 +138,7 @@ class TestVoiceHandler:
             ) as mock_download,
             patch("mindroom.voice_handler.media_mime_type", return_value="audio/ogg"),
         ):
-            result = await voice_handler.download_audio(client, event)
+            result = await voice_handler._download_audio(client, event)
 
         assert result is not None
         assert result.content == b"audio_data"
@@ -161,7 +161,7 @@ class TestVoiceHandler:
             ) as mock_download,
             patch("mindroom.voice_handler.media_mime_type", return_value="audio/mpeg"),
         ):
-            result = await voice_handler.download_audio(client, event)
+            result = await voice_handler._download_audio(client, event)
 
         assert result is not None
         assert result.content == b"decrypted_audio_data"
@@ -186,7 +186,7 @@ class TestVoiceHandler:
         voice_handler._voice_normalization_tasks.clear()
         cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
 
-        with patch("mindroom.voice_handler.download_audio", new=AsyncMock(return_value=None)):
+        with patch("mindroom.voice_handler._download_audio", new=AsyncMock(return_value=None)):
             prepared = await voice_handler.prepare_voice_message(
                 client,
                 tmp_path,

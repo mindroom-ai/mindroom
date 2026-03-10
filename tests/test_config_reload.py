@@ -14,7 +14,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import MultiAgentOrchestrator, _get_changed_agents
+from mindroom.orchestration.config_updates import _get_changed_agents
+from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import TEST_PASSWORD
 
 

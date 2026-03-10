@@ -13,7 +13,7 @@ _REPO_FRONTEND_DIST_DIR = _REPO_FRONTEND_SOURCE_DIR / "dist"
 _FRONTEND_BUILD_ATTEMPTED = False
 
 
-def resolve_frontend_dist_dir() -> Path | None:
+def _resolve_frontend_dist_dir() -> Path | None:
     """Return the bundled or locally built dashboard directory if it exists."""
     override = os.getenv("MINDROOM_FRONTEND_DIST")
     if override:
@@ -29,7 +29,7 @@ def resolve_frontend_dist_dir() -> Path | None:
 
 def ensure_frontend_dist_dir() -> Path | None:
     """Return dashboard assets, building the repo checkout when needed."""
-    existing = resolve_frontend_dist_dir()
+    existing = _resolve_frontend_dist_dir()
     if existing is not None:
         return existing
 
@@ -41,7 +41,7 @@ def _build_repo_frontend_dist() -> Path | None:
     global _FRONTEND_BUILD_ATTEMPTED
 
     if _FRONTEND_BUILD_ATTEMPTED:
-        return resolve_frontend_dist_dir()
+        return _resolve_frontend_dist_dir()
     _FRONTEND_BUILD_ATTEMPTED = True
 
     if os.getenv("MINDROOM_AUTO_BUILD_FRONTEND") == "0":
@@ -59,4 +59,4 @@ def _build_repo_frontend_dist() -> Path | None:
     subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
     subprocess.run([bun, "run", "tsc"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
     subprocess.run([bun, "run", "vite", "build"], check=True, cwd=_REPO_FRONTEND_SOURCE_DIR)
-    return resolve_frontend_dist_dir()
+    return _resolve_frontend_dist_dir()
