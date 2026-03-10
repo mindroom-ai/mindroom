@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
-    consume_pending_oauth_state,
+    consume_pending_oauth_request,
     issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
@@ -200,9 +200,17 @@ async def connect_oauth(
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    state = issue_pending_oauth_state(request, "homeassistant", agent_name)
+    resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
+    state = issue_pending_oauth_state(
+        request,
+        "homeassistant",
+        agent_name,
+        payload={
+            "instance_url": config.instance_url,
+            "client_id": config.client_id,
+        },
+    )
 
     auth_params = {
         "client_id": config.client_id,
@@ -213,14 +221,6 @@ async def connect_oauth(
 
     # Build query string
     auth_url = f"{config.instance_url}/auth/authorize?{urlencode(auth_params)}"
-
-    # Store config for callback
-    temp_config = {
-        "instance_url": config.instance_url,
-        "client_id": config.client_id,
-        "redirect_uri": redirect_uri,
-    }
-    _save_config(target, temp_config)
 
     return HomeAssistantAuthUrl(auth_url=auth_url)
 
@@ -288,16 +288,12 @@ async def callback(request: Request) -> RedirectResponse:
     from mindroom.api.main import verify_user  # noqa: PLC0415
 
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
-    agent_name = consume_pending_oauth_state(request, "homeassistant", state)
-
-    # Get stored config
+    pending = consume_pending_oauth_request(request, "homeassistant", state)
+    agent_name = pending.agent_name
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
-    if not config:
-        raise HTTPException(status_code=503, detail="No configuration found")
 
-    instance_url = config.get("instance_url")
-    client_id = config.get("client_id")
+    instance_url = (pending.payload or {}).get("instance_url")
+    client_id = (pending.payload or {}).get("client_id")
 
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")

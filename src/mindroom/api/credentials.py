@@ -24,8 +24,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
-
-_UNSUPPORTED_DASHBOARD_WORKER_SCOPES = {"room_thread"}
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
 _pending_oauth_state_lock = threading.Lock()
 
@@ -37,6 +35,7 @@ class PendingOAuthState:
     service: str
     user_id: str
     agent_name: str | None
+    payload: dict[str, str] | None
     created_at: float
 
 
@@ -89,7 +88,13 @@ def _prune_expired_pending_oauth_states(now: float) -> None:
         _pending_oauth_states.pop(state, None)
 
 
-def issue_pending_oauth_state(request: Request, service: str, agent_name: str | None = None) -> str:
+def issue_pending_oauth_state(
+    request: Request,
+    service: str,
+    agent_name: str | None = None,
+    *,
+    payload: dict[str, str] | None = None,
+) -> str:
     """Create a short-lived server-side OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
     state = secrets.token_urlsafe(24)
@@ -98,6 +103,7 @@ def issue_pending_oauth_state(request: Request, service: str, agent_name: str | 
         service=service,
         user_id=user_id,
         agent_name=agent_name,
+        payload=payload,
         created_at=now,
     )
     with _pending_oauth_state_lock:
@@ -106,7 +112,7 @@ def issue_pending_oauth_state(request: Request, service: str, agent_name: str | 
     return state
 
 
-def consume_pending_oauth_state(request: Request, service: str, state: str) -> str | None:
+def _consume_pending_oauth_request(request: Request, service: str, state: str) -> PendingOAuthState:
     """Consume and validate a previously issued dashboard OAuth state token."""
     user_id = _require_auth_user_id(request)
     now = time.time()
@@ -122,7 +128,21 @@ def consume_pending_oauth_state(request: Request, service: str, state: str) -> s
         raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
     with _pending_oauth_state_lock:
         _pending_oauth_states.pop(state, None)
-    return pending.agent_name
+    return pending
+
+
+def consume_pending_oauth_state(request: Request, service: str, state: str) -> str | None:
+    """Consume and validate a previously issued dashboard OAuth state token."""
+    return _consume_pending_oauth_request(request, service, state).agent_name
+
+
+def consume_pending_oauth_request(
+    request: Request,
+    service: str,
+    state: str,
+) -> PendingOAuthState:
+    """Return the validated pending OAuth request for a callback."""
+    return _consume_pending_oauth_request(request, service, state)
 
 
 def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
@@ -142,6 +162,11 @@ def _build_dashboard_execution_identity(request: Request, agent_name: str) -> To
         tenant_id=tenant_id,
         account_id=account_id,
     )
+
+
+def dashboard_supports_worker_credentials(worker_scope: WorkerScope | None) -> bool:
+    """Return whether the dashboard can resolve this worker scope to a concrete worker."""
+    return worker_scope in (None, "shared")
 
 
 def _reject_raw_worker_targeting(request: Request) -> None:
@@ -193,7 +218,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    if worker_scope in _UNSUPPORTED_DASHBOARD_WORKER_SCOPES:
+    if not dashboard_supports_worker_credentials(worker_scope):
         raise HTTPException(
             status_code=400,
             detail=(

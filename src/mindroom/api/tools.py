@@ -5,12 +5,17 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from mindroom.api.credentials import load_credentials_for_target, resolve_request_credentials_target
+from mindroom.api.credentials import (
+    dashboard_supports_worker_credentials,
+    load_credentials_for_target,
+    resolve_request_credentials_target,
+)
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
+    WorkerScope,
     worker_scope_allows_shared_only_integrations,
 )
 
@@ -73,8 +78,17 @@ def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
         )
 
 
-def _update_tools_statuses(tools: list[dict[str, Any]], request: Request, agent_name: str | None) -> None:
+def _update_tools_statuses(
+    tools: list[dict[str, Any]],
+    request: Request,
+    agent_name: str | None,
+    *,
+    worker_scope: WorkerScope | None,
+) -> None:
     """Update tool availability using the resolved credential target."""
+    if not dashboard_supports_worker_credentials(worker_scope):
+        return
+
     target = resolve_request_credentials_target(request, agent_name=agent_name)
     credentials_cache: dict[str, dict[str, Any] | None] = {}
 
@@ -122,6 +136,6 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     if not worker_scope_allows_shared_only_integrations(worker_scope):
         tools = [tool for tool in tools if tool["name"] not in SHARED_ONLY_INTEGRATION_NAMES]
     _append_config_only_presets(tools)
-    _update_tools_statuses(tools, request, agent_name)
+    _update_tools_statuses(tools, request, agent_name, worker_scope=worker_scope)
 
     return ToolsResponse(tools=tools)

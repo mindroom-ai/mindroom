@@ -365,3 +365,39 @@ def test_pending_oauth_state_rejects_different_user() -> None:
     issuer_response = client.post(f"/consume/google?user_id=alice&state={state}")
     assert issuer_response.status_code == 200
     assert issuer_response.json() == {"agent_name": "general"}
+
+
+def test_pending_oauth_request_preserves_payload() -> None:
+    """Pending OAuth state should round-trip service-specific callback payload."""
+    app = FastAPI()
+
+    @app.post("/issue/{service}")
+    async def issue(service: str, request: Request) -> dict[str, str]:
+        request.state.auth_user = {"user_id": "alice"}
+        return {
+            "state": credentials_api.issue_pending_oauth_state(
+                request,
+                service,
+                "general",
+                payload={"instance_url": "https://ha.example.com", "client_id": "client-id"},
+            ),
+        }
+
+    @app.post("/consume/{service}")
+    async def consume(service: str, request: Request, state: str) -> dict[str, str | dict[str, str] | None]:
+        request.state.auth_user = {"user_id": "alice"}
+        pending = credentials_api.consume_pending_oauth_request(request, service, state)
+        return {
+            "agent_name": pending.agent_name,
+            "payload": pending.payload,
+        }
+
+    client = TestClient(app)
+    state = client.post("/issue/homeassistant").json()["state"]
+    response = client.post(f"/consume/homeassistant?state={state}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "agent_name": "general",
+        "payload": {"instance_url": "https://ha.example.com", "client_id": "client-id"},
+    }

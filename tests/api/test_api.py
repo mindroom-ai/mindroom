@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, NoReturn
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -378,7 +378,7 @@ def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(tes
 
 
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
-    """Google dashboard actions should reject isolating worker scopes."""
+    """Google dashboard actions should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
 
     with (
@@ -387,11 +387,11 @@ def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClien
         response = test_client.post("/api/google/disconnect?agent_name=general")
 
     assert response.status_code == 400
-    assert "worker_scope=shared" in response.json()["detail"]
+    assert "worker_scope=user" in response.json()["detail"]
 
 
 def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client: TestClient) -> None:
-    """Home Assistant OAuth should reject isolating worker scopes."""
+    """Home Assistant OAuth should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
 
     with (
@@ -406,7 +406,7 @@ def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client:
         )
 
     assert response.status_code == 400
-    assert "worker_scope=shared" in response.json()["detail"]
+    assert "worker_scope=user" in response.json()["detail"]
 
 
 def test_google_connect_uses_pending_oauth_state(
@@ -489,6 +489,59 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     assert "agent_name=general" not in params["redirect_uri"][0]
 
 
+def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
+    api_key_client: TestClient,
+) -> None:
+    """Home Assistant OAuth should save only the final token payload, not temp callback state."""
+    config = _config_with_worker_scope("shared")
+    target = MagicMock()
+    target.target_manager = MagicMock()
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    token_response = MagicMock()
+    token_response.status_code = 200
+    token_response.json.return_value = {
+        "access_token": "ha-access",
+        "refresh_token": "ha-refresh",
+        "expires_in": 3600,
+    }
+    async_client = MagicMock()
+    async_client.__aenter__.return_value.post.return_value = token_response
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
+        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
+    ):
+        connect_response = api_key_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "https://ha.example.com",
+                "client_id": "client-id",
+            },
+        )
+        assert connect_response.status_code == 200
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+
+        callback_response = api_key_client.get(
+            f"/api/homeassistant/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+
+    assert callback_response.status_code in {302, 307}
+    target.target_manager.save_credentials.assert_called_once_with(
+        "homeassistant",
+        {
+            "instance_url": "https://ha.example.com",
+            "client_id": "client-id",
+            "access_token": "ha-access",
+            "refresh_token": "ha-refresh",
+            "expires_in": 3600,
+        },
+    )
+
+
 def test_spotify_connect_uses_pending_oauth_state(
     api_key_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -525,7 +578,7 @@ def test_spotify_connect_uses_pending_oauth_state(
 
 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
-    """Spotify dashboard status should reject isolating worker scopes."""
+    """Spotify dashboard status should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")
 
     with (
@@ -534,7 +587,7 @@ def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) 
         response = test_client.get("/api/integrations/spotify/status?agent_name=general")
 
     assert response.status_code == 400
-    assert "worker_scope=shared" in response.json()["detail"]
+    assert "worker_scope=user" in response.json()["detail"]
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
