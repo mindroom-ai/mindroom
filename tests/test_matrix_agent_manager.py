@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import nio
 import pytest
 import yaml
@@ -30,6 +31,29 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
+
+
+def _recording_httpx_async_client(
+    captured_requests: list[tuple[str, dict[str, object]]],
+    response: httpx.Response,
+) -> type[object]:
+    """Build a minimal AsyncClient replacement that records POST payloads."""
+
+    class _FakeAsyncClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, url: str, json: dict[str, object]) -> httpx.Response:
+            captured_requests.append((url, json))
+            return response
+
+    return _FakeAsyncClient
 
 
 @pytest.fixture(autouse=True)
@@ -249,26 +273,109 @@ class TestMatrixRegistration:
         monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", registration_token)
 
         mock_client = AsyncMock()
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id="@test_user:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, dict[str, object]]] = []
+
+        with (
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    captured_requests,
+                    httpx.Response(200, json={"user_id": "@test_user:localhost"}),
+                ),
+            ),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
+            mock_matrix_client.return_value.__aenter__.return_value = mock_client
+
+            user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
+
+            assert user_id == "@test_user:localhost"
+            assert captured_requests == [
+                (
+                    "http://localhost:8008/_matrix/client/v3/register",
+                    {
+                        "username": "test_user",
+                        "password": test_pass,
+                        "device_name": "mindroom_agent",
+                        "auth": {
+                            "type": "m.login.registration_token",
+                            "token": registration_token,
+                        },
+                    },
+                ),
+            ]
+            mock_client.register.assert_not_called()
+            mock_client.register_with_token.assert_not_called()
+            mock_client.login.assert_called_once_with(test_pass)
+            mock_client.set_displayname.assert_called_once_with("Test User")
+
+    @pytest.mark.asyncio
+    async def test_register_user_falls_back_to_matrix_nio_token_flow_on_uiaa_challenge(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec-strict homeservers should fall back to matrix-nio's interactive token flow."""
+        test_pass = "test_pass"  # noqa: S105
+        registration_token = "token-123"  # noqa: S105
+        monkeypatch.setenv("MATRIX_REGISTRATION_TOKEN", registration_token)
+
+        mock_client = AsyncMock()
         mock_client.register_with_token.return_value = nio.RegisterResponse(
             user_id="@test_user:localhost",
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
         mock_client.set_displayname.return_value = AsyncMock()
+        captured_requests: list[tuple[str, dict[str, object]]] = []
 
-        with patch("mindroom.matrix.users.matrix_client") as mock_matrix_client:
+        with (
+            patch(
+                "mindroom.matrix.users.httpx.AsyncClient",
+                _recording_httpx_async_client(
+                    captured_requests,
+                    httpx.Response(
+                        401,
+                        json={
+                            "session": "sess-123",
+                            "flows": [{"stages": ["m.login.registration_token"]}],
+                        },
+                    ),
+                ),
+            ),
+            patch("mindroom.matrix.users.matrix_client") as mock_matrix_client,
+        ):
             mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
             user_id = await _register_user("http://localhost:8008", "test_user", test_pass, "Test User")
 
             assert user_id == "@test_user:localhost"
+            assert captured_requests == [
+                (
+                    "http://localhost:8008/_matrix/client/v3/register",
+                    {
+                        "username": "test_user",
+                        "password": test_pass,
+                        "device_name": "mindroom_agent",
+                        "auth": {
+                            "type": "m.login.registration_token",
+                            "token": registration_token,
+                        },
+                    },
+                ),
+            ]
             mock_client.register_with_token.assert_called_once_with(
                 username="test_user",
                 password=test_pass,
                 registration_token=registration_token,
                 device_name="mindroom_agent",
             )
-            mock_client.register.assert_not_called()
+            mock_client.login.assert_not_called()
             mock_client.set_displayname.assert_called_once_with("Test User")
 
     @pytest.mark.asyncio
@@ -544,27 +651,68 @@ class TestAgentUserCreation:
         mock_register.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users.matrix_client")
     @patch("mindroom.matrix.users._save_agent_credentials")
     @patch("mindroom.matrix.users._get_agent_credentials")
-    async def test_create_agent_user_existing(
+    async def test_create_agent_user_existing_credentials_log_in_directly(
         self,
         mock_get_creds: MagicMock,
         mock_save_creds: MagicMock,
-        mock_register: AsyncMock,
+        mock_matrix_client: MagicMock,
     ) -> None:
-        """Test creating agent user with existing credentials."""
+        """Existing credentials should be reused via login without re-registration."""
         mock_get_creds.return_value = {
             "username": "mindroom_calculator",
             "password": "existing_pass",
         }
-        mock_register.return_value = "@mindroom_calculator:localhost"
+        mock_client = AsyncMock()
+        mock_client.login.return_value = MagicMock(spec=nio.LoginResponse)
+        mock_matrix_client.return_value.__aenter__.return_value = mock_client
 
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
 
         assert agent_user.password == "existing_pass"  # noqa: S105
         mock_save_creds.assert_not_called()  # Should not save again
-        mock_register.assert_called_once()  # Still tries to register/verify
+        mock_matrix_client.assert_called_once_with(
+            "http://localhost:8008",
+            user_id="@mindroom_calculator:localhost",
+        )
+        mock_client.login.assert_called_once_with("existing_pass")
+        mock_client.set_displayname.assert_called_once_with("CalculatorAgent")
+
+    @pytest.mark.asyncio
+    @patch("mindroom.matrix.users._register_user")
+    @patch("mindroom.matrix.users.matrix_client")
+    @patch("mindroom.matrix.users._save_agent_credentials")
+    @patch("mindroom.matrix.users._get_agent_credentials")
+    async def test_create_agent_user_existing_credentials_retry_registration_on_login_failure(
+        self,
+        mock_get_creds: MagicMock,
+        mock_save_creds: MagicMock,
+        mock_matrix_client: MagicMock,
+        mock_register: AsyncMock,
+    ) -> None:
+        """Existing credentials should retry registration when login no longer works."""
+        mock_get_creds.return_value = {
+            "username": "mindroom_calculator",
+            "password": "stale_pass",
+        }
+        mock_client = AsyncMock()
+        mock_client.login.return_value = MagicMock(spec=nio.LoginError)
+        mock_matrix_client.return_value.__aenter__.return_value = mock_client
+        mock_register.return_value = "@mindroom_calculator:localhost"
+
+        agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent")
+
+        assert agent_user.password == "stale_pass"  # noqa: S105
+        mock_save_creds.assert_not_called()
+        mock_client.login.assert_called_once_with("stale_pass")
+        mock_register.assert_called_once_with(
+            homeserver="http://localhost:8008",
+            username="mindroom_calculator",
+            password="stale_pass",  # noqa: S106
+            display_name="CalculatorAgent",
+        )
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")

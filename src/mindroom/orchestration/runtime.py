@@ -116,7 +116,7 @@ async def _run_with_retry(
             raise
         except Exception as exc:
             if permanent_error_check is not None and permanent_error_check(exc):
-                logger.exception("%s failed with a permanent error", step_name)
+                logger.error("%s failed with a permanent error: %s", step_name, exc)  # noqa: TRY400
                 raise
             attempt += 1
             retry_in_seconds = _retry_delay_seconds(
