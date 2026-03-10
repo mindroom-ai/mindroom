@@ -25,6 +25,32 @@ from mindroom.credentials import get_credentials_manager
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+_SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
+
+
+class ToolInitOverrideError(ValueError):
+    """Raised when a caller supplies unsupported tool init overrides."""
+
+
+def _sanitize_tool_init_overrides(
+    tool_name: str,
+    tool_init_overrides: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if not tool_init_overrides:
+        return None
+
+    metadata = TOOL_METADATA[tool_name]
+    allowed_fields = {
+        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
+    }
+    unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
+    if unexpected_fields:
+        allowed = ", ".join(sorted(allowed_fields)) or "none"
+        unexpected = ", ".join(unexpected_fields)
+        msg = f"Unsupported tool init override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
+        raise ToolInitOverrideError(msg)
+
+    return {name: tool_init_overrides[name] for name in tool_init_overrides}
 
 
 def _register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
@@ -60,14 +86,15 @@ def _build_tool_instance(
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
+    safe_tool_init_overrides = _sanitize_tool_init_overrides(tool_name, tool_init_overrides)
 
     init_kwargs = {}
     if metadata.config_fields:
         for field in metadata.config_fields:
             if field.name in credentials:
                 init_kwargs[field.name] = credentials[field.name]
-            if tool_init_overrides and field.name in tool_init_overrides:
-                init_kwargs[field.name] = tool_init_overrides[field.name]
+            if safe_tool_init_overrides and field.name in safe_tool_init_overrides:
+                init_kwargs[field.name] = safe_tool_init_overrides[field.name]
 
     toolkit = tool_class(**init_kwargs)
     if disable_sandbox_proxy:
@@ -76,7 +103,7 @@ def _build_tool_instance(
         tool_name,
         toolkit,
         sandbox_tools_override=sandbox_tools_override,
-        tool_init_overrides=tool_init_overrides,
+        tool_init_overrides=safe_tool_init_overrides,
     )
 
 

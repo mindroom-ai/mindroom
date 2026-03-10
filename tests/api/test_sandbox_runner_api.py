@@ -178,6 +178,29 @@ def test_sandbox_runner_rejects_direct_credential_overrides(
     assert "lease_id" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_unsafe_tool_init_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool init overrides should reject non-whitelisted config fields."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "openai",
+            "function_name": "list_models",
+            "args": [],
+            "kwargs": {},
+            "tool_init_overrides": {"api_key": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "api_key" in response.json()["detail"]
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)

@@ -8,7 +8,7 @@ import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from tests.conftest import FakeCredentialsManager
 
 
@@ -139,6 +139,12 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     execute_url, execute_payload = captured_calls[1]
     assert execute_url.endswith("/api/sandbox-runner/execute")
     assert execute_payload["lease_id"] == "lease-123"
+
+
+def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
+    """Tool init overrides should allow only the explicit safe whitelist."""
+    with pytest.raises(ToolInitOverrideError, match="api_key"):
+        get_tool_by_name("openai", tool_init_overrides={"api_key": "sk-test"})
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:

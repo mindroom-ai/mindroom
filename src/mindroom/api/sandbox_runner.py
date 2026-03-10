@@ -20,7 +20,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
-from mindroom.tool_system.metadata import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.metadata import ToolInitOverrideError, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
 
 if TYPE_CHECKING:
@@ -160,6 +160,8 @@ def _resolve_entrypoint(
             credential_overrides=credential_overrides,
             tool_init_overrides=tool_init_overrides,
         )
+    except ToolInitOverrideError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     function = toolkit.functions.get(function_name) or toolkit.async_functions.get(function_name)
