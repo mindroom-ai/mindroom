@@ -95,6 +95,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     kwargs: dict[str, Any] = Field(default_factory=dict)
     lease_id: str | None = None
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -148,6 +149,7 @@ def _resolve_entrypoint(
     tool_name: str,
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config()
     try:
@@ -155,6 +157,7 @@ def _resolve_entrypoint(
             tool_name,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
+            tool_init_overrides=tool_init_overrides,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -236,6 +239,7 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
         tool_name=request.tool_name,
         function_name=request.function_name,
         credential_overrides=request.credential_overrides or None,
+        tool_init_overrides=request.tool_init_overrides or None,
     )
 
     try:
@@ -367,12 +371,14 @@ async def execute_tool_call(
     request: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    credential_overrides: dict[str, object] = {}
+    credential_overrides = dict(request.credential_overrides)
     if request.lease_id is not None:
-        credential_overrides = _consume_credential_lease(
-            request.lease_id,
-            tool_name=request.tool_name,
-            function_name=request.function_name,
+        credential_overrides.update(
+            _consume_credential_lease(
+                request.lease_id,
+                tool_name=request.tool_name,
+                function_name=request.function_name,
+            ),
         )
 
     request.credential_overrides = credential_overrides

@@ -185,6 +185,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         name: str,
         *,
         credential_overrides: dict[str, object] | None = None,  # noqa: ARG001
+        tool_init_overrides: dict[str, object] | None = None,  # noqa: ARG001
         sandbox_tools_override: list[str] | None = None,  # noqa: ARG001
     ) -> MagicMock:
         if name == "browser":
@@ -251,7 +252,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
 
     assert workspace.is_dir()
     overrides_by_tool = {
-        call.args[0]: call.kwargs.get("credential_overrides") for call in mock_get_tool_by_name.call_args_list
+        call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
@@ -289,7 +290,7 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
         os.chdir(original_cwd)
 
     assert mock_get_tool_by_name.call_args is not None
-    assert mock_get_tool_by_name.call_args.kwargs["credential_overrides"] == {"base_dir": str(expected_workspace)}
+    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
     assert expected_workspace.is_dir()
 
 

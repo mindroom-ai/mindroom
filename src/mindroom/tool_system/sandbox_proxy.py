@@ -203,6 +203,7 @@ def _call_proxy_sync(
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    tool_init_overrides: dict[str, object] | None = None,
 ) -> object:
     if _PROXY_TOKEN is None:
         msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
@@ -238,6 +239,8 @@ def _call_proxy_sync(
             "args": [to_json_compatible(arg) for arg in args],
             "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
         }
+        if tool_init_overrides:
+            payload["tool_init_overrides"] = to_json_compatible(tool_init_overrides)
         if lease_id is not None:
             payload["lease_id"] = lease_id
 
@@ -254,7 +257,13 @@ def _call_proxy_sync(
     raise RuntimeError(str(error))
 
 
-def _wrap_sync_function(function: Function, tool_name: str, function_name: str) -> Function:
+def _wrap_sync_function(
+    function: Function,
+    tool_name: str,
+    function_name: str,
+    *,
+    tool_init_overrides: dict[str, object] | None = None,
+) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
 
@@ -265,13 +274,20 @@ def _wrap_sync_function(function: Function, tool_name: str, function_name: str) 
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            tool_init_overrides=tool_init_overrides,
         )
 
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
 
-def _wrap_async_function(function: Function, tool_name: str, function_name: str) -> Function:
+def _wrap_async_function(
+    function: Function,
+    tool_name: str,
+    function_name: str,
+    *,
+    tool_init_overrides: dict[str, object] | None = None,
+) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
 
@@ -283,6 +299,7 @@ def _wrap_async_function(function: Function, tool_name: str, function_name: str)
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            tool_init_overrides=tool_init_overrides,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -294,6 +311,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     toolkit: Toolkit,
     *,
     sandbox_tools_override: list[str] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
@@ -304,11 +322,21 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         return toolkit
 
     toolkit.functions = {
-        function_name: _wrap_sync_function(function, tool_name, function_name)
+        function_name: _wrap_sync_function(
+            function,
+            tool_name,
+            function_name,
+            tool_init_overrides=tool_init_overrides,
+        )
         for function_name, function in toolkit.functions.items()
     }
     toolkit.async_functions = {
-        function_name: _wrap_async_function(function, tool_name, function_name)
+        function_name: _wrap_async_function(
+            function,
+            tool_name,
+            function_name,
+            tool_init_overrides=tool_init_overrides,
+        )
         for function_name, function in toolkit.async_functions.items()
     }
     return toolkit

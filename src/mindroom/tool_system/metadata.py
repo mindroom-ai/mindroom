@@ -50,6 +50,7 @@ def _build_tool_instance(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
     sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
@@ -65,11 +66,18 @@ def _build_tool_instance(
         for field in metadata.config_fields:
             if field.name in credentials:
                 init_kwargs[field.name] = credentials[field.name]
+            if tool_init_overrides and field.name in tool_init_overrides:
+                init_kwargs[field.name] = tool_init_overrides[field.name]
 
     toolkit = tool_class(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
-    return maybe_wrap_toolkit_for_sandbox_proxy(tool_name, toolkit, sandbox_tools_override=sandbox_tools_override)
+    return maybe_wrap_toolkit_for_sandbox_proxy(
+        tool_name,
+        toolkit,
+        sandbox_tools_override=sandbox_tools_override,
+        tool_init_overrides=tool_init_overrides,
+    )
 
 
 def get_tool_by_name(
@@ -77,6 +85,7 @@ def get_tool_by_name(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
     sandbox_tools_override: list[str] | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
@@ -90,6 +99,7 @@ def get_tool_by_name(
         tool_name,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
+        tool_init_overrides=tool_init_overrides,
         sandbox_tools_override=sandbox_tools_override,
     )
 

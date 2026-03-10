@@ -238,7 +238,7 @@ def _tool_supports_base_dir(tool_name: str) -> bool:
     return any(field.name == "base_dir" for field in metadata.config_fields)
 
 
-def _tool_credential_overrides(
+def _tool_init_overrides(
     tool_name: str,
     *,
     workspace_path: Path | None,
@@ -509,7 +509,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     get_tool_by_name(
                         tool_name,
-                        credential_overrides=_tool_credential_overrides(tool_name, workspace_path=workspace_path),
+                        tool_init_overrides=_tool_init_overrides(tool_name, workspace_path=workspace_path),
                         sandbox_tools_override=sandbox_tools,
                     ),
                 )

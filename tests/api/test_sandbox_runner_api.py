@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
@@ -47,6 +52,35 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     data = response.json()
     assert data["ok"] is True
     assert '"result": 3' in data["result"]
+
+
+def test_sandbox_runner_applies_tool_init_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox runner should instantiate tools with forwarded non-secret init overrides."""
+    _set_sandbox_token(monkeypatch)
+    workspace = tmp_path / "mind_data"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "USER.md").write_text("Bas\n", encoding="utf-8")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": str(workspace)},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert "USER.md" in data["result"]
 
 
 def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
