@@ -12,7 +12,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from mindroom.credentials import CredentialsManager, get_credentials_manager, validate_service_name
+from mindroom.credentials import (
+    CredentialsManager,
+    get_credentials_manager,
+    merge_scoped_credentials,
+    validate_service_name,
+)
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
@@ -260,15 +265,11 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
 
-    shared_credentials = target.base_manager.load_credentials(service)
-    merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, dict) and shared_credentials.get("_source") == "env":
-        merged_credentials.update(shared_credentials)
-
-    worker_credentials = target.target_manager.load_credentials(service)
-    if isinstance(worker_credentials, dict):
-        merged_credentials.update(worker_credentials)
-    return merged_credentials or None
+    return merge_scoped_credentials(
+        service,
+        base_manager=target.base_manager,
+        worker_manager=target.target_manager,
+    )
 
 
 class SetApiKeyRequest(BaseModel):

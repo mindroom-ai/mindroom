@@ -127,7 +127,7 @@ def resolve_worker_key(
         if requester_key is None:
             return None
         worker_key = f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
-    else:
+    elif worker_scope == "room_thread":
         room_key = identity.room_id
         if room_key is None:
             return None
@@ -138,6 +138,9 @@ def resolve_worker_key(
             f"{_normalize_worker_key_part(room_key)}:"
             f"{_normalize_worker_key_part(thread_key)}"
         )
+    else:
+        msg = f"Unknown worker scope: {worker_scope}"
+        raise ValueError(msg)
 
     return worker_key
 

@@ -442,6 +442,7 @@ describe('Integrations', () => {
         /google services, home assistant, spotify, gmail, google calendar, and google sheets/i
       )
     ).toBeInTheDocument();
+    expect(screen.getByText('worker_scope=shared', { selector: 'code' })).toBeInTheDocument();
     expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
     expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
     expect(screen.queryByText('Weather')).toBeInTheDocument();

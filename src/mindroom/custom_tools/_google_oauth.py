@@ -25,7 +25,7 @@ class ScopedGoogleOAuthMixin:
 
     _oauth_tool_name: str
     _oauth_log_name: str
-    DEFAULT_SCOPES: list[str]
+    DEFAULT_SCOPES: list[str] | dict[str, str]
     _oauth_logger: Logger
     _creds_manager: CredentialsManager
     _worker_scope: WorkerScope | None
@@ -92,13 +92,18 @@ class ScopedGoogleOAuthMixin:
         ensure_tool_deps(_GOOGLE_DEPS, self._oauth_tool_name)
         from google.oauth2.credentials import Credentials  # noqa: PLC0415
 
+        scopes = token_data.get("scopes")
+        if not isinstance(scopes, list):
+            default_scopes = self.DEFAULT_SCOPES
+            scopes = list(default_scopes.values()) if isinstance(default_scopes, dict) else default_scopes
+
         return Credentials(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
             token_uri=token_data.get("token_uri"),
             client_id=token_data.get("client_id"),
             client_secret=token_data.get("client_secret"),
-            scopes=token_data.get("scopes", self.DEFAULT_SCOPES),
+            scopes=scopes,
         )
 
     def _load_stored_credentials(self) -> Any:  # noqa: ANN401

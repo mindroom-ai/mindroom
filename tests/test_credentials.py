@@ -11,6 +11,7 @@ from mindroom.credentials import (
     CredentialsManager,
     get_credentials_manager,
     load_scoped_credentials,
+    merge_scoped_credentials,
     save_scoped_credentials,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -263,6 +264,24 @@ class TestCredentialsManager:
             )
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
+
+    def test_merge_scoped_credentials_overlays_worker_credentials(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker-scoped credentials should overlay env-backed shared credentials."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("google", {"api_key": "env-key", "_source": "env", "shared_only": "yes"})
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
+
+        merged = merge_scoped_credentials(
+            "google",
+            base_manager=manager,
+            worker_manager=worker_manager,
+        )
+
+        assert merged == {"api_key": "worker-key", "_source": "ui", "shared_only": "yes"}
 
     def test_complex_credentials_structure(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading complex nested credentials."""

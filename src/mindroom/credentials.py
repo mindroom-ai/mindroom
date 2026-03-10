@@ -212,6 +212,26 @@ def _resolve_worker_credentials_manager(
     return credentials_manager.for_worker(worker_key)
 
 
+def merge_scoped_credentials(
+    service: str,
+    *,
+    base_manager: CredentialsManager,
+    worker_manager: CredentialsManager | None,
+) -> dict[str, Any] | None:
+    """Merge env-backed shared credentials with worker-scoped overrides."""
+    shared_credentials = base_manager.load_credentials(service)
+    merged_credentials: dict[str, Any] = {}
+    if isinstance(shared_credentials, Mapping) and shared_credentials.get("_source") == "env":
+        merged_credentials.update(shared_credentials)
+
+    if worker_manager is not None:
+        worker_credentials = worker_manager.load_credentials(service)
+        if isinstance(worker_credentials, Mapping):
+            merged_credentials.update(worker_credentials)
+
+    return merged_credentials or None
+
+
 def load_scoped_credentials(
     service: str,
     *,
@@ -231,17 +251,11 @@ def load_scoped_credentials(
         credentials_manager=manager,
         execution_identity=execution_identity,
     )
-    shared_credentials = manager.load_credentials(service)
-    merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, Mapping) and shared_credentials.get("_source") == "env":
-        merged_credentials.update(shared_credentials)
-    if worker_manager is None:
-        return merged_credentials or None
-
-    worker_credentials = worker_manager.load_credentials(service)
-    if isinstance(worker_credentials, Mapping):
-        merged_credentials.update(worker_credentials)
-    return merged_credentials or None
+    return merge_scoped_credentials(
+        service,
+        base_manager=manager,
+        worker_manager=worker_manager,
+    )
 
 
 def save_scoped_credentials(

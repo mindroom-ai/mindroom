@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -418,6 +418,22 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert worker_root / "sessions" / "general.db" in db_files
     assert worker_root / "learning" / "general.db" in db_files
+
+
+def test_resolve_worker_key_rejects_unknown_scope() -> None:
+    """Unknown worker scopes should fail loudly instead of silently acting like room_thread."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with pytest.raises(ValueError, match="Unknown worker scope"):
+        resolve_worker_key(cast("WorkerScope", "bogus"), execution_identity)
 
 
 @patch("mindroom.agents.SqliteDb")
