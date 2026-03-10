@@ -181,7 +181,12 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 ) -> None:
     """Optional dependency import failures should not abort agent creation with implied tools."""
 
-    def _lookup_tool(name: str, *, sandbox_tools_override: list[str] | None = None) -> MagicMock:  # noqa: ARG001
+    def _lookup_tool(
+        name: str,
+        *,
+        credential_overrides: dict[str, object] | None = None,  # noqa: ARG001
+        sandbox_tools_override: list[str] | None = None,  # noqa: ARG001
+    ) -> MagicMock:
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
@@ -223,6 +228,69 @@ def test_create_agent_expands_openclaw_compat_for_sandbox_tool_overrides(
     sandbox_overrides = [call.kwargs["sandbox_tools_override"] for call in mock_get_tool_by_name.call_args_list]
     assert sandbox_overrides
     assert all(override == expected_sandbox for override in sandbox_overrides)
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """base_dir-aware tools should use the agent workspace from memory_file_path."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    workspace = tmp_path / "mind_data"
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = str(workspace)
+    config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
+    config.agents["general"].include_default_tools = False
+
+    create_agent("general", config=config)
+
+    assert workspace.is_dir()
+    overrides_by_tool = {
+        call.args[0]: call.kwargs.get("credential_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["duckduckgo"] is None
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Relative memory_file_path should resolve from the config directory, not CWD."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "./mind_data"
+    config.agents["general"].tools = ["coding"]
+    config.agents["general"].include_default_tools = False
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    expected_workspace = config_dir / "mind_data"
+
+    original_cwd = Path.cwd()
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir(parents=True, exist_ok=True)
+    os.chdir(other_cwd)
+    try:
+        with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+            create_agent("general", config=config)
+    finally:
+        os.chdir(original_cwd)
+
+    assert mock_get_tool_by_name.call_args is not None
+    assert mock_get_tool_by_name.call_args.kwargs["credential_overrides"] == {"base_dir": str(expected_workspace)}
+    assert expected_workspace.is_dir()
 
 
 @patch("mindroom.agents.SqliteDb")

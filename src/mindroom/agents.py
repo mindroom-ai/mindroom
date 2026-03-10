@@ -19,7 +19,7 @@ from mindroom import agent_prompts
 from mindroom import tools as _tools_module  # noqa: F401
 from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 
@@ -218,6 +218,35 @@ def _build_additional_context(
             max_preload_chars=max_preload_chars,
         )
     return additional_context
+
+
+def _resolve_agent_workspace_path(agent_config: AgentConfig) -> Path | None:
+    """Return the agent workspace directory when one is explicitly configured."""
+    if agent_config.memory_file_path is None:
+        return None
+
+    workspace_path = resolve_config_relative_path(agent_config.memory_file_path)
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    return workspace_path
+
+
+def _tool_supports_base_dir(tool_name: str) -> bool:
+    """Return whether a registered tool exposes a base_dir config field."""
+    metadata = TOOL_METADATA.get(tool_name)
+    if metadata is None or not metadata.config_fields:
+        return False
+    return any(field.name == "base_dir" for field in metadata.config_fields)
+
+
+def _tool_credential_overrides(
+    tool_name: str,
+    *,
+    workspace_path: Path | None,
+) -> dict[str, object] | None:
+    """Build per-agent tool overrides for workspace-aware local tools."""
+    if workspace_path is None or not _tool_supports_base_dir(tool_name):
+        return None
+    return {"base_dir": str(workspace_path)}
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -433,6 +462,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     tool_names = config.get_agent_tools(agent_name)
     sandbox_tools = config.get_agent_sandbox_tools(agent_name)
+    workspace_path = _resolve_agent_workspace_path(agent_config)
 
     # Create tools
     tools: list[Toolkit] = []
@@ -476,7 +506,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
                 tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
             else:
-                tools.append(get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools))
+                tools.append(
+                    get_tool_by_name(
+                        tool_name,
+                        credential_overrides=_tool_credential_overrides(tool_name, workspace_path=workspace_path),
+                        sandbox_tools_override=sandbox_tools,
+                    ),
+                )
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
