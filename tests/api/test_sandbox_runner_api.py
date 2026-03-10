@@ -155,6 +155,29 @@ def test_sandbox_runner_rejects_when_token_not_configured(
     assert "not configured" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_direct_credential_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential overrides must come from a lease, not the execute request payload."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [2, 3],
+            "kwargs": {},
+            "credential_overrides": {"OPENAI_API_KEY": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "lease_id" in response.json()["detail"]
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)

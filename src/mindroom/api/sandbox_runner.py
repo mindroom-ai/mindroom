@@ -85,8 +85,9 @@ _LEASES_LOCK = threading.Lock()
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
-    Also used internally for in-process and subprocess execution when
-    ``credential_overrides`` are resolved from a lease.
+    Clients must provide credentials via ``lease_id``.
+    ``credential_overrides`` is reserved for internal in-process and subprocess
+    execution after the lease has been resolved.
     """
 
     tool_name: str
@@ -371,14 +372,15 @@ async def execute_tool_call(
     request: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    credential_overrides = dict(request.credential_overrides)
+    if request.credential_overrides:
+        raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
+
+    credential_overrides: dict[str, object] = {}
     if request.lease_id is not None:
-        credential_overrides.update(
-            _consume_credential_lease(
-                request.lease_id,
-                tool_name=request.tool_name,
-                function_name=request.function_name,
-            ),
+        credential_overrides = _consume_credential_lease(
+            request.lease_id,
+            tool_name=request.tool_name,
+            function_name=request.function_name,
         )
 
     request.credential_overrides = credential_overrides
