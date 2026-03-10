@@ -146,12 +146,12 @@ class TestUserAccountManagement:
             mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_existing_valid(
+    async def test_ensure_user_account_logs_in_with_existing_credentials(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Test ensuring user account when valid credentials exist."""
+        """Existing stored credentials should be used via direct login."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with internal user account
@@ -162,16 +162,12 @@ class TestUserAccountManagement:
         with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
             state.save()
 
-            # Mock that user already exists when trying to register
-            mock_client.register.return_value = nio.ErrorResponse(
-                message="User ID already taken",
-                status_code="M_USER_IN_USE",
-            )
             mock_client.login.return_value = nio.LoginResponse(
                 user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
                 device_id="TEST_DEVICE",
                 access_token=TEST_ACCESS_TOKEN,
             )
+            mock_client.set_displayname.return_value = AsyncMock()
 
             with (
                 patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
@@ -191,18 +187,17 @@ class TestUserAccountManagement:
                 assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
                 assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
 
-                # Should have tried to register (which returns M_USER_IN_USE)
-                mock_client.register.assert_called_once()
+                mock_client.register.assert_not_called()
                 mock_client.login.assert_called_once_with("existing_password")
                 mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
-    async def test_ensure_user_account_invalid_credentials(
+    async def test_ensure_user_account_recreates_account_when_stored_login_fails(
         self,
         tmp_path: Path,
         mock_matrix_client: tuple[MagicMock, AsyncMock],
     ) -> None:
-        """Test ensuring user account when stored credentials are invalid."""
+        """Failed login with stored credentials should retry registration."""
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with invalid credentials
@@ -219,7 +214,7 @@ class TestUserAccountManagement:
                 status_code="M_FORBIDDEN",
             )
 
-            # Mock successful registration for new account
+            # Mock successful registration for the recreated account.
             mock_client.register.return_value = nio.RegisterResponse(
                 user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
                 device_id="TEST_DEVICE",
@@ -248,8 +243,9 @@ class TestUserAccountManagement:
                 # Password stays the same - create_agent_user reuses existing credentials
                 assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
 
-                # Should have registered new user
+                mock_client.login.assert_called_once_with("wrong_password")
                 mock_client.register.assert_called_once()
+                mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_configured_identity(

@@ -15,7 +15,12 @@ import httpx
 import uvicorn
 
 from mindroom.memory.auto_flush import MemoryAutoFlushWorker, auto_flush_enabled
-from mindroom.runtime_state import reset_runtime_state, set_runtime_failed, set_runtime_ready, set_runtime_starting
+from mindroom.runtime_state import (
+    reset_runtime_state,
+    set_runtime_failed,
+    set_runtime_ready,
+    set_runtime_starting,
+)
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
@@ -149,7 +154,7 @@ async def _run_with_retry(
             raise
         except Exception as exc:
             if permanent_error_check is not None and permanent_error_check(exc):
-                logger.exception("%s failed with a permanent error", step_name)
+                logger.error("%s failed with a permanent error: %s", step_name, exc)  # noqa: TRY400
                 raise
             attempt += 1
             retry_in_seconds = _retry_delay_seconds(

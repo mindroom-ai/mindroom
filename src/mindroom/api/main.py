@@ -16,7 +16,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
-from watchfiles import awatch
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -32,18 +31,23 @@ from mindroom.api.tools import router as tools_router
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
+from mindroom.logging_config import get_logger
 from mindroom.runtime_state import get_runtime_state
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
 
+logger = get_logger(__name__)
+
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
-    """Watch config.yaml for changes using watchfiles."""
-    async for changes in awatch(CONFIG_PATH.parent, stop_event=stop_event):
-        for _change, path in changes:
-            if path.endswith("config.yaml"):
-                print(f"Config file changed: {path}")
-                _load_config_from_file()
+    """Watch config.yaml for changes."""
+
+    async def _on_config_change() -> None:
+        logger.info("Config file changed", path=str(CONFIG_PATH))
+        _load_config_from_file()
+
+    await watch_file(CONFIG_PATH, _on_config_change, stop_event=stop_event)
 
 
 @asynccontextmanager

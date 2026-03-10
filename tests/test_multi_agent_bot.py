@@ -38,6 +38,7 @@ from mindroom.orchestrator import (
     _run_auxiliary_task_forever,
     _run_with_retry,
     _wait_for_matrix_homeserver,
+    main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
@@ -512,6 +513,37 @@ class TestAgentBot:
             await bot.try_start()
 
         mock_start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_reraises_permanent_startup_error(self, tmp_path: Path) -> None:
+        """Permanent startup errors should stop the process and surface the failure."""
+        reset_runtime_state()
+        blocking_event = asyncio.Event()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=PermanentMatrixStartupError("boom"))
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await blocking_event.wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            pytest.raises(PermanentMatrixStartupError, match="boom"),
+        ):
+            await main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
+            )
+
+        mock_orchestrator.stop.assert_awaited_once()
+        state = get_runtime_state()
+        assert state.phase == "idle"
+        assert state.detail is None
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
