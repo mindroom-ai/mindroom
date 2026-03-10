@@ -2,7 +2,7 @@
 
 Last updated: 2026-03-10
 Owner: MindRoom backend
-Status: Phase 2 largely implemented, with explicit shared-only exceptions for dashboard-managed credentials and OAuth-heavy integrations
+Status: Phase 2 core scope-aware state implemented, with migration/import follow-up and live validation still pending
 
 ## Objective
 
@@ -111,9 +111,11 @@ The execution identity should contain these fields.
 
 Matrix already provides a trustworthy requester identity path through the sender and existing runtime context.
 The OpenAI-compatible path must not use a request-body `user` field as a durable trust source.
-The final design should allow user-scoped workers on `/v1` only when a trusted authenticated principal is present.
+Current `/v1` behavior only allows unscoped agents and agents with `worker_scope=shared`.
+Future `/v1` support should allow additional worker scopes only when a trusted authenticated principal is present.
 If `/v1` lacks a trusted requester identity, only scopes that do not require a requester identity should be allowed.
-The practical rule is that `shared` and session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
+One intended final rule is that `shared` and possibly session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
+That `room_thread` expansion is not implemented today and should not be treated as current `/v1` behavior.
 The dashboard also has an authenticated user identity, but that identity is a dashboard principal rather than the Matrix requester identity used by runtime worker routing.
 That means the dashboard must not read or write credentials for `user`, `user_agent`, or `room_thread` workers until there is a deliberate identity-linking model for those scopes.
 
@@ -121,7 +123,7 @@ That means the dashboard must not read or write credentials for `user`, `user_ag
 
 Tool execution policy should become an explicit concept rather than a side effect of the old sandbox settings.
 The minimum policy categories are local execution in the primary runtime and worker-routed execution in a scoped worker.
-The source of truth should be `worker_tools` and `worker_scope`.
+The source of truth is `worker_tools` and `worker_scope`.
 
 The final policy model should support these per-tool decisions.
 
@@ -320,6 +322,7 @@ If background execution is later supported, worker metadata should track process
 
 Migration needs different behavior for shared and isolated scopes because current data is mostly agent-scoped and shared.
 Not all existing data can be safely partitioned after the fact.
+This section describes intended migration behavior and is not fully implemented yet.
 
 The migration rules should be:
 
@@ -401,10 +404,11 @@ Phase 1 aligned file-backed memory with worker-owned storage.
 
 ### Phase 2: Scope-Aware Mutable State
 
-Phase 2 made the remaining core mutable state obey worker scope.
+Phase 2 implemented the core scope-aware state changes needed for worker routing correctness.
+Phase 2 is not fully complete because migration and explicit-import behavior remain follow-up work.
 Phase 2 is the correctness phase.
 
-Phase 2 work items were:
+Phase 2 delivered:
 
 - Add worker-aware session storage resolvers.
 - Add worker-aware learning storage resolvers.
@@ -414,7 +418,11 @@ Phase 2 work items were:
 - Block direct worker mutation of unsupported memory backends.
 - Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
 - Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
-- Add migration behavior for `shared` scope and explicit-import behavior for isolated scopes.
+
+Phase 2 follow-up still pending:
+
+- Design and implement migration behavior for `shared` scope.
+- Design and implement explicit-import behavior for isolated scopes.
 
 ### Phase 3: Policy Expansion And Lifecycle
 
@@ -453,12 +461,12 @@ The first concrete Phase 3 target should be a first-class worker manager with ex
 
 ## File Map For Remaining Work
 
-- `src/mindroom/tool_system/worker_routing.py` should remain the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
-- `src/mindroom/agents.py` should move session and learning path selection behind worker-aware resolvers.
-- `src/mindroom/credentials.py` should become scope-aware and stop assuming global service-only keys.
-- `src/mindroom/api/openai_compat.py` should enforce trusted requester identity rules for user-scoped workers.
-- `src/mindroom/api/sandbox_runner.py` should evolve behind a worker manager rather than remaining the place where worker lifecycle is implicitly encoded.
-- `cluster/k8s/instance/templates/deployment-mindroom.yaml` should eventually stop representing the final deployment model because many dynamic workers cannot be modeled as one static sidecar.
+- `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
+- `src/mindroom/agents.py` now resolves session and learning storage through worker-aware paths and remains the place to keep agent construction aligned with scoped state.
+- `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
+- `src/mindroom/api/openai_compat.py` still needs to keep enforcing trusted requester identity rules and scope eligibility for `/v1`.
+- `src/mindroom/api/sandbox_runner.py` still needs to evolve behind a worker manager rather than remaining the place where worker lifecycle is implicitly encoded.
+- `cluster/k8s/instance/templates/deployment-mindroom.yaml` still does not represent the final deployment model because many dynamic workers cannot be modeled as one static sidecar.
 
 ## Open Decisions
 
