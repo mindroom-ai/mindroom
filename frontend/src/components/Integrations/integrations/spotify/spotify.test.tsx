@@ -47,12 +47,6 @@ describe('SpotifyIntegrationProvider', () => {
       expect(config.onDisconnect).toBeDefined();
       expect(typeof config.onDisconnect).toBe('function');
     });
-
-    it('should provide checkConnection method', () => {
-      const config = spotifyIntegration.getConfig();
-      expect(config.checkConnection).toBeDefined();
-      expect(typeof config.checkConnection).toBe('function');
-    });
   });
 
   describe('loadStatus', () => {
@@ -104,7 +98,8 @@ describe('SpotifyIntegrationProvider', () => {
       });
 
       const config = spotifyIntegration.getConfig();
-      const connectPromise = config.onAction(config.integration);
+      expect(config.onAction).toBeDefined();
+      const connectPromise = config.onAction!(config.integration);
 
       // Simulate window closing after a short delay
       setTimeout(() => {
@@ -132,7 +127,7 @@ describe('SpotifyIntegrationProvider', () => {
 
       const config = spotifyIntegration.getConfig();
 
-      await expect(config.onAction(config.integration)).rejects.toThrow('Connection failed');
+      await expect(config.onAction!(config.integration)).rejects.toThrow('Connection failed');
     });
 
     it('appends agent_name for scoped OAuth connect', async () => {
@@ -144,7 +139,7 @@ describe('SpotifyIntegrationProvider', () => {
       });
 
       const config = spotifyIntegration.getConfig({ agentName: 'code' });
-      await config.onAction(config.integration);
+      await config.onAction!(config.integration);
 
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/integrations/spotify/connect?agent_name=code'),
@@ -188,44 +183,6 @@ describe('SpotifyIntegrationProvider', () => {
         expect.stringContaining('/api/integrations/spotify/disconnect?agent_name=code'),
         expect.objectContaining({ method: 'POST' })
       );
-    });
-  });
-
-  describe('checkConnection', () => {
-    it('should return true when localStorage indicates connected', async () => {
-      localStorageMock.getItem.mockReturnValue('true');
-
-      const config = spotifyIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
-
-      expect(isConnected).toBe(true);
-      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured');
-    });
-
-    it('should check backend when localStorage is empty', async () => {
-      localStorageMock.getItem.mockReturnValue(null);
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ connected: true }),
-      });
-
-      const config = spotifyIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
-
-      expect(isConnected).toBe(true);
-      expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/integrations/spotify/status')
-      );
-    });
-
-    it('should return false on backend error', async () => {
-      localStorageMock.getItem.mockReturnValue(null);
-      (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
-
-      const config = spotifyIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
-
-      expect(isConnected).toBe(false);
     });
   });
 });

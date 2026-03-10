@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import secrets
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +26,21 @@ from mindroom.tool_system.worker_routing import (
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
 _UNSUPPORTED_DASHBOARD_WORKER_SCOPES = {"room_thread"}
+_PENDING_OAUTH_STATE_TTL_SECONDS = 600
+_pending_oauth_state_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class PendingOAuthState:
+    """Pending OAuth connect request bound to one authenticated dashboard user."""
+
+    service: str
+    user_id: str
+    agent_name: str | None
+    created_at: float
+
+
+_pending_oauth_states: dict[str, PendingOAuthState] = {}
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -51,6 +69,60 @@ class RequestCredentialsTarget:
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
     auth_user = getattr(request.state, "auth_user", None)
     return auth_user if isinstance(auth_user, dict) else None
+
+
+def _require_auth_user_id(request: Request) -> str:
+    auth_user = _request_auth_user(request) or {}
+    user_id = auth_user.get("user_id")
+    if isinstance(user_id, str) and user_id:
+        return user_id
+    raise HTTPException(status_code=401, detail="Missing or invalid credentials")
+
+
+def _prune_expired_pending_oauth_states(now: float) -> None:
+    expired_keys = [
+        state
+        for state, pending in _pending_oauth_states.items()
+        if now - pending.created_at > _PENDING_OAUTH_STATE_TTL_SECONDS
+    ]
+    for state in expired_keys:
+        _pending_oauth_states.pop(state, None)
+
+
+def issue_pending_oauth_state(request: Request, service: str, agent_name: str | None = None) -> str:
+    """Create a short-lived server-side OAuth state bound to the current user and target."""
+    user_id = _require_auth_user_id(request)
+    state = secrets.token_urlsafe(24)
+    now = time.time()
+    pending = PendingOAuthState(
+        service=service,
+        user_id=user_id,
+        agent_name=agent_name,
+        created_at=now,
+    )
+    with _pending_oauth_state_lock:
+        _prune_expired_pending_oauth_states(now)
+        _pending_oauth_states[state] = pending
+    return state
+
+
+def consume_pending_oauth_state(request: Request, service: str, state: str) -> str | None:
+    """Consume and validate a previously issued dashboard OAuth state token."""
+    user_id = _require_auth_user_id(request)
+    now = time.time()
+    with _pending_oauth_state_lock:
+        _prune_expired_pending_oauth_states(now)
+        pending = _pending_oauth_states.get(state)
+
+    if pending is None:
+        raise HTTPException(status_code=400, detail="OAuth state is invalid or expired")
+    if pending.service != service:
+        raise HTTPException(status_code=400, detail="OAuth state does not match this integration")
+    if pending.user_id != user_id:
+        raise HTTPException(status_code=403, detail="OAuth state does not belong to the current user")
+    with _pending_oauth_state_lock:
+        _pending_oauth_states.pop(state, None)
+    return pending.agent_name
 
 
 def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
@@ -162,7 +234,7 @@ def resolve_request_credentials_target(
 
 def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:
     """Load credentials for the resolved target, including scoped overlays when needed."""
-    if target.worker_scope is None or target.agent_name is None or target.execution_identity is None:
+    if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
 
     shared_credentials = target.base_manager.load_credentials(service)

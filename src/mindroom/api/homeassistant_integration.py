@@ -13,7 +13,7 @@ Uses the official Home Assistant REST API.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -22,6 +22,8 @@ from pydantic import BaseModel
 
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
+    consume_pending_oauth_state,
+    issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
@@ -199,19 +201,18 @@ async def connect_oauth(
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    state = issue_pending_oauth_state(request, "homeassistant", agent_name)
     redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
-    if agent_name:
-        redirect_uri = f"{redirect_uri}?agent_name={agent_name}"
 
     auth_params = {
         "client_id": config.client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
+        "state": state,
     }
 
     # Build query string
-    query_string = "&".join(f"{k}={v}" for k, v in auth_params.items())
-    auth_url = f"{config.instance_url}/auth/authorize?{query_string}"
+    auth_url = f"{config.instance_url}/auth/authorize?{urlencode(auth_params)}"
 
     # Store config for callback
     temp_config = {
@@ -280,11 +281,14 @@ async def callback(request: Request) -> RedirectResponse:
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
-    agent_name = request.query_params.get("agent_name") or None
-    if agent_name:
-        from mindroom.api.main import verify_user  # noqa: PLC0415
+    state = request.query_params.get("state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No OAuth state received")
 
-        await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    from mindroom.api.main import verify_user  # noqa: PLC0415
+
+    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    agent_name = consume_pending_oauth_state(request, "homeassistant", state)
 
     # Get stored config
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))

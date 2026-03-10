@@ -121,7 +121,7 @@ class TestGmailTools:
             gmail_tools = GmailTools()  # noqa: F841
 
             # Verify error was logged
-            mock_logger.error.assert_called_once()
+            mock_logger.exception.assert_called_once()
 
             # Verify parent was initialized with None
             mock_parent_init.assert_called_once_with(creds=None)

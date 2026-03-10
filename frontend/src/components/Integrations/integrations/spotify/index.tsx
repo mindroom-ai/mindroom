@@ -24,7 +24,6 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
       integration: this.integration,
       onAction: () => this.connect(agentName),
       onDisconnect: () => this.disconnect(agentName),
-      checkConnection: () => this.checkConnection(agentName),
     };
   }
 

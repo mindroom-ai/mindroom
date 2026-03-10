@@ -3,18 +3,6 @@ import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope }
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
 import { withAgentName } from '@/lib/api';
 
-// Wrapper component to handle the dialog integration
-function HomeAssistantConfigDialog(props: {
-  onClose: () => void;
-  onSuccess?: () => void;
-  agentName?: string | null;
-}) {
-  // Pass the onSuccess callback to the HomeAssistantIntegrationComponent
-  return (
-    <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} agentName={props.agentName} />
-  );
-}
-
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
     id: 'homeassistant',
@@ -31,10 +19,6 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     const agentName = scope?.agentName ?? null;
     return {
       integration: this.integration,
-      onAction: async () => {
-        // The parent component will handle showing the dialog
-        // This is handled via the ConfigComponent
-      },
       onDisconnect: async () => {
         const response = await fetch(withAgentName('/api/homeassistant/disconnect', agentName), {
           method: 'POST',
@@ -43,8 +27,9 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
           throw new Error('Failed to disconnect Home Assistant');
         }
       },
-      ConfigComponent: props => <HomeAssistantConfigDialog {...props} agentName={agentName} />,
-      checkConnection: () => this.checkConnection(agentName),
+      ConfigComponent: props => (
+        <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} agentName={agentName} />
+      ),
     };
   }
 
@@ -74,19 +59,6 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
       status: 'available',
       connected: false,
     };
-  }
-
-  private async checkConnection(agentName?: string | null): Promise<boolean> {
-    try {
-      const response = await fetch(withAgentName('/api/homeassistant/status', agentName));
-      if (response.ok) {
-        const data = await response.json();
-        return data.connected === true;
-      }
-    } catch (error) {
-      console.error('Failed to check Home Assistant connection:', error);
-    }
-    return false;
   }
 }
 

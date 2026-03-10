@@ -22,6 +22,8 @@ from pydantic import BaseModel
 
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
+    consume_pending_oauth_state,
+    issue_pending_oauth_state,
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
@@ -159,7 +161,7 @@ def _get_google_credentials(target: RequestCredentialsTarget) -> Credentials | N
 def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> None:
     """Save credentials using the unified credentials manager."""
     token_data = _build_google_token_data(creds)
-    if target.worker_scope is None or target.agent_name is None:
+    if target.worker_scope is None:
         target.target_manager.save_credentials("google", token_data)
         return
 
@@ -277,6 +279,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
     try:
         resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         _, _, flow_cls = _ensure_google_packages()
+        state = issue_pending_oauth_state(request, "google", agent_name)
 
         # Create OAuth flow with all scopes
         # Use current environment variable for redirect URI to support multiple deployments
@@ -288,7 +291,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
             access_type="offline",
             include_granted_scopes="true",
             prompt="consent",
-            state=agent_name or "",
+            state=state,
         )
 
         return GoogleAuthUrl(auth_url=auth_url)
@@ -308,11 +311,14 @@ async def callback(request: Request) -> RedirectResponse:
     if not code:
         raise HTTPException(status_code=400, detail="No authorization code received")
 
-    agent_name = request.query_params.get("state") or None
-    if agent_name:
-        from mindroom.api.main import verify_user  # noqa: PLC0415
+    state = request.query_params.get("state")
+    if not state:
+        raise HTTPException(status_code=400, detail="No OAuth state received")
 
-        await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    from mindroom.api.main import verify_user  # noqa: PLC0415
+
+    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
+    agent_name = consume_pending_oauth_state(request, "google", state)
 
     oauth_config = _get_oauth_credentials()
     if not oauth_config:

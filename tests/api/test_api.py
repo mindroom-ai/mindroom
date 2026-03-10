@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
@@ -406,6 +407,121 @@ def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client:
 
     assert response.status_code == 400
     assert "worker_scope=shared" in response.json()["detail"]
+
+
+def test_google_connect_uses_pending_oauth_state(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google connect should issue an opaque server-bound state token."""
+    config = _config_with_worker_scope("shared")
+    issued_state: dict[str, str] = {}
+
+    class _FakeFlow:
+        def authorization_url(
+            self,
+            *,
+            access_type: str,
+            include_granted_scopes: str,
+            prompt: str,
+            state: str,
+        ) -> tuple[str, str]:
+            assert access_type == "offline"
+            assert include_granted_scopes == "true"
+            assert prompt == "consent"
+            issued_state["state"] = state
+            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
+
+    class _FakeFlowFactory:
+        @staticmethod
+        def from_client_config(
+            client_config: object,
+            *,
+            scopes: list[str],
+            redirect_uri: str,
+        ) -> _FakeFlow:
+            assert client_config
+            assert scopes
+            assert redirect_uri
+            return _FakeFlow()
+
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._get_oauth_credentials",
+        lambda: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+    )
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._ensure_google_packages",
+        lambda: (object, object, _FakeFlowFactory),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post("/api/google/connect?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
+    assert issued_state["state"]
+    assert issued_state["state"] != "general"
+
+
+def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
+    """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "https://ha.example.com",
+                "client_id": "client-id",
+            },
+        )
+
+    assert response.status_code == 200
+    auth_url = response.json()["auth_url"]
+    parsed = urlparse(auth_url)
+    params = parse_qs(parsed.query)
+    assert params["state"][0]
+    assert params["state"][0] != "general"
+    assert "agent_name=general" not in params["redirect_uri"][0]
+
+
+def test_spotify_connect_uses_pending_oauth_state(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spotify connect should issue an opaque server-bound state token."""
+    config = _config_with_worker_scope("shared")
+    issued_state: dict[str, str] = {}
+
+    class _FakeSpotifyOAuth:
+        def get_authorize_url(self, state: str | None = None) -> str:
+            issued_state["state"] = state or ""
+            return "https://accounts.spotify.test/authorize"
+
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "client-secret")
+
+    def _spotify_oauth_factory(**_kwargs: object) -> _FakeSpotifyOAuth:
+        return _FakeSpotifyOAuth()
+
+    monkeypatch.setattr(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        lambda: (object, _spotify_oauth_factory),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.spotify.test/authorize"
+    assert issued_state["state"]
+    assert issued_state["state"] != "general"
 
 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
@@ -955,18 +1071,22 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/google/callback?code=test-code",
-        "/api/homeassistant/callback?code=test-code",
-        "/api/integrations/spotify/callback?code=test-code",
+        "/api/google/callback?code=test-code&state=missing",
+        "/api/homeassistant/callback?code=test-code&state=missing",
+        "/api/integrations/spotify/callback?code=test-code&state=missing",
     ],
 )
 def test_api_key_keeps_oauth_callbacks_open(
     api_key_client: TestClient,
     path: str,
 ) -> None:
-    """OAuth callbacks must remain reachable without Authorization headers."""
+    """OAuth callbacks should stay reachable via the dashboard auth cookie."""
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
     response = api_key_client.get(path)
-    assert response.status_code != 401
+    assert response.status_code == 400
+    assert "OAuth state is invalid or expired" in response.json()["detail"]
 
 
 def _set_platform_auth(

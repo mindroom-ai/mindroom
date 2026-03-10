@@ -30,7 +30,7 @@ export interface IntegrationConfig {
   /**
    * Handler for when the integration is selected/clicked
    */
-  onAction: (integration: Integration) => void | Promise<void>;
+  onAction?: (integration: Integration) => void | Promise<void>;
 
   /**
    * Handler for disconnecting the integration
@@ -45,11 +45,6 @@ export interface IntegrationConfig {
     onSuccess?: () => void;
     agentName?: string | null;
   }>;
-
-  /**
-   * Check if the integration is connected
-   */
-  checkConnection?: () => Promise<boolean>;
 
   /**
    * Custom action button component

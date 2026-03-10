@@ -5,9 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from mindroom.api import credentials as credentials_api
 from mindroom.credentials import CredentialsManager
 
 
@@ -39,6 +40,14 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
         # Store the mock for use in tests
         client.mock_manager = mock_credentials_manager
         yield client
+
+
+@pytest.fixture(autouse=True)
+def clear_pending_oauth_state() -> Generator[None, None, None]:
+    """Reset pending OAuth state between tests."""
+    credentials_api._pending_oauth_states.clear()
+    yield
+    credentials_api._pending_oauth_states.clear()
 
 
 class TestCredentialsAPI:
@@ -305,3 +314,54 @@ class TestCredentialsAPI:
         response = test_client.get("/api/credentials/bad!service/status")
         assert response.status_code == 400
         assert "Service name can only include" in response.json()["detail"]
+
+
+def test_pending_oauth_state_binds_agent_name_and_user() -> None:
+    """Pending OAuth state should resolve only for the issuing user and target."""
+    app = FastAPI()
+
+    @app.post("/issue/{service}")
+    async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
+        request.state.auth_user = {"user_id": user_id}
+        return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
+
+    @app.post("/consume/{service}")
+    async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
+        request.state.auth_user = {"user_id": user_id}
+        return {"agent_name": credentials_api.consume_pending_oauth_state(request, service, state)}
+
+    client = TestClient(app)
+    issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
+    assert issue_response.status_code == 200
+
+    state = issue_response.json()["state"]
+    consume_response = client.post(f"/consume/google?user_id=alice&state={state}")
+    assert consume_response.status_code == 200
+    assert consume_response.json() == {"agent_name": "general"}
+
+
+def test_pending_oauth_state_rejects_different_user() -> None:
+    """Pending OAuth state should stay valid for the issuer after a different user is rejected."""
+    app = FastAPI()
+
+    @app.post("/issue/{service}")
+    async def issue(service: str, request: Request, user_id: str, agent_name: str | None = None) -> dict[str, str]:
+        request.state.auth_user = {"user_id": user_id}
+        return {"state": credentials_api.issue_pending_oauth_state(request, service, agent_name)}
+
+    @app.post("/consume/{service}")
+    async def consume(service: str, request: Request, state: str, user_id: str) -> dict[str, str | None]:
+        request.state.auth_user = {"user_id": user_id}
+        return {"agent_name": credentials_api.consume_pending_oauth_state(request, service, state)}
+
+    client = TestClient(app)
+    issue_response = client.post("/issue/google?user_id=alice&agent_name=general")
+    state = issue_response.json()["state"]
+
+    consume_response = client.post(f"/consume/google?user_id=bob&state={state}")
+    assert consume_response.status_code == 403
+    assert "current user" in consume_response.json()["detail"]
+
+    issuer_response = client.post(f"/consume/google?user_id=alice&state={state}")
+    assert issuer_response.status_code == 200
+    assert issuer_response.json() == {"agent_name": "general"}

@@ -18,7 +18,6 @@ describe('HomeAssistantIntegrationProvider', () => {
       expect(config.integration.category).toBe('smart_home');
       expect(config.integration.setup_type).toBe('special');
       expect(config.ConfigComponent).toBeDefined();
-      expect(config.checkConnection).toBeDefined();
     });
   });
 

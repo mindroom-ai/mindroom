@@ -3,16 +3,6 @@ import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope }
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
 import { withAgentName } from '@/lib/api';
 
-// Wrapper component to handle the dialog integration
-function GoogleConfigDialog(props: {
-  onClose: () => void;
-  onSuccess?: () => void;
-  agentName?: string | null;
-}) {
-  // Pass the onSuccess callback to the GoogleIntegrationComponent
-  return <GoogleIntegrationComponent onSuccess={props.onSuccess} agentName={props.agentName} />;
-}
-
 class GoogleIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
     id: 'google',
@@ -29,10 +19,6 @@ class GoogleIntegrationProvider implements IntegrationProvider {
     const agentName = scope?.agentName ?? null;
     return {
       integration: this.integration,
-      onAction: async () => {
-        // The parent component will handle showing the dialog
-        // This is handled via the ConfigComponent
-      },
       onDisconnect: async () => {
         const response = await fetch(withAgentName('/api/google/disconnect', agentName), {
           method: 'POST',
@@ -41,8 +27,9 @@ class GoogleIntegrationProvider implements IntegrationProvider {
           throw new Error('Failed to disconnect Google services');
         }
       },
-      ConfigComponent: props => <GoogleConfigDialog {...props} agentName={agentName} />,
-      checkConnection: () => this.checkConnection(agentName),
+      ConfigComponent: props => (
+        <GoogleIntegrationComponent onSuccess={props.onSuccess} agentName={agentName} />
+      ),
     };
   }
 
@@ -66,19 +53,6 @@ class GoogleIntegrationProvider implements IntegrationProvider {
       status: 'available',
       connected: false,
     };
-  }
-
-  private async checkConnection(agentName?: string | null): Promise<boolean> {
-    try {
-      const response = await fetch(withAgentName('/api/google/status', agentName));
-      if (response.ok) {
-        const data = await response.json();
-        return data.connected === true;
-      }
-    } catch (error) {
-      console.error('Failed to check Google connection:', error);
-    }
-    return false;
   }
 }
 
