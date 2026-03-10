@@ -878,37 +878,37 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Sandbox Tools */}
+      {/* Worker Tools */}
       {effectiveTools.length > 0 && (
         <FieldGroup
-          label="Sandbox Tools"
-          helperText={`Select which of this agent's tools to execute through the sandbox proxy${
-            config?.defaults.sandbox_tools != null
+          label="Worker Tools"
+          helperText={`Select which of this agent's tools to route through worker-scoped execution via the sandbox proxy${
+            config?.defaults.worker_tools != null
               ? ` (default: ${
-                  config.defaults.sandbox_tools.length > 0
-                    ? config.defaults.sandbox_tools.join(', ')
+                  config.defaults.worker_tools.length > 0
+                    ? config.defaults.worker_tools.join(', ')
                     : 'none'
                 })`
               : ''
           }`}
         >
           <Controller
-            name="sandbox_tools"
+            name="worker_tools"
             control={control}
             render={({ field }) => (
               <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
                 {effectiveTools.map(toolName => {
-                  const effective = field.value ?? config?.defaults.sandbox_tools ?? [];
+                  const effective = field.value ?? config?.defaults.worker_tools ?? [];
                   const isChecked = effective.includes(toolName);
-                  const isInherited = field.value == null && config?.defaults.sandbox_tools != null;
+                  const isInherited = field.value == null && config?.defaults.worker_tools != null;
                   const toggle = () => {
                     // On first interaction when inheriting, seed from defaults
-                    const current = field.value ?? config?.defaults.sandbox_tools ?? [];
+                    const current = field.value ?? config?.defaults.worker_tools ?? [];
                     const updated = isChecked
                       ? current.filter(t => t !== toolName)
                       : [...current, toolName];
                     field.onChange(updated);
-                    handleFieldChange('sandbox_tools', updated);
+                    handleFieldChange('worker_tools', updated);
                   };
                   return (
                     <div
@@ -916,7 +916,7 @@ export function AgentEditor() {
                       className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-colors"
                     >
                       <Checkbox
-                        aria-label={`sandbox ${toolName}`}
+                        aria-label={`worker ${toolName}`}
                         checked={isChecked}
                         onCheckedChange={toggle}
                         className="h-5 w-5 sm:h-4 sm:w-4"

@@ -407,37 +407,12 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_sandbox_tools(self, agent_name: str) -> list[str] | None:
-        """Get effective sandbox tools for an agent, including preset expansion.
-
-        Returns:
-            Ordered tool names with duplicates removed, or None to defer to env var globals.
-
-        """
-        agent_config = self.get_agent(agent_name)
-        configured = agent_config.sandbox_tools
-        if configured is None:
-            configured = self.defaults.sandbox_tools
-        if configured is None:
-            return None
-        return self.expand_tool_names(list(configured))
-
     def get_agent_worker_tools(self, agent_name: str) -> list[str] | None:
-        """Get effective worker-routed tools for an agent, including preset expansion.
-
-        Falls back to the legacy sandbox_tools fields when worker_tools are not
-        explicitly configured so existing configs keep working during the
-        worker-routing transition.
-
-        """
+        """Get effective worker-routed tools for an agent, including preset expansion."""
         agent_config = self.get_agent(agent_name)
         configured = agent_config.worker_tools
         if configured is None:
             configured = self.defaults.worker_tools
-        if configured is None:
-            configured = agent_config.sandbox_tools
-        if configured is None:
-            configured = self.defaults.sandbox_tools
         if configured is None:
             return None
         return self.expand_tool_names(list(configured))

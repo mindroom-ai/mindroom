@@ -253,13 +253,13 @@ def _build_worker_routing_payload(
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
-    sandbox_tools_override: list[str] | None = None,
+    worker_tools_override: list[str] | None = None,
 ) -> bool:
     """Return whether the given tool should execute through the sandbox proxy.
 
-    When *sandbox_tools_override* is not ``None``, it takes precedence over the
-    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic.  An empty list
-    means "sandbox nothing for this agent".
+    When *worker_tools_override* is not ``None``, it takes precedence over the
+    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
+    means "route nothing through the proxy for this agent".
     """
     if _SANDBOX_RUNNER_MODE:
         return False
@@ -267,8 +267,8 @@ def _sandbox_proxy_enabled_for_tool(
     if _PROXY_URL is None:
         return False
 
-    if sandbox_tools_override is not None:
-        return tool_name in sandbox_tools_override
+    if worker_tools_override is not None:
+        return tool_name in worker_tools_override
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
@@ -393,7 +393,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
-    sandbox_tools_override: list[str] | None = None,
+    worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> Toolkit:
@@ -402,7 +402,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not _sandbox_proxy_enabled_for_tool(tool_name, sandbox_tools_override=sandbox_tools_override):
+    if not _sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=worker_tools_override):
         return toolkit
 
     toolkit.functions = {

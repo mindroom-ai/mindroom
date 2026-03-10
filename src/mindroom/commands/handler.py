@@ -217,7 +217,7 @@ def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, 
                     tool_name,
                     get_tool_by_name(
                         tool_name,
-                        sandbox_tools_override=worker_tools,
+                        worker_tools_override=worker_tools,
                         worker_scope=worker_scope,
                         routing_agent_name=agent_name,
                     ),

@@ -194,11 +194,11 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     def _lookup_tool(
         name: str,
         *,
-        sandbox_tools_override: list[str] | None = None,
+        worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del sandbox_tools_override, worker_scope, routing_agent_name
+        del worker_tools_override, worker_scope, routing_agent_name
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
@@ -223,23 +223,23 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_expands_openclaw_compat_for_sandbox_tool_overrides(
+def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Sandbox override list should receive expanded tool names including openclaw_compat."""
+    """Worker override list should receive expanded tool names including openclaw_compat."""
     mock_get_tool_by_name.return_value = MagicMock()
     config = Config.from_yaml()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
-    config.agents["summary"].sandbox_tools = ["openclaw_compat"]
+    config.agents["summary"].worker_tools = ["openclaw_compat"]
 
     create_agent("summary", config=config)
 
-    expected_sandbox = config.expand_tool_names(["openclaw_compat"])
-    sandbox_overrides = [call.kwargs["sandbox_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert sandbox_overrides
-    assert all(override == expected_sandbox for override in sandbox_overrides)
+    expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
+    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
+    assert worker_overrides
+    assert all(override == expected_worker_tools for override in worker_overrides)
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -547,6 +547,40 @@ def test_config_rejects_legacy_agent_memory_dir_field() -> None:
                 "calculator": {
                     "display_name": "CalculatorAgent",
                     "memory_dir": "./memory",
+                },
+            },
+        )
+
+
+def test_config_rejects_legacy_agent_sandbox_tools_field() -> None:
+    """Legacy sandbox_tools field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "sandbox_tools": ["shell"],
+                },
+            },
+        )
+
+
+def test_config_rejects_legacy_defaults_sandbox_tools_field() -> None:
+    """Legacy defaults.sandbox_tools field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("defaults.sandbox_tools was removed. Use defaults.worker_tools instead."),
+    ):
+        Config(
+            defaults={
+                "sandbox_tools": ["shell"],
+            },
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
                 },
             },
         )

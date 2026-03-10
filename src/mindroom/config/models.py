@@ -52,13 +52,9 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Whether to show tool call details inline in responses",
     )
-    sandbox_tools: list[str] | None = Field(
-        default=None,
-        description="Tool names to sandbox by default for all agents (None = use env var config)",
-    )
     worker_tools: list[str] | None = Field(
         default=None,
-        description="Tool names to route through scoped workers by default (falls back to sandbox_tools when omitted)",
+        description="Tool names to route through scoped workers by default (None = use env var config)",
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
@@ -73,6 +69,15 @@ class DefaultsConfig(BaseModel):
         ge=1,
         description="Hard cap for extra role preload context loaded from context_files",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_defaults_fields(cls, data: object) -> object:
+        """Reject removed legacy fields to prevent silent misconfiguration."""
+        if isinstance(data, dict) and "sandbox_tools" in data:
+            msg = "defaults.sandbox_tools was removed. Use defaults.worker_tools instead."
+            raise ValueError(msg)
+        return data
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:

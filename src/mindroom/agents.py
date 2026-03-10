@@ -511,7 +511,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     get_tool_by_name(
                         tool_name,
-                        sandbox_tools_override=worker_tools,
+                        worker_tools_override=worker_tools,
                         worker_scope=worker_scope,
                         routing_agent_name=agent_name,
                     ),
