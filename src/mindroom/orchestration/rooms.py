@@ -28,7 +28,7 @@ def _filter_concrete_matrix_user_ids(user_ids: set[str], *, warning_message: str
     return concrete_user_ids
 
 
-def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
+def get_authorized_user_ids_to_invite(config: Config) -> set[str]:
     """Collect Matrix users from authorization config that can be invited."""
     user_ids = set(config.authorization.global_users)
     for room_users in config.authorization.room_permissions.values():
@@ -39,7 +39,7 @@ def _get_authorized_user_ids_to_invite(config: Config) -> set[str]:
     )
 
 
-def _get_root_space_user_ids_to_invite(config: Config) -> set[str]:
+def get_root_space_user_ids_to_invite(config: Config) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
     user_ids = _filter_concrete_matrix_user_ids(
         set(config.authorization.global_users),

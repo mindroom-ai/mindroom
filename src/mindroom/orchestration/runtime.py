@@ -29,8 +29,8 @@ logger = get_logger(__name__)
 _MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV = "MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS"
 _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS = 5.0
 _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS = 2.0
-_STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
-_STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
+STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
+STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 
 
 def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
@@ -47,7 +47,7 @@ def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
     return timeout_seconds
 
 
-def _retry_delay_seconds(
+def retry_delay_seconds(
     attempt: int,
     *,
     initial_delay_seconds: float,
@@ -58,12 +58,12 @@ def _retry_delay_seconds(
     return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
 
 
-def _is_permanent_startup_error(exc: Exception) -> bool:
+def is_permanent_startup_error(exc: Exception) -> bool:
     """Return whether a startup exception is clearly non-retryable."""
     return isinstance(exc, PermanentMatrixStartupError)
 
 
-async def _cancel_task(
+async def cancel_task(
     task: asyncio.Task | None,
     *,
     suppress_exceptions: tuple[type[BaseException], ...] = (asyncio.CancelledError,),
@@ -86,7 +86,7 @@ def _log_detached_task_result(task: asyncio.Task, *, message: str) -> None:
         logger.exception(message)
 
 
-def _create_logged_task(
+def create_logged_task(
     coro: Coroutine[Any, Any, None],
     *,
     name: str,
@@ -98,12 +98,12 @@ def _create_logged_task(
     return task
 
 
-async def _run_with_retry(
+async def run_with_retry(
     step_name: str,
     operation: Callable[[], Awaitable[None]],
     *,
-    initial_delay_seconds: float = _STARTUP_RETRY_INITIAL_DELAY_SECONDS,
-    max_delay_seconds: float = _STARTUP_RETRY_MAX_DELAY_SECONDS,
+    initial_delay_seconds: float = STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    max_delay_seconds: float = STARTUP_RETRY_MAX_DELAY_SECONDS,
     permanent_error_check: Callable[[Exception], bool] | None = None,
     update_runtime_state: bool = True,
 ) -> None:
@@ -119,7 +119,7 @@ async def _run_with_retry(
                 logger.error("%s failed with a permanent error: %s", step_name, exc)  # noqa: TRY400
                 raise
             attempt += 1
-            retry_in_seconds = _retry_delay_seconds(
+            retry_in_seconds = retry_delay_seconds(
                 attempt,
                 initial_delay_seconds=initial_delay_seconds,
                 max_delay_seconds=max_delay_seconds,
@@ -138,7 +138,7 @@ async def _run_with_retry(
             return
 
 
-async def _wait_for_matrix_homeserver(
+async def wait_for_matrix_homeserver(
     *,
     timeout_seconds: float | None = None,
     request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
@@ -193,7 +193,7 @@ async def _wait_for_matrix_homeserver(
 
 
 @dataclass(slots=True)
-class _EntityStartResults:
+class EntityStartResults:
     """Result of one pass trying to start a batch of entities."""
 
     started_bots: list[AgentBot | TeamBot] = field(default_factory=list)
@@ -201,7 +201,7 @@ class _EntityStartResults:
     permanently_failed_entities: list[str] = field(default_factory=list)
 
 
-def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
+def create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     """Create a temporary user object that will be updated by ensure_user_account."""
     if entity_name == ROUTER_AGENT_NAME:
         display_name = "RouterAgent"
@@ -220,13 +220,13 @@ def _create_temp_user(entity_name: str, config: Config) -> AgentMatrixUser:
     )
 
 
-async def _cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
+async def cancel_sync_task(entity_name: str, sync_tasks: dict[str, asyncio.Task]) -> None:
     """Cancel and remove a sync task for an entity."""
     task = sync_tasks.pop(entity_name, None)
-    await _cancel_task(task)
+    await cancel_task(task)
 
 
-async def _stop_entities(
+async def stop_entities(
     entities_to_restart: set[str],
     agent_bots: dict[str, AgentBot | TeamBot],
     sync_tasks: dict[str, asyncio.Task],
@@ -234,7 +234,7 @@ async def _stop_entities(
     """Stop a set of entities and remove them from runtime maps."""
     # Cancel sync tasks first so restarted entities do not accumulate duplicate loops.
     for entity_name in entities_to_restart:
-        await _cancel_sync_task(entity_name, sync_tasks)
+        await cancel_sync_task(entity_name, sync_tasks)
 
     stop_tasks = [agent_bots[entity_name].stop() for entity_name in entities_to_restart if entity_name in agent_bots]
     if stop_tasks:
@@ -244,7 +244,7 @@ async def _stop_entities(
         agent_bots.pop(entity_name, None)
 
 
-async def _sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
+async def sync_forever_with_restart(bot: AgentBot | TeamBot, max_retries: int = -1) -> None:
     """Run sync_forever with automatic restart on failure."""
     retry_count = 0
     while bot.running and (max_retries < 0 or retry_count < max_retries):

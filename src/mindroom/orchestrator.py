@@ -53,23 +53,23 @@ from .orchestration.config_updates import (
     build_config_update_plan,
 )
 from .orchestration.rooms import (
-    _get_authorized_user_ids_to_invite,
-    _get_root_space_user_ids_to_invite,
+    get_authorized_user_ids_to_invite,
+    get_root_space_user_ids_to_invite,
 )
 from .orchestration.runtime import (
-    _STARTUP_RETRY_INITIAL_DELAY_SECONDS,
-    _STARTUP_RETRY_MAX_DELAY_SECONDS,
-    _cancel_sync_task,
-    _cancel_task,
-    _create_logged_task,
-    _create_temp_user,
-    _EntityStartResults,
-    _is_permanent_startup_error,
-    _retry_delay_seconds,
-    _run_with_retry,
-    _stop_entities,
-    _sync_forever_with_restart,
-    _wait_for_matrix_homeserver,
+    STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+    STARTUP_RETRY_MAX_DELAY_SECONDS,
+    EntityStartResults,
+    cancel_sync_task,
+    cancel_task,
+    create_logged_task,
+    create_temp_user,
+    is_permanent_startup_error,
+    retry_delay_seconds,
+    run_with_retry,
+    stop_entities,
+    sync_forever_with_restart,
+    wait_for_matrix_homeserver,
 )
 
 if TYPE_CHECKING:
@@ -170,10 +170,10 @@ class MultiAgentOrchestrator:
         update_runtime_state: bool,
     ) -> None:
         """Ensure the internal user account exists, retrying only transient failures."""
-        await _run_with_retry(
+        await run_with_retry(
             "Preparing MindRoom user account",
             lambda: self._ensure_user_account(config),
-            permanent_error_check=_is_permanent_startup_error,
+            permanent_error_check=is_permanent_startup_error,
             update_runtime_state=update_runtime_state,
         )
 
@@ -190,12 +190,12 @@ class MultiAgentOrchestrator:
         """Cancel any in-flight background knowledge refresh task."""
         task = self._knowledge_refresh_task
         self._knowledge_refresh_task = None
-        await _cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
+        await cancel_task(task, suppress_exceptions=(asyncio.CancelledError, Exception))
 
     async def _cancel_bot_start_task(self, entity_name: str) -> None:
         """Cancel any background start task for one bot."""
         task = self._bot_start_tasks.pop(entity_name, None)
-        await _cancel_task(task)
+        await cancel_task(task)
 
     async def _cancel_bot_start_tasks(self) -> None:
         """Cancel all background bot start tasks."""
@@ -208,7 +208,7 @@ class MultiAgentOrchestrator:
         if existing_task is not None and not existing_task.done():
             return
         self._sync_tasks[entity_name] = asyncio.create_task(
-            _sync_forever_with_restart(bot),
+            sync_forever_with_restart(bot),
             name=f"sync_{entity_name}",
         )
 
@@ -255,7 +255,7 @@ class MultiAgentOrchestrator:
                     logger.info("Bot recovered after startup failure", agent_name=entity_name)
                     bots_to_setup = self._bots_to_setup_after_background_start(entity_name)
                     if bots_to_setup:
-                        await _run_with_retry(
+                        await run_with_retry(
                             f"Updating Matrix room memberships for {entity_name}",
                             partial(self._setup_rooms_and_memberships, bots_to_setup),
                             update_runtime_state=False,
@@ -264,10 +264,10 @@ class MultiAgentOrchestrator:
                     return
 
                 attempt += 1
-                retry_in_seconds = _retry_delay_seconds(
+                retry_in_seconds = retry_delay_seconds(
                     attempt,
-                    initial_delay_seconds=_STARTUP_RETRY_INITIAL_DELAY_SECONDS,
-                    max_delay_seconds=_STARTUP_RETRY_MAX_DELAY_SECONDS,
+                    initial_delay_seconds=STARTUP_RETRY_INITIAL_DELAY_SECONDS,
+                    max_delay_seconds=STARTUP_RETRY_MAX_DELAY_SECONDS,
                 )
                 logger.warning(
                     "Bot startup failed; retrying in background",
@@ -283,7 +283,7 @@ class MultiAgentOrchestrator:
     async def _schedule_bot_start_retry(self, entity_name: str) -> None:
         """Schedule background retries for one failed bot startup."""
         await self._cancel_bot_start_task(entity_name)
-        self._bot_start_tasks[entity_name] = _create_logged_task(
+        self._bot_start_tasks[entity_name] = create_logged_task(
             self._run_bot_start_retry(entity_name),
             name=f"retry_start_{entity_name}",
             failure_message="Background bot start task failed",
@@ -298,7 +298,7 @@ class MultiAgentOrchestrator:
         """Run background knowledge refresh until it succeeds or is cancelled."""
         current_task = asyncio.current_task()
         try:
-            await _run_with_retry(
+            await run_with_retry(
                 "Background knowledge refresh",
                 lambda: self._configure_knowledge(config, start_watcher=start_watcher),
                 update_runtime_state=False,
@@ -315,7 +315,7 @@ class MultiAgentOrchestrator:
     ) -> None:
         """Schedule knowledge refresh in the background, replacing any in-flight run."""
         await self._cancel_knowledge_refresh_task()
-        self._knowledge_refresh_task = _create_logged_task(
+        self._knowledge_refresh_task = create_logged_task(
             self._run_knowledge_refresh(config, start_watcher=start_watcher),
             name="knowledge_refresh",
             failure_message="Background knowledge refresh failed",
@@ -350,7 +350,7 @@ class MultiAgentOrchestrator:
 
     def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
-        temp_user = _create_temp_user(entity_name, config)
+        temp_user = create_temp_user(entity_name, config)
         bot = cast("AgentBot | TeamBot", create_bot_for_entity(entity_name, temp_user, config, self.storage_path))
         bot.orchestrator = self
         self.agent_bots[entity_name] = bot
@@ -361,7 +361,7 @@ class MultiAgentOrchestrator:
         entity_names: Iterable[str],
         *,
         start_sync_tasks: bool,
-    ) -> _EntityStartResults:
+    ) -> EntityStartResults:
         """Try to start each named entity once and classify the results."""
         entity_bots: list[tuple[str, AgentBot | TeamBot]] = []
         for entity_name in entity_names:
@@ -369,7 +369,7 @@ class MultiAgentOrchestrator:
             if bot is not None:
                 entity_bots.append((entity_name, bot))
 
-        results = _EntityStartResults()
+        results = EntityStartResults()
         if not entity_bots:
             return results
 
@@ -394,7 +394,7 @@ class MultiAgentOrchestrator:
         config: Config,
         *,
         start_sync_tasks: bool,
-    ) -> _EntityStartResults:
+    ) -> EntityStartResults:
         """Create configured entities and try to start them once."""
         for entity_name in entity_names:
             self._create_managed_bot(entity_name, config)
@@ -438,10 +438,10 @@ class MultiAgentOrchestrator:
             raise RuntimeError(msg)
 
         set_runtime_starting("Starting router Matrix account")
-        await _run_with_retry(
+        await run_with_retry(
             "Starting router Matrix account",
             _start_router,
-            permanent_error_check=_is_permanent_startup_error,
+            permanent_error_check=is_permanent_startup_error,
         )
         return router_bot
 
@@ -458,7 +458,7 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
-        await _wait_for_matrix_homeserver()
+        await wait_for_matrix_homeserver()
         if not self.agent_bots:
             await self.initialize()
 
@@ -477,7 +477,7 @@ class MultiAgentOrchestrator:
 
         # Setup rooms and have all bots join them before potentially heavy
         # knowledge indexing, so new rooms and invites are not delayed by embeddings.
-        await _run_with_retry(
+        await run_with_retry(
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
@@ -525,7 +525,7 @@ class MultiAgentOrchestrator:
         """Cancel, clean up, and unregister entities removed from config."""
         for entity_name in removed_entities:
             await self._cancel_bot_start_task(entity_name)
-            await _cancel_sync_task(entity_name, self._sync_tasks)
+            await cancel_sync_task(entity_name, self._sync_tasks)
 
             bot = self.agent_bots.pop(entity_name, None)
             if bot is not None:
@@ -536,7 +536,7 @@ class MultiAgentOrchestrator:
         if plan.entities_to_restart:
             for entity_name in plan.entities_to_restart:
                 await self._cancel_bot_start_task(entity_name)
-            await _stop_entities(plan.entities_to_restart, self.agent_bots, self._sync_tasks)
+            await stop_entities(plan.entities_to_restart, self.agent_bots, self._sync_tasks)
 
         entities_to_recreate = plan.entities_to_restart & plan.all_new_entities
         changed_entities = entities_to_recreate | plan.new_entities
@@ -699,7 +699,7 @@ class MultiAgentOrchestrator:
         if root_space_id is None:
             return
 
-        invite_user_ids = _get_root_space_user_ids_to_invite(config)
+        invite_user_ids = get_root_space_user_ids_to_invite(config)
         if not invite_user_ids:
             return
 
@@ -825,7 +825,7 @@ class MultiAgentOrchestrator:
             return
 
         server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
-        authorized_user_ids = _get_authorized_user_ids_to_invite(config)
+        authorized_user_ids = get_authorized_user_ids_to_invite(config)
         authorized_user_ids = await self._invite_internal_user_to_rooms(
             config,
             joined_rooms,
@@ -854,7 +854,7 @@ class MultiAgentOrchestrator:
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         for entity_name in list(self._sync_tasks.keys()):
-            await _cancel_sync_task(entity_name, self._sync_tasks)
+            await cancel_sync_task(entity_name, self._sync_tasks)
 
         for bot in self.agent_bots.values():
             bot.running = False
@@ -928,7 +928,7 @@ async def _run_auxiliary_task_forever(
             restart_count = 0
         restart_count += 1
         await asyncio.sleep(
-            _retry_delay_seconds(
+            retry_delay_seconds(
                 restart_count,
                 initial_delay_seconds=_AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS,
                 max_delay_seconds=_AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS,

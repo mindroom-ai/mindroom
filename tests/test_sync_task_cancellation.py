@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.orchestration.runtime import _cancel_sync_task, _stop_entities
+from mindroom.orchestration.runtime import cancel_sync_task, stop_entities
 from mindroom.orchestrator import MultiAgentOrchestrator
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 async def test_cancel_sync_task() -> None:
-    """Test the _cancel_sync_task helper function."""
+    """Test the cancel_sync_task helper function."""
 
     # Create a real cancelled task for testing
     async def dummy_coro() -> None:
@@ -28,7 +28,7 @@ async def test_cancel_sync_task() -> None:
     sync_tasks = {"agent1": task}
 
     # Cancel the task
-    await _cancel_sync_task("agent1", sync_tasks)
+    await cancel_sync_task("agent1", sync_tasks)
 
     # Verify task was cancelled and removed
     assert task.cancelled()
@@ -37,18 +37,18 @@ async def test_cancel_sync_task() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_sync_task_missing_entity() -> None:
-    """Test _cancel_sync_task with non-existent entity."""
+    """Test cancel_sync_task with non-existent entity."""
     sync_tasks = {}
 
     # Should not raise error for missing entity
-    await _cancel_sync_task("non_existent", sync_tasks)
+    await cancel_sync_task("non_existent", sync_tasks)
 
     assert len(sync_tasks) == 0
 
 
 @pytest.mark.asyncio
 async def test_stop_entities_cancels_sync_tasks() -> None:
-    """Test that _stop_entities properly cancels sync tasks."""
+    """Test that stop_entities properly cancels sync tasks."""
 
     async def sync_loop() -> None:
         await asyncio.sleep(60)
@@ -74,7 +74,7 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
     }
 
     entities_to_restart = {"agent1", "agent2"}
-    await _stop_entities(entities_to_restart, agent_bots, sync_tasks)
+    await stop_entities(entities_to_restart, agent_bots, sync_tasks)
 
     assert task1.cancelled()
     assert task2.cancelled()
@@ -100,7 +100,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.orchestrator._sync_forever_with_restart"),
+        patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.ensure_all_rooms_exist") as mock_ensure_rooms,
         patch("mindroom.orchestrator.ensure_user_in_rooms") as mock_ensure_user,
         patch("mindroom.orchestrator.create_agent_user") as mock_create_user,
@@ -150,10 +150,10 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
     with (
         patch("mindroom.orchestrator.Config.from_yaml") as mock_from_yaml,
         patch("mindroom.orchestration.config_updates._identify_entities_to_restart") as mock_identify,
-        patch("mindroom.orchestrator._stop_entities") as mock_stop_entities,
+        patch("mindroom.orchestrator.stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.orchestrator._sync_forever_with_restart"),
-        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator.sync_forever_with_restart"),
+        patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
         patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
@@ -195,7 +195,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         # Run update_config
         await orchestrator.update_config()
 
-        # Verify _stop_entities was called with sync_tasks dict
+        # Verify stop_entities was called with sync_tasks dict
         mock_stop_entities.assert_called_once_with(
             {"agent1"},
             orchestrator.agent_bots,
@@ -217,9 +217,9 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
     with (
         patch("mindroom.orchestrator.Config.from_yaml") as mock_from_yaml,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
-        patch("mindroom.orchestrator._sync_forever_with_restart"),
-        patch("mindroom.orchestrator._stop_entities"),
-        patch("mindroom.orchestrator._create_temp_user") as mock_create_temp_user,
+        patch("mindroom.orchestrator.sync_forever_with_restart"),
+        patch("mindroom.orchestrator.stop_entities"),
+        patch("mindroom.orchestrator.create_temp_user") as mock_create_temp_user,
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
@@ -295,7 +295,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
-    with patch("mindroom.orchestrator._cancel_sync_task") as mock_cancel:
+    with patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
 
         # Track which tasks are cancelled
