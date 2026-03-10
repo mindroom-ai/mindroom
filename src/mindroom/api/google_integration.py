@@ -219,7 +219,7 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
     has_credentials = bool(client_id and client_secret)
 
     # Get current credentials
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
     creds = _get_google_credentials(target)
 
     if not creds:
@@ -275,7 +275,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
         )
 
     try:
-        resolve_request_credentials_target(request, agent_name=agent_name)
+        resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         _, _, flow_cls = _ensure_google_packages()
 
         # Create OAuth flow with all scopes
@@ -292,6 +292,8 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
         )
 
         return GoogleAuthUrl(auth_url=auth_url)
+    except HTTPException:
+        raise
     except ImportError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
@@ -326,13 +328,15 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect
         parsed_uri = urlparse(current_redirect_uri)
         base_url = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
         return RedirectResponse(url=f"{base_url}/?google=connected")
+    except HTTPException:
+        raise
     except ImportError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     except Exception as e:
@@ -350,8 +354,10 @@ async def callback(request: Request) -> RedirectResponse:
 async def disconnect(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Google services by removing stored tokens."""
     try:
-        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
         target.target_manager.delete_credentials("google")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:

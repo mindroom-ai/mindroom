@@ -102,7 +102,7 @@ class _ApiKeyRequest(BaseModel):
 
 def _get_service_credentials(service: str, request: Request, agent_name: str | None = None) -> dict[str, Any]:
     """Get stored credentials for a service."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)
     return credentials if credentials else {}
 
@@ -114,7 +114,7 @@ def _save_service_credentials(
     agent_name: str | None = None,
 ) -> None:
     """Save service credentials."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     target.target_manager.save_credentials(service, credentials)
 
 
@@ -179,7 +179,7 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
             detail="Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.",
         )
 
-    resolve_request_credentials_target(request, agent_name=agent_name)
+    resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     _, spotify_oauth_cls = _ensure_spotify_packages()
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
@@ -248,7 +248,7 @@ async def disconnect_service(
     if service not in tools_metadata:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
 
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     target.target_manager.delete_credentials(service)
 
     return {"status": "disconnected"}

@@ -12,7 +12,11 @@ import httpx
 from agno.tools import Toolkit
 
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials
-from mindroom.tool_system.worker_routing import WorkerScope
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 
 class HomeAssistantTools(Toolkit):
@@ -25,6 +29,15 @@ class HomeAssistantTools(Toolkit):
         routing_agent_name: str | None = None,
     ) -> None:
         """Initialize Home Assistant tools."""
+        if not worker_scope_allows_shared_only_integrations(worker_scope):
+            msg = unsupported_shared_only_integration_message(
+                "homeassistant",
+                worker_scope,
+                agent_name=routing_agent_name,
+                subject="Tool",
+            )
+            raise ValueError(msg)
+
         self._creds_manager = get_credentials_manager()
         self._worker_scope = worker_scope
         self._routing_agent_name = routing_agent_name

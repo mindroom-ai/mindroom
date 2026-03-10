@@ -13,6 +13,10 @@ from loguru import logger
 
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.worker_routing import (
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
@@ -35,6 +39,15 @@ class GoogleSheetsTools(AgnoGoogleSheetsTools):
         This wrapper automatically loads credentials from MindRoom's
         unified credential storage and passes them to the Agno GoogleSheetsTools.
         """
+        if not worker_scope_allows_shared_only_integrations(worker_scope):
+            msg = unsupported_shared_only_integration_message(
+                "google_sheets",
+                worker_scope,
+                agent_name=routing_agent_name,
+                subject="Tool",
+            )
+            raise ValueError(msg)
+
         self._creds_manager = get_credentials_manager()
         self._worker_scope = worker_scope
         self._routing_agent_name = routing_agent_name

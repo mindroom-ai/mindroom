@@ -114,16 +114,11 @@ class TestCredentialsAPI:
             {"api_key": "sk-test123", "_source": "ui"},
         )
 
-    def test_worker_key_uses_worker_scoped_manager(
+    def test_rejects_raw_worker_key_query_param(
         self,
         client: TestClient,
-        mock_credentials_manager: MagicMock,
     ) -> None:
-        """worker_key should redirect credential writes to the worker-scoped manager."""
-        worker_manager = MagicMock()
-        worker_manager.load_credentials.return_value = None
-        mock_credentials_manager.for_worker.return_value = worker_manager
-
+        """Dashboard credential API should not accept raw worker_key targeting."""
         response = client.post(
             "/api/credentials/openai/api-key?worker_key=worker-a",
             json={
@@ -133,12 +128,8 @@ class TestCredentialsAPI:
             },
         )
 
-        assert response.status_code == 200
-        mock_credentials_manager.for_worker.assert_called_once_with("worker-a")
-        worker_manager.save_credentials.assert_called_once_with(
-            "openai",
-            {"api_key": "sk-test123", "_source": "ui"},
-        )
+        assert response.status_code == 400
+        assert "worker_key" in response.json()["detail"]
 
     def test_agent_name_uses_authenticated_user_worker_scope(
         self,
@@ -179,6 +170,77 @@ class TestCredentialsAPI:
         mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
         assert response.json()["has_key"] is True
 
+    def test_agent_name_uses_customer_id_for_worker_tenant(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dashboard worker targeting must use the same tenant identity as runtime routing."""
+        config = _config_with_worker_scope("user")
+        worker_manager = MagicMock()
+        worker_manager.load_credentials.return_value = {
+            "api_key": "sk-worker-scope",
+            "_source": "ui",
+        }
+        mock_credentials_manager.for_worker.return_value = worker_manager
+        monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+        monkeypatch.setenv("ACCOUNT_ID", "account-456")
+
+        expected_worker_key = resolve_worker_key(
+            "user",
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="standalone",
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+                tenant_id="tenant-123",
+                account_id="account-456",
+            ),
+            agent_name="general",
+        )
+        assert expected_worker_key is not None
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai/api-key?agent_name=general")
+
+        assert response.status_code == 200
+        mock_credentials_manager.for_worker.assert_called_once_with(expected_worker_key)
+
+    def test_rejects_shared_only_integration_services_for_isolating_scope(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Shared-only integration credentials should be rejected for isolating scopes."""
+        config = _config_with_worker_scope("user")
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/google?agent_name=general")
+
+        assert response.status_code == 400
+        assert "worker_scope=shared" in response.json()["detail"]
+
+    def test_list_services_hides_shared_only_integrations_for_isolating_scope(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Dashboard service listing should hide shared-only integrations for isolating scopes."""
+        config = _config_with_worker_scope("user")
+        worker_manager = MagicMock()
+        worker_manager.list_services.return_value = ["google", "homeassistant", "openai"]
+        mock_credentials_manager.for_worker.return_value = worker_manager
+        mock_credentials_manager.list_services.return_value = []
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/list?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json() == ["openai"]
+
     def test_agent_name_rejects_room_thread_scope(
         self,
         client: TestClient,
@@ -191,6 +253,59 @@ class TestCredentialsAPI:
 
         assert response.status_code == 400
         assert "worker_scope=room_thread" in response.json()["detail"]
+
+    def test_shared_agent_name_does_not_merge_global_ui_credentials(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Shared worker scope should not inherit UI-saved global credentials."""
+        config = _config_with_worker_scope("shared")
+        worker_manager = MagicMock()
+        worker_manager.load_credentials.return_value = None
+        mock_credentials_manager.for_worker.return_value = worker_manager
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "sk-global-ui",
+            "_source": "ui",
+        }
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai/api-key?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json()["has_key"] is False
+
+    def test_shared_agent_name_still_merges_env_credentials(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Shared worker scope should still see env-backed base credentials."""
+        config = _config_with_worker_scope("shared")
+        worker_manager = MagicMock()
+        worker_manager.load_credentials.return_value = None
+        mock_credentials_manager.for_worker.return_value = worker_manager
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "sk-global-env",
+            "_source": "env",
+        }
+
+        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai/api-key?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json()["has_key"] is True
+        assert response.json()["source"] == "env"
+
+    def test_rejects_raw_source_worker_key_query_param(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Credential copy API should not accept raw source_worker_key targeting."""
+        response = client.post("/api/credentials/model:new/copy-from/model:old?source_worker_key=worker-a")
+
+        assert response.status_code == 400
+        assert "source_worker_key" in response.json()["detail"]
 
     def test_get_credentials(
         self,

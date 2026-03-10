@@ -2,7 +2,7 @@
 
 Last updated: 2026-03-10
 Owner: MindRoom backend
-Status: Phase 1 prototype implemented in commit `fa9b1418`
+Status: Phase 2 largely implemented, with explicit shared-only exceptions for OAuth-heavy dashboard integrations
 
 ## Objective
 
@@ -27,7 +27,9 @@ The current prototype validates persistence with `shell`, `file`, and `python`.
 The current prototype carries execution identity from Matrix and OpenAI-compatible ingress into worker-routed tool calls.
 The current prototype persists worker workspace, cache, and Python packages inside worker-owned state.
 The current prototype aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
-The current prototype does not yet make sessions, learning, and credentials fully worker-scope-aware.
+Sessions, learning, and most credentials are now worker-scope-aware.
+Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
+Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 
 ## Product Boundary
 
@@ -229,6 +231,11 @@ The target credentials model is:
 - Credential leases are created on the target worker and are short-lived and single-use by default.
 - Leased credentials never become part of the model prompt or normal tool arguments.
 
+OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
+Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user`, `user_agent`, and `room_thread`.
+They only support unscoped agents and agents with `worker_scope=shared`.
+This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
+
 ## Local Development Backend
 
 The local backend should use one primary MindRoom runtime plus many persistent worker containers.
@@ -372,10 +379,10 @@ Phase 1 aligned file-backed memory with worker-owned storage.
 
 ### Phase 2: Scope-Aware Mutable State
 
-Phase 2 should make all remaining mutable state obey worker scope.
+Phase 2 made the remaining core mutable state obey worker scope.
 Phase 2 is the correctness phase.
 
-Phase 2 work items are:
+Phase 2 work items were:
 
 - Add worker-aware session storage resolvers.
 - Add worker-aware learning storage resolvers.
@@ -383,6 +390,7 @@ Phase 2 work items are:
 - Refactor credential lease issuance to target the resolved worker endpoint.
 - Enforce file-backed memory for worker-editable agents.
 - Block direct worker mutation of unsupported memory backends.
+- Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
 - Add migration behavior for `shared` scope and explicit-import behavior for isolated scopes.
 
 ### Phase 3: Policy Expansion And Lifecycle
@@ -415,8 +423,8 @@ Phase 4 work items are:
 
 ## Recommended Immediate Next Step
 
-The next implementation step should be Phase 2.
-The first concrete target inside Phase 2 should be session and learning storage resolvers because they close the biggest remaining split-state gap after memory.
+The next implementation step should be Phase 3.
+The first concrete target inside Phase 3 should be a first-class worker manager with explicit lifecycle, health, and cleanup behavior.
 
 ## File Map For Remaining Work
 

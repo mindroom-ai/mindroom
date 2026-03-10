@@ -225,19 +225,16 @@ def load_scoped_credentials(
     if worker_scope is None:
         return manager.load_credentials(service)
 
-    shared_credentials = manager.load_credentials(service)
-    merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, Mapping) and (
-        worker_scope == "shared" or shared_credentials.get("_source") == "env"
-    ):
-        merged_credentials.update(shared_credentials)
-
     worker_manager = _resolve_worker_credentials_manager(
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
         execution_identity=execution_identity,
     )
+    shared_credentials = manager.load_credentials(service)
+    merged_credentials: dict[str, Any] = {}
+    if isinstance(shared_credentials, Mapping) and shared_credentials.get("_source") == "env":
+        merged_credentials.update(shared_credentials)
     if worker_manager is None:
         return merged_credentials or None
 

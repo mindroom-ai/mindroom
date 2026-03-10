@@ -10,7 +10,15 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from mindroom.credentials import CredentialsManager, get_credentials_manager, validate_service_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    SHARED_ONLY_INTEGRATION_NAMES,
+    ToolExecutionIdentity,
+    WorkerScope,
+    requires_shared_only_integration_scope,
+    resolve_worker_key,
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 
@@ -27,14 +35,6 @@ def _validated_service(service: str) -> str:
         return validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _manager_for_worker(worker_key: str | None) -> CredentialsManager:
-    normalized_worker_key = worker_key.strip() if worker_key is not None else ""
-    manager = get_credentials_manager()
-    if not normalized_worker_key:
-        return manager
-    return manager.for_worker(normalized_worker_key)
 
 
 @dataclass(frozen=True)
@@ -57,6 +57,7 @@ def _build_dashboard_execution_identity(request: Request, agent_name: str) -> To
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
+    tenant_id = os.getenv("CUSTOMER_ID")
     account_id = os.getenv("ACCOUNT_ID")
     return ToolExecutionIdentity(
         channel="matrix",
@@ -66,34 +67,34 @@ def _build_dashboard_execution_identity(request: Request, agent_name: str) -> To
         thread_id=None,
         resolved_thread_id=None,
         session_id=None,
-        tenant_id=account_id,
+        tenant_id=tenant_id,
         account_id=account_id,
     )
+
+
+def _reject_raw_worker_targeting(request: Request) -> None:
+    for param_name in ("worker_key", "source_worker_key"):
+        if request.query_params.get(param_name):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query parameter '{param_name}' is not supported on the dashboard credentials API. "
+                    "Use agent_name to resolve the scoped worker target."
+                ),
+            )
 
 
 def resolve_request_credentials_target(
     request: Request,
     *,
-    worker_key: str | None = None,
     agent_name: str | None = None,
     credentials_manager: CredentialsManager | None = None,
+    service_names: tuple[str, ...] = (),
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    if worker_key and agent_name:
-        raise HTTPException(status_code=400, detail="Use either worker_key or agent_name, not both")
+    _reject_raw_worker_targeting(request)
 
     base_manager = credentials_manager or get_credentials_manager()
-
-    if worker_key:
-        normalized_worker_key = worker_key.strip()
-        target_manager = base_manager if not normalized_worker_key else base_manager.for_worker(normalized_worker_key)
-        return RequestCredentialsTarget(
-            base_manager=base_manager,
-            target_manager=target_manager,
-            worker_scope=None,
-            agent_name=None,
-            execution_identity=None,
-        )
 
     if not agent_name:
         return RequestCredentialsTarget(
@@ -129,6 +130,19 @@ def resolve_request_credentials_target(
             ),
         )
 
+    if not worker_scope_allows_shared_only_integrations(worker_scope):
+        for service_name in service_names:
+            if not requires_shared_only_integration_scope(service_name):
+                continue
+            raise HTTPException(
+                status_code=400,
+                detail=unsupported_shared_only_integration_message(
+                    service_name,
+                    worker_scope,
+                    agent_name=agent_name,
+                ),
+            )
+
     execution_identity = _build_dashboard_execution_identity(request, agent_name)
     worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=agent_name)
     if worker_key is None:
@@ -153,9 +167,7 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
 
     shared_credentials = target.base_manager.load_credentials(service)
     merged_credentials: dict[str, Any] = {}
-    if isinstance(shared_credentials, dict) and (
-        target.worker_scope == "shared" or shared_credentials.get("_source") == "env"
-    ):
+    if isinstance(shared_credentials, dict) and shared_credentials.get("_source") == "env":
         merged_credentials.update(shared_credentials)
 
     worker_credentials = target.target_manager.load_credentials(service)
@@ -189,26 +201,34 @@ class SetCredentialsRequest(BaseModel):
 @router.get("/list")
 async def list_services(
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> list[str]:
     """List all services with stored credentials."""
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
     if target.worker_scope is None:
         return target.target_manager.list_services()
-    return sorted(set(target.base_manager.list_services()) | set(target.target_manager.list_services()))
+    worker_services = set(target.target_manager.list_services())
+    env_services = {
+        service
+        for service in target.base_manager.list_services()
+        if (credentials := target.base_manager.load_credentials(service)) is not None
+        and credentials.get("_source") == "env"
+    }
+    services = worker_services | env_services
+    if not worker_scope_allows_shared_only_integrations(target.worker_scope):
+        services -= SHARED_ONLY_INTEGRATION_NAMES
+    return sorted(services)
 
 
 @router.get("/{service}/status")
 async def get_credential_status(
     service: str,
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> CredentialStatus:
     """Get the status of credentials for a service."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)
 
     if credentials:
@@ -227,12 +247,11 @@ async def set_credentials(
     service: str,
     http_request: Request,
     payload: SetCredentialsRequest,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set multiple credentials for a service."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(http_request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
 
     # Mark as UI-sourced and save
     creds = {**payload.credentials, "_source": "ui"}
@@ -246,7 +265,6 @@ async def set_api_key(
     service: str,
     http_request: Request,
     request: SetApiKeyRequest,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Set an API key for a service."""
@@ -255,7 +273,7 @@ async def set_api_key(
     if request_service != service:
         raise HTTPException(status_code=400, detail="Service mismatch in request")
 
-    target = resolve_request_credentials_target(http_request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(http_request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
     credentials[request.key_name] = request.api_key
     credentials["_source"] = "ui"
@@ -270,12 +288,11 @@ async def get_api_key(
     request: Request,
     key_name: str = "api_key",
     include_value: bool = False,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Get API key metadata for a service, and optionally the full key value."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target) or {}
     api_key = credentials.get(key_name)
 
@@ -300,12 +317,11 @@ async def get_api_key(
 async def get_credentials(
     service: str,
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Get credentials for a service (for editing)."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:
@@ -318,12 +334,11 @@ async def get_credentials(
 async def delete_credentials(
     service: str,
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, str]:
     """Delete all credentials for a service."""
     service = _validated_service(service)
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     target.target_manager.delete_credentials(service)
 
     return {"status": "success", "message": f"Credentials deleted for {service}"}
@@ -334,15 +349,17 @@ async def copy_credentials(
     service: str,
     source_service: str,
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
-    source_worker_key: str | None = None,
 ) -> dict[str, str]:
     """Copy credentials from one service to another."""
     service = _validated_service(service)
     source_service = _validated_service(source_service)
-    source_manager = _manager_for_worker(source_worker_key)
-    source_creds = source_manager.load_credentials(source_service)
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=(service, source_service),
+    )
+    source_creds = load_credentials_for_target(source_service, target)
 
     if not source_creds:
         raise HTTPException(status_code=404, detail=f"No credentials found for {source_service}")
@@ -350,7 +367,6 @@ async def copy_credentials(
     # Copy credentials, marking as UI-sourced
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
     target.target_manager.save_credentials(service, target_creds)
 
     return {"status": "success", "message": f"Credentials copied from {source_service} to {service}"}
@@ -360,13 +376,12 @@ async def copy_credentials(
 async def validate_credentials(
     service: str,
     request: Request,
-    worker_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Test if credentials are valid for a service."""
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
-    target = resolve_request_credentials_target(request, worker_key=worker_key, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=(service,))
     credentials = load_credentials_for_target(service, target)
 
     if not credentials:

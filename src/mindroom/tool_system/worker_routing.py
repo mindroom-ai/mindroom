@@ -19,6 +19,16 @@ WorkerScope = Literal["shared", "user", "user_agent", "room_thread"]
 ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
+SHARED_ONLY_INTEGRATION_NAMES = frozenset(
+    {
+        "google",
+        "spotify",
+        "homeassistant",
+        "gmail",
+        "google_calendar",
+        "google_sheets",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +76,32 @@ def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_key_part(identity.requester_id)
     return None
+
+
+def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
+    """Return whether a worker scope can use shared-only dashboard integrations."""
+    return worker_scope in (None, "shared")
+
+
+def requires_shared_only_integration_scope(name: str) -> bool:
+    """Return whether a tool or dashboard integration is restricted to shared scope."""
+    return name in SHARED_ONLY_INTEGRATION_NAMES
+
+
+def unsupported_shared_only_integration_message(
+    name: str,
+    worker_scope: WorkerScope | None,
+    *,
+    agent_name: str | None = None,
+    subject: str = "Integration",
+) -> str:
+    """Return the user-facing error for shared-only integrations on isolating scopes."""
+    scope_label = worker_scope or "unscoped"
+    agent_detail = f"Agent '{agent_name}' uses " if agent_name else "This request uses "
+    return (
+        f"{subject} '{name}' is only supported for shared deployment credentials or agents with "
+        f"worker_scope=shared. {agent_detail}worker_scope={scope_label}."
+    )
 
 
 def resolve_worker_key(

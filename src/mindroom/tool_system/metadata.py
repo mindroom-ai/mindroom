@@ -15,7 +15,12 @@ from mindroom.config.main import Config
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
-from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    requires_shared_only_integration_scope,
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -58,6 +63,17 @@ def _build_tool_instance(
     routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
+    if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
+        worker_scope,
+    ):
+        msg = unsupported_shared_only_integration_message(
+            tool_name,
+            worker_scope,
+            agent_name=routing_agent_name,
+            subject="Tool",
+        )
+        raise ValueError(msg)
+
     tool_class = _TOOL_REGISTRY[tool_name]()
     creds_manager = get_credentials_manager()
     credentials = (

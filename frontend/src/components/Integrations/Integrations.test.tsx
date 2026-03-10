@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { Integrations } from './Integrations';
+import { useConfigStore } from '@/store/configStore';
 
 // Mock hooks
 const mockTools = [
@@ -192,6 +193,11 @@ describe('Integrations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockToast.mockReset();
+    useConfigStore.setState({ agents: [] });
+    Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
+      configurable: true,
+      value: () => false,
+    });
   });
 
   it('should render integrations list', async () => {
@@ -401,5 +407,44 @@ describe('Integrations', () => {
         });
       });
     }
+  });
+
+  it('hides shared-only integrations for isolating worker scopes', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'code',
+          display_name: 'Scoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: 'user',
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+    fireEvent.keyDown(combobox, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Scoped Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/only supported for shared deployment credentials/i)
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
+    expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
+    expect(screen.queryByText('Weather')).toBeInTheDocument();
   });
 });

@@ -42,6 +42,15 @@ import {
 import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 
+const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
+const SHARED_ONLY_BACKEND_TOOL_IDS = new Set([
+  'spotify',
+  'homeassistant',
+  'gmail',
+  'google_calendar',
+  'google_sheets',
+]);
+
 export function Integrations() {
   const { agents } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
@@ -61,6 +70,8 @@ export function Integrations() {
     [scopedAgents, scopeAgentName]
   );
   const selectedWorkerScope = selectedScopeAgent?.worker_scope ?? null;
+  const hidesSharedOnlyIntegrations =
+    selectedScopeAgent !== null && selectedWorkerScope !== null && selectedWorkerScope !== 'shared';
 
   // Fetch tools from backend
   const {
@@ -102,7 +113,7 @@ export function Integrations() {
   // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
-  }, [backendTools, scopeAgentName]);
+  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
@@ -122,6 +133,9 @@ export function Integrations() {
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
         const config = provider.getConfig(scope);
+        if (hidesSharedOnlyIntegrations && SHARED_ONLY_PROVIDER_IDS.has(config.integration.id)) {
+          continue;
+        }
         const status = provider.loadStatus ? await provider.loadStatus(scope) : {};
         loadedIntegrations.push({
           ...config.integration,
@@ -135,6 +149,9 @@ export function Integrations() {
 
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
+        .filter(
+          tool => !hidesSharedOnlyIntegrations || !SHARED_ONLY_BACKEND_TOOL_IDS.has(tool.name)
+        )
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
           return {
@@ -669,6 +686,15 @@ export function Integrations() {
               <AlertDescription>
                 Room-thread scoped agents are not configurable here because their worker is selected
                 at runtime from a room and thread.
+              </AlertDescription>
+            </Alert>
+          )}
+          {hidesSharedOnlyIntegrations && (
+            <Alert className="mt-3">
+              <AlertDescription>
+                Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
+                are only supported for shared deployment credentials or agents with
+                `worker_scope=shared`.
               </AlertDescription>
             </Alert>
           )}

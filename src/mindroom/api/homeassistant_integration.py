@@ -131,7 +131,7 @@ async def _test_connection(instance_url: str, token: str) -> dict[str, Any]:
 @router.get("/status")
 async def get_status(request: Request, agent_name: str | None = None) -> HomeAssistantStatus:
     """Check Home Assistant integration status."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     config = _get_stored_config(target)
 
     if not config:
@@ -198,7 +198,7 @@ async def connect_oauth(
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
     if agent_name:
         redirect_uri = f"{redirect_uri}?agent_name={agent_name}"
@@ -260,7 +260,7 @@ async def connect_token(
         ) from e
 
     # Save configuration
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     _save_config(
         target,
         {
@@ -287,7 +287,7 @@ async def callback(request: Request) -> RedirectResponse:
         await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
 
     # Get stored config
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=503, detail="No configuration found")
@@ -341,8 +341,10 @@ async def callback(request: Request) -> RedirectResponse:
 async def disconnect(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Disconnect Home Assistant by removing stored tokens."""
     try:
-        target = resolve_request_credentials_target(request, agent_name=agent_name)
+        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
         target.target_manager.delete_credentials("homeassistant")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
@@ -356,7 +358,7 @@ async def get_entities(
     agent_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get Home Assistant entities."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
@@ -412,7 +414,7 @@ async def call_service(
     agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Call a Home Assistant service."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     config = _get_stored_config(target)
     if not config:
         raise HTTPException(status_code=401, detail="Not connected to Home Assistant")

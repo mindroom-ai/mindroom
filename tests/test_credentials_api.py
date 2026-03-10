@@ -112,26 +112,23 @@ class TestCredentialsAPI:
         # Verify the key was saved
         assert mock_credentials_manager.get_api_key("openai") == "sk-test123"
 
-    def test_worker_key_targets_worker_scoped_credentials(
+    def test_rejects_raw_worker_key_query_param(
         self,
         test_client: TestClient,
-        mock_credentials_manager: CredentialsManager,
     ) -> None:
-        """Credential API should read and write worker-scoped credentials when worker_key is provided."""
+        """Credential API should reject raw worker_key targeting from callers."""
         response = test_client.post(
             "/api/credentials/openai?worker_key=worker-a",
             json={"credentials": {"api_key": "scoped-key"}},
         )
-        assert response.status_code == 200
+        assert response.status_code == 400
+        assert "worker_key" in response.json()["detail"]
 
-        shared_creds = mock_credentials_manager.load_credentials("openai")
-        worker_creds = mock_credentials_manager.for_worker("worker-a").load_credentials("openai")
-        assert shared_creds is None
-        assert worker_creds == {"api_key": "scoped-key", "_source": "ui"}
-
-        response = test_client.get("/api/credentials/openai?worker_key=worker-a")
-        assert response.status_code == 200
-        assert response.json()["credentials"] == {"api_key": "scoped-key"}
+    def test_rejects_raw_source_worker_key_query_param(self, test_client: TestClient) -> None:
+        """Credential copy endpoint should reject raw source_worker_key targeting."""
+        response = test_client.post("/api/credentials/model:new/copy-from/model:old?source_worker_key=worker-a")
+        assert response.status_code == 400
+        assert "source_worker_key" in response.json()["detail"]
 
     def test_set_api_key_service_mismatch(self, test_client: TestClient) -> None:
         """Test setting an API key with mismatched service."""
