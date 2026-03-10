@@ -20,7 +20,13 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
-from mindroom.tool_system.metadata import ToolInitOverrideError, ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    ToolInitOverrideError,
+    ensure_tool_registry_loaded,
+    get_tool_by_name,
+    sanitize_tool_init_overrides,
+)
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
 
 if TYPE_CHECKING:
@@ -376,6 +382,13 @@ async def execute_tool_call(
     """Execute a tool function locally and return the serialized result."""
     if request.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
+    if request.tool_init_overrides and request.tool_name in TOOL_METADATA:
+        try:
+            request.tool_init_overrides = (
+                sanitize_tool_init_overrides(request.tool_name, request.tool_init_overrides) or {}
+            )
+        except ToolInitOverrideError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     credential_overrides: dict[str, object] = {}
     if request.lease_id is not None:

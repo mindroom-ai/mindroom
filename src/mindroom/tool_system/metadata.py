@@ -32,10 +32,11 @@ class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
 
 
-def _sanitize_tool_init_overrides(
+def sanitize_tool_init_overrides(
     tool_name: str,
     tool_init_overrides: dict[str, object] | None,
 ) -> dict[str, object] | None:
+    """Validate and retain only the explicitly safe runtime tool init overrides."""
     if not tool_init_overrides:
         return None
 
@@ -86,7 +87,7 @@ def _build_tool_instance(
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
-    safe_tool_init_overrides = _sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
 
     init_kwargs = {}
     if metadata.config_fields:
