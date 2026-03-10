@@ -330,6 +330,7 @@ class TestChatCompletions:
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "unsupported_worker_scope"
+        assert "unscoped agents and worker_scope=shared" in error["message"]
         assert "general" in error["message"]
 
     def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
@@ -366,6 +367,7 @@ class TestChatCompletions:
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "unsupported_worker_scope"
+        assert "unscoped agents and worker_scope=shared" in error["message"]
         assert "code" in error["message"]
 
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:

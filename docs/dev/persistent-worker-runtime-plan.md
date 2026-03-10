@@ -2,7 +2,7 @@
 
 Last updated: 2026-03-10
 Owner: MindRoom backend
-Status: Phase 2 core scope-aware state implemented, with migration/import follow-up and live validation still pending
+Status: Phase 2 core scope-aware state implemented, with live validation still pending
 
 ## Objective
 
@@ -17,7 +17,7 @@ Phase 1 proves the core architecture can route generic tool calls into persisten
 Phase 2 makes all mutable state obey the same scope so the system becomes correct rather than merely demonstrable.
 Phase 3 expands policy and lifecycle behavior once the state model is sound.
 Phase 4 makes the system production-ready in Kubernetes.
-Doing the work in this order prevents expensive migration and deployment work from being built on top of an unproven routing model.
+Doing the work in this order prevents expensive lifecycle and deployment work from being built on top of an unproven routing model.
 
 ## Current Status
 
@@ -318,19 +318,18 @@ If background execution is later supported, worker metadata should track process
 - Credentials should only be loaded into the worker scope that is allowed to use them.
 - Worker-owned mutable state must never silently fall back to shared primary-runtime state.
 
-## Migration Strategy
+## State Initialization Policy
 
-Migration needs different behavior for shared and isolated scopes because current data is mostly agent-scoped and shared.
-Not all existing data can be safely partitioned after the fact.
-This section describes intended migration behavior and is not fully implemented yet.
+Adopting worker scope is a clean break from old shared agent-scoped mutable state.
+The system does not migrate or import old sessions, learning data, or file memory into worker-owned storage.
 
-The migration rules should be:
+The initialization rules are:
 
 - Agents without worker scope keep existing storage untouched.
-- `shared` scope may migrate existing agent-scoped sessions, learning, and file memory into the shared worker root on first activation.
-- `user`, `user_agent`, and `room_thread` should not automatically clone shared historical state into every new worker.
-- Isolated scopes should start with empty mutable state unless an explicit import is requested.
-- No compatibility fallback should remain between legacy sandbox config and `worker_tools`.
+- Agents that opt into any worker scope start with fresh worker-owned mutable state.
+- `shared`, `user`, `user_agent`, and `room_thread` all use newly scoped storage rather than automatic migration.
+- No explicit import flow is part of the current design.
+- No compatibility fallback remains between legacy sandbox config and `worker_tools`.
 
 ## Observability
 
@@ -405,7 +404,6 @@ Phase 1 aligned file-backed memory with worker-owned storage.
 ### Phase 2: Scope-Aware Mutable State
 
 Phase 2 implemented the core scope-aware state changes needed for worker routing correctness.
-Phase 2 is not fully complete because migration and explicit-import behavior remain follow-up work.
 Phase 2 is the correctness phase.
 
 Phase 2 delivered:
@@ -418,11 +416,6 @@ Phase 2 delivered:
 - Block direct worker mutation of unsupported memory backends.
 - Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
 - Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
-
-Phase 2 follow-up still pending:
-
-- Design and implement migration behavior for `shared` scope.
-- Design and implement explicit-import behavior for isolated scopes.
 
 ### Phase 3: Policy Expansion And Lifecycle
 

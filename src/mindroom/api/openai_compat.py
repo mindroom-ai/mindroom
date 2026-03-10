@@ -105,7 +105,10 @@ def _unsupported_worker_scope_error(agent_names: list[str]) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
     return _error_response(
         400,
-        (f"OpenAI-compatible chat completions only support worker_scope=shared. Unsupported agents: {invalid_agents}"),
+        (
+            "OpenAI-compatible chat completions only support unscoped agents and worker_scope=shared. "
+            f"Unsupported agents: {invalid_agents}"
+        ),
         param="model",
         code="unsupported_worker_scope",
     )
