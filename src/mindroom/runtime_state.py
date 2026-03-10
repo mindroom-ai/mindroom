@@ -7,21 +7,21 @@ from threading import Lock
 
 
 @dataclass(slots=True)
-class RuntimeState:
+class _RuntimeState:
     """Thread-safe snapshot of the current MindRoom runtime phase."""
 
     phase: str = "idle"
     detail: str | None = None
 
 
-_state = RuntimeState()
+_state = _RuntimeState()
 _lock = Lock()
 
 
-def get_runtime_state() -> RuntimeState:
+def get_runtime_state() -> _RuntimeState:
     """Return a copy of the current runtime state."""
     with _lock:
-        return RuntimeState(phase=_state.phase, detail=_state.detail)
+        return _RuntimeState(phase=_state.phase, detail=_state.detail)
 
 
 def set_runtime_starting(detail: str = "MindRoom startup in progress") -> None:
