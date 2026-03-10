@@ -7,7 +7,14 @@ import pytest
 
 import mindroom.credentials
 from mindroom.constants import CREDENTIALS_DIR
-from mindroom.credentials import CredentialsManager, get_credentials_manager
+from mindroom.credentials import (
+    CredentialsManager,
+    get_credentials_manager,
+    load_scoped_credentials,
+    merge_scoped_credentials,
+    save_scoped_credentials,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 
 @pytest.fixture
@@ -155,6 +162,157 @@ class TestCredentialsManager:
         credentials_manager.delete_credentials("google")
         assert credentials_manager.load_credentials("google") is None
         assert credentials_manager.load_credentials("homeassistant") == ha_creds
+
+    def test_worker_credentials_are_isolated_from_shared(self, temp_credentials_dir: Path) -> None:
+        """Worker-scoped credentials should not overwrite or read from the shared credential directory."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-key", "_source": "ui"})
+
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.save_credentials("openai", {"api_key": "worker-key", "_source": "ui"})
+
+        assert manager.load_credentials("openai") == {"api_key": "shared-key", "_source": "ui"}
+        assert worker_manager.load_credentials("openai") == {"api_key": "worker-key", "_source": "ui"}
+        assert worker_manager.get_credentials_path("openai").parent != manager.get_credentials_path("openai").parent
+
+    def test_save_scoped_credentials_writes_to_worker_manager(self, temp_credentials_dir: Path) -> None:
+        """Scoped saves should target the worker-owned credentials store."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+
+        with tool_execution_identity(execution_identity):
+            save_scoped_credentials(
+                "google",
+                {"token": "worker-token", "_source": "ui"},
+                worker_scope="user",
+                routing_agent_name="general",
+                credentials_manager=manager,
+            )
+
+        shared_credentials = manager.load_credentials("google")
+        worker_credentials = manager.for_worker(
+            "v1:tenant-123:user:@alice:example.org",
+        ).load_credentials("google")
+
+        assert shared_credentials is None
+        assert worker_credentials == {"token": "worker-token", "_source": "ui"}
+
+    def test_load_scoped_credentials_shared_scope_does_not_fall_back_to_global_ui(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared worker scope should not inherit UI-saved global credentials."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        manager.save_credentials("google", {"api_key": "global-ui-key", "_source": "ui"})
+
+        with tool_execution_identity(execution_identity):
+            loaded_credentials = load_scoped_credentials(
+                "google",
+                worker_scope="shared",
+                routing_agent_name="general",
+                credentials_manager=manager,
+            )
+
+        assert loaded_credentials is None
+
+    def test_load_scoped_credentials_shared_scope_keeps_env_fallback(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared worker scope should still inherit env-backed credentials."""
+        manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
+
+        with tool_execution_identity(execution_identity):
+            loaded_credentials = load_scoped_credentials(
+                "google",
+                worker_scope="shared",
+                routing_agent_name="general",
+                credentials_manager=manager,
+            )
+
+        assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
+
+    def test_load_scoped_credentials_uses_worker_rooted_manager_without_nesting(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker-rooted managers should resolve scoped credentials from the current worker root."""
+        base_manager = CredentialsManager(temp_credentials_dir)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = "v1:tenant-123:user:@alice:example.org"
+        worker_manager = base_manager.for_worker(worker_key)
+        worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
+
+        loaded_credentials = load_scoped_credentials(
+            "openweather",
+            worker_scope="user",
+            routing_agent_name="general",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
+
+    def test_merge_scoped_credentials_overlays_worker_credentials(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker-scoped credentials should overlay env-backed shared credentials."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("google", {"api_key": "env-key", "_source": "env", "shared_only": "yes"})
+        worker_manager = manager.for_worker("worker-a")
+        worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
+
+        merged = merge_scoped_credentials(
+            "google",
+            base_manager=manager,
+            worker_manager=worker_manager,
+        )
+
+        assert merged == {"api_key": "worker-key", "_source": "ui", "shared_only": "yes"}
 
     def test_complex_credentials_structure(self, credentials_manager: CredentialsManager) -> None:
         """Test saving and loading complex nested credentials."""

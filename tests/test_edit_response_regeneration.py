@@ -36,6 +36,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.get_agent_worker_scope.return_value = None
     config.authorization.agent_reply_permissions = {}
 
     # Create the bot
@@ -185,6 +186,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
+    config.get_agent_worker_scope.return_value = None
     config.authorization.agent_reply_permissions = {}
 
     # Create the bot

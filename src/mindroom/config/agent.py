@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
+from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 
@@ -81,9 +82,13 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether to show tool call details inline in responses (per-agent override)",
     )
-    sandbox_tools: list[str] | None = Field(
+    worker_tools: list[str] | None = Field(
         default=None,
-        description="Tool names to execute through sandbox proxy (overrides defaults; None = inherit)",
+        description="Tool names to route through scoped workers (overrides defaults; None = inherit)",
+    )
+    worker_scope: WorkerScope | None = Field(
+        default=None,
+        description="Worker scope for routed tools: user, user_agent, room_thread, or shared",
     )
     allow_self_config: bool | None = Field(
         default=None,
@@ -111,6 +116,9 @@ class AgentConfig(BaseModel):
                 raise ValueError(msg)
             if "memory_dir" in data:
                 msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+                raise ValueError(msg)
+            if "sandbox_tools" in data:
+                msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
                 raise ValueError(msg)
         return data
 

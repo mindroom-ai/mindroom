@@ -9,6 +9,7 @@ from httpx import Response
 
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
+from mindroom.tool_system.metadata import get_tool_by_name
 from tests.conftest import TEST_PASSWORD
 
 
@@ -70,6 +71,19 @@ class TestHomeAssistantTools:
             for expected in expected_methods:
                 assert expected in method_names
 
+    def test_tool_metadata_passes_worker_scope_to_wrapper(self) -> None:
+        """Tool construction must propagate worker routing metadata into the wrapper."""
+        tool = get_tool_by_name("homeassistant", worker_scope="shared", routing_agent_name="general")
+
+        assert isinstance(tool, HomeAssistantTools)
+        assert tool._worker_scope == "shared"
+        assert tool._routing_agent_name == "general"
+
+    def test_tool_metadata_rejects_isolating_worker_scope(self) -> None:
+        """Home Assistant tools are intentionally unsupported for isolating worker scopes."""
+        with pytest.raises(ValueError, match="worker_scope=shared"):
+            get_tool_by_name("homeassistant", worker_scope="user", routing_agent_name="general")
+
     def test_load_config_with_stored_credentials(
         self,
         ha_tools_with_mocked_creds: HomeAssistantTools,
@@ -81,9 +95,9 @@ class TestHomeAssistantTools:
         assert config["instance_url"] == "http://homeassistant.local:8123"
         assert config["access_token"] == TEST_PASSWORD
 
-        # Should return cached config on second call
+        # A second lookup should return the same values.
         config2 = ha_tools_with_mocked_creds._load_config()
-        assert config2 is config
+        assert config2 == config
 
     def test_load_config_without_credentials(self) -> None:
         """Test loading configuration when no credentials exist."""

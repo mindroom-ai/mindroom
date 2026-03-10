@@ -11,17 +11,36 @@ from urllib.parse import urljoin
 import httpx
 from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 
 class HomeAssistantTools(Toolkit):
     """Tools for interacting with Home Assistant."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+    ) -> None:
         """Initialize Home Assistant tools."""
-        # Use the credentials manager
+        if not worker_scope_allows_shared_only_integrations(worker_scope):
+            msg = unsupported_shared_only_integration_message(
+                "homeassistant",
+                worker_scope,
+                agent_name=routing_agent_name,
+                subject="Tool",
+            )
+            raise ValueError(msg)
+
         self._creds_manager = get_credentials_manager()
-        self._config: dict[str, Any] | None = None
+        self._worker_scope = worker_scope
+        self._routing_agent_name = routing_agent_name
 
         # Initialize the toolkit with all available methods
         super().__init__(
@@ -43,12 +62,12 @@ class HomeAssistantTools(Toolkit):
 
     def _load_config(self) -> dict[str, Any] | None:
         """Load Home Assistant configuration from unified location."""
-        if self._config:
-            return self._config
-
-        # Load from credentials manager
-        self._config = self._creds_manager.load_credentials("homeassistant")
-        return self._config
+        return load_scoped_credentials(
+            "homeassistant",
+            worker_scope=self._worker_scope,
+            routing_agent_name=self._routing_agent_name,
+            credentials_manager=self._creds_manager,
+        )
 
     async def _api_request(  # noqa: PLR0911
         self,

@@ -43,6 +43,7 @@ from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, tool_execution_identity
 
 _AUTO_MODEL_NAME = "auto"
 _TEAM_MODEL_PREFIX = "team/"
@@ -62,6 +63,8 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
+_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: set[WorkerScope | None] = {None, "shared"}
+
 
 @dataclass(slots=True)
 class _ToolStreamState:
@@ -78,6 +81,65 @@ def _load_config() -> tuple[Config, Path]:
     loader to avoid circular imports (main.py imports this router).
     """
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+
+
+def _openai_compatible_agent_names(config: Config) -> list[str]:
+    return [
+        agent_name
+        for agent_name in config.agents
+        if agent_name != ROUTER_AGENT_NAME
+        and config.get_agent_worker_scope(agent_name) in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+    ]
+
+
+def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+    return [
+        agent_name
+        for agent_name in agent_names
+        if agent_name in config.agents
+        and config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+    ]
+
+
+def _unsupported_worker_scope_error(agent_names: list[str]) -> JSONResponse:
+    invalid_agents = ", ".join(agent_names)
+    return _error_response(
+        400,
+        (
+            "OpenAI-compatible chat completions only support unscoped agents and worker_scope=shared. "
+            f"Unsupported agents: {invalid_agents}"
+        ),
+        param="model",
+        code="unsupported_worker_scope",
+    )
+
+
+def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse | None:
+    if not config.teams or team_name not in config.teams:
+        return _error_response(
+            404,
+            f"Team '{team_name}' not found",
+            param="model",
+            code="model_not_found",
+        )
+    invalid_agents = _openai_incompatible_agents(config.teams[team_name].agents, config)
+    if invalid_agents:
+        return _unsupported_worker_scope_error(invalid_agents)
+    return None
+
+
+def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
+    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
+        return _error_response(
+            404,
+            f"Model '{agent_name}' not found",
+            param="model",
+            code="model_not_found",
+        )
+    invalid_agents = _openai_incompatible_agents([agent_name], config)
+    if invalid_agents:
+        return _unsupported_worker_scope_error(invalid_agents)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -426,28 +488,33 @@ def _validate_chat_request(
     agent_name = req.model
 
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        if not config.teams or team_name not in config.teams:
-            return _error_response(
-                404,
-                f"Team '{team_name}' not found",
-                param="model",
-                code="model_not_found",
-            )
-        return None  # team execution handled in chat_completions
+        return _validate_team_model_request(agent_name.removeprefix(_TEAM_MODEL_PREFIX), config)
 
     if agent_name == _AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
 
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
-        return _error_response(
-            404,
-            f"Model '{agent_name}' not found",
-            param="model",
-            code="model_not_found",
-        )
+    return _validate_agent_model_request(agent_name, config)
 
-    return None
+
+def _build_tool_execution_identity(
+    *,
+    agent_name: str,
+    session_id: str,
+) -> ToolExecutionIdentity:
+    """Build the execution identity used for worker-routed tool calls."""
+    return ToolExecutionIdentity(
+        channel="openai_compat",
+        agent_name=agent_name,
+        # The OpenAI-compatible request-body `user` field is caller-supplied and
+        # not a trusted identity source for worker routing.
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=session_id,
+        tenant_id=os.getenv("CUSTOMER_ID"),
+        account_id=os.getenv("ACCOUNT_ID"),
+    )
 
 
 def _parse_chat_request(
@@ -484,11 +551,15 @@ async def _resolve_auto_route(
     Returns the resolved agent name, or a JSONResponse error if routing fails
     and no agents are available.
     """
-    available = [n for n in config.agents if n != ROUTER_AGENT_NAME]
+    available = _openai_compatible_agent_names(config)
     routed = await suggest_agent(prompt, available, config, thread_history)
     if routed is None:
         if not available:
-            return _error_response(500, "No agents configured for auto-routing", error_type="server_error")
+            return _error_response(
+                500,
+                "No OpenAI-compatible agents configured for auto-routing",
+                error_type="server_error",
+            )
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)
     else:
@@ -551,16 +622,23 @@ async def list_models(
     except OSError:
         created = 0
 
-    models: list[_ModelObject] = [
-        _ModelObject(
-            id=_AUTO_MODEL_NAME,
-            name="Auto",
-            description="Automatically routes to the best agent for your message",
-            created=created,
-        ),
-    ]
+    compatible_agents = set(_openai_compatible_agent_names(config))
+    models: list[_ModelObject] = []
+    if compatible_agents:
+        models.append(
+            _ModelObject(
+                id=_AUTO_MODEL_NAME,
+                name="Auto",
+                description="Automatically routes to the best agent for your message",
+                created=created,
+            ),
+        )
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
+        if (
+            agent_name == ROUTER_AGENT_NAME
+            or agent_name in _RESERVED_MODEL_NAMES
+            or agent_name not in compatible_agents
+        ):
             continue
         models.append(
             _ModelObject(
@@ -573,6 +651,8 @@ async def list_models(
 
     # Add teams
     for team_name, team_config in (config.teams or {}).items():
+        if _openai_incompatible_agents(team_config.agents, config):
+            continue
         models.append(
             _ModelObject(
                 id=f"{_TEAM_MODEL_PREFIX}{team_name}",
@@ -629,8 +709,12 @@ async def chat_completions(
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
+        execution_identity = _build_tool_execution_identity(
+            agent_name=agent_name,
+            session_id=session_id,
+        )
         if req.stream:
-            return await _stream_team_completion(
+            response: JSONResponse | StreamingResponse = await _stream_team_completion(
                 team_name,
                 agent_name,
                 prompt,
@@ -638,26 +722,55 @@ async def chat_completions(
                 config,
                 thread_history,
                 req.user,
+                execution_identity=execution_identity,
             )
-        return await _non_stream_team_completion(
-            team_name,
-            agent_name,
-            prompt,
-            session_id,
-            config,
-            thread_history,
-            req.user,
+        else:
+            with tool_execution_identity(execution_identity):
+                response = await _non_stream_team_completion(
+                    team_name,
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    thread_history,
+                    req.user,
+                )
+    else:
+        # Resolve knowledge base for this agent
+        try:
+            knowledge = _resolve_knowledge(agent_name, config)
+        except Exception:
+            logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
+            knowledge = None
+
+        execution_identity = _build_tool_execution_identity(
+            agent_name=agent_name,
+            session_id=session_id,
         )
+        if req.stream:
+            response = await _stream_completion(
+                agent_name,
+                prompt,
+                session_id,
+                config,
+                thread_history,
+                req.user,
+                knowledge,
+                execution_identity=execution_identity,
+            )
+        else:
+            with tool_execution_identity(execution_identity):
+                response = await _non_stream_completion(
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    thread_history,
+                    req.user,
+                    knowledge,
+                )
 
-    # Resolve knowledge base for this agent
-    try:
-        knowledge = _resolve_knowledge(agent_name, config)
-    except Exception:
-        logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
-        knowledge = None
-
-    handler = _stream_completion if req.stream else _non_stream_completion
-    return await handler(agent_name, prompt, session_id, config, thread_history, req.user, knowledge)
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -849,23 +962,25 @@ async def _stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
-    stream: AsyncIterator[AIStreamChunk] = stream_agent_response(
-        agent_name=agent_name,
-        prompt=prompt,
-        session_id=session_id,
-        storage_path=STORAGE_PATH_OBJ,
-        config=config,
-        thread_history=thread_history,
-        room_id=None,
-        knowledge=knowledge,
-        user_id=user,
-        include_interactive_questions=False,
-    )
+    with tool_execution_identity(execution_identity):
+        stream = stream_agent_response(
+            agent_name=agent_name,
+            prompt=prompt,
+            session_id=session_id,
+            storage_path=STORAGE_PATH_OBJ,
+            config=config,
+            thread_history=thread_history,
+            room_id=None,
+            knowledge=knowledge,
+            user_id=user,
+            include_interactive_questions=False,
+        )
 
-    # Peek at first event to detect errors before committing to SSE
-    first_event = await anext(aiter(stream), None)
+        # Peek at first event to detect errors before committing to SSE
+        first_event = await anext(aiter(stream), None)
     if first_event is None:
         return _error_response(500, "Agent returned empty response", error_type="server_error")
 
@@ -878,29 +993,29 @@ async def _stream_completion(
 
     async def event_generator() -> AsyncIterator[str]:
         tool_state = _ToolStreamState()
+        with tool_execution_identity(execution_identity):
+            # 1. Initial role announcement
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
 
-        # 1. Initial role announcement
-        yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'role': 'assistant'})}\n\n"
-
-        # 2. Yield the peeked first event
-        text = _extract_stream_text(first_event, tool_state)
-        if text:
-            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
-
-        # 3. Stream remaining content
-        # Error strings after the first event are sent as content chunks
-        # since we can't switch to an error HTTP status mid-stream.
-        async for event in stream:
-            text = _extract_stream_text(event, tool_state)
+            # 2. Yield the peeked first event
+            text = _extract_stream_text(first_event, tool_state)
             if text:
                 yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # 4. Final chunk with finish_reason
-        logger.info("Chat completion sent", model=agent_name, stream=True)
-        yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+            # 3. Stream remaining content
+            # Error strings after the first event are sent as content chunks
+            # since we can't switch to an error HTTP status mid-stream.
+            async for event in stream:
+                text = _extract_stream_text(event, tool_state)
+                if text:
+                    yield f"data: {_chunk_json(completion_id, created, agent_name, delta={'content': text})}\n\n"
 
-        # 5. Stream terminator
-        yield "data: [DONE]\n\n"
+            # 4. Final chunk with finish_reason
+            logger.info("Chat completion sent", model=agent_name, stream=True)
+            yield f"data: {_chunk_json(completion_id, created, agent_name, delta={}, finish_reason='stop')}\n\n"
+
+            # 5. Stream terminator
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1012,9 +1127,11 @@ async def _stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    agents, team, mode = _build_team(team_name, config)
+    with tool_execution_identity(execution_identity):
+        agents, team, mode = _build_team(team_name, config)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1023,9 +1140,10 @@ async def _stream_team_completion(
     team_prompt = build_prompt_with_thread_history(prompt, thread_history)
 
     try:
-        stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
-        # Peek at first event
-        first_event = await anext(aiter(stream), None)
+        with tool_execution_identity(execution_identity):
+            stream = team.arun(team_prompt, stream=True, stream_events=True, session_id=session_id, user_id=user)
+            # Peek at first event
+            first_event = await anext(aiter(stream), None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         return _error_response(500, "Team execution failed", error_type="server_error")
@@ -1046,6 +1164,7 @@ async def _stream_team_completion(
             created=created,
             model_id=model_id,
             team_name=team_name,
+            execution_identity=execution_identity,
         ),
         media_type="text/event-stream",
     )
@@ -1118,6 +1237,7 @@ async def _team_stream_event_generator(
     created: int,
     model_id: str,
     team_name: str,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> AsyncIterator[str]:
     """Yield SSE chunks for team streaming responses.
 
@@ -1134,41 +1254,42 @@ async def _team_stream_event_generator(
     def _chunk(content: str) -> str:
         return f"data: {_chunk_json(completion_id, created, model_id, delta={'content': content})}\n\n"
 
-    # 1. Role announcement
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
+    with tool_execution_identity(execution_identity):
+        # 1. Role announcement
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={'role': 'assistant'})}\n\n"
 
-    # 2. First event (guaranteed non-error by preflight)
-    text = _classify_team_event(first_event, tool_state)
-    if text:
-        yield _chunk(text)
+        # 2. First event (guaranteed non-error by preflight)
+        text = _classify_team_event(first_event, tool_state)
+        if text:
+            yield _chunk(text)
 
-    # 3. Remaining events
-    try:
-        async for event in stream:
-            if _extract_team_stream_error(event) is not None:
-                logger.warning("Team stream emitted error event", team=team_name)
-                pending = _finalize_pending_tools(tool_state)
-                if pending:
-                    yield _chunk(pending)
-                yield _chunk("Team execution failed.")
-                break
+        # 3. Remaining events
+        try:
+            async for event in stream:
+                if _extract_team_stream_error(event) is not None:
+                    logger.warning("Team stream emitted error event", team=team_name)
+                    pending = _finalize_pending_tools(tool_state)
+                    if pending:
+                        yield _chunk(pending)
+                    yield _chunk("Team execution failed.")
+                    break
 
-            text = _classify_team_event(event, tool_state)
-            if text:
-                yield _chunk(text)
-    except Exception:
-        logger.exception("Team stream failed during iteration", team=team_name)
+                text = _classify_team_event(event, tool_state)
+                if text:
+                    yield _chunk(text)
+        except Exception:
+            logger.exception("Team stream failed during iteration", team=team_name)
+            pending = _finalize_pending_tools(tool_state)
+            if pending:
+                yield _chunk(pending)
+            yield _chunk("Team execution failed.")
+
+        # 4. Finalize any tool calls that started but never completed
         pending = _finalize_pending_tools(tool_state)
         if pending:
             yield _chunk(pending)
-        yield _chunk("Team execution failed.")
 
-    # 4. Finalize any tool calls that started but never completed
-    pending = _finalize_pending_tools(tool_state)
-    if pending:
-        yield _chunk(pending)
-
-    # 5. Finish
-    logger.info("Team completion sent", team=team_name, stream=True)
-    yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
-    yield "data: [DONE]\n\n"
+        # 5. Finish
+        logger.info("Team completion sent", team=team_name, stream=True)
+        yield f"data: {_chunk_json(completion_id, created, model_id, delta={}, finish_reason='stop')}\n\n"
+        yield "data: [DONE]\n\n"

@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -191,9 +192,12 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     bot._generate_team_response_helper = AsyncMock()
 
     store_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    seen_requesters: list[str | None] = []
     scheduled_tasks: list[asyncio.Task[Any]] = []
 
     async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        identity = get_tool_execution_identity()
+        seen_requesters.append(identity.requester_id if identity is not None else None)
         store_calls.append((args, kwargs))
 
     def schedule_background_task(
@@ -225,6 +229,7 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
     bot._generate_team_response_helper.assert_awaited_once()
     assert len(store_calls) == 1
     assert store_calls[0][0][1] == ["a1", "a2"]
+    assert seen_requesters == ["@user:localhost"]
 
 
 @pytest.mark.asyncio

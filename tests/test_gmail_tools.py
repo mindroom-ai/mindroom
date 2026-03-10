@@ -90,10 +90,9 @@ class TestGmailTools:
             mock_parent_init.return_value = None
             gmail_tools = GmailTools()  # noqa: F841
 
-            # Verify warning was logged
-            mock_logger.warning.assert_called_once_with(
-                "Gmail credentials not found in MindRoom storage",
-            )
+            # Construction is allowed to stay silent because worker-scoped creds
+            # may only be resolvable once execution identity exists.
+            mock_logger.warning.assert_not_called()
 
             # Verify parent was initialized with None credentials
             mock_parent_init.assert_called_once_with(creds=None)
@@ -122,7 +121,7 @@ class TestGmailTools:
             gmail_tools = GmailTools()  # noqa: F841
 
             # Verify error was logged
-            mock_logger.error.assert_called_once()
+            mock_logger.exception.assert_called_once()
 
             # Verify parent was initialized with None
             mock_parent_init.assert_called_once_with(creds=None)
@@ -210,24 +209,22 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
 
-            # Mock the parent's _auth method
-            with patch("mindroom.custom_tools.gmail.AgnoGmailTools._auth") as mock_parent_auth:
-                gmail_tools = GmailTools()
-                gmail_tools.creds = None
+            gmail_tools = GmailTools()
+            gmail_tools.creds = None
 
-                # Store the original auth for testing
-                gmail_tools._original_auth = mock_parent_auth
+            mock_parent_auth = Mock()
+            gmail_tools._original_auth = mock_parent_auth
 
-                # Call _auth
-                gmail_tools._auth()
+            # Call _auth
+            gmail_tools._auth()
 
-                # Verify warning was logged
-                mock_logger.warning.assert_called_with(
-                    "No stored credentials found, initiating OAuth flow",
-                )
+            # Verify warning was logged
+            mock_logger.warning.assert_called_with(
+                "No stored credentials found, initiating OAuth flow",
+            )
 
-                # Verify original auth was called
-                mock_parent_auth.assert_called_once()
+            # Verify original auth was called
+            mock_parent_auth.assert_called_once()
 
     @patch("mindroom.custom_tools.gmail.get_credentials_manager")
     def test_auth_error_handling(

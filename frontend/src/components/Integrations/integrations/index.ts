@@ -15,7 +15,12 @@ export const integrationProviders: Record<string, IntegrationProvider> = {
 };
 
 // Export types
-export type { Integration, IntegrationConfig, IntegrationProvider } from './types';
+export type {
+  Integration,
+  IntegrationConfig,
+  IntegrationProvider,
+  IntegrationScope,
+} from './types';
 
 // Helper function to get all integrations
 export function getAllIntegrations(): IntegrationProvider[] {

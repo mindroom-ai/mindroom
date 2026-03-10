@@ -4,13 +4,23 @@ This module provides centralized credential storage and retrieval for all integr
 used by both agents and the dashboard interface.
 """
 
+from __future__ import annotations
+
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    resolve_execution_identity_for_worker_scope,
+    resolve_worker_key,
+    worker_root_path,
+)
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 logger = get_logger(__name__)
@@ -46,6 +56,16 @@ class CredentialsManager:
 
         # Ensure the directory exists
         self.base_path.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def storage_root(self) -> Path:
+        """Return the storage root that owns this credentials directory."""
+        return self.base_path.parent
+
+    def for_worker(self, worker_key: str) -> CredentialsManager:
+        """Return a credentials manager rooted in one worker's persistent state."""
+        worker_credentials_path = worker_root_path(self.storage_root, worker_key) / "credentials"
+        return CredentialsManager(base_path=worker_credentials_path)
 
     def get_credentials_path(self, service: str) -> Path:
         """Get the path for a service's credentials file.
@@ -168,3 +188,100 @@ def get_credentials_manager() -> CredentialsManager:
     if _credentials_manager is None:
         _credentials_manager = CredentialsManager()
     return _credentials_manager
+
+
+def _resolve_worker_credentials_manager(
+    *,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    credentials_manager: CredentialsManager,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> CredentialsManager | None:
+    """Return the worker-scoped credentials manager for the current execution, if any."""
+    if worker_scope is None:
+        return None
+
+    execution_identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=routing_agent_name,
+        execution_identity=execution_identity,
+    )
+    if execution_identity is None:
+        return None
+
+    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    if worker_key is None:
+        return None
+
+    expected_worker_root = worker_root_path(credentials_manager.storage_root, worker_key)
+    if credentials_manager.storage_root.expanduser().resolve() == expected_worker_root:
+        return credentials_manager
+
+    return credentials_manager.for_worker(worker_key)
+
+
+def merge_scoped_credentials(
+    service: str,
+    *,
+    base_manager: CredentialsManager,
+    worker_manager: CredentialsManager | None,
+) -> dict[str, Any] | None:
+    """Merge env-backed shared credentials with worker-scoped overrides."""
+    shared_credentials = base_manager.load_credentials(service)
+    merged_credentials: dict[str, Any] = {}
+    if isinstance(shared_credentials, Mapping) and shared_credentials.get("_source") == "env":
+        merged_credentials.update(shared_credentials)
+
+    if worker_manager is not None:
+        worker_credentials = worker_manager.load_credentials(service)
+        if isinstance(worker_credentials, Mapping):
+            merged_credentials.update(worker_credentials)
+
+    return merged_credentials or None
+
+
+def load_scoped_credentials(
+    service: str,
+    *,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
+    credentials_manager: CredentialsManager | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> dict[str, Any] | None:
+    """Load credentials for a service, resolving worker-scoped overrides when available."""
+    manager = credentials_manager or get_credentials_manager()
+    if worker_scope is None:
+        return manager.load_credentials(service)
+
+    worker_manager = _resolve_worker_credentials_manager(
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+        credentials_manager=manager,
+        execution_identity=execution_identity,
+    )
+    return merge_scoped_credentials(
+        service,
+        base_manager=manager,
+        worker_manager=worker_manager,
+    )
+
+
+def save_scoped_credentials(
+    service: str,
+    credentials: dict[str, Any],
+    *,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
+    credentials_manager: CredentialsManager | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    """Save credentials for a service to the current worker scope when available."""
+    manager = credentials_manager or get_credentials_manager()
+    worker_manager = _resolve_worker_credentials_manager(
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+        credentials_manager=manager,
+        execution_identity=execution_identity,
+    )
+    target_manager = worker_manager or manager
+    target_manager.save_credentials(service, credentials)
