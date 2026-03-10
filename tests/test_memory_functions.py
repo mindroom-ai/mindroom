@@ -1142,6 +1142,47 @@ class TestMemoryFunctions:
         assert "How do we build the API?" in enhanced
 
     @pytest.mark.asyncio
+    async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_structured_memory(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Prompt loading should preserve curated MEMORY.md content even when structured entries are present."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.memory.file.max_entrypoint_lines = 10
+
+        memory_dir = storage_path / "memory-files" / "agent_general"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n",
+            encoding="utf-8",
+        )
+
+        enhanced = await build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
+        assert "Curated fact." in enhanced
+        assert "- [id=m1] Structured fact." in enhanced
+
+    @pytest.mark.asyncio
+    async def test_file_backend_prompt_respects_max_entrypoint_lines(self, storage_path: Path, config: Config) -> None:
+        """Prompt loading should obey the configured MEMORY.md preload cap."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "memory-files")
+        config.memory.file.max_entrypoint_lines = 2
+
+        memory_dir = storage_path / "memory-files" / "agent_general"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "MEMORY.md").write_text(
+            "# Memory\nCurated fact.\n- [id=m1] Structured fact.\nTrailing fact.\n",
+            encoding="utf-8",
+        )
+
+        enhanced = await build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
+        assert "# Memory\nCurated fact." in enhanced
+        assert "Structured fact." not in enhanced
+        assert "Trailing fact." not in enhanced
+
+    @pytest.mark.asyncio
     async def test_file_backend_room_prompt_search_uses_agent_override(
         self,
         storage_path: Path,

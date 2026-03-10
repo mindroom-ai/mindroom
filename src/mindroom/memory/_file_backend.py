@@ -369,13 +369,11 @@ def load_scope_entrypoint_context(
     entrypoint_path = _scope_dir(scope_user_id, resolution, config, create=False) / FILE_MEMORY_ENTRYPOINT
     if not entrypoint_path.exists():
         return ""
-    text = entrypoint_path.read_text(encoding="utf-8").strip()
-    if not text:
-        return ""
-    memory_lines = [line.strip() for line in text.splitlines() if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())]
-    if memory_lines:
-        return "\n".join(memory_lines).strip()
-    return text
+    max_lines = config.memory.file.max_entrypoint_lines
+    lines = entrypoint_path.read_text(encoding="utf-8").splitlines()
+    if max_lines < len(lines):
+        lines = lines[:max_lines]
+    return "\n".join(lines).strip()
 
 
 def _find_file_replica_memory_ids(
