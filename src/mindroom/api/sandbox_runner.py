@@ -430,6 +430,14 @@ def _worker_initialization_failure_response(
     return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
 
+def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteRequest:
+    """Fill in the pinned worker key for dedicated worker pods when omitted."""
+    dedicated_worker_key = _runner_dedicated_worker_key()
+    if dedicated_worker_key is not None and request.worker_key is None:
+        request.worker_key = dedicated_worker_key
+    return request
+
+
 async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
@@ -585,6 +593,7 @@ def _run_subprocess_worker() -> int:
             file=sys.stderr,
         )
         return 1
+    request = _normalize_request_worker_key(request)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker we write to stderr afterwards.
@@ -644,6 +653,7 @@ async def execute_tool_call(
     request: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
+    request = _normalize_request_worker_key(request)
     if request.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
     if request.tool_init_overrides and request.tool_name in TOOL_METADATA:
@@ -653,7 +663,6 @@ async def execute_tool_call(
             )
         except ToolInitOverrideError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     credential_overrides: dict[str, object] = {}
     if request.lease_id is not None:
         credential_overrides = _consume_credential_lease(
