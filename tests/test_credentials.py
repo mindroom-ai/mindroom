@@ -8,6 +8,7 @@ import pytest
 import mindroom.credentials
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import (
+    SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     get_credentials_manager,
     load_scoped_credentials,
@@ -497,3 +498,58 @@ class TestGlobalCredentialsManager:
         """Test that global manager uses the default path."""
         manager = get_credentials_manager()
         assert manager.base_path == CREDENTIALS_DIR
+
+    def test_global_manager_uses_explicit_shared_credentials_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedicated workers should be able to configure a distinct shared credential mirror path."""
+        storage_path = (tmp_path / "worker-root").resolve()
+        shared_path = storage_path / ".shared_credentials"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
+        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(shared_path))
+
+        manager = get_credentials_manager()
+
+        assert manager.base_path == storage_path / "credentials"
+        assert manager.shared_base_path == shared_path
+
+    def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedicated worker processes should load mirrored shared credentials through the global manager."""
+        root = (tmp_path / "shared-storage").resolve()
+        base_manager = CredentialsManager(root / "credentials")
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = "v1:tenant-123:shared:general"
+        base_manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
+        sync_shared_credentials_to_worker(worker_key, credentials_manager=base_manager)
+        worker_root = base_manager.for_worker(worker_key).storage_root
+
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
+        mindroom.credentials._credentials_manager = None
+
+        manager = get_credentials_manager()
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            worker_scope="shared",
+            routing_agent_name="general",
+            credentials_manager=manager,
+            execution_identity=execution_identity,
+        )
+
+        assert loaded_credentials == {"api_key": "env-key", "_source": "env"}

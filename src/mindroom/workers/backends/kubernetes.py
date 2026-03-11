@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from mindroom.credentials import sync_shared_credentials_to_worker
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
@@ -51,6 +51,7 @@ _NODE_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_NODE_NAME"
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
+_OWNER_DEPLOYMENT_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _HOSTNAME_ENV = "HOSTNAME"
 
@@ -88,6 +89,7 @@ class _KubernetesMetadata(Protocol):
     annotations: dict[str, str] | None
     labels: dict[str, str]
     generation: int | None
+    uid: str | None
 
 
 class _KubernetesDeploymentSpec(Protocol):
@@ -250,6 +252,7 @@ class KubernetesWorkerBackendConfig:
     colocate_with_control_plane_node: bool
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
+    owner_deployment_name: str | None
 
     @classmethod
     def from_env(cls) -> KubernetesWorkerBackendConfig:
@@ -291,6 +294,7 @@ class KubernetesWorkerBackendConfig:
             colocate_with_control_plane_node=_read_bool_env(_COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
             extra_env=_read_json_mapping_env(_EXTRA_ENV_JSON_ENV),
             extra_labels=_read_json_mapping_env(_EXTRA_LABELS_JSON_ENV),
+            owner_deployment_name=os.getenv(_OWNER_DEPLOYMENT_NAME_ENV, "").strip() or None,
         )
 
 
@@ -321,6 +325,7 @@ def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str,
         str(config.colocate_with_control_plane_node),
         extra_env_json,
         extra_labels_json,
+        config.owner_deployment_name or "",
         auth_token or "",
     )
 
@@ -341,6 +346,8 @@ class KubernetesWorkerBackend:
         self._worker_locks_lock = threading.Lock()
         self._control_plane_node_name: str | None = None
         self._control_plane_node_name_loaded = False
+        self._owner_reference: dict[str, object] | None = None
+        self._owner_reference_loaded = False
 
     @classmethod
     def from_env(cls, *, auth_token: str | None) -> KubernetesWorkerBackend:
@@ -607,6 +614,10 @@ class KubernetesWorkerBackend:
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
             {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
+            {
+                "name": SHARED_CREDENTIALS_PATH_ENV,
+                "value": f"{self.config.storage_mount_path}/.shared_credentials",
+            },
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "HOME", "value": self.config.storage_mount_path},
@@ -676,14 +687,18 @@ class KubernetesWorkerBackend:
 
     def _service_manifest(self, *, worker_id: str) -> dict[str, object]:
         labels = self._labels(worker_id)
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": labels,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
         return {
             "apiVersion": "v1",
             "kind": "Service",
-            "metadata": {
-                "name": worker_id,
-                "namespace": self.config.namespace,
-                "labels": labels,
-            },
+            "metadata": metadata,
             "spec": {
                 "selector": labels,
                 "ports": [
@@ -706,6 +721,15 @@ class KubernetesWorkerBackend:
         replicas: int,
     ) -> dict[str, object]:
         labels = self._labels(worker_id)
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": labels,
+            "annotations": annotations,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
         pod_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "securityContext": {
@@ -755,12 +779,7 @@ class KubernetesWorkerBackend:
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
-            "metadata": {
-                "name": worker_id,
-                "namespace": self.config.namespace,
-                "labels": labels,
-                "annotations": annotations,
-            },
+            "metadata": metadata,
             "spec": {
                 "replicas": replicas,
                 "selector": {"matchLabels": labels},
@@ -873,6 +892,36 @@ class KubernetesWorkerBackend:
         self._control_plane_node_name = pod.spec.node_name
         self._control_plane_node_name_loaded = True
         return self._control_plane_node_name
+
+    def _owner_reference_or_none(self) -> dict[str, object] | None:
+        if self._owner_reference_loaded:
+            return self._owner_reference
+        if self.config.owner_deployment_name is None:
+            self._owner_reference_loaded = True
+            return None
+
+        owner_deployment = self._read_deployment(self.config.owner_deployment_name)
+        if owner_deployment is None:
+            msg = f"Configured Kubernetes worker owner deployment '{self.config.owner_deployment_name}' was not found."
+            raise WorkerBackendError(msg)
+
+        owner_uid = owner_deployment.metadata.uid
+        if owner_uid is None or not owner_uid.strip():
+            msg = (
+                f"Configured Kubernetes worker owner deployment '{self.config.owner_deployment_name}' is missing a UID."
+            )
+            raise WorkerBackendError(msg)
+
+        self._owner_reference = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": self.config.owner_deployment_name,
+            "uid": owner_uid,
+            "controller": False,
+            "blockOwnerDeletion": False,
+        }
+        self._owner_reference_loaded = True
+        return self._owner_reference
 
     def _delete_deployment(self, deployment_name: str) -> None:
         try:

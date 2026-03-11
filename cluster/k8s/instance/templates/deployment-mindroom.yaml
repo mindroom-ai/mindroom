@@ -133,6 +133,8 @@ spec:
           value: {{ .Values.kubernetesWorkerNamePrefix | quote }}
         - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
           value: {{ dict "customer" .Values.customer | toJson | quote }}
+        - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
+          value: "mindroom-{{ .Values.customer }}"
         {{- end }}
         - name: MINDROOM_SANDBOX_PROXY_TOKEN
           valueFrom:

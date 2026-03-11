@@ -55,6 +55,7 @@ class _FakeAppsApi:
         self.created_bodies.append(body)
         deployment = _to_namespace(body)
         deployment.metadata.generation = 1
+        deployment.metadata.uid = f"{deployment.metadata.name}-uid"
         deployment.status = SimpleNamespace(ready_replicas=body["spec"]["replicas"], observed_generation=1)
         self.deployments[deployment.metadata.name] = deployment
         return deployment
@@ -144,6 +145,7 @@ def _backend(
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
+    owner_deployment_name: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -166,6 +168,7 @@ def _backend(
         colocate_with_control_plane_node=colocate_with_control_plane_node,
         extra_env={},
         extra_labels={"mindroom.ai/tenant": "test"},
+        owner_deployment_name=owner_deployment_name,
     )
     backend = KubernetesWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
     apps_api = _FakeAppsApi()
@@ -173,12 +176,24 @@ def _backend(
     backend._apps_api = apps_api
     backend._core_api = core_api
     backend._api_exception_cls = _FakeApiError
+    if owner_deployment_name is not None:
+        apps_api.deployments[owner_deployment_name] = SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=owner_deployment_name,
+                annotations={},
+                labels={},
+                generation=1,
+                uid=f"{owner_deployment_name}-uid",
+            ),
+            spec=SimpleNamespace(replicas=1),
+            status=SimpleNamespace(ready_replicas=1, observed_generation=1),
+        )
     return backend, apps_api, core_api
 
 
 def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     """Ensuring one worker should create a service/deployment pair with a dedicated mounted subpath."""
-    backend, apps_api, core_api = _backend()
+    backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
 
     handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
@@ -199,14 +214,36 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
+    assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
+    assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )
     assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
+    assert deployment["metadata"]["ownerReferences"] == [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": "mindroom-demo",
+            "uid": "mindroom-demo-uid",
+            "controller": False,
+            "blockOwnerDeletion": False,
+        },
+    ]
+    assert core_api.created_bodies[0]["metadata"]["ownerReferences"] == [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": "mindroom-demo",
+            "uid": "mindroom-demo-uid",
+            "controller": False,
+            "blockOwnerDeletion": False,
+        },
+    ]
     assert "annotations" not in deployment["spec"]["template"]["metadata"]
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
@@ -216,12 +253,21 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
         "fsGroupChangePolicy": "OnRootMismatch",
         "seccompProfile": {"type": "RuntimeDefault"},
     }
-    assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
-    assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
     }
+    assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
+    assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
+
+
+def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> None:
+    """Configured owner deployments should fail closed when they cannot be resolved."""
+    backend, _apps_api, _core_api = _backend(owner_deployment_name="mindroom-missing")
+    backend._apps_api.deployments.pop("mindroom-missing")
+
+    with pytest.raises(WorkerBackendError, match="owner deployment 'mindroom-missing' was not found"):
+        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
 
 def test_kubernetes_backend_honors_custom_worker_port() -> None:
