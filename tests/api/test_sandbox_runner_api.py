@@ -15,7 +15,7 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
 
@@ -361,6 +361,52 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     assert data["ok"] is True
 
     expected_prefix = worker_root / worker_dir_name("worker-a") / "venv"
+    assert str(expected_prefix) in data["result"]
+
+
+def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped worker keys should be sanitized before they reach the venv path."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    worker_key = resolve_worker_key(
+        "user",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="persistent_worker_lab",
+            requester_id="@smoketest_a:chat-internal.ionq.co",
+            room_id="!persistent-workers:chat-internal.ionq.co",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+            tenant_id="default",
+        ),
+        agent_name="persistent_worker_lab",
+    )
+    assert worker_key is not None
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "python",
+            "function_name": "run_python_code",
+            "args": ["import sys\nresult = sys.prefix", "result"],
+            "kwargs": {},
+            "worker_key": worker_key,
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+
+    worker_dir = worker_dir_name(worker_key)
+    assert ":" not in worker_dir
+    expected_prefix = worker_root / worker_dir / "venv"
     assert str(expected_prefix) in data["result"]
 
 
