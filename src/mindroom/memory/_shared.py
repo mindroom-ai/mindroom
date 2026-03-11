@@ -93,5 +93,6 @@ MEM0_REPLICA_KEY = "mindroom_replica_key"
 
 
 def new_memory_id() -> str:
+    """Return a timestamped unique memory ID."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     return f"m_{timestamp}_{uuid4().hex[:8]}"

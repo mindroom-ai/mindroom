@@ -114,7 +114,7 @@ def get_primary_worker_manager(
     return _PRIMARY_WORKER_MANAGER
 
 
-def reset_primary_worker_manager() -> None:
+def _reset_primary_worker_manager() -> None:
     """Reset the cached primary worker manager. Intended for tests."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
     with _PRIMARY_WORKER_MANAGER_LOCK:

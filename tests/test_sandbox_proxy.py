@@ -367,7 +367,7 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
 
 def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Concurrent proxy requests should not build multiple static worker managers for one config."""
-    workers_runtime_module.reset_primary_worker_manager()
+    workers_runtime_module._reset_primary_worker_manager()
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
     monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
@@ -416,7 +416,7 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     assert init_count == 1
     assert len(managers) == 2
     assert managers[0] is managers[1]
-    workers_runtime_module.reset_primary_worker_manager()
+    workers_runtime_module._reset_primary_worker_manager()
 
 
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:

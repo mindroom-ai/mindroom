@@ -11,15 +11,15 @@ from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import (
-    DEDICATED_WORKER_KEY_ENV,
-    DEDICATED_WORKER_ROOT_ENV,
+    _DEDICATED_WORKER_KEY_ENV,
+    _DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
+    _sync_env_credentials_to_worker,
     get_credentials_manager,
     load_scoped_credentials,
     merge_scoped_credentials,
     save_scoped_credentials,
-    sync_env_credentials_to_worker,
     sync_shared_credentials_to_worker,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -293,7 +293,7 @@ class TestCredentialsManager:
         worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
         base_manager.save_credentials("openweather", {"api_key": "env-key", "_source": "env", "base": "yes"})
-        sync_env_credentials_to_worker(worker_key, credentials_manager=base_manager)
+        _sync_env_credentials_to_worker(worker_key, credentials_manager=base_manager)
         worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
 
         loaded_credentials = load_scoped_credentials(
@@ -399,7 +399,7 @@ class TestCredentialsManager:
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
 
-        sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
+        _sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
 
         worker_credentials = manager.for_worker("worker-a").shared_manager().load_credentials("google")
         assert worker_credentials == {"api_key": "env-key", "_source": "env"}
@@ -414,7 +414,7 @@ class TestCredentialsManager:
         worker_manager = manager.for_worker("worker-a")
         worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
 
-        sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
+        _sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
 
         assert worker_manager.load_credentials("google") == {"api_key": "worker-key", "_source": "ui"}
         assert worker_manager.shared_manager().load_credentials("google") == {
@@ -698,8 +698,8 @@ class TestSharedIntegrationCredentialTagging:
         worker_key = "v1:tenant-123:shared:general"
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
 
-        monkeypatch.setenv(DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(DEDICATED_WORKER_ROOT_ENV, str(worker_root))
+        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
+        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",
@@ -749,8 +749,8 @@ class TestSharedIntegrationCredentialTagging:
         worker_manager.shared_manager().save_credentials("google", {"api_key": "env-key", "_source": "env"})
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
 
-        monkeypatch.setenv(DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(DEDICATED_WORKER_ROOT_ENV, str(worker_root))
+        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
+        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",

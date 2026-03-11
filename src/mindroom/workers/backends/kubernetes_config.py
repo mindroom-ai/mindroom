@@ -91,7 +91,7 @@ def _read_json_mapping_env(name: str) -> dict[str, str]:
 
 
 @dataclass(frozen=True, slots=True)
-class KubernetesWorkerBackendConfig:
+class _KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
 
     namespace: str
@@ -117,7 +117,7 @@ class KubernetesWorkerBackendConfig:
     owner_deployment_name: str | None
 
     @classmethod
-    def from_env(cls) -> KubernetesWorkerBackendConfig:
+    def from_env(cls) -> _KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from the current environment."""
         namespace = os.getenv(_NAMESPACE_ENV, "").strip() or os.getenv(_POD_NAMESPACE_ENV, "").strip() or "default"
         image = os.getenv(_IMAGE_ENV, "").strip()
@@ -163,7 +163,7 @@ class KubernetesWorkerBackendConfig:
 
 def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = KubernetesWorkerBackendConfig.from_env()
+    config = _KubernetesWorkerBackendConfig.from_env()
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (

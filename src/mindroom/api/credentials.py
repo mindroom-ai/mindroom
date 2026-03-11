@@ -34,7 +34,7 @@ _pending_oauth_state_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
-class PendingOAuthState:
+class _PendingOAuthState:
     """Pending OAuth connect request bound to one authenticated dashboard user."""
 
     service: str
@@ -44,7 +44,7 @@ class PendingOAuthState:
     created_at: float
 
 
-_pending_oauth_states: dict[str, PendingOAuthState] = {}
+_pending_oauth_states: dict[str, _PendingOAuthState] = {}
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +104,7 @@ def issue_pending_oauth_state(
     user_id = _require_auth_user_id(request)
     state = secrets.token_urlsafe(24)
     now = time.time()
-    pending = PendingOAuthState(
+    pending = _PendingOAuthState(
         service=service,
         user_id=user_id,
         agent_name=agent_name,
@@ -117,7 +117,7 @@ def issue_pending_oauth_state(
     return state
 
 
-def _consume_pending_oauth_request(request: Request, service: str, state: str) -> PendingOAuthState:
+def _consume_pending_oauth_request(request: Request, service: str, state: str) -> _PendingOAuthState:
     """Consume and validate a previously issued dashboard OAuth state token."""
     user_id = _require_auth_user_id(request)
     now = time.time()
@@ -138,7 +138,7 @@ def consume_pending_oauth_request(
     request: Request,
     service: str,
     state: str,
-) -> PendingOAuthState:
+) -> _PendingOAuthState:
     """Return the validated pending OAuth request for a callback."""
     return _consume_pending_oauth_request(request, service, state)
 

@@ -11,11 +11,11 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
 from . import kubernetes_resources as resources
-from .kubernetes_config import KubernetesWorkerBackendConfig, kubernetes_backend_config_signature
+from .kubernetes_config import _KubernetesWorkerBackendConfig, kubernetes_backend_config_signature
 
 __all__ = [
     "KubernetesWorkerBackend",
-    "KubernetesWorkerBackendConfig",
+    "_KubernetesWorkerBackendConfig",
     "kubernetes_backend_config_signature",
 ]
 
@@ -25,7 +25,7 @@ class KubernetesWorkerBackend:
 
     backend_name = "kubernetes"
 
-    def __init__(self, *, config: KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+    def __init__(self, *, config: _KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
         self.config = config
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
@@ -36,7 +36,7 @@ class KubernetesWorkerBackend:
     @classmethod
     def from_env(cls, *, auth_token: str | None) -> KubernetesWorkerBackend:
         """Construct a backend instance from environment-backed configuration."""
-        return cls(config=KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
+        return cls(config=_KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key."""

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from mindroom.workers.models import WorkerStatus
 
-    from .kubernetes_config import KubernetesWorkerBackendConfig
+    from .kubernetes_config import _KubernetesWorkerBackendConfig
 
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
@@ -210,7 +210,7 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
 class KubernetesResourceManager:
     """Own Kubernetes API access, manifest construction, and cached cluster metadata."""
 
-    def __init__(self, *, config: KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+    def __init__(self, *, config: _KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.config = config
         self.auth_token = auth_token

@@ -109,7 +109,7 @@ def _scope_markdown_files(scope_path: Path) -> list[Path]:
     )
 
 
-def load_scope_id_entries(
+def _load_scope_id_entries(
     scope_user_id: str,
     resolution: FileMemoryResolution,
     config: Config,
@@ -167,7 +167,7 @@ def _format_entry_line(memory_id: str, content: str) -> str:
     return f"- [id={memory_id}] {normalized_content}"
 
 
-def append_scope_memory_entry(
+def _append_scope_memory_entry(
     scope_user_id: str,
     content: str,
     resolution: FileMemoryResolution,
@@ -207,7 +207,7 @@ def append_scope_memory_entry(
     }
 
 
-def search_scope_memory_entries(  # noqa: C901
+def _search_scope_memory_entries(  # noqa: C901
     scope_user_id: str,
     query: str,
     resolution: FileMemoryResolution,
@@ -215,7 +215,7 @@ def search_scope_memory_entries(  # noqa: C901
     *,
     limit: int,
 ) -> list[MemoryResult]:
-    id_entries, _ = load_scope_id_entries(scope_user_id, resolution, config)
+    id_entries, _ = _load_scope_id_entries(scope_user_id, resolution, config)
     query_tokens = _extract_query_tokens(query)
 
     scored_entries: list[MemoryResult] = []
@@ -307,7 +307,7 @@ def _get_scope_memory_by_path_id(
     }
 
 
-def get_scope_memory_by_id(
+def _get_scope_memory_by_id(
     scope_user_id: str,
     memory_id: str,
     resolution: FileMemoryResolution,
@@ -315,21 +315,21 @@ def get_scope_memory_by_id(
 ) -> MemoryResult | None:
     if path_result := _get_scope_memory_by_path_id(scope_user_id, memory_id, resolution, config):
         return path_result
-    entries, _ = load_scope_id_entries(scope_user_id, resolution, config)
+    entries, _ = _load_scope_id_entries(scope_user_id, resolution, config)
     for entry in entries:
         if entry["id"] == memory_id:
             return entry
     return None
 
 
-def replace_scope_memory_entry(
+def _replace_scope_memory_entry(
     scope_user_id: str,
     memory_id: str,
     content: str | None,
     resolution: FileMemoryResolution,
     config: Config,
 ) -> bool:
-    _entries, id_to_file = load_scope_id_entries(scope_user_id, resolution, config)
+    _entries, id_to_file = _load_scope_id_entries(scope_user_id, resolution, config)
     if (file_path := id_to_file.get(memory_id)) is None:
         return False
 
@@ -363,6 +363,7 @@ def load_scope_entrypoint_context(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> str:
+    """Load the scoped `MEMORY.md` entrypoint text."""
     entrypoint_path = _scope_dir(scope_user_id, resolution, config, create=False) / FILE_MEMORY_ENTRYPOINT
     if not entrypoint_path.exists():
         return ""
@@ -386,7 +387,7 @@ def _find_file_replica_memory_ids(
     if not isinstance(anchor_memory, str):
         return []
 
-    entries, _ = load_scope_id_entries(scope_user_id, resolution, config)
+    entries, _ = _load_scope_id_entries(scope_user_id, resolution, config)
     matches: list[str] = []
     for entry in entries:
         if entry.get("memory") != anchor_memory:
@@ -412,7 +413,7 @@ def _find_file_anchor_memory_result(
             resolved_storage_path=target_storage_path,
         )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-            if result := get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
+            if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
                 return result
     return None
 
@@ -424,7 +425,7 @@ def _file_mutation_target_ids(
     resolution: FileMemoryResolution,
     config: Config,
 ) -> list[str]:
-    if get_scope_memory_by_id(scope_user_id, memory_id, resolution, config) is not None:
+    if _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config) is not None:
         return [memory_id]
     return _find_file_replica_memory_ids(
         scope_user_id=scope_user_id,
@@ -453,7 +454,7 @@ def _mutate_file_memory_targets(
         for target_id in dict.fromkeys(
             _file_mutation_target_ids(scope_user_id, memory_id, anchor_result, resolution, config),
         ):
-            if replace_scope_memory_entry(scope_user_id, target_id, content, resolution, config):
+            if _replace_scope_memory_entry(scope_user_id, target_id, content, resolution, config):
                 updated_targets += 1
     return scope_user_id, updated_targets
 
@@ -464,8 +465,9 @@ def add_file_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """Append one file-backed memory for an agent scope."""
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
+    _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
     logger.info("File memory added", agent=agent_name)
 
 
@@ -477,6 +479,7 @@ def append_agent_daily_file_memory(
     *,
     preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
+    """Append one memory entry to the agent's daily file."""
     resolution = resolve_file_memory_resolution(
         storage_path,
         config,
@@ -485,7 +488,7 @@ def append_agent_daily_file_memory(
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
-    result = append_scope_memory_entry(
+    result = _append_scope_memory_entry(
         agent_scope_user_id(agent_name),
         content,
         resolution,
@@ -504,11 +507,12 @@ def search_file_agent_memories(
     *,
     limit: int,
 ) -> list[MemoryResult]:
+    """Search file-backed memories visible to an agent."""
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    results = search_scope_memory_entries(agent_scope_user_id(agent_name), query, resolution, config, limit=limit)
+    results = _search_scope_memory_entries(agent_scope_user_id(agent_name), query, resolution, config, limit=limit)
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        team_results = search_scope_memory_entries(team_id, query, resolution, config, limit=limit)
+        team_results = _search_scope_memory_entries(team_id, query, resolution, config, limit=limit)
         for memory in team_results:
             memory_text = memory.get("memory", "")
             if memory_text in existing_memories:
@@ -527,13 +531,14 @@ def list_file_agent_memories(
     limit: int,
     preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
+    """List file-backed memories stored for an agent."""
     resolution = resolve_file_memory_resolution(
         storage_path,
         config,
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
-    results, _ = load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
+    results, _ = _load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
     return results[:limit]
 
 
@@ -543,13 +548,14 @@ def get_file_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> MemoryResult | None:
+    """Return one file-backed memory visible to the caller."""
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
         resolution = file_memory_resolution_from_paths(
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
         )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-            result = get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
+            result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
             if result is not None:
                 return result
     return None
@@ -562,6 +568,7 @@ def update_file_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """Update one file-backed memory across its replica targets."""
     if (anchor_result := _find_file_anchor_memory_result(memory_id, caller_context, storage_path, config)) is None:
         raise MemoryNotFoundError(memory_id)
 
@@ -590,6 +597,7 @@ def delete_file_agent_memory(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """Delete one file-backed memory across its replica targets."""
     if (anchor_result := _find_file_anchor_memory_result(memory_id, caller_context, storage_path, config)) is None:
         raise MemoryNotFoundError(memory_id)
 
@@ -620,8 +628,9 @@ def add_file_room_memory(
     *,
     agent_name: str | None,
 ) -> None:
+    """Append one file-backed memory for a room scope."""
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    append_scope_memory_entry(room_scope_user_id(room_id), content, resolution, config)
+    _append_scope_memory_entry(room_scope_user_id(room_id), content, resolution, config)
     logger.debug("File room memory added", room_id=room_id)
 
 
@@ -634,8 +643,9 @@ def search_file_room_memories(
     agent_name: str | None,
     limit: int,
 ) -> list[MemoryResult]:
+    """Search file-backed memories stored for a room scope."""
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    return search_scope_memory_entries(room_scope_user_id(room_id), query, resolution, config, limit=limit)
+    return _search_scope_memory_entries(room_scope_user_id(room_id), query, resolution, config, limit=limit)
 
 
 def store_file_conversation_memory(
@@ -645,6 +655,7 @@ def store_file_conversation_memory(
     config: Config,
     room_id: str | None,
 ) -> None:
+    """Persist condensed conversation text to file-backed memory scopes."""
     condensed_prompt = " ".join(prompt.strip().split())
     if not condensed_prompt:
         return
@@ -659,7 +670,7 @@ def store_file_conversation_memory(
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
         )
-        append_scope_memory_entry(
+        _append_scope_memory_entry(
             scope_user_id,
             condensed_prompt,
             resolution,
@@ -667,7 +678,7 @@ def store_file_conversation_memory(
             memory_id=team_memory_id,
         )
         if room_user_id is not None:
-            append_scope_memory_entry(
+            _append_scope_memory_entry(
                 room_user_id,
                 condensed_prompt,
                 resolution,
