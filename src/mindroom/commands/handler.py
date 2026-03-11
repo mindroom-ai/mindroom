@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.agents import build_agent_tool_init_context, build_agent_tool_init_overrides
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -208,7 +209,8 @@ def _resolve_skill_command_agent(  # noqa: C901
 
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
     worker_tools = config.get_agent_worker_tools(agent_name)
-    worker_scope = config.get_agent_worker_scope(agent_name)
+    tool_init_context = build_agent_tool_init_context(config, agent_name)
+    worker_scope = tool_init_context.worker_scope
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in config.get_agent_tools(agent_name):
         try:
@@ -217,6 +219,7 @@ def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, 
                     tool_name,
                     get_tool_by_name(
                         tool_name,
+                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
                         worker_tools_override=worker_tools,
                         worker_scope=worker_scope,
                         routing_agent_name=agent_name,

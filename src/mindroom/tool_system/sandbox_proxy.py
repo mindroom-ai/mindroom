@@ -348,6 +348,7 @@ def _call_proxy_sync(
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> object:
@@ -375,6 +376,8 @@ def _call_proxy_sync(
             if worker_handle is not None
             else (f"{_PROXY_URL}{_SANDBOX_PROXY_EXECUTE_PATH}")
         )
+        if tool_init_overrides:
+            payload["tool_init_overrides"] = to_json_compatible(tool_init_overrides)
         lease_url = (
             worker_api_endpoint(worker_handle, "leases")
             if worker_handle is not None
@@ -420,6 +423,7 @@ def _wrap_sync_function(
     tool_name: str,
     function_name: str,
     *,
+    tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> Function:
@@ -433,6 +437,7 @@ def _wrap_sync_function(
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
         )
@@ -446,6 +451,7 @@ def _wrap_async_function(
     tool_name: str,
     function_name: str,
     *,
+    tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> Function:
@@ -460,6 +466,7 @@ def _wrap_async_function(
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
         )
@@ -472,6 +479,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
+    tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -493,6 +501,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
         )
@@ -503,6 +512,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
         )

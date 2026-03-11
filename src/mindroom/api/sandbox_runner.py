@@ -22,7 +22,13 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
-from mindroom.tool_system.metadata import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    ToolInitOverrideError,
+    ensure_tool_registry_loaded,
+    get_tool_by_name,
+    sanitize_tool_init_overrides,
+)
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -103,8 +109,9 @@ _LEASES_LOCK = threading.Lock()
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
-    Also used internally for in-process and subprocess execution when
-    ``credential_overrides`` are resolved from a lease.
+    Clients must provide credentials via ``lease_id``.
+    ``credential_overrides`` is reserved for internal in-process and subprocess
+    execution after the lease has been resolved.
     """
 
     tool_name: str
@@ -117,6 +124,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     routing_agent_name: str | None = None
     execution_identity: dict[str, Any] = Field(default_factory=dict)
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -201,6 +209,7 @@ def _resolve_entrypoint(
     tool_name: str,
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -211,10 +220,13 @@ def _resolve_entrypoint(
             tool_name,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
+            tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
         )
+    except ToolInitOverrideError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     function = toolkit.functions.get(function_name) or toolkit.async_functions.get(function_name)
@@ -444,6 +456,7 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
             tool_name=request.tool_name,
             function_name=request.function_name,
             credential_overrides=request.credential_overrides or None,
+            tool_init_overrides=request.tool_init_overrides or None,
             runtime_overrides=runtime_overrides,
             worker_scope=request.worker_scope,
             routing_agent_name=request.routing_agent_name,
@@ -641,6 +654,15 @@ async def execute_tool_call(
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     request = _normalize_request_worker_key(request)
+    if request.credential_overrides:
+        raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
+    if request.tool_init_overrides and request.tool_name in TOOL_METADATA:
+        try:
+            request.tool_init_overrides = (
+                sanitize_tool_init_overrides(request.tool_name, request.tool_init_overrides) or {}
+            )
+        except ToolInitOverrideError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     credential_overrides: dict[str, object] = {}
     if request.lease_id is not None:
         credential_overrides = _consume_credential_lease(

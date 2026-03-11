@@ -75,6 +75,35 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     assert '"result": 3' in data["result"]
 
 
+def test_sandbox_runner_applies_tool_init_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox runner should instantiate tools with forwarded non-secret init overrides."""
+    _set_sandbox_token(monkeypatch)
+    workspace = tmp_path / "mind_data"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "USER.md").write_text("Bas\n", encoding="utf-8")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": str(workspace)},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert "USER.md" in data["result"]
+
+
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
     """Sandbox runner should expose a minimal unauthenticated health endpoint."""
     response = runner_client.get("/healthz")
@@ -152,6 +181,123 @@ def test_sandbox_runner_rejects_when_token_not_configured(
     )
     assert response.status_code == 503
     assert "not configured" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_direct_credential_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential overrides must come from a lease, not the execute request payload."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [2, 3],
+            "kwargs": {},
+            "credential_overrides": {"OPENAI_API_KEY": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "lease_id" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_unsafe_tool_init_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool init overrides should reject non-whitelisted config fields."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "openai",
+            "function_name": "list_models",
+            "args": [],
+            "kwargs": {},
+            "tool_init_overrides": {"api_key": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "api_key" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_invalid_base_dir_override_type(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed base_dir overrides should be rejected before toolkit construction."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
+
+
+def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsafe tool init overrides should be rejected before subprocess execution starts."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "openai",
+            "function_name": "list_models",
+            "args": [],
+            "kwargs": {},
+            "tool_init_overrides": {"api_key": "test-key"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "api_key" in response.json()["detail"]
+
+
+def test_sandbox_runner_subprocess_rejects_invalid_base_dir_override_type(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed base_dir overrides should be rejected before subprocess dispatch."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
 
 
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,6 +30,8 @@ That smoke validation did not validate dynamic per-user Kubernetes workers.
 The current prototype carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
 The current prototype persists worker workspace, cache, and Python packages inside worker-owned state.
 The current prototype aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
+For file-backed agents that set `memory_file_path`, local workspace-aware tools now derive their base directory from that same path.
+Worker-routed scoped tools still execute against the resolved worker workspace, so the agent-level workspace hint does not bypass worker-owned state.
 Sessions, learning, and most credentials are now worker-scope-aware.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
@@ -206,6 +208,9 @@ Concrete providers may realize the same contract through storage-path overrides,
 The worker workspace should remain at `<worker_root>/workspace`.
 The persistent Python environment should remain at `<worker_root>/venv`.
 Caches should stay inside `<worker_root>/cache`.
+Non-secret tool init overrides such as `base_dir` are allowed only as a narrow transport mechanism for workspace-aware tools.
+Those overrides must be explicitly whitelisted, type-validated before toolkit construction, and rejected with a client error when malformed.
+For worker-routed execution, runtime worker workspace resolution remains authoritative over any forwarded tool init override.
 
 ## Memory Design
 

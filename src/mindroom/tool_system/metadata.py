@@ -5,9 +5,10 @@ from __future__ import annotations
 import functools
 import importlib
 import inspect
+import os
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
@@ -32,6 +33,96 @@ from mindroom.credentials import get_credentials_manager, load_scoped_credential
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
+_SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
+
+
+class ToolInitOverrideError(ValueError):
+    """Raised when a caller supplies unsupported tool init overrides."""
+
+
+def _sanitize_safe_tool_init_override_value(
+    tool_name: str,
+    field_name: str,
+    value: object,
+) -> object:
+    """Validate one safe tool init override value."""
+    if field_name == "base_dir":
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, os.PathLike):
+            return os.fspath(value)
+        msg = f"Unsupported value for tool init override '{tool_name}.{field_name}': expected a string path or null."
+        raise ToolInitOverrideError(msg)
+
+    return value
+
+
+def sanitize_tool_init_overrides(
+    tool_name: str,
+    tool_init_overrides: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Validate and retain only the explicitly safe runtime tool init overrides."""
+    if not tool_init_overrides:
+        return None
+
+    metadata = TOOL_METADATA[tool_name]
+    allowed_fields = {
+        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
+    }
+    unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
+    if unexpected_fields:
+        allowed = ", ".join(sorted(allowed_fields)) or "none"
+        unexpected = ", ".join(unexpected_fields)
+        msg = f"Unsupported tool init override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
+        raise ToolInitOverrideError(msg)
+
+    return {
+        name: _sanitize_safe_tool_init_override_value(tool_name, name, tool_init_overrides[name])
+        for name in tool_init_overrides
+    }
+
+
+def _build_tool_config_init_kwargs(
+    metadata: ToolMetadata,
+    *,
+    credentials: dict[str, object],
+    tool_init_overrides: dict[str, object] | None,
+    runtime_overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    """Collect safe config-field kwargs for one tool constructor."""
+    if not metadata.config_fields:
+        return {}
+
+    config_field_names = {field.name for field in metadata.config_fields}
+    init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_init_overrides:
+        init_kwargs.update(
+            {
+                field.name: tool_init_overrides[field.name]
+                for field in metadata.config_fields
+                if field.name in tool_init_overrides
+            },
+        )
+    if runtime_overrides:
+        init_kwargs.update(
+            {field_name: value for field_name, value in runtime_overrides.items() if field_name in config_field_names},
+        )
+    return init_kwargs
+
+
+def _add_worker_context_init_kwargs(
+    tool_class: type[Toolkit],
+    *,
+    init_kwargs: dict[str, object],
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> None:
+    """Inject worker-routing constructor args when a toolkit supports them."""
+    init_signature = inspect.signature(tool_class.__init__)
+    if "worker_scope" in init_signature.parameters:
+        init_kwargs["worker_scope"] = worker_scope
+    if "routing_agent_name" in init_signature.parameters:
+        init_kwargs["routing_agent_name"] = routing_agent_name
 
 
 def _build_tool_instance(
@@ -39,6 +130,7 @@ def _build_tool_instance(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
@@ -70,34 +162,27 @@ def _build_tool_instance(
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
+    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    init_kwargs = _build_tool_config_init_kwargs(
+        metadata,
+        credentials=credentials,
+        tool_init_overrides=safe_tool_init_overrides,
+        runtime_overrides=runtime_overrides,
+    )
+    _add_worker_context_init_kwargs(
+        tool_class,
+        init_kwargs=init_kwargs,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
 
-    init_kwargs = {}
-    if metadata.config_fields:
-        config_field_names = {field.name for field in metadata.config_fields}
-        for field in metadata.config_fields:
-            if field.name in credentials:
-                init_kwargs[field.name] = credentials[field.name]
-        if runtime_overrides:
-            init_kwargs.update(
-                {
-                    field_name: value
-                    for field_name, value in runtime_overrides.items()
-                    if field_name in config_field_names
-                },
-            )
-
-    init_signature = inspect.signature(tool_class.__init__)
-    if "worker_scope" in init_signature.parameters:
-        init_kwargs["worker_scope"] = worker_scope
-    if "routing_agent_name" in init_signature.parameters:
-        init_kwargs["routing_agent_name"] = routing_agent_name
-
-    toolkit = tool_class(**init_kwargs)
+    toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
+        tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
@@ -109,6 +194,7 @@ def get_tool_by_name(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
@@ -125,6 +211,7 @@ def get_tool_by_name(
         tool_name,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
+        tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
         worker_scope=worker_scope,

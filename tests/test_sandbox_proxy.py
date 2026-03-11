@@ -10,7 +10,7 @@ import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
@@ -148,6 +148,18 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     execute_url, execute_payload = captured_calls[1]
     assert execute_url.endswith("/api/sandbox-runner/execute")
     assert execute_payload["lease_id"] == "lease-123"
+
+
+def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
+    """Tool init overrides should allow only the explicit safe whitelist."""
+    with pytest.raises(ToolInitOverrideError, match="api_key"):
+        get_tool_by_name("openai", tool_init_overrides={"api_key": "sk-test"})
+
+
+def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
+    """base_dir overrides should be validated before toolkit construction."""
+    with pytest.raises(ToolInitOverrideError, match="base_dir"):
+        get_tool_by_name("coding", tool_init_overrides={"base_dir": {"bad": "value"}})
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -668,3 +680,50 @@ class TestWorkerToolsOverride:
         result = entrypoint(1, 2)
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
+
+    def test_get_tool_by_name_passes_tool_init_overrides_to_proxy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Proxy execution should preserve non-secret tool init overrides like base_dir."""
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            def raise_for_status(self) -> None:
+                return
+
+            def json(self) -> dict[str, object]:
+                return {"ok": True, "result": "sandbox-result"}
+
+        class _FakeClient:
+            def __init__(self, *, timeout: float) -> None:
+                pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return
+
+            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:  # noqa: ARG002
+                captured["url"] = url
+                captured["json"] = json
+                return _FakeResponse()
+
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+        tool = get_tool_by_name(
+            "coding",
+            tool_init_overrides={"base_dir": "/workspace/demo"},
+            worker_tools_override=["coding"],
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+
+        result = entrypoint(path=".")
+
+        assert result == "sandbox-result"
+        assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
+        assert captured["json"]["tool_init_overrides"] == {"base_dir": "/workspace/demo"}
