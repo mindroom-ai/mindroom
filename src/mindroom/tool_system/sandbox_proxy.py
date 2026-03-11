@@ -275,6 +275,7 @@ def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
     worker_tools_override: list[str] | None = None,
+    worker_scope: WorkerScope | None = None,
 ) -> bool:
     """Return whether the given tool should execute through the sandbox proxy.
 
@@ -288,11 +289,11 @@ def _sandbox_proxy_enabled_for_tool(
     if not primary_worker_backend_available(proxy_url=_PROXY_URL):
         return False
 
+    if _PROXY_URL is None and worker_scope is None:
+        return False
+
     if worker_tools_override is not None:
         return tool_name in worker_tools_override
-
-    if _PROXY_URL is None:
-        return False
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
@@ -443,7 +444,11 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not _sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=worker_tools_override):
+    if not _sandbox_proxy_enabled_for_tool(
+        tool_name,
+        worker_tools_override=worker_tools_override,
+        worker_scope=worker_scope,
+    ):
         return toolkit
 
     toolkit.functions = {

@@ -47,6 +47,46 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
   --set supabaseServiceKey="your-service-key"
 ```
 
+### Dedicated worker pods
+
+The instance chart supports two worker backends:
+
+- `workerBackend=static_runner` keeps the existing shared sandbox-runner sidecar
+- `workerBackend=kubernetes` lets the primary runtime create dedicated worker pods from worker keys
+
+When `workerBackend=kubernetes`, the chart now wires:
+
+- a worker-manager service account and namespace-scoped RBAC
+- primary-runtime environment for the Kubernetes worker backend
+- worker cleanup interval configuration
+- network policy allowing primary-runtime to worker traffic on `8766`
+
+Example:
+
+```
+helm upgrade --install instance-1 ./cluster/k8s/instance \
+  --namespace mindroom-instances \
+  --create-namespace \
+  --set customer=1 \
+  --set workerBackend=kubernetes \
+  --set workerCleanupIntervalSeconds=300 \
+  --set kubernetesWorkerIdleTimeoutSeconds=1800 \
+  --set kubernetesWorkerReadyTimeoutSeconds=60
+```
+
+Useful chart values:
+
+- `workerBackend`
+- `workerCleanupIntervalSeconds`
+- `kubernetesWorkerImage`
+- `kubernetesWorkerImagePullPolicy`
+- `kubernetesWorkerServiceAccountName` for dedicated worker pods; the primary runtime gets its own manager service account automatically
+- `kubernetesWorkerNamePrefix`
+- `kubernetesWorkerStorageSubpathPrefix`
+- `kubernetesWorkerPort`
+- `kubernetesWorkerReadyTimeoutSeconds`
+- `kubernetesWorkerIdleTimeoutSeconds`
+
 ## Secrets Management
 
 API keys are mounted as files at `/etc/secrets/` (not environment variables). MindRoom reads paths from `*_API_KEY_FILE` environment variables:

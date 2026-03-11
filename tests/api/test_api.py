@@ -13,8 +13,10 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import main
+from mindroom.api import workers as workers_api
 from mindroom.config.main import Config
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.workers.models import WorkerHandle
 
 
 def _config_with_worker_scope(worker_scope: str | None) -> Config:
@@ -244,6 +246,99 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
         "detail": "Setting up Matrix rooms and memberships",
     }
     reset_runtime_state()
+
+
+def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Background worker cleanup should no-op when no backend is configured."""
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda proxy_url: False)
+
+    assert main._cleanup_workers_once() == 0
+
+
+def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Background worker cleanup should delegate to the configured worker manager."""
+
+    class _FakeWorkerManager:
+        backend_name = "kubernetes"
+
+        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            return [
+                WorkerHandle(
+                    worker_id="worker-1",
+                    worker_key="worker-key",
+                    endpoint="http://worker/api/sandbox-runner/execute",
+                    auth_token="token",
+                    status="idle",
+                    backend_name="kubernetes",
+                    last_used_at=1.0,
+                    created_at=0.0,
+                ),
+            ]
+
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda proxy_url: True)
+    monkeypatch.setattr(main, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+
+    assert main._cleanup_workers_once() == 1
+
+
+def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dashboard should expose backend-neutral worker metadata."""
+
+    class _FakeWorkerManager:
+        def list_workers(self, *, include_idle: bool = True) -> list[WorkerHandle]:
+            assert include_idle is True
+            return [
+                WorkerHandle(
+                    worker_id="worker-1",
+                    worker_key="worker-key",
+                    endpoint="http://worker/api/sandbox-runner/execute",
+                    auth_token="token",
+                    status="ready",
+                    backend_name="kubernetes",
+                    last_used_at=12.0,
+                    created_at=1.0,
+                    debug_metadata={"namespace": "mindroom-instances"},
+                ),
+            ]
+
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda proxy_url: True)
+    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+
+    response = test_client.get("/api/workers")
+
+    assert response.status_code == 200
+    assert response.json()["workers"][0]["worker_key"] == "worker-key"
+    assert response.json()["workers"][0]["backend_name"] == "kubernetes"
+
+
+def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dashboard should expose manual idle-worker cleanup."""
+
+    class _FakeWorkerManager:
+        idle_timeout_seconds = 60.0
+
+        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            return [
+                WorkerHandle(
+                    worker_id="worker-1",
+                    worker_key="worker-key",
+                    endpoint="http://worker/api/sandbox-runner/execute",
+                    auth_token="token",
+                    status="idle",
+                    backend_name="kubernetes",
+                    last_used_at=12.0,
+                    created_at=1.0,
+                ),
+            ]
+
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda proxy_url: True)
+    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+
+    response = test_client.post("/api/workers/cleanup")
+
+    assert response.status_code == 200
+    assert response.json()["idle_timeout_seconds"] == 60.0
+    assert response.json()["cleaned_workers"][0]["status"] == "idle"
 
 
 def test_load_config(test_client: TestClient) -> None:

@@ -426,8 +426,31 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            worker_tools_override=["shell"],
+            worker_scope="shared",
+        )
+        is True
+    )
     assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=None) is False
+
+
+def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_proxy_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-scoped agents should still honor env-based routing on the Kubernetes backend."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"shell"})
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_scope="user") is True
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", worker_scope="user") is False
 
 
 def test_kubernetes_backend_is_unavailable_without_required_config(monkeypatch: pytest.MonkeyPatch) -> None:

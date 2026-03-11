@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
 
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
+REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="local worker venv bootstrap is validated on Linux",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -283,6 +288,7 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     assert captured_kwargs["routing_agent_name"] == "general"
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -342,6 +348,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -371,6 +378,7 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     assert str(expected_prefix) in data["result"]
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -417,6 +425,7 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     assert str(expected_prefix) in data["result"]
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_lists_known_workers(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -449,6 +458,7 @@ def test_sandbox_runner_lists_known_workers(
     assert worker["debug_metadata"]["state_root"] == str((tmp_path / "workers" / worker_dir_name("worker-a")).resolve())
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

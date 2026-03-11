@@ -74,6 +74,34 @@ In Kubernetes the runner runs as a second container in the same pod, sharing `lo
 - Read-only access to config (for plugin tool registration)
 - No access to the secrets volume
 
+### Kubernetes (dedicated worker pods)
+
+MindRoom also supports a Kubernetes worker backend where the primary runtime creates dedicated worker pods from worker keys instead of sending everything to one shared sidecar.
+
+In that mode:
+
+- the primary runtime sets `MINDROOM_WORKER_BACKEND=kubernetes`
+- each worker pod runs the existing sandbox-runner app
+- worker state is mounted from the shared instance PVC via `subPath=workers/<worker_dir>`
+- the worker pod uses `MINDROOM_SANDBOX_DEDICATED_WORKER_KEY` and `MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT`
+- idle cleanup scales worker deployments to `0` while preserving state
+
+Useful variables for the primary runtime:
+
+- `MINDROOM_WORKER_BACKEND=kubernetes`
+- `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS`
+- `MINDROOM_KUBERNETES_WORKER_NAMESPACE`
+- `MINDROOM_KUBERNETES_WORKER_IMAGE`
+- `MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY`
+- `MINDROOM_KUBERNETES_WORKER_SERVICE_ACCOUNT_NAME`
+- `MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME`
+- `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`
+- `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX`
+- `MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME`
+- `MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME`
+- `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS`
+- `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS`
+
 ### Host machine + Docker sandbox container
 
 Run MindRoom directly on the host while isolating code-execution tools in a Docker container:
@@ -123,6 +151,8 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS`        | HTTP timeout for proxy calls                       | `120`                                 |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime                          | `60`                                  |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`       | JSON mapping tool selectors to credential services | `{}`                                  |
+| `MINDROOM_WORKER_BACKEND`                       | Primary-runtime worker backend (`static_runner` or `kubernetes`) | `static_runner`            |
+| `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS`      | Background idle-worker cleanup interval in the primary runtime | `0` (disabled)             |
 
 ### Sandbox runner
 
@@ -134,6 +164,8 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 | `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                           | `120`                                                        |
 | `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config *(will fail if not writable)* |
 | `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                           | *(optional)*                                                 |
+| `MINDROOM_SANDBOX_DEDICATED_WORKER_KEY`              | Pin a worker pod to one worker key                                            | *(optional)*                                                 |
+| `MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT`             | Mounted worker root for dedicated worker pods                                 | `MINDROOM_STORAGE_PATH`                                      |
 
 ## Execution modes
 

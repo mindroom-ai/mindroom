@@ -18,6 +18,13 @@ spec:
   - ports:
     - port: 8765    # MindRoom runtime (bundled dashboard + API)
     - port: 8008    # synapse HTTP
+  # Allow the primary runtime to reach dedicated worker pods.
+  - from:
+    - podSelector:
+        matchLabels:
+          customer: {{ .Values.customer | quote }}
+    ports:
+    - port: 8766
   egress:
   # Allow intra-instance traffic between MindRoom and Synapse pods.
   - to:
@@ -27,6 +34,7 @@ spec:
     ports:
     - port: 8008
     - port: 8765
+    - port: 8766
   # Allow DNS
   - ports:
     - port: 53
