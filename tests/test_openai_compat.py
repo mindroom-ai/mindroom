@@ -327,14 +327,32 @@ class TestChatCompletions:
         identity = _build_tool_execution_identity(agent_name="general", session_id="session-123")
         assert identity.requester_id is None
 
-    def test_openai_execution_identity_uses_trusted_requester(self) -> None:
-        """OpenAI-compatible execution identity should use an explicitly trusted requester."""
-        identity = _build_tool_execution_identity(
-            agent_name="general",
-            session_id="session-123",
-            requester_id="@alice:example.com",
-        )
-        assert identity.requester_id == "@alice:example.com"
+    def test_requester_header_is_not_used_for_execution_identity(self, authed_client: TestClient) -> None:
+        """Caller-supplied requester headers must not become `/v1` execution identity."""
+        seen_requester_ids: list[str | None] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            identity = get_tool_execution_identity()
+            seen_requester_ids.append(identity.requester_id if identity is not None else None)
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            response = authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-1",
+                    "X-Mindroom-Requester-Id": "@alice:example.com",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert seen_requester_ids == [None]
 
     def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
         """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
@@ -402,128 +420,6 @@ class TestChatCompletions:
         assert "unscoped agents and worker_scope=shared" in error["message"]
         assert "code" in error["message"]
 
-    def test_rejects_user_scoped_agent_with_trusted_requester_header(self, test_config: Config) -> None:
-        """User-scoped agents should remain unsupported on `/v1` even with a trusted requester header."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        test_config.agents["general"].worker_scope = "user"
-        app = FastAPI()
-        app.include_router(router)
-
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_COMPAT_API_KEYS": "test-key-1",
-                    "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER": "x-mindroom-requester-id",
-                },
-            ),
-        ):
-            client = TestClient(app)
-            response = client.post(
-                "/v1/chat/completions",
-                headers={
-                    "Authorization": "Bearer test-key-1",
-                    "X-Mindroom-Requester-Id": "@alice:example.com",
-                },
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                },
-            )
-
-        assert response.status_code == 400
-        error = response.json()["error"]
-        assert error["code"] == "unsupported_worker_scope"
-        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
-
-    def test_rejects_user_agent_scoped_team_with_trusted_requester_header(self, test_config: Config) -> None:
-        """Team requests should remain conservative on `/v1` even with a trusted requester header."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        test_config.agents["code"].worker_scope = "user_agent"
-        test_config.teams = {
-            "dev-team": TeamConfig(
-                display_name="Dev Team",
-                role="Engineering helpers",
-                agents=["general", "code"],
-                mode="coordinate",
-            ),
-        }
-        app = FastAPI()
-        app.include_router(router)
-
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_COMPAT_API_KEYS": "test-key-1",
-                    "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER": "x-mindroom-requester-id",
-                },
-            ),
-        ):
-            client = TestClient(app)
-            response = client.post(
-                "/v1/chat/completions",
-                headers={
-                    "Authorization": "Bearer test-key-1",
-                    "X-Mindroom-Requester-Id": "@alice:example.com",
-                },
-                json={
-                    "model": "team/dev-team",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                },
-            )
-
-        assert response.status_code == 400
-        error = response.json()["error"]
-        assert error["code"] == "unsupported_worker_scope"
-        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
-
-    def test_room_thread_scope_stays_unsupported_with_trusted_requester_header(self, test_config: Config) -> None:
-        """`room_thread` should remain unsupported on `/v1` even with a trusted requester."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        test_config.agents["general"].worker_scope = "room_thread"
-        app = FastAPI()
-        app.include_router(router)
-
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_COMPAT_API_KEYS": "test-key-1",
-                    "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER": "x-mindroom-requester-id",
-                },
-            ),
-        ):
-            client = TestClient(app)
-            response = client.post(
-                "/v1/chat/completions",
-                headers={
-                    "Authorization": "Bearer test-key-1",
-                    "X-Mindroom-Requester-Id": "@alice:example.com",
-                },
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                },
-            )
-
-        assert response.status_code == 400
-        error = response.json()["error"]
-        assert error["code"] == "unsupported_worker_scope"
-        assert "room_thread" in error["message"]
-
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto-routing should fail when all agents require unsupported worker scopes."""
         from fastapi import FastAPI  # noqa: PLC0415
@@ -551,83 +447,6 @@ class TestChatCompletions:
 
         assert response.status_code == 500
         assert response.json()["error"]["message"] == "No OpenAI-compatible agents configured for auto-routing"
-
-    def test_user_scoped_auto_route_stays_unavailable_without_trusted_requester(self, test_config: Config) -> None:
-        """Unauthenticated-mode `/v1` should not trust caller-supplied requester headers."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        test_config.agents["general"].worker_scope = "user"
-        app = FastAPI()
-        app.include_router(router)
-
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true",
-                    "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER": "x-mindroom-requester-id",
-                },
-            ),
-        ):
-            client = TestClient(app)
-            response = client.post(
-                "/v1/chat/completions",
-                headers={"X-Mindroom-Requester-Id": "@alice:example.com"},
-                json={
-                    "model": "general",
-                    "messages": [{"role": "user", "content": "Hi"}],
-                },
-            )
-
-        assert response.status_code == 400
-        error = response.json()["error"]
-        assert error["code"] == "unsupported_worker_scope"
-        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
-
-    def test_models_keep_requester_scoped_agents_hidden_with_trusted_requester_present(
-        self,
-        test_config: Config,
-    ) -> None:
-        """`/v1/models` should remain conservative even when a trusted requester header is present."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
-        from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        test_config.agents["general"].worker_scope = "user"
-        test_config.agents["code"].worker_scope = "user_agent"
-        test_config.agents["research"].worker_scope = "room_thread"
-
-        app = FastAPI()
-        app.include_router(router)
-
-        with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch.dict(
-                "os.environ",
-                {
-                    "OPENAI_COMPAT_API_KEYS": "test-key-1",
-                    "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER": "x-mindroom-requester-id",
-                },
-            ),
-        ):
-            client = TestClient(app)
-            response = client.get(
-                "/v1/models",
-                headers={
-                    "Authorization": "Bearer test-key-1",
-                    "X-Mindroom-Requester-Id": "@alice:example.com",
-                },
-            )
-
-        assert response.status_code == 200
-        model_ids = {model["id"] for model in response.json()["data"]}
-        assert not model_ids
-        assert "general" not in model_ids
-        assert "code" not in model_ids
-        assert "research" not in model_ids
 
     def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
         """Repeated requests with the same X-Session-Id should reuse one derived session ID."""
