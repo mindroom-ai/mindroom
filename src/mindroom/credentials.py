@@ -7,6 +7,7 @@ used by both agents and the dashboard interface.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -24,6 +25,14 @@ from mindroom.tool_system.worker_routing import (
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 logger = get_logger(__name__)
+_SHARED_STORAGE_PATH_ENV = "MINDROOM_SHARED_STORAGE_PATH"
+
+
+def _default_credentials_base_path() -> Path:
+    shared_storage_path = os.getenv(_SHARED_STORAGE_PATH_ENV, "").strip()
+    if shared_storage_path:
+        return Path(shared_storage_path).expanduser().resolve() / "credentials"
+    return CREDENTIALS_DIR
 
 
 def validate_service_name(service: str) -> str:
@@ -50,7 +59,7 @@ class CredentialsManager:
 
         """
         if base_path is None:
-            self.base_path = CREDENTIALS_DIR
+            self.base_path = _default_credentials_base_path()
         else:
             self.base_path = Path(base_path)
 

@@ -296,6 +296,53 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
 
+    def test_credentials_manager_defaults_to_shared_storage_path_when_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Dedicated workers should resolve shared credentials from the shared storage mount."""
+        shared_storage_root = tmp_path / "shared-storage"
+        monkeypatch.setenv("MINDROOM_SHARED_STORAGE_PATH", str(shared_storage_root))
+
+        manager = CredentialsManager()
+
+        assert manager.base_path == (shared_storage_root / "credentials").resolve()
+
+    def test_shared_storage_root_supports_worker_scoped_credentials_lookup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Dedicated workers should load shared env-backed credentials plus worker overrides from the shared storage mount."""
+        shared_storage_root = tmp_path / "shared-storage"
+        monkeypatch.setenv("MINDROOM_SHARED_STORAGE_PATH", str(shared_storage_root))
+        manager = CredentialsManager()
+        manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_manager = manager.for_worker("v1:tenant-123:user:@alice:example.org")
+        worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
+
+        with tool_execution_identity(execution_identity):
+            loaded = load_scoped_credentials(
+                "google",
+                worker_scope="user",
+                routing_agent_name="general",
+                credentials_manager=manager,
+            )
+
+        assert loaded == {"api_key": "worker-key", "_source": "ui"}
+
     def test_merge_scoped_credentials_overlays_worker_credentials(
         self,
         temp_credentials_dir: Path,

@@ -46,10 +46,14 @@ _TOKEN_SECRET_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY"  # noqa: S
 _IDLE_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS"
 _READY_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS"
 _NAME_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
+_NODE_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_NODE_NAME"
+_COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE"
+_SHARED_STORAGE_MOUNT_PATH_ENV = "MINDROOM_KUBERNETES_WORKER_SHARED_STORAGE_MOUNT_PATH"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _HOSTNAME_ENV = "HOSTNAME"
+_SHARED_STORAGE_PATH_ENV = "MINDROOM_SHARED_STORAGE_PATH"
 
 _ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
 _ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
@@ -161,6 +165,13 @@ def _read_int_env(name: str, default: int) -> int:
     return max(1, value)
 
 
+def _read_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _read_json_mapping_env(name: str) -> dict[str, str]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -185,8 +196,11 @@ def _read_json_mapping_env(name: str) -> dict[str, str]:
 def _worker_id_for_key(worker_key: str, *, prefix: str) -> str:
     digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
     normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_NAME_PREFIX
-    worker_id = f"{normalized_prefix}-{digest}"
-    return worker_id[:63].rstrip("-")
+    max_prefix_length = 63 - len(digest) - 1
+    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
+    if not safe_prefix:
+        safe_prefix = _DEFAULT_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
+    return f"{safe_prefix}-{digest}"
 
 
 def _service_host(service_name: str, namespace: str, port: int) -> str:
@@ -228,11 +242,14 @@ class KubernetesWorkerBackendConfig:
     config_map_name: str | None
     config_key: str
     config_path: str
+    shared_storage_mount_path: str | None
     token_secret_name: str | None
     token_secret_key: str
     idle_timeout_seconds: float
     ready_timeout_seconds: float
     name_prefix: str
+    node_name: str | None
+    colocate_with_control_plane_node: bool
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
 
@@ -252,6 +269,7 @@ class KubernetesWorkerBackendConfig:
 
         config_map_name = os.getenv(_CONFIG_MAP_NAME_ENV, "").strip() or None
         token_secret_name = os.getenv(_TOKEN_SECRET_NAME_ENV, "").strip() or None
+        shared_storage_mount_path = os.getenv(_SHARED_STORAGE_MOUNT_PATH_ENV, "").strip() or None
         return cls(
             namespace=namespace,
             image=image,
@@ -268,11 +286,14 @@ class KubernetesWorkerBackendConfig:
             config_map_name=config_map_name,
             config_key=os.getenv(_CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY).strip() or _DEFAULT_CONFIG_KEY,
             config_path=os.getenv(_CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH).strip() or _DEFAULT_CONFIG_PATH,
+            shared_storage_mount_path=shared_storage_mount_path,
             token_secret_name=token_secret_name,
             token_secret_key=os.getenv(_TOKEN_SECRET_KEY_ENV, "sandbox_proxy_token").strip() or "sandbox_proxy_token",
             idle_timeout_seconds=_read_float_env(_IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
             ready_timeout_seconds=_read_float_env(_READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
             name_prefix=os.getenv(_NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX).strip() or _DEFAULT_NAME_PREFIX,
+            node_name=os.getenv(_NODE_NAME_ENV, "").strip() or None,
+            colocate_with_control_plane_node=_read_bool_env(_COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
             extra_env=_read_json_mapping_env(_EXTRA_ENV_JSON_ENV),
             extra_labels=_read_json_mapping_env(_EXTRA_LABELS_JSON_ENV),
         )
@@ -296,11 +317,14 @@ def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str,
         config.config_map_name or "",
         config.config_key,
         config.config_path,
+        config.shared_storage_mount_path or "",
         config.token_secret_name or "",
         config.token_secret_key,
         str(config.idle_timeout_seconds),
         str(config.ready_timeout_seconds),
         config.name_prefix,
+        config.node_name or "",
+        str(config.colocate_with_control_plane_node),
         extra_env_json,
         extra_labels_json,
         auth_token or "",
@@ -436,6 +460,7 @@ class KubernetesWorkerBackend:
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[_ANNOTATION_WORKER_STATUS] = "idle"
         self._patch_deployment(deployment_name, replicas=0, annotations=annotations)
+        self._delete_service(deployment_name)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -451,6 +476,7 @@ class KubernetesWorkerBackend:
             annotations = dict(deployment.metadata.annotations or {})
             annotations[_ANNOTATION_WORKER_STATUS] = "idle"
             self._patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
+            self._delete_service(handle.worker_id)
             deployment.spec.replicas = 0
             deployment.metadata.annotations = annotations
             cleaned.append(self._handle_from_deployment(deployment, now=timestamp))
@@ -470,6 +496,7 @@ class KubernetesWorkerBackend:
         annotations[_ANNOTATION_FAILURE_REASON] = failure_reason
         annotations[_ANNOTATION_FAILURE_COUNT] = str(_parse_annotation_int(annotations, _ANNOTATION_FAILURE_COUNT) + 1)
         self._patch_deployment(deployment_name, replicas=0, annotations=annotations)
+        self._delete_service(deployment_name)
         deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
@@ -586,6 +613,8 @@ class KubernetesWorkerBackend:
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "HOME", "value": self.config.storage_mount_path},
         ]
+        if self.config.shared_storage_mount_path is not None:
+            env.append({"name": _SHARED_STORAGE_PATH_ENV, "value": self.config.shared_storage_mount_path})
         if self.config.config_map_name is not None:
             env.append({"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path})
         if self.config.token_secret_name is not None:
@@ -627,6 +656,17 @@ class KubernetesWorkerBackend:
                     "readOnly": True,
                 },
             )
+        if (
+            self.config.shared_storage_mount_path is not None
+            and self.config.shared_storage_mount_path != self.config.storage_mount_path
+        ):
+            mounts.append(
+                {
+                    "name": "shared-storage",
+                    "mountPath": self.config.shared_storage_mount_path,
+                    "readOnly": True,
+                },
+            )
         return mounts
 
     def _volumes(self) -> list[dict[str, object]]:
@@ -644,6 +684,18 @@ class KubernetesWorkerBackend:
                     "name": "worker-config",
                     "configMap": {
                         "name": self.config.config_map_name,
+                    },
+                },
+            )
+        if (
+            self.config.shared_storage_mount_path is not None
+            and self.config.shared_storage_mount_path != self.config.storage_mount_path
+        ):
+            volumes.append(
+                {
+                    "name": "shared-storage",
+                    "persistentVolumeClaim": {
+                        "claimName": self.config.storage_pvc_name,
                     },
                 },
             )
@@ -683,6 +735,14 @@ class KubernetesWorkerBackend:
         labels = self._labels(worker_id)
         pod_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
+            "securityContext": {
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "runAsNonRoot": True,
+                "fsGroupChangePolicy": "OnRootMismatch",
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
             "containers": [
                 {
                     "name": _CONTAINER_NAME,
@@ -716,7 +776,7 @@ class KubernetesWorkerBackend:
             ],
             "volumes": self._volumes(),
         }
-        node_name = self._control_plane_node_name_or_none()
+        node_name = self._worker_node_name_or_none()
         if node_name is not None:
             pod_spec["nodeName"] = node_name
         return {
@@ -816,7 +876,11 @@ class KubernetesWorkerBackend:
         response = self._apps.list_namespaced_deployment(self.config.namespace, label_selector=selector)
         return list(response.items or [])
 
-    def _control_plane_node_name_or_none(self) -> str | None:
+    def _worker_node_name_or_none(self) -> str | None:
+        if self.config.node_name is not None:
+            return self.config.node_name
+        if not self.config.colocate_with_control_plane_node:
+            return None
         if self._control_plane_node_name_loaded:
             return self._control_plane_node_name
 

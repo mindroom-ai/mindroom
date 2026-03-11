@@ -6,9 +6,8 @@
 {{- $workerImagePullPolicy := .Values.kubernetesWorkerImagePullPolicy | default .Values.mindroom_image_pull_policy | default "Always" -}}
 {{- $storageAccessMode := .Values.storageAccessMode | default "ReadWriteOnce" -}}
 {{- $controlPlaneNodeName := .Values.controlPlaneNodeName | default "" -}}
-{{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
-{{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
-{{- end -}}
+{{- $workerSharedStorageMountPath := .Values.kubernetesWorkerSharedStorageMountPath | default "/app/shared-storage" -}}
+{{- $workerColocateWithControlPlaneNode := .Values.kubernetesWorkerColocateWithControlPlaneNode | default true -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -111,12 +110,21 @@ spec:
           value: {{ .Values.storagePath | quote }}
         - name: MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
           value: {{ .Values.kubernetesWorkerStorageSubpathPrefix | quote }}
+        - name: MINDROOM_KUBERNETES_WORKER_SHARED_STORAGE_MOUNT_PATH
+          value: {{ $workerSharedStorageMountPath | quote }}
         - name: MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME
           value: "mindroom-config-{{ .Values.customer }}"
         - name: MINDROOM_KUBERNETES_WORKER_CONFIG_KEY
           value: "config.yaml"
         - name: MINDROOM_KUBERNETES_WORKER_CONFIG_PATH
           value: "/app/config.yaml"
+        {{- if $controlPlaneNodeName }}
+        - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
+          value: {{ $controlPlaneNodeName | quote }}
+        {{- else if and (ne $storageAccessMode "ReadWriteMany") $workerColocateWithControlPlaneNode }}
+        - name: MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE
+          value: "true"
+        {{- end }}
         - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME
           value: "mindroom-api-keys-{{ .Values.customer }}"
         - name: MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY

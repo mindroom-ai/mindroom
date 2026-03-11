@@ -2,7 +2,8 @@ customer: demo
 baseDomain: mindroom.chat  # Base domain for all services
 storage: 10Gi  # More storage for Matrix data
 storageClassName: hcloud-volumes  # Override to local cluster storage class (for example `standard` in kind)
-storageAccessMode: ReadWriteOnce  # Set ReadWriteMany for multi-node shared-worker storage, or pin the control plane to one node.
+storageAccessMode: ReadWriteOnce  # MindRoom storage access mode. Set ReadWriteMany for multi-node shared-worker storage.
+synapseStorageAccessMode: ReadWriteOnce
 storagePath: "/mindroom_data"  # Base path inside container for persisted state
 
 # Docker images
@@ -13,13 +14,15 @@ synapse_image_pull_policy: Always
 authorizationGlobalUsers: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
-workerCleanupIntervalSeconds: 0  # Background cleanup in the primary runtime. 0 disables it.
-controlPlaneNodeName: ""  # Optional single-node pin for shared ReadWriteOnce storage when using workerBackend=kubernetes.
+workerCleanupIntervalSeconds: 30
+controlPlaneNodeName: ""  # Optional explicit node pin for the control plane and dedicated workers when using shared ReadWriteOnce storage.
 kubernetesWorkerImage: ""  # Defaults to mindroom_image when empty
 kubernetesWorkerImagePullPolicy: ""  # Defaults to mindroom_image_pull_policy when empty
 kubernetesWorkerServiceAccountName: ""  # ServiceAccount used by dedicated worker pods. Defaults to the namespace `default`.
 kubernetesWorkerNamePrefix: "mindroom-worker"
 kubernetesWorkerStorageSubpathPrefix: "workers"
+kubernetesWorkerSharedStorageMountPath: "/app/shared-storage"
+kubernetesWorkerColocateWithControlPlaneNode: true
 kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800

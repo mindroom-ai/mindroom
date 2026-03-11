@@ -25,7 +25,7 @@ metadata:
     customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
-  - {{ .Values.storageAccessMode | default "ReadWriteOnce" }}
+  - {{ .Values.synapseStorageAccessMode | default "ReadWriteOnce" }}
   resources:
     requests:
       storage: {{ .Values.storage }}
