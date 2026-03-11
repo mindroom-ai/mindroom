@@ -14,6 +14,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSpec
+from mindroom.workers import runtime as workers_runtime_module
 from tests.conftest import FakeCredentialsManager
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
@@ -365,10 +366,10 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
 
 def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Concurrent proxy requests should not build multiple static worker managers for one config."""
-    monkeypatch.setattr(sandbox_proxy_module, "_WORKER_MANAGER", None)
-    monkeypatch.setattr(sandbox_proxy_module, "_WORKER_MANAGER_CONFIG", None)
+    workers_runtime_module.reset_primary_worker_manager()
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
 
     first_init_started = threading.Event()
     allow_first_init_to_finish = threading.Event()
@@ -397,7 +398,7 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
         except Exception as exc:  # pragma: no cover - surfaced by assertion below
             exceptions.append(exc)
 
-    monkeypatch.setattr(sandbox_proxy_module, "StaticSandboxRunnerBackend", FakeBackend)
+    monkeypatch.setattr(workers_runtime_module, "StaticSandboxRunnerBackend", FakeBackend)
 
     first_thread = threading.Thread(target=load_manager)
     second_thread = threading.Thread(target=load_manager)
@@ -414,6 +415,30 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     assert init_count == 1
     assert len(managers) == 2
     assert managers[0] is managers[1]
+    workers_runtime_module.reset_primary_worker_manager()
+
+
+def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed tools should stay proxy-enabled when the Kubernetes backend provides worker handles directly."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=None) is False
+
+
+def test_kubernetes_backend_is_unavailable_without_required_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backend availability should fail closed when Kubernetes provider config is incomplete."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_IMAGE", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", raising=False)
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is False
 
 
 class TestWorkerToolsOverride:

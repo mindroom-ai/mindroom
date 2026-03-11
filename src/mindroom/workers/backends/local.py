@@ -96,6 +96,11 @@ def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePath
     )
 
 
+def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
+    """Return the filesystem paths owned by one concrete worker root."""
+    return _local_worker_state_paths_for_root(state_root)
+
+
 def local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
     """Return the filesystem paths owned by one worker key."""
     resolved_root = worker_root.expanduser().resolve()
@@ -109,6 +114,18 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
         msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
         raise WorkerBackendError(msg)
     return _local_worker_state_paths_for_root(Path(state_root))
+
+
+def ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
+    """Create the persistent directories and venv for one worker root."""
+    paths.workspace.mkdir(parents=True, exist_ok=True)
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    paths.metadata_dir.mkdir(parents=True, exist_ok=True)
+    if (paths.venv_dir / "bin" / "python").exists():
+        return
+
+    builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
+    builder.create(paths.venv_dir)
 
 
 class LocalWorkerBackend:
@@ -271,14 +288,7 @@ class LocalWorkerBackend:
         )
 
     def _ensure_worker_state(self, paths: LocalWorkerStatePaths) -> None:
-        paths.workspace.mkdir(parents=True, exist_ok=True)
-        paths.cache_dir.mkdir(parents=True, exist_ok=True)
-        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
-        if (paths.venv_dir / "bin" / "python").exists():
-            return
-
-        builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
-        builder.create(paths.venv_dir)
+        ensure_local_worker_state(paths)
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         if not self.worker_root.exists():

@@ -69,6 +69,13 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
     assert '"result": 3' in data["result"]
 
 
+def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
+    """Sandbox runner should expose a minimal unauthenticated health endpoint."""
+    response = runner_client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -484,6 +491,67 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
 
     worker_file = tmp_path / "workers" / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+def test_dedicated_worker_mode_uses_mounted_root(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker mode should execute against the mounted worker root directly."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "dedicated-worker"
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+        save_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from dedicated worker", "note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-a",
+            },
+        )
+    assert save_response.status_code == 200
+    assert save_response.json()["ok"] is True
+
+    worker_file = worker_root / "workspace" / "note.txt"
+    assert worker_file.read_text(encoding="utf-8") == "hello from dedicated worker"
+
+
+def test_dedicated_worker_mode_rejects_mismatched_worker_key(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker mode should reject requests for other worker keys."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "dedicated-worker"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "read_file",
+            "args": ["note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-b",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert "Dedicated sandbox worker is pinned" in data["error"]
 
 
 def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(

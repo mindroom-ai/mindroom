@@ -7,7 +7,6 @@ import functools
 import hmac
 import json
 import os
-import threading
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -23,9 +22,8 @@ from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
     resolve_worker_key,
 )
-from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
-from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
+from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
     from agno.tools.function import Function
@@ -100,9 +98,6 @@ _PROXY_TIMEOUT = _read_proxy_timeout()
 _EXECUTION_MODE = _read_execution_mode()
 _CREDENTIAL_LEASE_TTL = _read_credential_lease_ttl()
 _PROXY_TOOLS = _read_proxy_tools(_EXECUTION_MODE)
-_WORKER_MANAGER: WorkerManager | None = None
-_WORKER_MANAGER_CONFIG: tuple[str | None, str | None] | None = None
-_WORKER_MANAGER_LOCK = threading.Lock()
 
 
 def sandbox_proxy_token_matches(provided_token: str | None) -> bool:
@@ -264,27 +259,8 @@ def _build_worker_routing_payload(
     )
 
 
-def _proxy_api_root() -> str | None:
-    if _PROXY_URL is None:
-        return None
-    return normalize_static_runner_api_root(_PROXY_URL)
-
-
-def _get_worker_manager() -> WorkerManager:
-    global _WORKER_MANAGER, _WORKER_MANAGER_CONFIG
-
-    api_root = _proxy_api_root()
-    config = (api_root, _PROXY_TOKEN)
-    with _WORKER_MANAGER_LOCK:
-        if _WORKER_MANAGER is None or config != _WORKER_MANAGER_CONFIG:
-            _WORKER_MANAGER = WorkerManager(
-                StaticSandboxRunnerBackend(
-                    api_root=api_root or "",
-                    auth_token=_PROXY_TOKEN,
-                ),
-            )
-            _WORKER_MANAGER_CONFIG = config
-    return _WORKER_MANAGER
+def _get_worker_manager():
+    return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
 
 
 def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:
@@ -306,11 +282,17 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
-    if _SANDBOX_RUNNER_MODE or _PROXY_URL is None or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
+    if _SANDBOX_RUNNER_MODE or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
+        return False
+
+    if not primary_worker_backend_available(proxy_url=_PROXY_URL):
         return False
 
     if worker_tools_override is not None:
         return tool_name in worker_tools_override
+
+    if _PROXY_URL is None:
+        return False
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
@@ -331,10 +313,6 @@ def _call_proxy_sync(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> object:
-    if _PROXY_URL is None:
-        msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
-        raise RuntimeError(msg)
-
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -348,6 +326,9 @@ def _call_proxy_sync(
         routing_agent_name=routing_agent_name,
     )
     payload.update(worker_payload)
+    if worker_handle is None and _PROXY_URL is None:
+        msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
+        raise RuntimeError(msg)
 
     try:
         headers = _request_headers_for_handle(worker_handle)
