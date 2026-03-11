@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
 
@@ -66,6 +66,15 @@ class _AdditionalContextChunk:
     kind: str
     title: str
     body: str
+
+
+@dataclass(frozen=True)
+class AgentToolInitContext:
+    """Shared agent tool-init settings used across local and command-dispatch paths."""
+
+    workspace_path: Path | None
+    worker_routed_tools: frozenset[str]
+    worker_scope: WorkerScope | None
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
@@ -253,6 +262,30 @@ def _tool_init_overrides(
     if worker_scope is not None and tool_name in worker_routed_tools:
         return None
     return {"base_dir": str(workspace_path)}
+
+
+def build_agent_tool_init_context(config: Config, agent_name: str) -> AgentToolInitContext:
+    """Build the shared context that decides per-tool init overrides for one agent."""
+    agent_config = config.get_agent(agent_name)
+    return AgentToolInitContext(
+        workspace_path=_resolve_agent_workspace_path(agent_config),
+        worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name)),
+        worker_scope=config.get_agent_worker_scope(agent_name),
+    )
+
+
+def build_agent_tool_init_overrides(
+    tool_name: str,
+    *,
+    context: AgentToolInitContext,
+) -> dict[str, object] | None:
+    """Resolve safe per-tool init overrides for one agent tool."""
+    return _tool_init_overrides(
+        tool_name,
+        workspace_path=context.workspace_path,
+        worker_routed_tools=context.worker_routed_tools,
+        worker_scope=context.worker_scope,
+    )
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -511,9 +544,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     tool_names = config.get_agent_tools(agent_name)
     worker_tools = config.get_agent_worker_tools(agent_name)
-    worker_routed_tools = frozenset(worker_tools)
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    workspace_path = _resolve_agent_workspace_path(agent_config)
+    tool_init_context = build_agent_tool_init_context(config, agent_name)
+    worker_scope = tool_init_context.worker_scope
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
@@ -565,12 +597,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     get_tool_by_name(
                         tool_name,
-                        tool_init_overrides=_tool_init_overrides(
-                            tool_name,
-                            workspace_path=workspace_path,
-                            worker_routed_tools=worker_routed_tools,
-                            worker_scope=worker_scope,
-                        ),
+                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
                         worker_tools_override=worker_tools,
                         worker_scope=worker_scope,
                         routing_agent_name=agent_name,

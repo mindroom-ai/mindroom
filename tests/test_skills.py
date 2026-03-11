@@ -10,7 +10,7 @@ import pytest
 from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
-from mindroom.commands.handler import _run_skill_command_tool
+from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.thread_utils import create_session_id
@@ -326,6 +326,37 @@ def test_skill_command_spec_parses_frontmatter(tmp_path: Path) -> None:
     assert spec.dispatch is not None
     assert spec.dispatch.tool_name == "demo_tool"
     assert spec.dispatch.arg_mode == "raw"
+
+
+def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill command dispatch should reuse the same workspace override rules as create_agent()."""
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
+        captured_calls.append((tool_name, dict(kwargs)))
+        return object()
+
+    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+
+    workspace = tmp_path / "mind_data"
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].memory_file_path = str(workspace)
+    config.agents["code"].tools = ["coding", "shell"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_scope = "user"
+    config.agents["code"].worker_tools = ["coding"]
+
+    toolkits = _collect_agent_toolkits(config, "code")
+
+    assert workspace.is_dir()
+    assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
+    overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
+    assert overrides_by_tool["coding"] is None
+    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
 @pytest.mark.asyncio
