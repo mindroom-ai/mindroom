@@ -81,6 +81,7 @@ def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> No
     instance_url = config_to_save.get("instance_url")
     if isinstance(instance_url, str):
         config_to_save["instance_url"] = _normalize_instance_url(instance_url)
+    config_to_save.setdefault("_source", "ui")
     target.target_manager.save_credentials("homeassistant", config_to_save)
 
 

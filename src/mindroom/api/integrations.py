@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 from typing import Any, Protocol, cast
 
@@ -61,13 +62,11 @@ class _SpotifyOAuthFactoryProtocol(Protocol):
 def _ensure_spotify_packages() -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
     ensure_tool_deps(["spotipy"], "spotify")
-
-    from spotipy import Spotify as _Spotify  # noqa: PLC0415
-    from spotipy import SpotifyOAuth as _SpotifyOAuth  # noqa: PLC0415
+    spotipy_module = importlib.import_module("spotipy")
 
     return (
-        cast("_SpotifyClientFactoryProtocol", _Spotify),
-        cast("_SpotifyOAuthFactoryProtocol", _SpotifyOAuth),
+        cast("_SpotifyClientFactoryProtocol", spotipy_module.Spotify),
+        cast("_SpotifyOAuthFactoryProtocol", spotipy_module.SpotifyOAuth),
     )
 
 
@@ -89,7 +88,9 @@ def _get_spotify_credentials(request: Request, agent_name: str | None = None) ->
 def _save_spotify_credentials(credentials: dict[str, Any], request: Request, agent_name: str | None = None) -> None:
     """Save Spotify credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
-    target.target_manager.save_credentials("spotify", credentials)
+    credentials_to_save = dict(credentials)
+    credentials_to_save.setdefault("_source", "ui")
+    target.target_manager.save_credentials("spotify", credentials_to_save)
 
 
 @router.get("/spotify/status")

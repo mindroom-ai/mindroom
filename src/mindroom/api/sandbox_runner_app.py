@@ -12,3 +12,9 @@ app.include_router(sandbox_runner_router)
 @app.on_event("startup")
 async def _startup() -> None:
     ensure_registry_loaded_with_config()
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Minimal readiness/liveness probe for dedicated worker pods."""
+    return {"status": "ok"}

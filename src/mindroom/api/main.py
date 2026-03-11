@@ -28,6 +28,7 @@ from mindroom.api.openai_compat import router as openai_compat_router
 from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
+from mindroom.api.workers import router as workers_router
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
@@ -35,9 +36,61 @@ from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
 from mindroom.runtime_state import get_runtime_state
+from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 logger = get_logger(__name__)
+_WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
+
+
+def _worker_cleanup_interval_seconds() -> float:
+    """Return the configured background idle-worker cleanup interval."""
+    raw = os.getenv(_WORKER_CLEANUP_INTERVAL_ENV, "0").strip()
+    try:
+        interval = float(raw)
+    except ValueError:
+        return 0.0
+    return max(0.0, interval)
+
+
+def _cleanup_workers_once() -> int:
+    """Run one idle-worker cleanup pass when a backend is configured."""
+    if not primary_worker_backend_available(
+        proxy_url=sandbox_proxy_module._PROXY_URL,
+        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+    ):
+        return 0
+
+    worker_manager = get_primary_worker_manager(
+        proxy_url=sandbox_proxy_module._PROXY_URL,
+        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+    )
+    cleaned_workers = worker_manager.cleanup_idle_workers()
+    if cleaned_workers:
+        logger.info(
+            "Cleaned idle workers",
+            count=len(cleaned_workers),
+            backend=worker_manager.backend_name,
+        )
+    return len(cleaned_workers)
+
+
+async def _worker_cleanup_loop(stop_event: asyncio.Event) -> None:
+    """Periodically clean idle workers in the primary runtime."""
+    interval_seconds = _worker_cleanup_interval_seconds()
+    if interval_seconds <= 0:
+        return
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            break
+        except TimeoutError:
+            try:
+                await asyncio.to_thread(_cleanup_workers_once)
+            except Exception:
+                logger.exception("Background worker cleanup failed")
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:
@@ -62,13 +115,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event))
+    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event))
 
     yield
 
     stop_event.set()
     watch_task.cancel()
+    worker_cleanup_task.cancel()
     with suppress(asyncio.CancelledError):
         await watch_task
+    with suppress(asyncio.CancelledError):
+        await worker_cleanup_task
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
@@ -501,6 +558,7 @@ app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
+app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 
 
