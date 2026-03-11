@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
@@ -147,7 +147,7 @@ def _backend(
     name_prefix: str = "mindroom-worker",
     owner_deployment_name: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
-    config = KubernetesWorkerBackendConfig(
+    config = _KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
         image_pull_policy="IfNotPresent",
@@ -173,9 +173,9 @@ def _backend(
     backend = KubernetesWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
-    backend._apps_api = apps_api
-    backend._core_api = core_api
-    backend._api_exception_cls = _FakeApiError
+    backend._resources.apps_api = apps_api
+    backend._resources.core_api = core_api
+    backend._resources.api_exception_cls = _FakeApiError
     if owner_deployment_name is not None:
         apps_api.deployments[owner_deployment_name] = SimpleNamespace(
             metadata=SimpleNamespace(
@@ -264,7 +264,8 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
 def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> None:
     """Configured owner deployments should fail closed when they cannot be resolved."""
     backend, _apps_api, _core_api = _backend(owner_deployment_name="mindroom-missing")
-    backend._apps_api.deployments.pop("mindroom-missing")
+    assert isinstance(backend._resources.apps_api, _FakeAppsApi)
+    backend._resources.apps_api.deployments.pop("mindroom-missing")
 
     with pytest.raises(WorkerBackendError, match="owner deployment 'mindroom-missing' was not found"):
         backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
@@ -490,15 +491,16 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     error_message = "worker never became ready"
 
     def _boom(
-        _self: KubernetesWorkerBackend,
+        _self: object,
         _deployment_name: str,
         *,
         timeout_seconds: float,
+        deployment_ready_fn: object,
     ) -> object:
-        del timeout_seconds
+        del timeout_seconds, deployment_ready_fn
         raise WorkerBackendError(error_message)
 
-    backend._wait_for_ready = MethodType(_boom, backend)
+    backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
 
     with pytest.raises(WorkerBackendError, match=error_message):
         backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)

@@ -28,7 +28,6 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.credentials import get_credentials_manager, save_scoped_credentials
-from mindroom.custom_tools._google_oauth import GOOGLE_OAUTH_DEPS
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -62,11 +61,12 @@ _ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 # Get configuration from environment
 _MINDROOM_PORT = os.getenv("MINDROOM_PORT", "8765")
 _REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_MINDROOM_PORT}/api/google/callback")
+_GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    ensure_tool_deps(GOOGLE_OAUTH_DEPS, "gmail")
+    ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "gmail")
 
     from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
     from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415

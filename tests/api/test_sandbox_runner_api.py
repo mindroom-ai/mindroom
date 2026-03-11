@@ -707,13 +707,13 @@ def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_ove
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
     worker_root = local_workers_module._default_worker_root()
-    paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=worker_root)
+    paths = local_workers_module._local_worker_state_paths("worker-a", worker_root=worker_root)
     subprocess_env = sandbox_runner_module._worker_subprocess_env(paths)
 
     with patch.dict("os.environ", subprocess_env, clear=True):
         child_worker_root = local_workers_module._default_worker_root()
 
-    child_paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=child_worker_root)
+    child_paths = local_workers_module._local_worker_state_paths("worker-a", worker_root=child_worker_root)
     assert child_worker_root == worker_root
     assert child_paths.root == paths.root
     assert subprocess_env["MINDROOM_SANDBOX_WORKER_ROOT"] == str(worker_root)
@@ -755,7 +755,7 @@ def test_get_local_worker_manager_singleton_creation_is_thread_safe(
         except Exception as exc:  # pragma: no cover - surfaced by assertion below
             exceptions.append(exc)
 
-    monkeypatch.setattr(local_workers_module, "LocalWorkerBackend", FakeBackend)
+    monkeypatch.setattr(local_workers_module, "_LocalWorkerBackend", FakeBackend)
 
     first_thread = threading.Thread(target=load_manager)
     second_thread = threading.Thread(target=load_manager)
@@ -776,7 +776,7 @@ def test_get_local_worker_manager_singleton_creation_is_thread_safe(
 
 def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Path) -> None:
     """Concurrent requests for one worker key should not initialize the venv twice."""
-    backend = local_workers_module.LocalWorkerBackend(
+    backend = local_workers_module._LocalWorkerBackend(
         worker_root=tmp_path / "workers",
         api_root="/api/sandbox-runner",
         idle_timeout_seconds=60.0,
