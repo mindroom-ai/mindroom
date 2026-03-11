@@ -141,14 +141,6 @@ def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 
         return default
 
 
-def _metadata_mapping(value: object) -> dict[str, str]:
-    if isinstance(value, dict):
-        return {str(key): str(item) for key, item in value.items()}
-    if hasattr(value, "__dict__"):
-        return {str(key): str(item) for key, item in vars(value).items()}
-    return {}
-
-
 @dataclass(frozen=True, slots=True)
 class KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
@@ -320,7 +312,7 @@ class KubernetesWorkerBackend:
         deployment = self._read_deployment(deployment_name)
         if deployment is None:
             return None
-        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
+        annotations = dict(deployment.metadata.annotations or {})
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         if annotations.get(_ANNOTATION_WORKER_STATUS) == "idle":
             annotations[_ANNOTATION_WORKER_STATUS] = "ready"
@@ -353,7 +345,7 @@ class KubernetesWorkerBackend:
             self._delete_service(deployment_name)
             return None
 
-        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
+        annotations = dict(deployment.metadata.annotations or {})
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[_ANNOTATION_WORKER_STATUS] = "idle"
         self._patch_deployment(deployment_name, replicas=0, annotations=annotations)
@@ -368,7 +360,7 @@ class KubernetesWorkerBackend:
             handle = self._handle_from_deployment(deployment, now=timestamp)
             if handle.status != "idle":
                 continue
-            annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
+            annotations = dict(deployment.metadata.annotations or {})
             annotations[_ANNOTATION_WORKER_STATUS] = "idle"
             self._patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             deployment.spec.replicas = 0
@@ -383,7 +375,7 @@ class KubernetesWorkerBackend:
         if deployment is None:
             msg = f"Unknown worker '{worker_key}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
-        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
+        annotations = dict(deployment.metadata.annotations or {})
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[_ANNOTATION_WORKER_STATUS] = "failed"
         annotations[_ANNOTATION_FAILURE_REASON] = failure_reason
@@ -640,7 +632,7 @@ class KubernetesWorkerBackend:
         try:
             self._core.read_namespaced_service(worker_id, self.config.namespace)
         except self._api_exception as exc:
-            if getattr(exc, "status", None) != 404:
+            if exc.status != 404:
                 raise
             self._core.create_namespaced_service(self.config.namespace, manifest)
             return
@@ -665,7 +657,7 @@ class KubernetesWorkerBackend:
         try:
             self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
         except self._api_exception as exc:
-            if getattr(exc, "status", None) != 404:
+            if exc.status != 404:
                 raise
             self._apps.create_namespaced_deployment(self.config.namespace, manifest)
             return
@@ -694,27 +686,27 @@ class KubernetesWorkerBackend:
         try:
             return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
         except self._api_exception as exc:
-            if getattr(exc, "status", None) == 404:
+            if exc.status == 404:
                 return None
             raise
 
     def _list_deployments(self) -> list[Any]:
         selector = self._list_selector()
         response = self._apps.list_namespaced_deployment(self.config.namespace, label_selector=selector)
-        return list(getattr(response, "items", []) or [])
+        return list(response.items or [])
 
     def _delete_deployment(self, deployment_name: str) -> None:
         try:
             self._apps.delete_namespaced_deployment(deployment_name, self.config.namespace)
         except self._api_exception as exc:
-            if getattr(exc, "status", None) != 404:
+            if exc.status != 404:
                 raise
 
     def _delete_service(self, service_name: str) -> None:
         try:
             self._core.delete_namespaced_service(service_name, self.config.namespace)
         except self._api_exception as exc:
-            if getattr(exc, "status", None) != 404:
+            if exc.status != 404:
                 raise
 
     def _wait_for_ready(self, deployment_name: str, *, timeout_seconds: float) -> Any:
@@ -732,23 +724,21 @@ class KubernetesWorkerBackend:
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _deployment_ready(self, deployment: Any) -> bool:
-        spec = getattr(deployment, "spec", None)
-        status = getattr(deployment, "status", None)
-        desired = int(getattr(spec, "replicas", 0) or 0)
+        desired = int(deployment.spec.replicas or 0)
         if desired == 0:
             return True
-        ready = int(getattr(status, "ready_replicas", 0) or 0)
-        observed_generation = getattr(status, "observed_generation", None)
-        generation = getattr(getattr(deployment, "metadata", None), "generation", None)
+        ready = int(deployment.status.ready_replicas or 0)
+        observed_generation = deployment.status.observed_generation
+        generation = deployment.metadata.generation
         generation_ready = observed_generation is None or generation is None or observed_generation >= generation
         return generation_ready and ready >= desired
 
     def _handle_from_deployment(self, deployment: Any, *, now: float) -> WorkerHandle:
-        metadata = getattr(deployment, "metadata", None)
-        annotations = _metadata_mapping(getattr(metadata, "annotations", {}))
+        metadata = deployment.metadata
+        annotations = dict(metadata.annotations or {})
         worker_key = annotations.get(_ANNOTATION_WORKER_KEY)
         if not worker_key:
-            msg = f"Deployment '{getattr(metadata, 'name', '<unknown>')}' is missing worker metadata."
+            msg = f"Deployment '{metadata.name}' is missing worker metadata."
             raise WorkerBackendError(msg)
 
         worker_id = str(metadata.name)
@@ -782,12 +772,11 @@ class KubernetesWorkerBackend:
         )
 
     def _effective_status(self, deployment: Any, *, now: float) -> WorkerStatus:
-        metadata = getattr(deployment, "metadata", None)
-        annotations = dict(getattr(metadata, "annotations", {}) or {})
+        annotations = dict(deployment.metadata.annotations or {})
         stored_status = annotations.get(_ANNOTATION_WORKER_STATUS, "starting")
         if stored_status == "failed":
             return "failed"
-        replicas = int(getattr(getattr(deployment, "spec", None), "replicas", 0) or 0)
+        replicas = int(deployment.spec.replicas or 0)
         if replicas == 0:
             return "idle"
         if not self._deployment_ready(deployment):

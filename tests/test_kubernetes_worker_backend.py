@@ -19,19 +19,16 @@ class _FakeApiException(Exception):
         self.status = status
 
 
-def _to_namespace(value: object) -> object:
+_MAPPING_KEYS = {"annotations", "labels", "matchLabels", "selector"}
+
+
+def _to_namespace(value: object, *, key: str | None = None) -> object:
     if isinstance(value, dict):
-        return SimpleNamespace(**{key: _to_namespace(item) for key, item in value.items()})
+        if key in _MAPPING_KEYS:
+            return deepcopy(value)
+        return SimpleNamespace(**{item_key: _to_namespace(item, key=item_key) for item_key, item in value.items()})
     if isinstance(value, list):
         return [_to_namespace(item) for item in value]
-    return value
-
-
-def _namespace_to_dict(value: object) -> object:
-    if isinstance(value, SimpleNamespace):
-        return {key: _namespace_to_dict(item) for key, item in vars(value).items()}
-    if isinstance(value, list):
-        return [_namespace_to_dict(item) for item in value]
     return value
 
 
@@ -72,12 +69,7 @@ class _FakeAppsApi:
             if "replicas" in spec:
                 deployment.spec.replicas = spec["replicas"]
                 deployment.status.ready_replicas = spec["replicas"]
-            template = spec.get("template")
-            if isinstance(template, dict):
-                template_meta = template.get("metadata")
-                if isinstance(template_meta, dict) and isinstance(template_meta.get("annotations"), dict):
-                    deployment.spec.template.metadata.annotations = template_meta["annotations"]
-        deployment.metadata.generation = getattr(deployment.metadata, "generation", 1) + 1
+        deployment.metadata.generation += 1
         deployment.status.observed_generation = deployment.metadata.generation
         return deployment
 
@@ -96,9 +88,7 @@ class _FakeAppsApi:
             selectors[key] = value
 
         def matches_selector(deployment: object) -> bool:
-            raw_labels = getattr(getattr(deployment, "metadata", None), "labels", {}) or {}
-            labels = _namespace_to_dict(raw_labels)
-            assert isinstance(labels, dict)
+            labels = deployment.metadata.labels
             return all(labels.get(key) == value for key, value in selectors.items())
 
         return SimpleNamespace(
