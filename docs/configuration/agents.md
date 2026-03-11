@@ -143,7 +143,7 @@ agents:
 | `enable_session_summaries` | bool | `null` | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`) |
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools` | list | `null` | Tool names to route through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.worker_tools` (default: `null` — defers to env vars). Set to `[]` to explicitly disable proxy routing for this agent |
+| `worker_tools` | list | `null` | Tool names to route through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent |
 | `worker_scope` | string | `null` | Worker-state sharing mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, `user_agent`, and `room_thread` |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
@@ -161,6 +161,7 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 ## Worker Routing
 
 `worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process.
+When `worker_tools` is omitted, MindRoom currently routes `coding`, `file`, `python`, and `shell` by default and keeps other tools local.
 `worker_scope` decides which proxied calls share the same worker-owned state directory.
 Some credential-backed custom tools stay local even if they are listed in `worker_tools`.
 Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
@@ -273,7 +274,7 @@ defaults:
   enable_session_summaries: false       # AI summaries of older conversation segments (costs extra LLM call)
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
-  worker_tools: null                     # Tool names to route through workers (null = use env var config, [] = disable)
+  worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null                     # Worker state scope for proxied tools (shared, user, user_agent, room_thread)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```

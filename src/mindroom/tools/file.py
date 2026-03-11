@@ -8,6 +8,7 @@ from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolExecutionTarget,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -20,11 +21,12 @@ if TYPE_CHECKING:
     name="file",
     display_name="File Tools",
     description="Local file operations including read, write, list, and search",
-    category=ToolCategory.DEVELOPMENT,  # Local tool
-    status=ToolStatus.AVAILABLE,  # No config needed
-    setup_type=SetupType.NONE,  # No authentication required
-    icon="FaFolder",  # React icon name
-    icon_color="text-yellow-500",  # Tailwind color class
+    category=ToolCategory.DEVELOPMENT,
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    default_execution_target=ToolExecutionTarget.WORKER,
+    icon="FaFolder",
+    icon_color="text-yellow-500",
     config_fields=[
         ConfigField(
             name="base_dir",

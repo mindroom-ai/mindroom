@@ -407,14 +407,20 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_worker_tools(self, agent_name: str) -> list[str] | None:
-        """Get effective worker-routed tools for an agent, including preset expansion."""
+    def get_agent_worker_tools(self, agent_name: str) -> list[str]:
+        """Get effective worker-routed tools for an agent, including default policy resolution."""
         agent_config = self.get_agent(agent_name)
         configured = agent_config.worker_tools
         if configured is None:
             configured = self.defaults.worker_tools
         if configured is None:
-            return None
+            from mindroom.tool_system.metadata import (  # noqa: PLC0415
+                default_worker_routed_tools,
+                ensure_tool_registry_loaded,
+            )
+
+            ensure_tool_registry_loaded(self)
+            return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
 
     def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:

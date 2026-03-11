@@ -8,6 +8,7 @@ from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolExecutionTarget,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    default_execution_target=ToolExecutionTarget.WORKER,
     icon="Code",
     icon_color="text-purple-500",
     config_fields=[
