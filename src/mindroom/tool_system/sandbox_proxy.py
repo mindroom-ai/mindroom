@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.workers.manager import WorkerManager
+
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
 _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
@@ -289,7 +291,7 @@ def _build_worker_routing_payload(
     )
 
 
-def _get_worker_manager():
+def _get_worker_manager() -> WorkerManager:
     return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
 
 

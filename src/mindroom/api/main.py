@@ -90,7 +90,7 @@ async def _worker_cleanup_loop(stop_event: asyncio.Event) -> None:
             try:
                 await asyncio.to_thread(_cleanup_workers_once)
             except Exception:
-                logger.opt(exception=True).warning("Background worker cleanup failed")
+                logger.exception("Background worker cleanup failed")
 
 
 async def _watch_config(stop_event: asyncio.Event) -> None:

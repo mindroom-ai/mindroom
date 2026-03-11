@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Protocol, cast
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
@@ -41,8 +41,8 @@ _STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX
 _CONFIG_MAP_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_MAP_NAME"
 _CONFIG_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_KEY"
 _CONFIG_PATH_ENV = "MINDROOM_KUBERNETES_WORKER_CONFIG_PATH"
-_TOKEN_SECRET_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME"
-_TOKEN_SECRET_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY"
+_TOKEN_SECRET_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_NAME"  # noqa: S105
+_TOKEN_SECRET_KEY_ENV = "MINDROOM_KUBERNETES_WORKER_TOKEN_SECRET_KEY"  # noqa: S105
 _IDLE_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS"
 _READY_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS"
 _NAME_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
@@ -70,10 +70,77 @@ _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 
 _CONTAINER_NAME = "sandbox-runner"
-_TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"
+_TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+
+
+class _ApiStatusError(Exception):
+    status: int
+
+
+class _KubernetesMetadata(Protocol):
+    name: str
+    annotations: dict[str, str] | None
+    labels: dict[str, str]
+    generation: int | None
+
+
+class _KubernetesDeploymentSpec(Protocol):
+    replicas: int | None
+
+
+class _KubernetesDeploymentStatus(Protocol):
+    ready_replicas: int | None
+    observed_generation: int | None
+
+
+class _KubernetesDeployment(Protocol):
+    metadata: _KubernetesMetadata
+    spec: _KubernetesDeploymentSpec
+    status: _KubernetesDeploymentStatus
+
+
+class _KubernetesPodSpec(Protocol):
+    node_name: str | None
+
+
+class _KubernetesPod(Protocol):
+    spec: _KubernetesPodSpec
+
+
+class _KubernetesDeploymentList(Protocol):
+    items: list[_KubernetesDeployment] | None
+
+
+class _AppsApiProtocol(Protocol):
+    def read_namespaced_deployment(self, name: str, namespace: str) -> _KubernetesDeployment: ...
+
+    def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> _KubernetesDeployment: ...
+
+    def patch_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+    ) -> _KubernetesDeployment: ...
+
+    def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
+
+    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> _KubernetesDeploymentList: ...
+
+
+class _CoreApiProtocol(Protocol):
+    def read_namespaced_service(self, name: str, namespace: str) -> object: ...
+
+    def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
+
+    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
+
+    def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
+
+    def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -171,6 +238,7 @@ class KubernetesWorkerBackendConfig:
 
     @classmethod
     def from_env(cls) -> KubernetesWorkerBackendConfig:
+        """Build Kubernetes worker configuration from the current environment."""
         namespace = os.getenv(_NAMESPACE_ENV, "").strip() or os.getenv(_POD_NAMESPACE_ENV, "").strip() or "default"
         image = os.getenv(_IMAGE_ENV, "").strip()
         if not image:
@@ -248,9 +316,9 @@ class KubernetesWorkerBackend:
         self.config = config
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
-        self._apps_api: Any | None = None
-        self._core_api: Any | None = None
-        self._api_exception_cls: type[Exception] | None = None
+        self._apps_api: _AppsApiProtocol | None = None
+        self._core_api: _CoreApiProtocol | None = None
+        self._api_exception_cls: type[_ApiStatusError] | None = None
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._control_plane_node_name: str | None = None
@@ -258,9 +326,11 @@ class KubernetesWorkerBackend:
 
     @classmethod
     def from_env(cls, *, auth_token: str | None) -> KubernetesWorkerBackend:
+        """Construct a backend instance from environment-backed configuration."""
         return cls(config=KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+        """Resolve or start the worker backing the given worker key."""
         with self._worker_lock(spec.worker_key):
             timestamp = time.time() if now is None else now
             deployment_name = self._worker_id(spec.worker_key)
@@ -273,7 +343,11 @@ class KubernetesWorkerBackend:
                 1 if should_restart else 0
             )
             created_at = current_handle.created_at if current_handle is not None else timestamp
-            last_started_at = timestamp if should_restart else current_handle.last_started_at
+            if should_restart:
+                last_started_at = timestamp
+            else:
+                assert current_handle is not None
+                last_started_at = current_handle.last_started_at
             annotations = self._metadata_annotations(
                 worker_key=worker_key,
                 state_subpath=state_subpath,
@@ -309,6 +383,7 @@ class KubernetesWorkerBackend:
             return self._handle_from_deployment(deployment, now=timestamp)
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+        """Return the current worker handle for one worker key, if present."""
         deployment = self._read_deployment(self._worker_id(worker_key))
         if deployment is None:
             return None
@@ -316,6 +391,7 @@ class KubernetesWorkerBackend:
         return self._handle_from_deployment(deployment, now=timestamp)
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+        """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
         deployment_name = self._worker_id(worker_key)
         deployment = self._read_deployment(deployment_name)
@@ -330,6 +406,7 @@ class KubernetesWorkerBackend:
         return self._handle_from_deployment(deployment, now=timestamp)
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
+        """List workers known to this backend."""
         timestamp = time.time() if now is None else now
         deployments = self._list_deployments()
         handles = [self._handle_from_deployment(deployment, now=timestamp) for deployment in deployments]
@@ -344,6 +421,7 @@ class KubernetesWorkerBackend:
         preserve_state: bool = True,
         now: float | None = None,
     ) -> WorkerHandle | None:
+        """Evict a worker and optionally retain its persisted state."""
         timestamp = time.time() if now is None else now
         deployment_name = self._worker_id(worker_key)
         deployment = self._read_deployment(deployment_name)
@@ -363,6 +441,7 @@ class KubernetesWorkerBackend:
         return self._handle_from_deployment(deployment, now=timestamp)
 
     def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
+        """Scale idle workers to zero while retaining their state."""
         timestamp = time.time() if now is None else now
         cleaned: list[WorkerHandle] = []
         for deployment in self._list_deployments():
@@ -378,6 +457,7 @@ class KubernetesWorkerBackend:
         return cleaned
 
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
+        """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
         deployment_name = self._worker_id(worker_key)
         deployment = self._read_deployment(deployment_name)
@@ -427,24 +507,24 @@ class KubernetesWorkerBackend:
         except Exception:
             kubernetes_config.load_kube_config()
 
-        self._apps_api = kubernetes_client.AppsV1Api()
-        self._core_api = kubernetes_client.CoreV1Api()
-        self._api_exception_cls = kubernetes_exceptions.ApiException
+        self._apps_api = cast("_AppsApiProtocol", kubernetes_client.AppsV1Api())
+        self._core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())
+        self._api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
     @property
-    def _apps(self) -> Any:
+    def _apps(self) -> _AppsApiProtocol:
         self._load_clients()
         assert self._apps_api is not None
         return self._apps_api
 
     @property
-    def _core(self) -> Any:
+    def _core(self) -> _CoreApiProtocol:
         self._load_clients()
         assert self._core_api is not None
         return self._core_api
 
     @property
-    def _api_exception(self) -> type[Exception]:
+    def _api_exception(self) -> type[_ApiStatusError]:
         self._load_clients()
         assert self._api_exception_cls is not None
         return self._api_exception_cls
@@ -717,15 +797,13 @@ class KubernetesWorkerBackend:
         if annotations is not None:
             body["metadata"] = {"annotations": annotations}
         if replicas is not None:
-            spec = body.setdefault("spec", {})
-            assert isinstance(spec, dict)
-            spec["replicas"] = replicas
+            body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
 
     def _patch_deployment_metadata(self, deployment_name: str, *, annotations: dict[str, str]) -> None:
         self._patch_deployment(deployment_name, annotations=annotations)
 
-    def _read_deployment(self, deployment_name: str) -> Any | None:
+    def _read_deployment(self, deployment_name: str) -> _KubernetesDeployment | None:
         try:
             return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
         except self._api_exception as exc:
@@ -733,7 +811,7 @@ class KubernetesWorkerBackend:
                 return None
             raise
 
-    def _list_deployments(self) -> list[Any]:
+    def _list_deployments(self) -> list[_KubernetesDeployment]:
         selector = self._list_selector()
         response = self._apps.list_namespaced_deployment(self.config.namespace, label_selector=selector)
         return list(response.items or [])
@@ -773,7 +851,7 @@ class KubernetesWorkerBackend:
             if exc.status != 404:
                 raise
 
-    def _wait_for_ready(self, deployment_name: str, *, timeout_seconds: float) -> Any:
+    def _wait_for_ready(self, deployment_name: str, *, timeout_seconds: float) -> _KubernetesDeployment:
         deadline = time.time() + timeout_seconds
         while True:
             deployment = self._read_deployment(deployment_name)
@@ -787,7 +865,7 @@ class KubernetesWorkerBackend:
                 raise WorkerBackendError(msg)
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
-    def _deployment_ready(self, deployment: Any) -> bool:
+    def _deployment_ready(self, deployment: _KubernetesDeployment) -> bool:
         desired = int(deployment.spec.replicas or 0)
         if desired == 0:
             return True
@@ -797,7 +875,7 @@ class KubernetesWorkerBackend:
         generation_ready = observed_generation is None or generation is None or observed_generation >= generation
         return generation_ready and ready >= desired
 
-    def _handle_from_deployment(self, deployment: Any, *, now: float) -> WorkerHandle:
+    def _handle_from_deployment(self, deployment: _KubernetesDeployment, *, now: float) -> WorkerHandle:
         metadata = deployment.metadata
         annotations = dict(metadata.annotations or {})
         worker_key = annotations.get(_ANNOTATION_WORKER_KEY)
@@ -835,7 +913,7 @@ class KubernetesWorkerBackend:
             debug_metadata=debug_metadata,
         )
 
-    def _effective_status(self, deployment: Any, *, now: float) -> WorkerStatus:
+    def _effective_status(self, deployment: _KubernetesDeployment, *, now: float) -> WorkerStatus:
         annotations = dict(deployment.metadata.annotations or {})
         stored_status = annotations.get(_ANNOTATION_WORKER_STATUS, "starting")
         if stored_status == "failed":

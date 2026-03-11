@@ -521,24 +521,24 @@ def test_dedicated_worker_mode_uses_mounted_root(
 
     def fake_run(
         cmd: list[str],
-        *,
-        input: str,
-        capture_output: bool,
-        text: bool,
-        timeout: float,
-        check: bool,
-        env: dict[str, str] | None,
-        cwd: str | None,
+        **run_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        del capture_output, text, timeout, check
+        assert run_kwargs["capture_output"] is True
+        assert run_kwargs["text"] is True
+        assert isinstance(run_kwargs["timeout"], float)
+        assert run_kwargs["check"] is False
+        request_input = str(run_kwargs["input"])
+        env = run_kwargs["env"]
+        cwd = run_kwargs["cwd"]
         assert env is not None
+        assert isinstance(env, dict)
         assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
+        assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
         assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
         assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
-        request_payload = json.loads(input)
+        request_payload = json.loads(request_input)
         assert request_payload["worker_key"] == "worker-a"
-        assert cwd is not None
         note_path = worker_root / "workspace" / request_payload["args"][1]
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text(request_payload["args"][0], encoding="utf-8")

@@ -18,6 +18,8 @@ from mindroom.config.main import Config
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
 from mindroom.workers.models import WorkerHandle
 
+TEST_WORKER_AUTH = "token"
+
 
 def _config_with_worker_scope(worker_scope: str | None) -> Config:
     config = Config.model_validate(
@@ -250,7 +252,7 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: False)
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda **_kwargs: False)
 
     assert main._cleanup_workers_once() == 0
 
@@ -267,7 +269,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                     worker_id="worker-1",
                     worker_key="worker-key",
                     endpoint="http://worker/api/sandbox-runner/execute",
-                    auth_token="token",
+                    auth_token=TEST_WORKER_AUTH,
                     status="idle",
                     backend_name="kubernetes",
                     last_used_at=1.0,
@@ -275,8 +277,8 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *, proxy_url, proxy_token: _FakeWorkerManager())
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda **_kwargs: True)
+    monkeypatch.setattr(main, "get_primary_worker_manager", lambda **_kwargs: _FakeWorkerManager())
 
     assert main._cleanup_workers_once() == 1
 
@@ -292,7 +294,7 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                     worker_id="worker-1",
                     worker_key="worker-key",
                     endpoint="http://worker/api/sandbox-runner/execute",
-                    auth_token="token",
+                    auth_token=TEST_WORKER_AUTH,
                     status="ready",
                     backend_name="kubernetes",
                     last_used_at=12.0,
@@ -301,11 +303,11 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda **_kwargs: True)
     monkeypatch.setattr(
         workers_api,
         "get_primary_worker_manager",
-        lambda *, proxy_url, proxy_token: _FakeWorkerManager(),
+        lambda **_kwargs: _FakeWorkerManager(),
     )
 
     response = test_client.get("/api/workers")
@@ -327,7 +329,7 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                     worker_id="worker-1",
                     worker_key="worker-key",
                     endpoint="http://worker/api/sandbox-runner/execute",
-                    auth_token="token",
+                    auth_token=TEST_WORKER_AUTH,
                     status="idle",
                     backend_name="kubernetes",
                     last_used_at=12.0,
@@ -335,11 +337,11 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda **_kwargs: True)
     monkeypatch.setattr(
         workers_api,
         "get_primary_worker_manager",
-        lambda *, proxy_url, proxy_token: _FakeWorkerManager(),
+        lambda **_kwargs: _FakeWorkerManager(),
     )
 
     response = test_client.post("/api/workers/cleanup")

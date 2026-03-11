@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -12,8 +12,12 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
 
+_TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
+_TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
+_TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 
-class _FakeApiException(Exception):
+
+class _FakeApiError(Exception):
     def __init__(self, status: int) -> None:
         super().__init__(status)
         self.status = status
@@ -43,7 +47,7 @@ class _FakeAppsApi:
         _ = namespace
         deployment = self.deployments.get(name)
         if deployment is None:
-            raise _FakeApiException(404)
+            raise _FakeApiError(404)
         return deployment
 
     def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> object:
@@ -65,10 +69,9 @@ class _FakeAppsApi:
             if isinstance(annotations, dict):
                 deployment.metadata.annotations = annotations
         spec = body.get("spec")
-        if isinstance(spec, dict):
-            if "replicas" in spec:
-                deployment.spec.replicas = spec["replicas"]
-                deployment.status.ready_replicas = spec["replicas"]
+        if isinstance(spec, dict) and "replicas" in spec:
+            deployment.spec.replicas = spec["replicas"]
+            deployment.status.ready_replicas = spec["replicas"]
         deployment.metadata.generation += 1
         deployment.status.observed_generation = deployment.metadata.generation
         return deployment
@@ -106,7 +109,7 @@ class _FakeCoreApi:
         _ = namespace
         service = self.services.get(name)
         if service is None:
-            raise _FakeApiException(404)
+            raise _FakeApiError(404)
         return service
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object:
@@ -130,7 +133,7 @@ class _FakeCoreApi:
         _ = namespace
         pod = self.pods.get(name)
         if pod is None:
-            raise _FakeApiException(404)
+            raise _FakeApiError(404)
         return pod
 
 
@@ -151,20 +154,20 @@ def _backend(
         config_map_name="mindroom-config",
         config_key="config.yaml",
         config_path="/app/config.yaml",
-        token_secret_name="mindroom-secrets",
-        token_secret_key="sandbox_proxy_token",
+        token_secret_name=_TEST_TOKEN_SECRET_NAME,
+        token_secret_key=_TEST_TOKEN_SECRET_KEY,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
         extra_env={},
         extra_labels={"mindroom.ai/tenant": "test"},
     )
-    backend = KubernetesWorkerBackend(config=config, auth_token="test-token")
+    backend = KubernetesWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
     backend._apps_api = apps_api
     backend._core_api = core_api
-    backend._api_exception_cls = _FakeApiException
+    backend._api_exception_cls = _FakeApiError
     return backend, apps_api, core_api
 
 
@@ -338,23 +341,30 @@ def test_kubernetes_backend_pins_workers_to_control_plane_node(
 def test_kubernetes_backend_records_failed_startup_state() -> None:
     """Workers that never become ready should surface as failed instead of starting forever."""
     backend, apps_api, _core_api = _backend()
+    error_message = "worker never became ready"
 
-    def _boom(*args: object, **kwargs: object) -> object:
-        raise WorkerBackendError("worker never became ready")
+    def _boom(
+        _self: KubernetesWorkerBackend,
+        _deployment_name: str,
+        *,
+        timeout_seconds: float,
+    ) -> object:
+        del timeout_seconds
+        raise WorkerBackendError(error_message)
 
-    backend._wait_for_ready = _boom  # type: ignore[method-assign]
+    backend._wait_for_ready = MethodType(_boom, backend)
 
-    with pytest.raises(WorkerBackendError, match="worker never became ready"):
+    with pytest.raises(WorkerBackendError, match=error_message):
         backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
     worker_id = next(iter(apps_api.deployments))
     deployment = apps_api.deployments[worker_id]
     assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
-    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "worker never became ready"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == error_message
     assert deployment.metadata.annotations["mindroom.ai/failure-count"] == "1"
     assert deployment.spec.replicas == 0
 
     handle = backend.get_worker("worker-a", now=11.0)
     assert handle is not None
     assert handle.status == "failed"
-    assert handle.failure_reason == "worker never became ready"
+    assert handle.failure_reason == error_message

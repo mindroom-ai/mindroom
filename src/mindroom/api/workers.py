@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
-from mindroom.workers.models import WorkerHandle
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
+
+if TYPE_CHECKING:
+    from mindroom.workers.manager import WorkerManager
+    from mindroom.workers.models import WorkerHandle
 
 
 class WorkerResponse(BaseModel):
@@ -62,7 +67,7 @@ def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
     )
 
 
-def _worker_manager():
+def _worker_manager() -> WorkerManager:
     if not primary_worker_backend_available(
         proxy_url=sandbox_proxy_module._PROXY_URL,
         proxy_token=sandbox_proxy_module._PROXY_TOKEN,
