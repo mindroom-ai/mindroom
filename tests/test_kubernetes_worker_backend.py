@@ -141,7 +141,6 @@ def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
     worker_port: int = 8766,
-    shared_storage_mount_path: str | None = None,
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -158,7 +157,6 @@ def _backend(
         config_map_name="mindroom-config",
         config_key="config.yaml",
         config_path="/app/config.yaml",
-        shared_storage_mount_path=shared_storage_mount_path,
         token_secret_name=_TEST_TOKEN_SECRET_NAME,
         token_secret_key=_TEST_TOKEN_SECRET_KEY,
         idle_timeout_seconds=idle_timeout_seconds,
@@ -180,7 +178,7 @@ def _backend(
 
 def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     """Ensuring one worker should create a service/deployment pair with a dedicated mounted subpath."""
-    backend, apps_api, core_api = _backend(shared_storage_mount_path="/app/shared-storage")
+    backend, apps_api, core_api = _backend()
 
     handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
@@ -201,23 +199,13 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
-    assert "MINDROOM_SHARED_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
-    assert container["volumeMounts"][-1] == {
-        "name": "shared-storage",
-        "mountPath": "/app/shared-storage",
-        "readOnly": True,
-    }
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )
-    assert deployment["spec"]["template"]["spec"]["volumes"][-1] == {
-        "name": "shared-storage",
-        "persistentVolumeClaim": {"claimName": "mindroom-storage"},
-    }
     assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
     assert "annotations" not in deployment["spec"]["template"]["metadata"]
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {

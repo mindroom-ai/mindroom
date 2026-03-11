@@ -7,7 +7,6 @@ used by both agents and the dashboard interface.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -25,14 +24,6 @@ from mindroom.tool_system.worker_routing import (
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 logger = get_logger(__name__)
-_SHARED_STORAGE_PATH_ENV = "MINDROOM_SHARED_STORAGE_PATH"
-
-
-def _default_credentials_base_path() -> Path:
-    shared_storage_path = os.getenv(_SHARED_STORAGE_PATH_ENV, "").strip()
-    if shared_storage_path:
-        return Path(shared_storage_path).expanduser().resolve() / "credentials"
-    return CREDENTIALS_DIR
 
 
 def validate_service_name(service: str) -> str:
@@ -59,7 +50,7 @@ class CredentialsManager:
 
         """
         if base_path is None:
-            self.base_path = _default_credentials_base_path()
+            self.base_path = CREDENTIALS_DIR
         else:
             self.base_path = Path(base_path)
 
@@ -247,6 +238,30 @@ def merge_scoped_credentials(
             merged_credentials.update(worker_credentials)
 
     return merged_credentials or None
+
+
+def sync_env_credentials_to_worker(
+    worker_key: str,
+    *,
+    credentials_manager: CredentialsManager | None = None,
+) -> None:
+    """Copy env-backed shared credentials into one worker's writable credentials store.
+
+    Worker-local non-env credentials are preserved. Existing env-backed copies are updated.
+    """
+    manager = credentials_manager or get_credentials_manager()
+    worker_manager = manager.for_worker(worker_key)
+
+    for service in manager.list_services():
+        shared_credentials = manager.load_credentials(service)
+        if not isinstance(shared_credentials, Mapping) or shared_credentials.get("_source") != "env":
+            continue
+
+        worker_credentials = worker_manager.load_credentials(service)
+        if isinstance(worker_credentials, Mapping) and worker_credentials.get("_source") != "env":
+            continue
+
+        worker_manager.save_credentials(service, dict(shared_credentials))
 
 
 def load_scoped_credentials(

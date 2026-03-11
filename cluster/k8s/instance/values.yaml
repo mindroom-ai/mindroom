@@ -21,8 +21,6 @@ kubernetesWorkerImagePullPolicy: ""  # Defaults to mindroom_image_pull_policy wh
 kubernetesWorkerServiceAccountName: ""  # ServiceAccount used by dedicated worker pods. Defaults to the namespace `default`.
 kubernetesWorkerNamePrefix: "mindroom-worker"
 kubernetesWorkerStorageSubpathPrefix: "workers"
-kubernetesWorkerSharedStorageMountPath: "/app/shared-storage"
-kubernetesWorkerColocateWithControlPlaneNode: true
 kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800

@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+from mindroom.credentials import sync_env_credentials_to_worker
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
@@ -48,12 +49,10 @@ _READY_TIMEOUT_ENV = "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS"
 _NAME_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
 _NODE_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_NODE_NAME"
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE"
-_SHARED_STORAGE_MOUNT_PATH_ENV = "MINDROOM_KUBERNETES_WORKER_SHARED_STORAGE_MOUNT_PATH"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _HOSTNAME_ENV = "HOSTNAME"
-_SHARED_STORAGE_PATH_ENV = "MINDROOM_SHARED_STORAGE_PATH"
 
 _ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
 _ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
@@ -242,7 +241,6 @@ class KubernetesWorkerBackendConfig:
     config_map_name: str | None
     config_key: str
     config_path: str
-    shared_storage_mount_path: str | None
     token_secret_name: str | None
     token_secret_key: str
     idle_timeout_seconds: float
@@ -266,10 +264,8 @@ class KubernetesWorkerBackendConfig:
         if not storage_pvc_name:
             msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
-
         config_map_name = os.getenv(_CONFIG_MAP_NAME_ENV, "").strip() or None
         token_secret_name = os.getenv(_TOKEN_SECRET_NAME_ENV, "").strip() or None
-        shared_storage_mount_path = os.getenv(_SHARED_STORAGE_MOUNT_PATH_ENV, "").strip() or None
         return cls(
             namespace=namespace,
             image=image,
@@ -286,7 +282,6 @@ class KubernetesWorkerBackendConfig:
             config_map_name=config_map_name,
             config_key=os.getenv(_CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY).strip() or _DEFAULT_CONFIG_KEY,
             config_path=os.getenv(_CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH).strip() or _DEFAULT_CONFIG_PATH,
-            shared_storage_mount_path=shared_storage_mount_path,
             token_secret_name=token_secret_name,
             token_secret_key=os.getenv(_TOKEN_SECRET_KEY_ENV, "sandbox_proxy_token").strip() or "sandbox_proxy_token",
             idle_timeout_seconds=_read_float_env(_IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
@@ -317,7 +312,6 @@ def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str,
         config.config_map_name or "",
         config.config_key,
         config.config_path,
-        config.shared_storage_mount_path or "",
         config.token_secret_name or "",
         config.token_secret_key,
         str(config.idle_timeout_seconds),
@@ -384,6 +378,7 @@ class KubernetesWorkerBackend:
                 status="starting",
             )
 
+            sync_env_credentials_to_worker(worker_key)
             self._apply_service(deployment_name)
             self._apply_deployment(
                 worker_key=worker_key,
@@ -613,8 +608,6 @@ class KubernetesWorkerBackend:
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "HOME", "value": self.config.storage_mount_path},
         ]
-        if self.config.shared_storage_mount_path is not None:
-            env.append({"name": _SHARED_STORAGE_PATH_ENV, "value": self.config.shared_storage_mount_path})
         if self.config.config_map_name is not None:
             env.append({"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path})
         if self.config.token_secret_name is not None:
@@ -656,17 +649,6 @@ class KubernetesWorkerBackend:
                     "readOnly": True,
                 },
             )
-        if (
-            self.config.shared_storage_mount_path is not None
-            and self.config.shared_storage_mount_path != self.config.storage_mount_path
-        ):
-            mounts.append(
-                {
-                    "name": "shared-storage",
-                    "mountPath": self.config.shared_storage_mount_path,
-                    "readOnly": True,
-                },
-            )
         return mounts
 
     def _volumes(self) -> list[dict[str, object]]:
@@ -684,18 +666,6 @@ class KubernetesWorkerBackend:
                     "name": "worker-config",
                     "configMap": {
                         "name": self.config.config_map_name,
-                    },
-                },
-            )
-        if (
-            self.config.shared_storage_mount_path is not None
-            and self.config.shared_storage_mount_path != self.config.storage_mount_path
-        ):
-            volumes.append(
-                {
-                    "name": "shared-storage",
-                    "persistentVolumeClaim": {
-                        "claimName": self.config.storage_pvc_name,
                     },
                 },
             )
