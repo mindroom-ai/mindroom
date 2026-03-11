@@ -4,6 +4,11 @@
 {{- $workerServiceAccountName := .Values.kubernetesWorkerServiceAccountName | default "default" -}}
 {{- $workerImage := .Values.kubernetesWorkerImage | default .Values.mindroom_image | default "ghcr.io/mindroom-ai/mindroom:latest" -}}
 {{- $workerImagePullPolicy := .Values.kubernetesWorkerImagePullPolicy | default .Values.mindroom_image_pull_policy | default "Always" -}}
+{{- $storageAccessMode := .Values.storageAccessMode | default "ReadWriteOnce" -}}
+{{- $controlPlaneNodeName := .Values.controlPlaneNodeName | default "" -}}
+{{- if and (eq $workerBackend "kubernetes") (ne $storageAccessMode "ReadWriteMany") (eq $controlPlaneNodeName "") -}}
+{{- fail "workerBackend=kubernetes with shared storage requires either storageAccessMode=ReadWriteMany or controlPlaneNodeName to keep the control plane and workers on one node" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,6 +31,9 @@ spec:
         app: mindroom
         customer: {{ .Values.customer | quote }}
     spec:
+      {{- if $controlPlaneNodeName }}
+      nodeName: {{ $controlPlaneNodeName }}
+      {{- end }}
       {{- if eq $workerBackend "kubernetes" }}
       serviceAccountName: {{ $workerManagerServiceAccountName }}
       {{- end }}

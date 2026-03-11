@@ -13,6 +13,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers import runtime as workers_runtime_module
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSpec
 from tests.conftest import FakeCredentialsManager
@@ -473,8 +474,10 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
     assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", worker_scope="user") is False
 
 
-def test_kubernetes_backend_is_unavailable_without_required_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Backend availability should fail closed when Kubernetes provider config is incomplete."""
+def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kubernetes routing should stay enabled so misconfiguration fails closed at call time."""
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
@@ -482,11 +485,11 @@ def test_kubernetes_backend_is_unavailable_without_required_config(monkeypatch: 
     monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_IMAGE", raising=False)
     monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", raising=False)
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is False
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
 
 
-def test_kubernetes_backend_is_unavailable_without_proxy_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Backend availability should fail closed when no worker auth token is configured."""
+def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kubernetes routing should stay enabled so missing auth fails closed at call time."""
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", None)
@@ -494,7 +497,27 @@ def test_kubernetes_backend_is_unavailable_without_proxy_token(monkeypatch: pyte
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
 
-    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is False
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
+
+
+def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Misconfigured Kubernetes worker routing should raise rather than executing in the primary runtime."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_IMAGE", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", raising=False)
+
+    tool = get_tool_by_name("shell", worker_tools_override=["shell"], worker_scope=None, routing_agent_name="code")
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    with pytest.raises(WorkerBackendError, match="MINDROOM_KUBERNETES_WORKER_IMAGE"):
+        entrypoint("pwd")
 
 
 class TestWorkerToolsOverride:

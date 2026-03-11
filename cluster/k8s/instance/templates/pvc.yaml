@@ -9,7 +9,7 @@ metadata:
     customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
-  - ReadWriteOnce
+  - {{ .Values.storageAccessMode | default "ReadWriteOnce" }}
   resources:
     requests:
       storage: {{ .Values.storage }}
@@ -25,7 +25,7 @@ metadata:
     customer: {{ .Values.customer | quote }}
 spec:
   accessModes:
-  - ReadWriteOnce
+  - {{ .Values.storageAccessMode | default "ReadWriteOnce" }}
   resources:
     requests:
       storage: {{ .Values.storage }}

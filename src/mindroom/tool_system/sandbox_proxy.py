@@ -318,23 +318,28 @@ def _sandbox_proxy_enabled_for_tool(
     if _SANDBOX_RUNNER_MODE or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
-    if not primary_worker_backend_available(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN):
-        return False
-
-    if _PROXY_URL is None and worker_scope is None and primary_worker_backend_name() == "static_runner":
-        return False
-
     if worker_tools_override is not None:
-        return tool_name in worker_tools_override
+        requested = tool_name in worker_tools_override
+    elif _EXECUTION_MODE in {"off", "local", "disabled"}:
+        requested = False
+    else:
+        requested = _EXECUTION_MODE in {"all", "sandbox_all"}
+        if not requested:
+            requested = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
 
-    if _EXECUTION_MODE in {"off", "local", "disabled"}:
+    if not requested:
         return False
 
-    enabled = _EXECUTION_MODE in {"all", "sandbox_all"}
-    if not enabled:
-        enabled = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+    backend_name = primary_worker_backend_name()
+    if backend_name == "static_runner" and _PROXY_URL is None and worker_scope is None:
+        return False
 
-    return enabled
+    if primary_worker_backend_available(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN):
+        return True
+
+    # Dedicated-worker backends must fail closed when routing is intended but the
+    # provider config is incomplete; otherwise tools silently execute locally.
+    return backend_name == "kubernetes"
 
 
 def _call_proxy_sync(
