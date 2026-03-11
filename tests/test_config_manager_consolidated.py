@@ -590,14 +590,31 @@ class TestGetAgentWorkerTools:
         )
         assert config.get_agent_worker_tools("code") == ["shell", "file"]
 
-    def test_worker_tools_returns_none_when_unset(self) -> None:
-        """When worker_tools are omitted everywhere, the agent has no explicit override."""
+    def test_worker_tools_use_default_policy_when_unset(self) -> None:
+        """When worker_tools are omitted everywhere, the built-in worker routing policy applies."""
         config = Config(
             agents={
-                "code": AgentConfig(display_name="Code"),
+                "code": AgentConfig(
+                    display_name="Code",
+                    tools=["calculator", "shell", "coding"],
+                    include_default_tools=False,
+                ),
             },
         )
-        assert config.get_agent_worker_tools("code") is None
+        assert config.get_agent_worker_tools("code") == ["shell", "coding"]
+
+    def test_worker_tools_default_policy_returns_empty_list_for_primary_only_tools(self) -> None:
+        """Tools without a worker default should stay local when worker_tools are omitted."""
+        config = Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    tools=["calculator", "scheduler"],
+                    include_default_tools=False,
+                ),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == []
 
     def test_worker_tools_empty_list_disables_routing(self) -> None:
         """Empty worker_tools should explicitly disable worker routing for that agent."""

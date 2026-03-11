@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
 from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.workers.backends import local as local_workers_module
+from mindroom.workers.models import WorkerSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,6 +29,13 @@ SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
 @pytest.fixture(autouse=True)
 def _load_tools() -> None:
     ensure_tool_registry_loaded()
+
+
+@pytest.fixture(autouse=True)
+def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
 
 
 @pytest.fixture
@@ -349,3 +362,246 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
 
     expected_prefix = worker_root / worker_dir_name("worker-a") / "venv"
     assert str(expected_prefix) in data["result"]
+
+
+def test_sandbox_runner_lists_known_workers(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox runner should expose worker metadata for debugging and observability."""
+    _set_sandbox_token(monkeypatch)
+
+    execute_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from worker A", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+    assert execute_response.status_code == 200
+    assert execute_response.json()["ok"] is True
+
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+    assert workers_response.status_code == 200
+
+    worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-a")
+    assert worker["status"] == "ready"
+    assert worker["backend_name"] == "local_sandbox_runner"
+    assert worker["startup_count"] == 1
+    assert worker["debug_metadata"]["state_root"] == str((tmp_path / "workers" / worker_dir_name("worker-a")).resolve())
+
+
+def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Idle cleanup should evict the live worker handle but keep its persisted state."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS", "60")
+
+    save_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from worker A", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+    assert save_response.status_code == 200
+    assert save_response.json()["ok"] is True
+
+    metadata_path = tmp_path / "workers" / worker_dir_name("worker-a") / "metadata" / "worker.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["last_used_at"] = 0.0
+    metadata["status"] = "ready"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    cleanup_response = runner_client.post("/api/sandbox-runner/workers/cleanup", headers=SANDBOX_HEADERS)
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+
+    assert cleanup_response.status_code == 200
+    cleaned_worker = cleanup_response.json()["cleaned_workers"][0]
+    assert cleaned_worker["worker_key"] == "worker-a"
+    assert cleaned_worker["status"] == "idle"
+
+    listed_worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-a")
+    assert listed_worker["status"] == "idle"
+
+    worker_file = tmp_path / "workers" / worker_dir_name("worker-a") / "workspace" / "note.txt"
+    assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess workers should resolve back to the parent worker root even when only storage path is set."""
+    monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+
+    worker_root = local_workers_module._default_worker_root()
+    paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=worker_root)
+    subprocess_env = sandbox_runner_module._worker_subprocess_env(paths)
+
+    with patch.dict("os.environ", subprocess_env, clear=True):
+        child_worker_root = local_workers_module._default_worker_root()
+
+    child_paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=child_worker_root)
+    assert child_worker_root == worker_root
+    assert child_paths.root == paths.root
+    assert subprocess_env["MINDROOM_SANDBOX_WORKER_ROOT"] == str(worker_root)
+
+
+def test_get_local_worker_manager_singleton_creation_is_thread_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent access should build the local worker manager only once per config."""
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
+
+    first_init_started = threading.Event()
+    allow_first_init_to_finish = threading.Event()
+    init_count_lock = threading.Lock()
+    init_count = 0
+    managers: list[object] = []
+    exceptions: list[Exception] = []
+
+    class FakeBackend:
+        backend_name = "fake_local_backend"
+        idle_timeout_seconds = 60.0
+
+        def __init__(self, *, worker_root: Path, api_root: str, idle_timeout_seconds: float) -> None:
+            del worker_root, api_root, idle_timeout_seconds
+            nonlocal init_count
+            with init_count_lock:
+                init_count += 1
+                call_number = init_count
+            if call_number == 1:
+                first_init_started.set()
+                assert allow_first_init_to_finish.wait(timeout=1.0)
+
+    def load_manager() -> None:
+        try:
+            managers.append(local_workers_module.get_local_worker_manager())
+        except Exception as exc:  # pragma: no cover - surfaced by assertion below
+            exceptions.append(exc)
+
+    monkeypatch.setattr(local_workers_module, "LocalWorkerBackend", FakeBackend)
+
+    first_thread = threading.Thread(target=load_manager)
+    second_thread = threading.Thread(target=load_manager)
+
+    first_thread.start()
+    assert first_init_started.wait(timeout=1.0)
+    second_thread.start()
+    assert init_count == 1
+    allow_first_init_to_finish.set()
+    first_thread.join(timeout=1.0)
+    second_thread.join(timeout=1.0)
+
+    assert exceptions == []
+    assert init_count == 1
+    assert len(managers) == 2
+    assert managers[0] is managers[1]
+
+
+def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Path) -> None:
+    """Concurrent requests for one worker key should not initialize the venv twice."""
+    backend = local_workers_module.LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=60.0,
+    )
+    first_create_started = threading.Event()
+    allow_first_create_to_finish = threading.Event()
+    second_create_started = threading.Event()
+    call_count_lock = threading.Lock()
+    create_call_count = 0
+    exceptions: list[Exception] = []
+
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        nonlocal create_call_count
+        with call_count_lock:
+            create_call_count += 1
+            call_number = create_call_count
+        if call_number == 1:
+            first_create_started.set()
+            assert allow_first_create_to_finish.wait(timeout=1.0)
+            (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+            (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
+            return
+
+        second_create_started.set()
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
+
+    def ensure_worker() -> None:
+        try:
+            backend.ensure_worker(WorkerSpec("worker-race"))
+        except Exception as exc:  # pragma: no cover - surfaced by test assertion below
+            exceptions.append(exc)
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+        thread_one = threading.Thread(target=ensure_worker)
+        thread_two = threading.Thread(target=ensure_worker)
+
+        thread_one.start()
+        assert first_create_started.wait(timeout=1.0)
+        thread_two.start()
+        assert not second_create_started.wait(timeout=0.2)
+        allow_first_create_to_finish.set()
+        thread_one.join(timeout=1.0)
+        thread_two.join(timeout=1.0)
+
+    assert exceptions == []
+    assert create_call_count == 1
+    worker = backend.get_worker("worker-race")
+    assert worker is not None
+    assert worker.startup_count == 1
+    assert worker.status == "ready"
+
+
+def test_sandbox_runner_records_worker_initialization_failures(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker bootstrap failures should be returned to callers and exposed in worker metadata."""
+    _set_sandbox_token(monkeypatch)
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", side_effect=OSError("boom")):
+        execute_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "args": ["note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-fail",
+            },
+        )
+
+    assert execute_response.status_code == 200
+    data = execute_response.json()
+    assert data["ok"] is False
+    assert "Failed to initialize worker 'worker-fail'" in data["error"]
+    assert "boom" in data["error"]
+
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+    assert workers_response.status_code == 200
+
+    worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-fail")
+    assert worker["status"] == "failed"
+    assert "boom" in worker["failure_reason"]
+    assert worker["failure_count"] == 1

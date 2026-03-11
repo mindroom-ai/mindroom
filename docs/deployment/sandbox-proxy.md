@@ -187,7 +187,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 
 ## Per-agent configuration
 
-By default, all agents share the same sandbox behavior from environment variables. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
+MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
 
 ```yaml
 defaults:
@@ -211,11 +211,11 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Defer to env var globals (`MINDROOM_SANDBOX_EXECUTION_MODE` / `MINDROOM_SANDBOX_PROXY_TOOLS`) |
-| `[]` (empty list) | Explicitly disable sandbox proxying for this agent, even if env vars enable it |
-| `["shell", "file"]` | Proxy exactly these tools, overriding env vars |
+| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `file`, `python`, and `shell` when those tools are enabled for the agent |
+| `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
+| `["shell", "file"]` | Proxy exactly these tools for this agent |
 
-Agent-level `worker_tools` overrides `defaults.worker_tools`, which in turn overrides env vars. A sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for any proxying to take effect.
+Agent-level `worker_tools` overrides `defaults.worker_tools`. A sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for any proxying to take effect.
 
 ## Worker Scope
 

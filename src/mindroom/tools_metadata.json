@@ -82,6 +82,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -99,6 +100,7 @@
       "auth_provider": null,
       "category": "communication",
       "config_fields": null,
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -194,6 +196,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "slack-sdk"
       ],
@@ -256,6 +259,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -395,6 +399,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "twilio"
       ],
@@ -457,6 +462,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "webexpythonsdk"
       ],
@@ -530,6 +536,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -592,6 +599,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Apache Airflow DAG file management for workflow orchestration",
       "display_name": "Airflow",
@@ -630,6 +638,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "apify-client"
       ],
@@ -692,6 +701,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "boto3"
       ],
@@ -787,6 +797,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -904,6 +915,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests",
         "pytz"
@@ -922,6 +934,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -1017,6 +1030,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "cartesia"
       ],
@@ -1200,6 +1214,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "claude-agent-sdk"
       ],
@@ -1229,6 +1244,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "worker",
       "dependencies": [],
       "description": "Advanced code-oriented file operations (precise edits, grep, and discovery). Prefer this over file for coding agents; keep file for backward compatibility.",
       "display_name": "Coding Tools",
@@ -1256,6 +1272,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "agno",
         "pydantic",
@@ -1331,6 +1348,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "atlassian-python-api"
       ],
@@ -1448,6 +1466,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -1554,6 +1573,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "openai"
       ],
@@ -1770,6 +1790,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "daytona"
       ],
@@ -1843,6 +1864,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -1860,6 +1882,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [
         "docker"
       ],
@@ -1911,6 +1934,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "e2b_code_interpreter"
       ],
@@ -2028,6 +2052,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "elevenlabs"
       ],
@@ -2101,6 +2126,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "fal-client"
       ],
@@ -2262,6 +2288,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "worker",
       "dependencies": [
         "agno"
       ],
@@ -2346,6 +2373,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "reportlab"
       ],
@@ -2375,6 +2403,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -2492,6 +2521,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-genai"
       ],
@@ -2554,6 +2584,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -2594,6 +2625,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "PyGithub"
       ],
@@ -2700,6 +2732,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-cloud-bigquery"
       ],
@@ -2729,6 +2762,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "googlemaps",
         "google-maps-places"
@@ -2814,6 +2848,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
         "google-auth-httplib2",
@@ -2933,6 +2968,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "groq"
       ],
@@ -3061,6 +3097,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "jira"
       ],
@@ -3090,6 +3127,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -3185,6 +3223,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "lumaai"
       ],
@@ -3258,6 +3297,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -3320,6 +3360,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "moviepy"
       ],
@@ -3437,6 +3478,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "neo4j"
       ],
@@ -3598,6 +3640,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "openai"
       ],
@@ -3615,6 +3658,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
+      "default_execution_target": "primary",
       "dependencies": null,
       "description": "Convenience bundle that implies shell, coding, browser, and other common tools",
       "display_name": "OpenClaw Compat",
@@ -3708,6 +3752,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -3803,6 +3848,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "psycopg"
       ],
@@ -3865,6 +3911,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "worker",
       "dependencies": [
         "agno"
       ],
@@ -3960,6 +4007,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
       "display_name": "Reasoning",
@@ -4141,6 +4189,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "redshift-connector"
       ],
@@ -4203,6 +4252,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "replicate"
       ],
@@ -4220,6 +4270,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Allow an agent to read and modify its own configuration",
       "display_name": "Self Config",
@@ -4269,6 +4320,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "worker",
       "dependencies": [],
       "description": "Execute shell commands and scripts",
       "display_name": "Shell Commands",
@@ -4307,6 +4359,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -4324,6 +4377,7 @@
       "auth_provider": null,
       "category": "development",
       "config_fields": null,
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -4375,6 +4429,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "py-trello"
       ],
@@ -4470,6 +4525,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "matplotlib"
       ],
@@ -4510,6 +4566,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Open URLs in web browser tabs or windows",
       "display_name": "Web Browser Tools",
@@ -4581,6 +4638,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -4654,6 +4712,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "boto3"
       ],
@@ -4738,6 +4797,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Send emails via SMTP (Gmail)",
       "display_name": "Email",
@@ -4842,6 +4902,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
         "google-auth",
@@ -4907,6 +4968,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "resend"
       ],
@@ -4958,6 +5020,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -5042,6 +5105,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "youtube_transcript_api"
       ],
@@ -5236,6 +5300,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "composio-agno"
       ],
@@ -5298,6 +5363,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -5315,6 +5381,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "List and register context-scoped file attachments",
       "display_name": "Attachments",
@@ -5353,6 +5420,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -5470,6 +5538,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "duckdb"
       ],
@@ -5487,6 +5556,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Delegate tasks to other configured agents",
       "display_name": "Agent Delegation",
@@ -5558,6 +5628,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "duckdb"
       ],
@@ -5598,6 +5669,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-api-python-client",
         "google-auth",
@@ -5740,6 +5812,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "mem0ai"
       ],
@@ -5757,6 +5830,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": [],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Explicitly store and search agent memories on demand",
       "display_name": "Agent Memory",
@@ -5839,6 +5913,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "notion-client"
       ],
@@ -5956,6 +6031,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "openbb"
       ],
@@ -6007,6 +6083,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "pandas"
       ],
@@ -6024,6 +6101,7 @@
       "auth_provider": null,
       "category": "productivity",
       "config_fields": null,
+      "default_execution_target": "primary",
       "dependencies": [
         "agno"
       ],
@@ -6185,6 +6263,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "sqlalchemy"
       ],
@@ -6214,6 +6293,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "todoist-api-python"
       ],
@@ -6243,6 +6323,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "yfinance"
       ],
@@ -6371,6 +6452,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "zep-cloud"
       ],
@@ -6444,6 +6526,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "agentql",
         "playwright"
@@ -6507,6 +6590,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "arxiv",
         "pypdf"
@@ -6614,6 +6698,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "baidusearch",
         "pycountry"
@@ -6721,6 +6806,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -6849,6 +6935,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -6866,6 +6953,7 @@
       "auth_provider": null,
       "category": "research",
       "config_fields": null,
+      "default_execution_target": "primary",
       "dependencies": [
         "playwright"
       ],
@@ -6994,6 +7082,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "browserbase",
         "playwright"
@@ -7123,6 +7212,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "crawl4ai"
       ],
@@ -7218,6 +7308,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "ddgs"
       ],
@@ -7500,6 +7591,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "exa_py"
       ],
@@ -7639,6 +7731,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "firecrawl-py"
       ],
@@ -7734,6 +7827,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "ddgs"
       ],
@@ -7785,6 +7879,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -7902,6 +7997,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx",
         "pydantic"
@@ -7976,6 +8072,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "linkup-sdk"
       ],
@@ -8038,6 +8135,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "newspaper4k",
         "lxml_html_clean"
@@ -8079,6 +8177,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "oxylabs"
       ],
@@ -8152,6 +8251,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -8269,6 +8369,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "scrapegraph-py"
       ],
@@ -8320,6 +8421,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Open source search engine for web, images, news, science, and specialized content",
       "display_name": "SearxNG",
@@ -8380,6 +8482,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "google-search-results"
       ],
@@ -8508,6 +8611,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
@@ -8603,6 +8707,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "spider-client"
       ],
@@ -8786,6 +8891,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "tavily-python"
       ],
@@ -9024,6 +9130,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "trafilatura"
       ],
@@ -9108,6 +9215,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [],
       "description": "Search and retrieve high-quality, royalty-free images from Unsplash",
       "display_name": "Unsplash",
@@ -9135,6 +9243,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx",
         "beautifulsoup4"
@@ -9176,6 +9285,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "wikipedia"
       ],
@@ -9216,6 +9326,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "httpx"
       ],
@@ -9300,6 +9411,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "praw"
       ],
@@ -9395,6 +9507,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "tweepy"
       ],
@@ -9446,6 +9559,7 @@
           "validation": null
         }
       ],
+      "default_execution_target": "primary",
       "dependencies": [
         "requests"
       ],
