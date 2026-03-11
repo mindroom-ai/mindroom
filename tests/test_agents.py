@@ -309,6 +309,35 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
+def test_create_agent_skips_agent_workspace_override_for_worker_routed_scoped_tools(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Worker-routed scoped tools should use worker workspace instead of the agent memory path."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    workspace = tmp_path / "mind_data"
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = str(workspace)
+    config.agents["general"].tools = ["coding", "shell"]
+    config.agents["general"].include_default_tools = False
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].worker_tools = ["coding"]
+
+    create_agent("general", config=config)
+
+    assert workspace.is_dir()
+    overrides_by_tool = {
+        call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert overrides_by_tool["coding"] is None
+    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
 def test_create_agent_uses_default_worker_tool_policy_when_unset(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,

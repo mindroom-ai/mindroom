@@ -244,9 +244,13 @@ def _tool_init_overrides(
     tool_name: str,
     *,
     workspace_path: Path | None,
+    worker_routed_tools: frozenset[str],
+    worker_scope: str | None,
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
     if workspace_path is None or not _tool_supports_base_dir(tool_name):
+        return None
+    if worker_scope is not None and tool_name in worker_routed_tools:
         return None
     return {"base_dir": str(workspace_path)}
 
@@ -507,6 +511,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     tool_names = config.get_agent_tools(agent_name)
     worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_routed_tools = frozenset(worker_tools)
     worker_scope = config.get_agent_worker_scope(agent_name)
     workspace_path = _resolve_agent_workspace_path(agent_config)
     memory_storage_path = resolve_agent_state_storage_path(
@@ -560,7 +565,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     get_tool_by_name(
                         tool_name,
-                        tool_init_overrides=_tool_init_overrides(tool_name, workspace_path=workspace_path),
+                        tool_init_overrides=_tool_init_overrides(
+                            tool_name,
+                            workspace_path=workspace_path,
+                            worker_routed_tools=worker_routed_tools,
+                            worker_scope=worker_scope,
+                        ),
                         worker_tools_override=worker_tools,
                         worker_scope=worker_scope,
                         routing_agent_name=agent_name,
