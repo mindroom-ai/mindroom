@@ -1,3 +1,8 @@
+{{- $workerBackend := .Values.workerBackend | default "static_runner" -}}
+{{- $workerPort := 8766 -}}
+{{- if eq $workerBackend "kubernetes" -}}
+{{- $workerPort = (.Values.kubernetesWorkerPort | default 8766) -}}
+{{- end -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -24,7 +29,7 @@ spec:
         matchLabels:
           customer: {{ .Values.customer | quote }}
     ports:
-    - port: 8766
+    - port: {{ $workerPort }}
   egress:
   # Allow intra-instance traffic between MindRoom and Synapse pods.
   - to:
@@ -34,7 +39,7 @@ spec:
     ports:
     - port: 8008
     - port: 8765
-    - port: 8766
+    - port: {{ $workerPort }}
   # Allow DNS
   - ports:
     - port: 53
