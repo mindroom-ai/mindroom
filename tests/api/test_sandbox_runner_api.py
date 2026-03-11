@@ -572,6 +572,62 @@ def test_dedicated_worker_mode_uses_mounted_root(
     assert worker_file.read_text(encoding="utf-8") == "hello from dedicated worker"
 
 
+def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker mode should infer the pinned worker key when callers omit it."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "dedicated-worker"
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        request_payload = json.loads(str(run_kwargs["input"]))
+        assert request_payload["worker_key"] == "worker-a"
+
+        note_path = worker_root / "workspace" / request_payload["args"][1]
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(request_payload["args"][0], encoding="utf-8")
+
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="saved")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    with (
+        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create),
+        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+    ):
+        save_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from inferred worker", "note.txt"],
+                "kwargs": {},
+            },
+        )
+
+    assert save_response.status_code == 200
+    assert save_response.json()["ok"] is True
+
+    worker_file = worker_root / "workspace" / "note.txt"
+    assert worker_file.read_text(encoding="utf-8") == "hello from inferred worker"
+
+
 def test_dedicated_worker_mode_rejects_mismatched_worker_key(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
