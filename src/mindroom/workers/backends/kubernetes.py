@@ -38,30 +38,6 @@ class KubernetesWorkerBackend:
         """Construct a backend instance from environment-backed configuration."""
         return cls(config=KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
 
-    @property
-    def _apps_api(self) -> resources.AppsApiProtocol | None:
-        return self._resources.apps_api
-
-    @_apps_api.setter
-    def _apps_api(self, value: resources.AppsApiProtocol | None) -> None:
-        self._resources.apps_api = value
-
-    @property
-    def _core_api(self) -> resources.CoreApiProtocol | None:
-        return self._resources.core_api
-
-    @_core_api.setter
-    def _core_api(self, value: resources.CoreApiProtocol | None) -> None:
-        self._resources.core_api = value
-
-    @property
-    def _api_exception_cls(self) -> type[resources.ApiStatusError] | None:
-        return self._resources.api_exception_cls
-
-    @_api_exception_cls.setter
-    def _api_exception_cls(self, value: type[resources.ApiStatusError] | None) -> None:
-        self._resources.api_exception_cls = value
-
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key."""
         with self._worker_lock(spec.worker_key):
@@ -104,7 +80,11 @@ class KubernetesWorkerBackend:
                 replicas=1,
             )
             try:
-                deployment = self._wait_for_ready(worker_id, timeout_seconds=self.config.ready_timeout_seconds)
+                deployment = self._resources.wait_for_ready(
+                    worker_id,
+                    timeout_seconds=self.config.ready_timeout_seconds,
+                    deployment_ready_fn=self._deployment_ready,
+                )
             except Exception as exc:
                 failure_reason = str(exc)
                 self.record_failure(worker_key, failure_reason, now=timestamp)
@@ -233,18 +213,6 @@ class KubernetesWorkerBackend:
         prefix = self.config.storage_subpath_prefix.strip().strip("/")
         worker_dir = worker_dir_name(worker_key)
         return f"{prefix}/{worker_dir}" if prefix else worker_dir
-
-    def _wait_for_ready(
-        self,
-        deployment_name: str,
-        *,
-        timeout_seconds: float,
-    ) -> resources.KubernetesDeployment:
-        return self._resources.wait_for_ready(
-            deployment_name,
-            timeout_seconds=timeout_seconds,
-            deployment_ready_fn=self._deployment_ready,
-        )
 
     def _deployment_ready(self, deployment: resources.KubernetesDeployment) -> bool:
         desired = int(deployment.spec.replicas or 0)

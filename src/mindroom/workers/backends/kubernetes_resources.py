@@ -70,7 +70,9 @@ class _KubernetesDeploymentStatus(Protocol):
     observed_generation: int | None
 
 
-class _KubernetesDeployment(Protocol):
+class KubernetesDeployment(Protocol):
+    """Minimal Deployment surface used by the backend."""
+
     metadata: _KubernetesMetadata
     spec: _KubernetesDeploymentSpec
     status: _KubernetesDeploymentStatus
@@ -85,20 +87,20 @@ class _KubernetesPod(Protocol):
 
 
 class _KubernetesDeploymentList(Protocol):
-    items: list[_KubernetesDeployment] | None
+    items: list[KubernetesDeployment] | None
 
 
 class _AppsApiProtocol(Protocol):
-    def read_namespaced_deployment(self, name: str, namespace: str) -> _KubernetesDeployment: ...
+    def read_namespaced_deployment(self, name: str, namespace: str) -> KubernetesDeployment: ...
 
-    def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> _KubernetesDeployment: ...
+    def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> KubernetesDeployment: ...
 
     def patch_namespaced_deployment(
         self,
         name: str,
         namespace: str,
         body: dict[str, object],
-    ) -> _KubernetesDeployment: ...
+    ) -> KubernetesDeployment: ...
 
     def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
 
@@ -117,7 +119,8 @@ class _CoreApiProtocol(Protocol):
     def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
 
 
-def _worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    """Return a DNS-safe Kubernetes resource name for one worker key."""
     digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
     normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_NAME_PREFIX
     max_prefix_length = 63 - len(digest) - 1
@@ -127,11 +130,13 @@ def _worker_id_for_key(worker_key: str, *, prefix: str) -> str:
     return f"{safe_prefix}-{digest}"
 
 
-def _service_host(service_name: str, namespace: str, port: int) -> str:
+def service_host(service_name: str, namespace: str, port: int) -> str:
+    """Return the cluster-local HTTP root for one worker Service."""
     return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
 
 
-def _parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
+def parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
+    """Parse one float annotation, falling back to a caller-provided default."""
     raw = annotations.get(key)
     if raw is None:
         return default
@@ -141,7 +146,8 @@ def _parse_annotation_float(annotations: dict[str, str], key: str, default: floa
         return default
 
 
-def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0) -> int:
+def parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0) -> int:
+    """Parse one integer annotation, falling back to a caller-provided default."""
     raw = annotations.get(key)
     if raw is None:
         return default
@@ -151,7 +157,7 @@ def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 
         return default
 
 
-def _metadata_annotations(
+def metadata_annotations(
     *,
     worker_key: str,
     state_subpath: str,
@@ -163,6 +169,7 @@ def _metadata_annotations(
     failure_reason: str | None,
     status: WorkerStatus,
 ) -> dict[str, str]:
+    """Build persisted worker lifecycle metadata stored on Deployments."""
     annotations = {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
@@ -200,8 +207,11 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
 
 
-class _KubernetesResourceManager:
+class KubernetesResourceManager:
+    """Own Kubernetes API access, manifest construction, and cached cluster metadata."""
+
     def __init__(self, *, config: KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+        """Initialize one resource manager for a concrete backend configuration."""
         self.config = config
         self.auth_token = auth_token
         self.apps_api: _AppsApiProtocol | None = None
@@ -213,43 +223,46 @@ class _KubernetesResourceManager:
         self._owner_reference_loaded = False
 
     @property
-    def apps(self) -> _AppsApiProtocol:
+    def _apps(self) -> _AppsApiProtocol:
         self._load_clients()
         assert self.apps_api is not None
         return self.apps_api
 
     @property
-    def core(self) -> _CoreApiProtocol:
+    def _core(self) -> _CoreApiProtocol:
         self._load_clients()
         assert self.core_api is not None
         return self.core_api
 
     @property
-    def api_exception(self) -> type[_ApiStatusError]:
+    def _api_exception(self) -> type[_ApiStatusError]:
         self._load_clients()
         assert self.api_exception_cls is not None
         return self.api_exception_cls
 
-    def list_deployments(self) -> list[_KubernetesDeployment]:
-        response = self.apps.list_namespaced_deployment(
+    def list_deployments(self) -> list[KubernetesDeployment]:
+        """List managed worker Deployments in this namespace."""
+        response = self._apps.list_namespaced_deployment(
             self.config.namespace,
             label_selector=_list_selector(extra_labels=self.config.extra_labels),
         )
         return list(response.items or [])
 
-    def read_deployment(self, deployment_name: str) -> _KubernetesDeployment | None:
+    def read_deployment(self, deployment_name: str) -> KubernetesDeployment | None:
+        """Read one Deployment, returning ``None`` for 404s."""
         try:
-            return self.apps.read_namespaced_deployment(deployment_name, self.config.namespace)
-        except self.api_exception as exc:
+            return self._apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+        except self._api_exception as exc:
             if exc.status == 404:
                 return None
             raise
 
     def apply_service(self, worker_id: str) -> None:
+        """Create-or-patch one worker Service."""
         self._apply_object(
-            read_fn=self.core.read_namespaced_service,
-            create_fn=self.core.create_namespaced_service,
-            patch_fn=self.core.patch_namespaced_service,
+            read_fn=self._core.read_namespaced_service,
+            create_fn=self._core.create_namespaced_service,
+            patch_fn=self._core.patch_namespaced_service,
             resource_name=worker_id,
             manifest=self._service_manifest(worker_id),
         )
@@ -263,10 +276,11 @@ class _KubernetesResourceManager:
         annotations: dict[str, str],
         replicas: int,
     ) -> None:
+        """Create-or-patch one worker Deployment."""
         self._apply_object(
-            read_fn=self.apps.read_namespaced_deployment,
-            create_fn=self.apps.create_namespaced_deployment,
-            patch_fn=self.apps.patch_namespaced_deployment,
+            read_fn=self._apps.read_namespaced_deployment,
+            create_fn=self._apps.create_namespaced_deployment,
+            patch_fn=self._apps.patch_namespaced_deployment,
             resource_name=worker_id,
             manifest=self._deployment_manifest(
                 worker_key=worker_key,
@@ -284,26 +298,30 @@ class _KubernetesResourceManager:
         replicas: int | None = None,
         annotations: dict[str, str] | None = None,
     ) -> None:
+        """Patch Deployment metadata and/or scale."""
         body: dict[str, object] = {}
         if annotations is not None:
             body["metadata"] = {"annotations": annotations}
         if replicas is not None:
             body["spec"] = {"replicas": replicas}
-        self.apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
+        self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
 
     def delete_deployment(self, deployment_name: str) -> None:
-        self._delete_object(self.apps.delete_namespaced_deployment, deployment_name)
+        """Delete one worker Deployment, ignoring 404s."""
+        self._delete_object(self._apps.delete_namespaced_deployment, deployment_name)
 
     def delete_service(self, service_name: str) -> None:
-        self._delete_object(self.core.delete_namespaced_service, service_name)
+        """Delete one worker Service, ignoring 404s."""
+        self._delete_object(self._core.delete_namespaced_service, service_name)
 
     def wait_for_ready(
         self,
         deployment_name: str,
         *,
         timeout_seconds: float,
-        deployment_ready_fn: Callable[[_KubernetesDeployment], bool],
-    ) -> _KubernetesDeployment:
+        deployment_ready_fn: Callable[[KubernetesDeployment], bool],
+    ) -> KubernetesDeployment:
+        """Poll a worker Deployment until it becomes ready or times out."""
         deadline = time.time() + timeout_seconds
         while True:
             deployment = self.read_deployment(deployment_name)
@@ -328,12 +346,12 @@ class _KubernetesResourceManager:
     ) -> None:
         try:
             read_fn(resource_name, self.config.namespace)
-        except self.api_exception as exc:
+        except self._api_exception as exc:
             if exc.status != 404:
                 raise
             try:
                 create_fn(self.config.namespace, manifest)
-            except self.api_exception as create_exc:
+            except self._api_exception as create_exc:
                 if create_exc.status != 409:
                     raise
                 patch_fn(resource_name, self.config.namespace, manifest)
@@ -343,7 +361,7 @@ class _KubernetesResourceManager:
     def _delete_object(self, delete_fn: Callable[[str, str], None], resource_name: str) -> None:
         try:
             delete_fn(resource_name, self.config.namespace)
-        except self.api_exception as exc:
+        except self._api_exception as exc:
             if exc.status != 404:
                 raise
 
@@ -363,8 +381,8 @@ class _KubernetesResourceManager:
         except Exception:
             kubernetes_config.load_kube_config()
 
-        self.apps_api = cast("AppsApiProtocol", kubernetes_client.AppsV1Api())
-        self.core_api = cast("CoreApiProtocol", kubernetes_client.CoreV1Api())
+        self.apps_api = cast("_AppsApiProtocol", kubernetes_client.AppsV1Api())
+        self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
     def _service_manifest(self, worker_id: str) -> dict[str, object]:
@@ -558,8 +576,8 @@ class _KubernetesResourceManager:
             self._control_plane_node_name_loaded = True
             return None
         try:
-            pod = self.core.read_namespaced_pod(pod_name, self.config.namespace)
-        except self.api_exception as exc:
+            pod = self._core.read_namespaced_pod(pod_name, self.config.namespace)
+        except self._api_exception as exc:
             if exc.status != 404:
                 raise
             pod = None
@@ -596,15 +614,3 @@ class _KubernetesResourceManager:
         }
         self._owner_reference_loaded = True
         return self._owner_reference
-
-
-ApiStatusError = _ApiStatusError
-AppsApiProtocol = _AppsApiProtocol
-CoreApiProtocol = _CoreApiProtocol
-KubernetesDeployment = _KubernetesDeployment
-KubernetesResourceManager = _KubernetesResourceManager
-metadata_annotations = _metadata_annotations
-parse_annotation_float = _parse_annotation_float
-parse_annotation_int = _parse_annotation_int
-service_host = _service_host
-worker_id_for_key = _worker_id_for_key
