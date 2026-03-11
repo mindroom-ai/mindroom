@@ -63,7 +63,11 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: set[WorkerScope | None] = {None, "shared"}
+_OPENAI_COMPAT_UNTRUSTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
+_OPENAI_COMPAT_TRUSTED_REQUESTER_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset(
+    {None, "shared", "user", "user_agent"},
+)
+_OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER_ENV = "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER"
 
 
 @dataclass(slots=True)
@@ -72,6 +76,13 @@ class _ToolStreamState:
 
     next_tool_id: int = 1
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenAICompatAuthContext:
+    """Authentication state for one OpenAI-compatible request."""
+
+    is_authenticated: bool
 
 
 def _load_config() -> tuple[Config, Path]:
@@ -83,38 +94,105 @@ def _load_config() -> tuple[Config, Path]:
     return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
 
 
-def _openai_compatible_agent_names(config: Config) -> list[str]:
+def _trusted_requester_header_name() -> str | None:
+    value = os.getenv(_OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER_ENV, "").strip().lower()
+    return value or None
+
+
+def _resolve_trusted_requester_id(
+    request: Request,
+    auth_context: _OpenAICompatAuthContext,
+) -> str | None:
+    """Return the trusted requester identity for one `/v1` request, if any."""
+    if not auth_context.is_authenticated:
+        return None
+
+    header_name = _trusted_requester_header_name()
+    if header_name is None:
+        return None
+
+    value = request.headers.get(header_name)
+    if value is None:
+        return None
+
+    normalized_value = value.strip()
+    return normalized_value or None
+
+
+def _openai_compatible_worker_scopes(
+    trusted_requester_id: str | None,
+) -> frozenset[WorkerScope | None]:
+    if trusted_requester_id is not None:
+        return _OPENAI_COMPAT_TRUSTED_REQUESTER_WORKER_SCOPES
+    return _OPENAI_COMPAT_UNTRUSTED_WORKER_SCOPES
+
+
+def _openai_compatible_agent_names(
+    config: Config,
+    *,
+    trusted_requester_id: str | None = None,
+) -> list[str]:
+    supported_scopes = _openai_compatible_worker_scopes(trusted_requester_id)
     return [
         agent_name
         for agent_name in config.agents
-        if agent_name != ROUTER_AGENT_NAME
-        and config.get_agent_worker_scope(agent_name) in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        if agent_name != ROUTER_AGENT_NAME and config.get_agent_worker_scope(agent_name) in supported_scopes
     ]
 
 
-def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+def _openai_incompatible_agents(
+    agent_names: list[str],
+    config: Config,
+    *,
+    trusted_requester_id: str | None = None,
+) -> list[str]:
+    supported_scopes = _openai_compatible_worker_scopes(trusted_requester_id)
     return [
         agent_name
         for agent_name in agent_names
-        if agent_name in config.agents
-        and config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        if agent_name in config.agents and config.get_agent_worker_scope(agent_name) not in supported_scopes
     ]
 
 
-def _unsupported_worker_scope_error(agent_names: list[str]) -> JSONResponse:
+def _trusted_requester_requirement_detail() -> str:
+    header_name = _trusted_requester_header_name()
+    if header_name is None:
+        return f"trusted requester header configured via {_OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER_ENV}"
+    return f"trusted requester header '{header_name}'"
+
+
+def _unsupported_worker_scope_error(
+    agent_names: list[str],
+    config: Config,
+    *,
+    trusted_requester_id: str | None,
+) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
+    invalid_scopes = {
+        config.get_agent_worker_scope(agent_name) for agent_name in agent_names if agent_name in config.agents
+    }
+    message = "OpenAI-compatible chat completions support unscoped agents and worker_scope=shared by default."
+    if trusted_requester_id is None and invalid_scopes & {"user", "user_agent"}:
+        message += (
+            f" worker_scope=user and worker_scope=user_agent require a {_trusted_requester_requirement_detail()}."
+        )
+    if "room_thread" in invalid_scopes:
+        message += " worker_scope=room_thread is not supported on /v1."
+
     return _error_response(
         400,
-        (
-            "OpenAI-compatible chat completions only support unscoped agents and worker_scope=shared. "
-            f"Unsupported agents: {invalid_agents}"
-        ),
+        f"{message} Unsupported agents: {invalid_agents}",
         param="model",
         code="unsupported_worker_scope",
     )
 
 
-def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse | None:
+def _validate_team_model_request(
+    team_name: str,
+    config: Config,
+    *,
+    trusted_requester_id: str | None,
+) -> JSONResponse | None:
     if not config.teams or team_name not in config.teams:
         return _error_response(
             404,
@@ -122,13 +200,26 @@ def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse
             param="model",
             code="model_not_found",
         )
-    invalid_agents = _openai_incompatible_agents(config.teams[team_name].agents, config)
+    invalid_agents = _openai_incompatible_agents(
+        config.teams[team_name].agents,
+        config,
+        trusted_requester_id=trusted_requester_id,
+    )
     if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents)
+        return _unsupported_worker_scope_error(
+            invalid_agents,
+            config,
+            trusted_requester_id=trusted_requester_id,
+        )
     return None
 
 
-def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
+def _validate_agent_model_request(
+    agent_name: str,
+    config: Config,
+    *,
+    trusted_requester_id: str | None,
+) -> JSONResponse | None:
     if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in _RESERVED_MODEL_NAMES:
         return _error_response(
             404,
@@ -136,9 +227,17 @@ def _validate_agent_model_request(agent_name: str, config: Config) -> JSONRespon
             param="model",
             code="model_not_found",
         )
-    invalid_agents = _openai_incompatible_agents([agent_name], config)
+    invalid_agents = _openai_incompatible_agents(
+        [agent_name],
+        config,
+        trusted_requester_id=trusted_requester_id,
+    )
     if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents)
+        return _unsupported_worker_scope_error(
+            invalid_agents,
+            config,
+            trusted_requester_id=trusted_requester_id,
+        )
     return None
 
 
@@ -292,11 +391,10 @@ def _error_response(
     return JSONResponse(status_code=status_code, content=body.model_dump())
 
 
-def _verify_api_key(authorization: str | None) -> JSONResponse | None:
-    """Verify bearer token against OPENAI_COMPAT_API_KEYS.
-
-    Returns None if valid, or an error JSONResponse if invalid.
-    """
+def _authenticate_request(
+    authorization: str | None,
+) -> _OpenAICompatAuthContext | JSONResponse:
+    """Authenticate one `/v1` request and return its auth context."""
     keys_env = os.getenv("OPENAI_COMPAT_API_KEYS", "")
     allow_unauthenticated = os.getenv("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED", "").strip().lower() in {
         "1",
@@ -305,7 +403,7 @@ def _verify_api_key(authorization: str | None) -> JSONResponse | None:
     }
     if not keys_env.strip():
         if allow_unauthenticated:
-            return None
+            return _OpenAICompatAuthContext(is_authenticated=False)
         return _error_response(
             401,
             "OpenAI-compatible API keys are not configured",
@@ -325,7 +423,7 @@ def _verify_api_key(authorization: str | None) -> JSONResponse | None:
     if token not in valid_keys:
         return _error_response(401, "Invalid API key", code="invalid_api_key")
 
-    return None
+    return _OpenAICompatAuthContext(is_authenticated=True)
 
 
 def _is_error_response(text: str) -> bool:
@@ -480,6 +578,8 @@ def _derive_session_id(
 def _validate_chat_request(
     req: _ChatCompletionRequest,
     config: Config,
+    *,
+    trusted_requester_id: str | None,
 ) -> JSONResponse | None:
     """Validate a chat completion request. Returns error response or None if valid."""
     if not req.messages:
@@ -488,26 +588,33 @@ def _validate_chat_request(
     agent_name = req.model
 
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
-        return _validate_team_model_request(agent_name.removeprefix(_TEAM_MODEL_PREFIX), config)
+        return _validate_team_model_request(
+            agent_name.removeprefix(_TEAM_MODEL_PREFIX),
+            config,
+            trusted_requester_id=trusted_requester_id,
+        )
 
     if agent_name == _AUTO_MODEL_NAME:
         return None  # auto-routing handled in chat_completions
 
-    return _validate_agent_model_request(agent_name, config)
+    return _validate_agent_model_request(
+        agent_name,
+        config,
+        trusted_requester_id=trusted_requester_id,
+    )
 
 
 def _build_tool_execution_identity(
     *,
     agent_name: str,
     session_id: str,
+    requester_id: str | None = None,
 ) -> ToolExecutionIdentity:
     """Build the execution identity used for worker-routed tool calls."""
     return ToolExecutionIdentity(
         channel="openai_compat",
         agent_name=agent_name,
-        # The OpenAI-compatible request-body `user` field is caller-supplied and
-        # not a trusted identity source for worker routing.
-        requester_id=None,
+        requester_id=requester_id,
         room_id=None,
         thread_id=None,
         resolved_thread_id=None,
@@ -519,6 +626,8 @@ def _build_tool_execution_identity(
 
 def _parse_chat_request(
     body: bytes,
+    *,
+    trusted_requester_id: str | None,
 ) -> tuple[_ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
@@ -530,7 +639,7 @@ def _parse_chat_request(
         return _error_response(400, "Invalid request body")
 
     config, _ = _load_config()
-    validation_error = _validate_chat_request(req, config)
+    validation_error = _validate_chat_request(req, config, trusted_requester_id=trusted_requester_id)
     if validation_error:
         return validation_error
 
@@ -545,13 +654,15 @@ async def _resolve_auto_route(
     prompt: str,
     config: Config,
     thread_history: list[dict[str, Any]] | None,
+    *,
+    trusted_requester_id: str | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
 
     Returns the resolved agent name, or a JSONResponse error if routing fails
     and no agents are available.
     """
-    available = _openai_compatible_agent_names(config)
+    available = _openai_compatible_agent_names(config, trusted_requester_id=trusted_requester_id)
     routed = await suggest_agent(prompt, available, config, thread_history)
     if routed is None:
         if not available:
@@ -607,12 +718,14 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
 @router.get("/models")
 async def list_models(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    auth_error = _verify_api_key(authorization)
-    if auth_error:
-        return auth_error
+    auth_context = _authenticate_request(authorization)
+    if isinstance(auth_context, JSONResponse):
+        return auth_context
+    trusted_requester_id = _resolve_trusted_requester_id(request, auth_context)
 
     config, config_path = _load_config()
 
@@ -622,7 +735,7 @@ async def list_models(
     except OSError:
         created = 0
 
-    compatible_agents = set(_openai_compatible_agent_names(config))
+    compatible_agents = set(_openai_compatible_agent_names(config, trusted_requester_id=trusted_requester_id))
     models: list[_ModelObject] = []
     if compatible_agents:
         models.append(
@@ -651,7 +764,11 @@ async def list_models(
 
     # Add teams
     for team_name, team_config in (config.teams or {}).items():
-        if _openai_incompatible_agents(team_config.agents, config):
+        if _openai_incompatible_agents(
+            team_config.agents,
+            config,
+            trusted_requester_id=trusted_requester_id,
+        ):
             continue
         models.append(
             _ModelObject(
@@ -672,12 +789,13 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    auth_error = _verify_api_key(authorization)
-    if auth_error:
-        return auth_error
+    auth_context = _authenticate_request(authorization)
+    if isinstance(auth_context, JSONResponse):
+        return auth_context
+    trusted_requester_id = _resolve_trusted_requester_id(request, auth_context)
 
     # Parse and validate request
-    parsed = _parse_chat_request(await request.body())
+    parsed = _parse_chat_request(await request.body(), trusted_requester_id=trusted_requester_id)
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, prompt, thread_history = parsed
@@ -685,7 +803,12 @@ async def chat_completions(
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
     if agent_name == _AUTO_MODEL_NAME:
-        result = await _resolve_auto_route(prompt, config, thread_history)
+        result = await _resolve_auto_route(
+            prompt,
+            config,
+            thread_history,
+            trusted_requester_id=trusted_requester_id,
+        )
         if isinstance(result, JSONResponse):
             return result
         agent_name = result
@@ -697,6 +820,7 @@ async def chat_completions(
         model=agent_name,
         stream=req.stream,
         session_id=session_id,
+        trusted_requester_id_present=trusted_requester_id is not None,
     )
 
     # Initialize shared knowledge managers once per request (idempotent).
@@ -712,6 +836,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            requester_id=trusted_requester_id,
         )
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
@@ -746,6 +871,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            requester_id=trusted_requester_id,
         )
         if req.stream:
             response = await _stream_completion(

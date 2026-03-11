@@ -11,7 +11,11 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+from mindroom.workers.models import WorkerSpec
 from tests.conftest import FakeCredentialsManager
+
+_TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -320,6 +324,42 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         "tenant_id": None,
         "account_id": None,
     }
+
+
+def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
+    """The current shared sandbox-runner provider should return stable handle identity per worker key."""
+    backend = StaticSandboxRunnerBackend(
+        api_root="http://sandbox-runner:8765",
+        auth_token=_TEST_AUTH_TOKEN,
+        idle_timeout_seconds=60.0,
+    )
+
+    first = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    second = backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    assert first.worker_id == second.worker_id
+    assert second.worker_key == "worker-a"
+    assert second.endpoint == "http://sandbox-runner:8765/api/sandbox-runner/execute"
+    assert second.auth_token == _TEST_AUTH_TOKEN
+    assert second.backend_name == "static_sandbox_runner"
+    assert second.startup_count == 1
+    assert second.last_used_at == 20.0
+
+
+def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
+    """Idle cleanup on the static provider should preserve worker identity while changing lifecycle state."""
+    backend = StaticSandboxRunnerBackend(
+        api_root="http://sandbox-runner:8765",
+        auth_token=_TEST_AUTH_TOKEN,
+        idle_timeout_seconds=5.0,
+    )
+    backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+
+    cleaned_workers = backend.cleanup_idle_workers(now=10.0)
+
+    assert len(cleaned_workers) == 1
+    assert cleaned_workers[0].worker_key == "worker-a"
+    assert cleaned_workers[0].status == "idle"
 
 
 class TestWorkerToolsOverride:

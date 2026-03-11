@@ -24,12 +24,17 @@ from pydantic import BaseModel, Field, ValidationError
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
-from mindroom.tool_system.worker_manager import PreparedWorker, WorkerHandle, WorkerStatePaths, get_worker_manager
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     tool_execution_identity,
 )
+from mindroom.workers.backends.local import (
+    LocalWorkerStatePaths,
+    get_local_worker_manager,
+    local_worker_state_paths_from_handle,
+)
+from mindroom.workers.models import WorkerHandle, WorkerSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -136,17 +141,19 @@ class SandboxRunnerExecuteResponse(BaseModel):
 class SandboxWorkerResponse(BaseModel):
     """Serialized worker metadata for sandbox-runner observability."""
 
+    worker_id: str
     worker_key: str
     endpoint: str
-    state_root: str
     status: str
-    backend: str
-    last_seen_at: float
+    backend_name: str
+    last_used_at: float
     created_at: float
     last_started_at: float | None = None
+    expires_at: float | None = None
     startup_count: int = 0
     failure_count: int = 0
     failure_reason: str | None = None
+    debug_metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class SandboxWorkerListResponse(BaseModel):
@@ -295,7 +302,7 @@ def _current_runtime_site_packages() -> list[str]:
     return list(dict.fromkeys(discovered_paths))
 
 
-def _worker_subprocess_env(paths: WorkerStatePaths) -> dict[str, str]:
+def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
     env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
@@ -319,23 +326,25 @@ def _worker_subprocess_env(paths: WorkerStatePaths) -> dict[str, str]:
 
 def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     return SandboxWorkerResponse(
+        worker_id=worker.worker_id,
         worker_key=worker.worker_key,
         endpoint=worker.endpoint,
-        state_root=str(worker.state_root),
         status=worker.status,
-        backend=worker.backend,
-        last_seen_at=worker.last_seen_at,
+        backend_name=worker.backend_name,
+        last_used_at=worker.last_used_at,
         created_at=worker.created_at,
         last_started_at=worker.last_started_at,
+        expires_at=worker.expires_at,
         startup_count=worker.startup_count,
         failure_count=worker.failure_count,
         failure_reason=worker.failure_reason,
+        debug_metadata=worker.debug_metadata,
     )
 
 
-def _prepare_worker(worker_key: str) -> PreparedWorker | SandboxRunnerExecuteResponse:
+def _prepare_worker(worker_key: str) -> WorkerHandle | SandboxRunnerExecuteResponse:
     try:
-        return get_worker_manager().get_or_create_worker(worker_key)
+        return get_local_worker_manager().ensure_worker(WorkerSpec(worker_key))
     except Exception as exc:
         logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
@@ -344,10 +353,10 @@ def _prepare_worker(worker_key: str) -> PreparedWorker | SandboxRunnerExecuteRes
 async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
-        prepared_worker = _prepare_worker(request.worker_key)
-        if isinstance(prepared_worker, SandboxRunnerExecuteResponse):
-            return prepared_worker
-        runtime_overrides = {"base_dir": prepared_worker.paths.workspace}
+        worker_handle = _prepare_worker(request.worker_key)
+        if isinstance(worker_handle, SandboxRunnerExecuteResponse):
+            return worker_handle
+        runtime_overrides = {"base_dir": local_worker_state_paths_from_handle(worker_handle).workspace}
 
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -393,7 +402,7 @@ def _subprocess_failure_response(
     error: str,
 ) -> SandboxRunnerExecuteResponse:
     if request.worker_key is not None:
-        get_worker_manager().record_failure(request.worker_key, error)
+        get_local_worker_manager().record_failure(request.worker_key, error)
     return SandboxRunnerExecuteResponse(ok=False, error=error)
 
 
@@ -403,14 +412,15 @@ def _resolve_subprocess_worker_context(
     if request.worker_key is None:
         return None, None, None
 
-    prepared_worker = _prepare_worker(request.worker_key)
-    if isinstance(prepared_worker, SandboxRunnerExecuteResponse):
-        return prepared_worker
+    worker_handle = _prepare_worker(request.worker_key)
+    if isinstance(worker_handle, SandboxRunnerExecuteResponse):
+        return worker_handle
 
+    paths = local_worker_state_paths_from_handle(worker_handle)
     return (
-        str(prepared_worker.paths.venv_dir / "bin" / "python"),
-        _worker_subprocess_env(prepared_worker.paths),
-        str(prepared_worker.paths.workspace),
+        str(paths.venv_dir / "bin" / "python"),
+        _worker_subprocess_env(paths),
+        str(paths.workspace),
     )
 
 
@@ -530,17 +540,19 @@ async def create_credential_lease(
 @router.get("/workers", response_model=SandboxWorkerListResponse)
 async def list_workers(include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers and their current lifecycle status."""
-    workers = [_serialize_worker(worker) for worker in get_worker_manager().list_workers(include_idle=include_idle)]
+    workers = [
+        _serialize_worker(worker) for worker in get_local_worker_manager().list_workers(include_idle=include_idle)
+    ]
     return SandboxWorkerListResponse(workers=workers)
 
 
 @router.post("/workers/cleanup", response_model=SandboxWorkerCleanupResponse)
 async def cleanup_idle_workers() -> SandboxWorkerCleanupResponse:
     """Mark idle workers inactive while retaining their persisted state."""
-    worker_manager = get_worker_manager()
+    worker_manager = get_local_worker_manager()
     cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
-        idle_timeout_seconds=worker_manager.idle_timeout_seconds,
+        idle_timeout_seconds=worker_manager.idle_timeout_seconds or 0.0,
         cleaned_workers=cleaned_workers,
     )
 
