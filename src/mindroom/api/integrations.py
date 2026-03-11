@@ -88,7 +88,9 @@ def _get_spotify_credentials(request: Request, agent_name: str | None = None) ->
 def _save_spotify_credentials(credentials: dict[str, Any], request: Request, agent_name: str | None = None) -> None:
     """Save Spotify credentials."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
-    target.target_manager.save_credentials("spotify", credentials)
+    credentials_to_save = dict(credentials)
+    credentials_to_save.setdefault("_source", "ui")
+    target.target_manager.save_credentials("spotify", credentials_to_save)
 
 
 @router.get("/spotify/status")

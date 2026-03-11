@@ -34,6 +34,8 @@ class FakeCredentialsManager:
         self._credentials_by_service = credentials_by_service
         self._worker_managers = worker_managers or {}
         self.storage_root = storage_root or Path("/var/empty/mindroom-fake-storage")
+        self.base_path = self.storage_root / "credentials"
+        self.shared_base_path = self.base_path
 
     def load_credentials(self, service: str) -> dict[str, object]:
         """Return stored credentials for *service*, or empty dict."""

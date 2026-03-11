@@ -653,6 +653,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
             "access_token": "ha-access",
             "refresh_token": "ha-refresh",
             "expires_in": 3600,
+            "_source": "ui",
         },
     )
 

@@ -103,6 +103,10 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         name = "dummy"
 
     class DummyCredentialsManager:
+        def __init__(self) -> None:
+            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
+            self.shared_base_path = self.base_path
+
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
 
@@ -145,6 +149,10 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     tool_name = "test_auto_install_failure_tool"
 
     class DummyCredentialsManager:
+        def __init__(self) -> None:
+            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
+            self.shared_base_path = self.base_path
+
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
 

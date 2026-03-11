@@ -120,6 +120,7 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
         "scopes": creds.scopes,
+        "_source": "ui",
     }
 
     id_token = creds.id_token

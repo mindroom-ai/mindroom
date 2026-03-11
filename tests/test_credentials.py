@@ -6,8 +6,13 @@ from typing import Any
 import pytest
 
 import mindroom.credentials
+from mindroom.api.credentials import RequestCredentialsTarget
+from mindroom.api.google_integration import _build_google_token_data
+from mindroom.api.integrations import _save_spotify_credentials
 from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import (
+    DEDICATED_WORKER_KEY_ENV,
+    DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
     get_credentials_manager,
@@ -324,11 +329,11 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "shared-ui-key", "_source": "ui"}
 
-    def test_save_scoped_credentials_unscoped_worker_manager_writes_to_shared_mirror(
+    def test_save_scoped_credentials_unscoped_worker_manager_writes_local_override(
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Unscoped worker-rooted saves should update the mirrored shared credential layer."""
+        """Unscoped worker-rooted saves should create a worker-local override instead of mutating the shared mirror."""
         base_manager = CredentialsManager(temp_credentials_dir)
         worker_key = "v1:tenant-123:unscoped:general"
         worker_manager = base_manager.for_worker(worker_key)
@@ -340,8 +345,48 @@ class TestCredentialsManager:
             credentials_manager=worker_manager,
         )
 
-        assert worker_manager.load_credentials("google") is None
-        assert worker_manager.shared_manager().load_credentials("google") == {
+        assert worker_manager.load_credentials("google") == {
+            "refresh_token": "worker-refresh",
+            "_source": "ui",
+        }
+        assert worker_manager.shared_manager().load_credentials("google") is None
+
+    def test_unscoped_worker_rooted_manager_keeps_local_refresh_across_resync(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Resyncing the shared mirror should not clobber a worker-local unscoped refresh."""
+        base_manager = CredentialsManager(temp_credentials_dir)
+        worker_key = "v1:tenant-123:unscoped:general"
+        worker_manager = base_manager.for_worker(worker_key)
+        base_manager.save_credentials("google", {"client_id": "shared-client", "_source": "ui"})
+
+        sync_shared_credentials_to_worker(
+            worker_key,
+            include_ui_credentials=True,
+            credentials_manager=base_manager,
+        )
+        save_scoped_credentials(
+            "google",
+            {"refresh_token": "worker-refresh", "_source": "ui"},
+            worker_scope=None,
+            credentials_manager=worker_manager,
+        )
+
+        sync_shared_credentials_to_worker(
+            worker_key,
+            include_ui_credentials=True,
+            credentials_manager=base_manager,
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            worker_scope=None,
+            credentials_manager=worker_manager,
+        )
+
+        assert loaded_credentials == {
+            "client_id": "shared-client",
             "refresh_token": "worker-refresh",
             "_source": "ui",
         }
@@ -399,6 +444,29 @@ class TestCredentialsManager:
             .load_credentials("openai")
         )
         assert shared_worker_credentials == {"api_key": "shared-ui-key", "_source": "ui"}
+
+    def test_sync_shared_credentials_to_worker_copies_legacy_shared_credentials_for_unscoped_workers(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Unscoped workers should mirror legacy shared credentials that predate _source tagging."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("spotify", {"access_token": "legacy-token"})
+
+        sync_shared_credentials_to_worker(
+            "v1:tenant-123:unscoped:general",
+            include_ui_credentials=True,
+            credentials_manager=manager,
+        )
+
+        shared_worker_credentials = (
+            manager.for_worker(
+                "v1:tenant-123:unscoped:general",
+            )
+            .shared_manager()
+            .load_credentials("spotify")
+        )
+        assert shared_worker_credentials == {"access_token": "legacy-token"}
 
     def test_merge_scoped_credentials_overlays_worker_credentials(
         self,
@@ -553,3 +621,155 @@ class TestGlobalCredentialsManager:
         )
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
+
+
+class TestSharedIntegrationCredentialTagging:
+    """Regression tests for shared-only integration credential saves."""
+
+    def test_google_token_data_is_tagged_as_ui_source(self) -> None:
+        """Google OAuth tokens saved through the dashboard should be tagged as UI-managed."""
+
+        class _FakeGoogleCredentials:
+            def __init__(self) -> None:
+                self.token = "access-token"  # noqa: S105
+                self.refresh_token = "refresh-token"  # noqa: S105
+                self.token_uri = "https://oauth2.googleapis.com/token"  # noqa: S105
+                self.client_id = "client-id"
+                self.client_secret = "client-secret"  # noqa: S105
+                self.scopes = ("scope-a", "scope-b")
+                self.id_token = None
+
+        token_data = _build_google_token_data(_FakeGoogleCredentials())
+
+        assert token_data["_source"] == "ui"
+
+    def test_spotify_credentials_saved_from_dashboard_are_tagged_as_ui_source(
+        self,
+        temp_credentials_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spotify OAuth saves should mark credentials as UI-managed so unscoped workers mirror them."""
+        manager = CredentialsManager(temp_credentials_dir)
+        target = RequestCredentialsTarget(
+            base_manager=manager,
+            target_manager=manager,
+            worker_scope=None,
+            agent_name=None,
+            execution_identity=None,
+        )
+
+        def _resolve_target(*_args: object, **_kwargs: object) -> RequestCredentialsTarget:
+            return target
+
+        monkeypatch.setattr(
+            "mindroom.api.integrations.resolve_request_credentials_target",
+            _resolve_target,
+        )
+
+        _save_spotify_credentials({"access_token": "spotify-token"}, object())
+
+        assert manager.load_credentials("spotify") == {
+            "access_token": "spotify-token",
+            "_source": "ui",
+        }
+
+    def test_dedicated_worker_manager_uses_current_worker_root_for_shared_scope(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedicated workers mounted at arbitrary paths should read and write shared-scope credentials in the mounted root."""
+        worker_root = (tmp_path / "app-worker").resolve()
+        worker_manager = CredentialsManager(
+            base_path=worker_root / "credentials",
+            shared_base_path=worker_root / ".shared_credentials",
+        )
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = "v1:tenant-123:shared:general"
+        worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
+
+        monkeypatch.setenv(DEDICATED_WORKER_KEY_ENV, worker_key)
+        monkeypatch.setenv(DEDICATED_WORKER_ROOT_ENV, str(worker_root))
+
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            worker_scope="shared",
+            routing_agent_name="general",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert loaded_credentials == {"token": "ui-token", "_source": "ui"}
+
+        save_scoped_credentials(
+            "google",
+            {"token": "refreshed-token", "_source": "ui"},
+            worker_scope="shared",
+            routing_agent_name="general",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert worker_manager.load_credentials("google") == {"token": "refreshed-token", "_source": "ui"}
+        assert not (worker_root / "workers").exists()
+
+    def test_dedicated_worker_manager_uses_current_worker_root_for_isolating_scope(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dedicated workers mounted at arbitrary paths should not nest isolating-scope credentials under another workers/ tree."""
+        worker_root = (tmp_path / "app-worker").resolve()
+        worker_manager = CredentialsManager(
+            base_path=worker_root / "credentials",
+            shared_base_path=worker_root / ".shared_credentials",
+        )
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="persistent_worker_lab",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+        worker_key = "v1:tenant-123:user:@alice:example.org"
+        worker_manager.shared_manager().save_credentials("google", {"api_key": "env-key", "_source": "env"})
+        worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
+
+        monkeypatch.setenv(DEDICATED_WORKER_KEY_ENV, worker_key)
+        monkeypatch.setenv(DEDICATED_WORKER_ROOT_ENV, str(worker_root))
+
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            worker_scope="user",
+            routing_agent_name="persistent_worker_lab",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert loaded_credentials == {"api_key": "env-key", "token": "ui-token", "_source": "ui"}
+
+        save_scoped_credentials(
+            "google",
+            {"token": "refreshed-token", "_source": "ui"},
+            worker_scope="user",
+            routing_agent_name="persistent_worker_lab",
+            credentials_manager=worker_manager,
+            execution_identity=execution_identity,
+        )
+
+        assert worker_manager.load_credentials("google") == {"token": "refreshed-token", "_source": "ui"}
+        assert not (worker_root / "workers").exists()
