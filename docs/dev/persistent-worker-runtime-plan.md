@@ -161,7 +161,7 @@ The worker backend is the provider that realizes a worker handle for a worker ke
 The worker manager and backend contract must provide these responsibilities.
 
 - Find or create the worker for a key.
-- Return a worker handle containing endpoint, state location, and status.
+- Return a worker handle containing endpoint, status, and any optional provider-neutral debug metadata needed for observability.
 - Touch or refresh worker liveness.
 - Track liveness and startup state.
 - Enforce idle timeout and cleanup policy.
@@ -243,7 +243,7 @@ The target credentials model is:
 
 - Credentials are stored under a scope-aware namespace rather than only `service_name`.
 - The common credential scopes are `shared`, `user`, and `worker`.
-- The default for worker-routed tools is `user` when a requester identity exists.
+- The current leading option is to default worker-routed tools to `user` when a requester identity exists, but the exact per-tool defaults are still a Phase 3 policy decision.
 - Shared credentials require explicit opt-in.
 - Credential leases are created on the target worker and are short-lived and single-use by default.
 - Leased credentials never become part of the model prompt or normal tool arguments.
@@ -478,7 +478,7 @@ The first concrete targets are explicit worker lifecycle through the backend int
 ## Open Decisions
 
 - Decide the exact authenticated identity source for `/v1` user-scoped workers.
-- Decide the final credential scope defaults for each class of worker-routed tool.
+- Decide the final credential scope defaults for each class of worker-routed tool, with `user` as the current leading default when a trusted requester identity exists.
 - Decide whether `room_thread` on `/v1` should key from conversation ID, session ID, or a distinct thread identifier.
 - Decide the long-term worker retention policy for hosted deployments.
 - Decide whether explicit user-facing worker reset commands should exist in the product.
