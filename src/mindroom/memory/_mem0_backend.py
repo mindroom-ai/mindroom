@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
 
-from .policy import (
+from ._policy import (
     agent_scope_user_id,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -18,7 +18,7 @@ from .policy import (
     resolve_context_storage_path,
     room_scope_user_id,
 )
-from .shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
+from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

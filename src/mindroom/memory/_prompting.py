@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .shared import MemoryResult
+    from ._shared import MemoryResult
 
 
 def _format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:

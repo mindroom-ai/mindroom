@@ -9,7 +9,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_state_storage_path,
 )
 
-from .shared import FileMemoryResolution
+from ._shared import FileMemoryResolution
 
 if TYPE_CHECKING:
     from pathlib import Path

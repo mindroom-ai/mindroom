@@ -207,10 +207,10 @@ exec uvicorn pkg.server:asgi --host 0.0.0.0 --port 8000
     assert ("pkg.server", "asgi") not in symbols
 
 
-def test_private_module_imported_by_src_module_is_reported(tmp_path: Path) -> None:
-    """Private src modules imported by source code should be flagged."""
+def test_private_module_imported_within_same_package_is_ignored(tmp_path: Path) -> None:
+    """Private modules can be imported from within their own package subtree."""
     _write(
-        tmp_path / "src" / "pkg" / "_internal.py",
+        tmp_path / "src" / "pkg" / "one" / "_internal.py",
         """
 def helper() -> int:
     return 1
@@ -218,7 +218,7 @@ def helper() -> int:
         + "\n",
     )
     _write(
-        tmp_path / "src" / "pkg" / "public.py",
+        tmp_path / "src" / "pkg" / "one" / "public.py",
         """
 from ._internal import helper
 
@@ -227,23 +227,22 @@ VALUE = helper()
         + "\n",
     )
 
-    private_module_imports = _private_module_imports(tmp_path)
-    assert ("pkg._internal", "pkg.public") in private_module_imports
+    assert _private_module_imports(tmp_path) == set()
 
 
-def test_private_submodule_import_via_package_is_reported(tmp_path: Path) -> None:
-    """Package-relative imports of private submodules should be flagged."""
+def test_private_module_imported_from_other_package_is_reported(tmp_path: Path) -> None:
+    """Private modules imported outside their package subtree should be flagged."""
     _write(
-        tmp_path / "src" / "pkg" / "_internal.py",
+        tmp_path / "src" / "pkg" / "one" / "_internal.py",
         """
 VALUE = 1
 """.strip()
         + "\n",
     )
     _write(
-        tmp_path / "src" / "pkg" / "public.py",
+        tmp_path / "src" / "pkg" / "two" / "public.py",
         """
-from . import _internal
+from pkg.one import _internal
 
 VALUE = _internal.VALUE
 """.strip()
@@ -251,7 +250,7 @@ VALUE = _internal.VALUE
     )
 
     private_module_imports = _private_module_imports(tmp_path)
-    assert ("pkg._internal", "pkg.public") in private_module_imports
+    assert ("pkg.one._internal", "pkg.two.public") in private_module_imports
 
 
 def test_private_module_imported_only_by_tests_is_ignored(tmp_path: Path) -> None:

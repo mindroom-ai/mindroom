@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-import mindroom.custom_tools.google_oauth as google_oauth_module
+import mindroom.custom_tools._google_oauth as google_oauth_module
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools

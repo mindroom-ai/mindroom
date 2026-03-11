@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.memory.policy import (
+from mindroom.memory._policy import (
     _sanitize_room_id_for_scope,
     agent_scope_user_id,
     get_allowed_memory_user_ids,

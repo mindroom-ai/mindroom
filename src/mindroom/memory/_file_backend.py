@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 
-from .policy import (
+from ._policy import (
     agent_name_from_scope_user_id,
     agent_scope_user_id,
     agent_uses_worker_scoped_memory,
@@ -23,7 +23,7 @@ from .policy import (
     resolve_file_memory_resolution,
     room_scope_user_id,
 )
-from .shared import (
+from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_DEFAULT_DIRNAME,
     FILE_MEMORY_ENTRY_PATTERN,

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Detect two kinds of module privacy issues within ``src/``.
+"""Detect module privacy issues within ``src/``.
 
 - Public top-level symbols that are never imported by other src modules.
-- Private modules that are imported by other src modules.
+- Private modules imported from outside their containing package subtree.
 
 Usage:
     python check_module_privacy.py <project-root>
@@ -44,7 +44,7 @@ class Module:
 
 @dataclass
 class PrivateModuleImport:
-    """A private module imported by another src module."""
+    """A private module imported from outside its containing package subtree."""
 
     module: str
     path: Path
@@ -101,6 +101,15 @@ def _package_parts(module_name: str) -> tuple[str, ...]:
 
 def _is_private_module_name(module_name: str) -> bool:
     return any(part.startswith("_") for part in module_name.split("."))
+
+
+def _private_module_owner_package(module_name: str) -> str:
+    parts = module_name.rsplit(".", 1)
+    return parts[0] if len(parts) == 2 else module_name
+
+
+def _module_is_within_package(module_name: str, package_name: str) -> bool:
+    return module_name == package_name or module_name.startswith(f"{package_name}.")
 
 
 def collect_modules(src_dir: Path) -> dict[str, Module]:  # noqa: C901, PLR0912
@@ -444,12 +453,15 @@ def find_cross_imports(modules: dict[str, Module]) -> set[tuple[str, str]]:  # n
 
 
 def collect_private_module_imports(modules: dict[str, Module]) -> list[PrivateModuleImport]:
-    """Return private src modules imported by other src modules."""
+    """Return private src modules imported from outside their package subtree."""
     private_modules = {module_name for module_name in modules if _is_private_module_name(module_name)}
     findings: dict[tuple[str, str, int], PrivateModuleImport] = {}
 
     def record(private_module_name: str, consumer: Module, lineno: int) -> None:
         if private_module_name == consumer.name:
+            return
+        owner_package = _private_module_owner_package(private_module_name)
+        if _module_is_within_package(consumer.name, owner_package):
             return
         findings.setdefault(
             (private_module_name, consumer.name, lineno),
@@ -572,7 +584,7 @@ def _collect_external_entrypoints(project_root: Path) -> set[tuple[str, str]]:
 
 
 def _collect_privacy_findings(project_root: Path) -> tuple[list[Symbol], list[PrivateModuleImport]]:
-    """Collect public-symbol and private-module privacy findings."""
+    """Collect public-symbol and private-module boundary findings."""
     src_dir = _find_src_dir(project_root)
     if src_dir is None:
         msg = f"No src/ directory found in {project_root}"
@@ -600,7 +612,7 @@ def find_private_candidates(project_root: Path) -> list[Symbol]:
 
 
 def find_private_module_imports(project_root: Path) -> list[PrivateModuleImport]:
-    """Find private src modules imported by other src modules."""
+    """Find private src modules imported from outside their package subtree."""
     _, private_module_imports = _collect_privacy_findings(project_root)
     return private_module_imports
 
@@ -631,7 +643,7 @@ def main() -> int:
     if private_module_imports:
         if candidates:
             print()
-        print(f"Found {len(private_module_imports)} private module imports in src/:\n")
+        print(f"Found {len(private_module_imports)} private module imports outside their package subtree:\n")
         for issue in private_module_imports:
             rel = issue.imported_by_path.relative_to(project_root)
             print(f"  {rel}:{issue.lineno}: imports private module `{issue.module}`")
