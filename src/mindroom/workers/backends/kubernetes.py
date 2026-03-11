@@ -141,6 +141,14 @@ def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 
         return default
 
 
+def _metadata_mapping(value: object) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    if hasattr(value, "__dict__"):
+        return {str(key): str(item) for key, item in vars(value).items()}
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
@@ -283,7 +291,14 @@ class KubernetesWorkerBackend:
             annotations=annotations,
             replicas=1,
         )
-        deployment = self._wait_for_ready(deployment_name, timeout_seconds=self.config.ready_timeout_seconds)
+        try:
+            deployment = self._wait_for_ready(deployment_name, timeout_seconds=self.config.ready_timeout_seconds)
+        except Exception as exc:
+            failure_reason = str(exc)
+            self.record_failure(worker_key, failure_reason, now=timestamp)
+            if isinstance(exc, WorkerBackendError):
+                raise
+            raise WorkerBackendError(failure_reason) from exc
         final_annotations = dict(annotations)
         final_annotations[_ANNOTATION_WORKER_STATUS] = "ready"
         self._patch_deployment_metadata(deployment_name, annotations=final_annotations)
@@ -303,7 +318,7 @@ class KubernetesWorkerBackend:
         deployment = self._read_deployment(deployment_name)
         if deployment is None:
             return None
-        annotations = dict(getattr(getattr(deployment, "metadata", None), "annotations", {}) or {})
+        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         if annotations.get(_ANNOTATION_WORKER_STATUS) == "idle":
             annotations[_ANNOTATION_WORKER_STATUS] = "ready"
@@ -336,7 +351,7 @@ class KubernetesWorkerBackend:
             self._delete_service(deployment_name)
             return None
 
-        annotations = dict(getattr(getattr(deployment, "metadata", None), "annotations", {}) or {})
+        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[_ANNOTATION_WORKER_STATUS] = "idle"
         self._patch_deployment(deployment_name, replicas=0, annotations=annotations)
@@ -351,7 +366,7 @@ class KubernetesWorkerBackend:
             handle = self._handle_from_deployment(deployment, now=timestamp)
             if handle.status != "idle":
                 continue
-            annotations = dict(getattr(getattr(deployment, "metadata", None), "annotations", {}) or {})
+            annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
             annotations[_ANNOTATION_WORKER_STATUS] = "idle"
             self._patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
             deployment.spec.replicas = 0
@@ -366,7 +381,7 @@ class KubernetesWorkerBackend:
         if deployment is None:
             msg = f"Unknown worker '{worker_key}' for Kubernetes failure recording."
             raise WorkerBackendError(msg)
-        annotations = dict(getattr(getattr(deployment, "metadata", None), "annotations", {}) or {})
+        annotations = _metadata_mapping(getattr(getattr(deployment, "metadata", None), "annotations", {}))
         annotations[_ANNOTATION_LAST_USED_AT] = str(timestamp)
         annotations[_ANNOTATION_WORKER_STATUS] = "failed"
         annotations[_ANNOTATION_FAILURE_REASON] = failure_reason
@@ -588,7 +603,6 @@ class KubernetesWorkerBackend:
                 "template": {
                     "metadata": {
                         "labels": labels,
-                        "annotations": annotations,
                     },
                     "spec": {
                         "serviceAccountName": self.config.service_account_name,
@@ -665,11 +679,6 @@ class KubernetesWorkerBackend:
         body: dict[str, object] = {}
         if annotations is not None:
             body["metadata"] = {"annotations": annotations}
-            body["spec"] = {
-                "template": {
-                    "metadata": {"annotations": annotations},
-                },
-            }
         if replicas is not None:
             spec = body.setdefault("spec", {})
             assert isinstance(spec, dict)
@@ -734,7 +743,7 @@ class KubernetesWorkerBackend:
 
     def _handle_from_deployment(self, deployment: Any, *, now: float) -> WorkerHandle:
         metadata = getattr(deployment, "metadata", None)
-        annotations = dict(getattr(metadata, "annotations", {}) or {})
+        annotations = _metadata_mapping(getattr(metadata, "annotations", {}))
         worker_key = annotations.get(_ANNOTATION_WORKER_KEY)
         if not worker_key:
             msg = f"Deployment '{getattr(metadata, 'name', '<unknown>')}' is missing worker metadata."

@@ -5,6 +5,9 @@ from __future__ import annotations
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
+
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
@@ -189,6 +192,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
     assert deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
+    assert "annotations" not in deployment["spec"]["template"]["metadata"]
 
 
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
@@ -249,3 +253,41 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
         "mindroom.ai/component=worker,"
         "mindroom.ai/tenant=test"
     )
+
+
+def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
+    """Refreshing worker usage must not mutate the pod template and trigger a rollout."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    touched = backend.touch_worker("worker-a", now=25.0)
+
+    assert touched is not None
+    patch_name, patch_body = apps_api.patched_bodies[-1]
+    assert patch_name == handle.worker_id
+    assert patch_body["metadata"]["annotations"]["mindroom.ai/last-used-at"] == "25.0"
+    assert "template" not in patch_body.get("spec", {})
+
+
+def test_kubernetes_backend_records_failed_startup_state() -> None:
+    """Workers that never become ready should surface as failed instead of starting forever."""
+    backend, apps_api, _core_api = _backend()
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise WorkerBackendError("worker never became ready")
+
+    backend._wait_for_ready = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(WorkerBackendError, match="worker never became ready"):
+        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    worker_id = next(iter(apps_api.deployments))
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "worker never became ready"
+    assert deployment.metadata.annotations["mindroom.ai/failure-count"] == "1"
+
+    handle = backend.get_worker("worker-a", now=11.0)
+    assert handle is not None
+    assert handle.status == "failed"
+    assert handle.failure_reason == "worker never became ready"
