@@ -64,9 +64,6 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 _OPENAI_COMPAT_UNTRUSTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
-_OPENAI_COMPAT_TRUSTED_REQUESTER_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset(
-    {None, "shared", "user", "user_agent"},
-)
 _OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER_ENV = "OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER"
 
 
@@ -122,8 +119,7 @@ def _resolve_trusted_requester_id(
 def _openai_compatible_worker_scopes(
     trusted_requester_id: str | None,
 ) -> frozenset[WorkerScope | None]:
-    if trusted_requester_id is not None:
-        return _OPENAI_COMPAT_TRUSTED_REQUESTER_WORKER_SCOPES
+    del trusted_requester_id
     return _OPENAI_COMPAT_UNTRUSTED_WORKER_SCOPES
 
 
@@ -154,13 +150,6 @@ def _openai_incompatible_agents(
     ]
 
 
-def _trusted_requester_requirement_detail() -> str:
-    header_name = _trusted_requester_header_name()
-    if header_name is None:
-        return f"trusted requester header configured via {_OPENAI_COMPAT_TRUSTED_REQUESTER_HEADER_ENV}"
-    return f"trusted requester header '{header_name}'"
-
-
 def _unsupported_worker_scope_error(
     agent_names: list[str],
     config: Config,
@@ -171,11 +160,10 @@ def _unsupported_worker_scope_error(
     invalid_scopes = {
         config.get_agent_worker_scope(agent_name) for agent_name in agent_names if agent_name in config.agents
     }
-    message = "OpenAI-compatible chat completions support unscoped agents and worker_scope=shared by default."
-    if trusted_requester_id is None and invalid_scopes & {"user", "user_agent"}:
-        message += (
-            f" worker_scope=user and worker_scope=user_agent require a {_trusted_requester_requirement_detail()}."
-        )
+    del trusted_requester_id
+    message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
+    if invalid_scopes & {"user", "user_agent"}:
+        message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
     if "room_thread" in invalid_scopes:
         message += " worker_scope=room_thread is not supported on /v1."
 

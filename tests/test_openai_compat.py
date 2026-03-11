@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 
 import pytest
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from mindroom.api.openai_compat import (
@@ -403,18 +402,11 @@ class TestChatCompletions:
         assert "unscoped agents and worker_scope=shared" in error["message"]
         assert "code" in error["message"]
 
-    def test_accepts_user_scoped_agent_with_trusted_requester_header(self, test_config: Config) -> None:
-        """User-scoped agents should work on `/v1` when a trusted requester header is present."""
+    def test_rejects_user_scoped_agent_with_trusted_requester_header(self, test_config: Config) -> None:
+        """User-scoped agents should remain unsupported on `/v1` even with a trusted requester header."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-        seen_requester_ids: list[str | None] = []
-
-        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
-            seen_requester_ids.append(identity.requester_id if identity is not None else None)
-            return "Response"
 
         test_config.agents["general"].worker_scope = "user"
         app = FastAPI()
@@ -422,7 +414,6 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch.dict(
                 "os.environ",
                 {
@@ -431,7 +422,6 @@ class TestChatCompletions:
                 },
             ),
         ):
-            mock_ai.side_effect = _capture
             client = TestClient(app)
             response = client.post(
                 "/v1/chat/completions",
@@ -445,11 +435,13 @@ class TestChatCompletions:
                 },
             )
 
-        assert response.status_code == 200
-        assert seen_requester_ids == ["@alice:example.com"]
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
 
-    def test_accepts_user_agent_scoped_team_with_trusted_requester_header(self, test_config: Config) -> None:
-        """Team requests should allow user-agent-scoped members when a trusted requester is present."""
+    def test_rejects_user_agent_scoped_team_with_trusted_requester_header(self, test_config: Config) -> None:
+        """Team requests should remain conservative on `/v1` even with a trusted requester header."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
@@ -468,11 +460,6 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
-            patch(
-                "mindroom.api.openai_compat._non_stream_team_completion",
-                new_callable=AsyncMock,
-                return_value=JSONResponse({"ok": True}),
-            ),
             patch.dict(
                 "os.environ",
                 {
@@ -494,8 +481,10 @@ class TestChatCompletions:
                 },
             )
 
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
 
     def test_room_thread_scope_stays_unsupported_with_trusted_requester_header(self, test_config: Config) -> None:
         """`room_thread` should remain unsupported on `/v1` even with a trusted requester."""
@@ -596,10 +585,13 @@ class TestChatCompletions:
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "unsupported_worker_scope"
-        assert "trusted requester header" in error["message"]
+        assert "worker_scope=user and worker_scope=user_agent are not yet supported on /v1" in error["message"]
 
-    def test_models_include_requester_scoped_agents_when_trusted_requester_present(self, test_config: Config) -> None:
-        """`/v1/models` should advertise requester-scoped agents only for trusted requester calls."""
+    def test_models_keep_requester_scoped_agents_hidden_with_trusted_requester_present(
+        self,
+        test_config: Config,
+    ) -> None:
+        """`/v1/models` should remain conservative even when a trusted requester header is present."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
@@ -632,9 +624,9 @@ class TestChatCompletions:
 
         assert response.status_code == 200
         model_ids = {model["id"] for model in response.json()["data"]}
-        assert "auto" in model_ids
-        assert "general" in model_ids
-        assert "code" in model_ids
+        assert not model_ids
+        assert "general" not in model_ids
+        assert "code" not in model_ids
         assert "research" not in model_ids
 
     def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
