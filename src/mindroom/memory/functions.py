@@ -48,9 +48,6 @@ from ._prompting import (
     build_memory_messages,
     build_prompt_with_memories,
 )
-from ._prompting import (
-    format_memories_as_context as _format_memories_as_context,
-)
 from ._shared import FileMemoryResolution, MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
@@ -60,11 +57,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-
-
-def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
-    """Format memories into a context string."""
-    return _format_memories_as_context(memories, context_type)
 
 
 async def add_agent_memory(

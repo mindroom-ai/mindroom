@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.memory._prompting import format_memories_as_context
 from mindroom.memory.functions import (
     add_agent_memory,
     add_room_memory,
     build_memory_enhanced_prompt,
     delete_agent_memory,
-    format_memories_as_context,
     get_agent_memory,
     list_all_agent_memories,
     search_agent_memories,
