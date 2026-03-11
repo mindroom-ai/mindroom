@@ -1,0 +1,610 @@
+"""Resource and manifest helpers for the Kubernetes worker backend."""
+
+from __future__ import annotations
+
+import hashlib
+import importlib
+import os
+import time
+from typing import TYPE_CHECKING, Protocol, cast
+
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.workers.backend import WorkerBackendError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.workers.models import WorkerStatus
+
+    from .kubernetes_config import KubernetesWorkerBackendConfig
+
+_DEFAULT_NAME_PREFIX = "mindroom-worker"
+_DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
+_DEFAULT_RESOURCE_LIMITS = {"memory": "1Gi", "cpu": "500m"}
+_READY_POLL_INTERVAL_SECONDS = 1.0
+_HOSTNAME_ENV = "HOSTNAME"
+
+ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
+ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
+ANNOTATION_LAST_STARTED_AT = "mindroom.ai/last-started-at"
+ANNOTATION_STARTUP_COUNT = "mindroom.ai/startup-count"
+ANNOTATION_FAILURE_COUNT = "mindroom.ai/failure-count"
+ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
+ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
+ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
+ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
+
+_LABEL_COMPONENT = "mindroom.ai/component"
+_LABEL_COMPONENT_VALUE = "worker"
+_LABEL_MANAGED_BY = "app.kubernetes.io/managed-by"
+_LABEL_MANAGED_BY_VALUE = "mindroom"
+_LABEL_NAME = "app.kubernetes.io/name"
+_LABEL_NAME_VALUE = "mindroom-worker"
+_LABEL_WORKER_ID = "mindroom.ai/worker-id"
+
+_CONTAINER_NAME = "sandbox-runner"
+_TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
+_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
+_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+
+
+class _ApiStatusError(Exception):
+    status: int
+
+
+class _KubernetesMetadata(Protocol):
+    name: str
+    annotations: dict[str, str] | None
+    labels: dict[str, str]
+    generation: int | None
+    uid: str | None
+
+
+class _KubernetesDeploymentSpec(Protocol):
+    replicas: int | None
+
+
+class _KubernetesDeploymentStatus(Protocol):
+    ready_replicas: int | None
+    observed_generation: int | None
+
+
+class _KubernetesDeployment(Protocol):
+    metadata: _KubernetesMetadata
+    spec: _KubernetesDeploymentSpec
+    status: _KubernetesDeploymentStatus
+
+
+class _KubernetesPodSpec(Protocol):
+    node_name: str | None
+
+
+class _KubernetesPod(Protocol):
+    spec: _KubernetesPodSpec
+
+
+class _KubernetesDeploymentList(Protocol):
+    items: list[_KubernetesDeployment] | None
+
+
+class _AppsApiProtocol(Protocol):
+    def read_namespaced_deployment(self, name: str, namespace: str) -> _KubernetesDeployment: ...
+
+    def create_namespaced_deployment(self, namespace: str, body: dict[str, object]) -> _KubernetesDeployment: ...
+
+    def patch_namespaced_deployment(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+    ) -> _KubernetesDeployment: ...
+
+    def delete_namespaced_deployment(self, name: str, namespace: str) -> None: ...
+
+    def list_namespaced_deployment(self, namespace: str, label_selector: str) -> _KubernetesDeploymentList: ...
+
+
+class _CoreApiProtocol(Protocol):
+    def read_namespaced_service(self, name: str, namespace: str) -> object: ...
+
+    def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
+
+    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
+
+    def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
+
+    def read_namespaced_pod(self, name: str, namespace: str) -> _KubernetesPod: ...
+
+
+def _worker_id_for_key(worker_key: str, *, prefix: str) -> str:
+    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
+    normalized_prefix = prefix.strip().lower().strip("-") or _DEFAULT_NAME_PREFIX
+    max_prefix_length = 63 - len(digest) - 1
+    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
+    if not safe_prefix:
+        safe_prefix = _DEFAULT_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
+    return f"{safe_prefix}-{digest}"
+
+
+def _service_host(service_name: str, namespace: str, port: int) -> str:
+    return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
+
+
+def _parse_annotation_float(annotations: dict[str, str], key: str, default: float) -> float:
+    raw = annotations.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0) -> int:
+    raw = annotations.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _metadata_annotations(
+    *,
+    worker_key: str,
+    state_subpath: str,
+    created_at: float,
+    last_used_at: float,
+    last_started_at: float | None,
+    startup_count: int,
+    failure_count: int,
+    failure_reason: str | None,
+    status: WorkerStatus,
+) -> dict[str, str]:
+    annotations = {
+        ANNOTATION_WORKER_KEY: worker_key,
+        ANNOTATION_STATE_SUBPATH: state_subpath,
+        ANNOTATION_CREATED_AT: str(created_at),
+        ANNOTATION_LAST_USED_AT: str(last_used_at),
+        ANNOTATION_STARTUP_COUNT: str(startup_count),
+        ANNOTATION_FAILURE_COUNT: str(failure_count),
+        ANNOTATION_WORKER_STATUS: status,
+    }
+    if last_started_at is not None:
+        annotations[ANNOTATION_LAST_STARTED_AT] = str(last_started_at)
+    if failure_reason:
+        annotations[ANNOTATION_FAILURE_REASON] = failure_reason
+    return annotations
+
+
+def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
+    labels = {
+        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+        _LABEL_NAME: _LABEL_NAME_VALUE,
+    }
+    labels.update(extra_labels)
+    labels[_LABEL_WORKER_ID] = worker_id
+    return labels
+
+
+def _list_selector(*, extra_labels: dict[str, str]) -> str:
+    selector = {
+        _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+        _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+        _LABEL_NAME: _LABEL_NAME_VALUE,
+    }
+    selector.update(extra_labels)
+    return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
+
+
+class _KubernetesResourceManager:
+    def __init__(self, *, config: KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+        self.config = config
+        self.auth_token = auth_token
+        self.apps_api: _AppsApiProtocol | None = None
+        self.core_api: _CoreApiProtocol | None = None
+        self.api_exception_cls: type[_ApiStatusError] | None = None
+        self._control_plane_node_name: str | None = None
+        self._control_plane_node_name_loaded = False
+        self._owner_reference: dict[str, object] | None = None
+        self._owner_reference_loaded = False
+
+    @property
+    def apps(self) -> _AppsApiProtocol:
+        self._load_clients()
+        assert self.apps_api is not None
+        return self.apps_api
+
+    @property
+    def core(self) -> _CoreApiProtocol:
+        self._load_clients()
+        assert self.core_api is not None
+        return self.core_api
+
+    @property
+    def api_exception(self) -> type[_ApiStatusError]:
+        self._load_clients()
+        assert self.api_exception_cls is not None
+        return self.api_exception_cls
+
+    def list_deployments(self) -> list[_KubernetesDeployment]:
+        response = self.apps.list_namespaced_deployment(
+            self.config.namespace,
+            label_selector=_list_selector(extra_labels=self.config.extra_labels),
+        )
+        return list(response.items or [])
+
+    def read_deployment(self, deployment_name: str) -> _KubernetesDeployment | None:
+        try:
+            return self.apps.read_namespaced_deployment(deployment_name, self.config.namespace)
+        except self.api_exception as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    def apply_service(self, worker_id: str) -> None:
+        self._apply_object(
+            read_fn=self.core.read_namespaced_service,
+            create_fn=self.core.create_namespaced_service,
+            patch_fn=self.core.patch_namespaced_service,
+            resource_name=worker_id,
+            manifest=self._service_manifest(worker_id),
+        )
+
+    def apply_deployment(
+        self,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        annotations: dict[str, str],
+        replicas: int,
+    ) -> None:
+        self._apply_object(
+            read_fn=self.apps.read_namespaced_deployment,
+            create_fn=self.apps.create_namespaced_deployment,
+            patch_fn=self.apps.patch_namespaced_deployment,
+            resource_name=worker_id,
+            manifest=self._deployment_manifest(
+                worker_key=worker_key,
+                worker_id=worker_id,
+                state_subpath=state_subpath,
+                annotations=annotations,
+                replicas=replicas,
+            ),
+        )
+
+    def patch_deployment(
+        self,
+        deployment_name: str,
+        *,
+        replicas: int | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> None:
+        body: dict[str, object] = {}
+        if annotations is not None:
+            body["metadata"] = {"annotations": annotations}
+        if replicas is not None:
+            body["spec"] = {"replicas": replicas}
+        self.apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
+
+    def delete_deployment(self, deployment_name: str) -> None:
+        self._delete_object(self.apps.delete_namespaced_deployment, deployment_name)
+
+    def delete_service(self, service_name: str) -> None:
+        self._delete_object(self.core.delete_namespaced_service, service_name)
+
+    def wait_for_ready(
+        self,
+        deployment_name: str,
+        *,
+        timeout_seconds: float,
+        deployment_ready_fn: Callable[[_KubernetesDeployment], bool],
+    ) -> _KubernetesDeployment:
+        deadline = time.time() + timeout_seconds
+        while True:
+            deployment = self.read_deployment(deployment_name)
+            if deployment is None:
+                msg = f"Kubernetes worker deployment '{deployment_name}' disappeared during startup."
+                raise WorkerBackendError(msg)
+            if deployment_ready_fn(deployment):
+                return deployment
+            if time.time() >= deadline:
+                msg = f"Kubernetes worker '{deployment_name}' did not become ready within {timeout_seconds:.0f}s."
+                raise WorkerBackendError(msg)
+            time.sleep(_READY_POLL_INTERVAL_SECONDS)
+
+    def _apply_object(
+        self,
+        *,
+        read_fn: Callable[[str, str], object],
+        create_fn: Callable[[str, dict[str, object]], object],
+        patch_fn: Callable[[str, str, dict[str, object]], object],
+        resource_name: str,
+        manifest: dict[str, object],
+    ) -> None:
+        try:
+            read_fn(resource_name, self.config.namespace)
+        except self.api_exception as exc:
+            if exc.status != 404:
+                raise
+            try:
+                create_fn(self.config.namespace, manifest)
+            except self.api_exception as create_exc:
+                if create_exc.status != 409:
+                    raise
+                patch_fn(resource_name, self.config.namespace, manifest)
+            return
+        patch_fn(resource_name, self.config.namespace, manifest)
+
+    def _delete_object(self, delete_fn: Callable[[str, str], None], resource_name: str) -> None:
+        try:
+            delete_fn(resource_name, self.config.namespace)
+        except self.api_exception as exc:
+            if exc.status != 404:
+                raise
+
+    def _load_clients(self) -> None:
+        if self.apps_api is not None and self.core_api is not None and self.api_exception_cls is not None:
+            return
+        try:
+            kubernetes_config = importlib.import_module("kubernetes.config")
+            kubernetes_client = importlib.import_module("kubernetes.client")
+            kubernetes_exceptions = importlib.import_module("kubernetes.client.exceptions")
+        except ModuleNotFoundError as exc:
+            msg = "The 'kubernetes' package is required for the Kubernetes worker backend."
+            raise WorkerBackendError(msg) from exc
+
+        try:
+            kubernetes_config.load_incluster_config()
+        except Exception:
+            kubernetes_config.load_kube_config()
+
+        self.apps_api = cast("AppsApiProtocol", kubernetes_client.AppsV1Api())
+        self.core_api = cast("CoreApiProtocol", kubernetes_client.CoreV1Api())
+        self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
+
+    def _service_manifest(self, worker_id: str) -> dict[str, object]:
+        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": worker_labels,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
+        return {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": metadata,
+            "spec": {
+                "selector": worker_labels,
+                "ports": [
+                    {
+                        "name": "api",
+                        "port": self.config.worker_port,
+                        "targetPort": self.config.worker_port,
+                    },
+                ],
+            },
+        }
+
+    def _deployment_manifest(
+        self,
+        *,
+        worker_key: str,
+        worker_id: str,
+        state_subpath: str,
+        annotations: dict[str, str],
+        replicas: int,
+    ) -> dict[str, object]:
+        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": worker_labels,
+            "annotations": annotations,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
+
+        pod_spec: dict[str, object] = {
+            "serviceAccountName": self.config.service_account_name,
+            "securityContext": {
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "fsGroup": 1000,
+                "runAsNonRoot": True,
+                "fsGroupChangePolicy": "OnRootMismatch",
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+            "containers": [
+                {
+                    "name": _CONTAINER_NAME,
+                    "image": self.config.image,
+                    "imagePullPolicy": self.config.image_pull_policy,
+                    "command": ["/app/run-sandbox-runner.sh"],
+                    "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
+                    "env": self._worker_env(worker_key),
+                    "volumeMounts": self._volume_mounts(state_subpath),
+                    "readinessProbe": {
+                        "httpGet": {"path": "/healthz", "port": "api"},
+                        "periodSeconds": 5,
+                        "failureThreshold": 6,
+                    },
+                    "livenessProbe": {
+                        "httpGet": {"path": "/healthz", "port": "api"},
+                        "periodSeconds": 10,
+                        "failureThreshold": 6,
+                    },
+                    "resources": {
+                        "requests": dict(_DEFAULT_RESOURCE_REQUESTS),
+                        "limits": dict(_DEFAULT_RESOURCE_LIMITS),
+                    },
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {"drop": ["ALL"]},
+                    },
+                },
+            ],
+            "volumes": self._volumes(),
+        }
+        node_name = self._worker_node_name_or_none()
+        if node_name is not None:
+            pod_spec["nodeName"] = node_name
+
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": metadata,
+            "spec": {
+                "replicas": replicas,
+                "selector": {"matchLabels": worker_labels},
+                "template": {
+                    "metadata": {"labels": worker_labels},
+                    "spec": pod_spec,
+                },
+            },
+        }
+
+    def _worker_env(self, worker_key: str) -> list[dict[str, object]]:
+        env: list[dict[str, object]] = [
+            {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
+            {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
+            {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
+            {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
+            {
+                "name": SHARED_CREDENTIALS_PATH_ENV,
+                "value": f"{self.config.storage_mount_path}/.shared_credentials",
+            },
+            {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
+            {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
+            {"name": "HOME", "value": self.config.storage_mount_path},
+        ]
+        if self.config.config_map_name is not None:
+            env.append({"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path})
+        if self.config.token_secret_name is not None:
+            env.append(
+                {
+                    "name": _TOKEN_ENV_NAME,
+                    "valueFrom": {
+                        "secretKeyRef": {
+                            "name": self.config.token_secret_name,
+                            "key": self.config.token_secret_key,
+                        },
+                    },
+                },
+            )
+        elif self.auth_token is not None:
+            env.append({"name": _TOKEN_ENV_NAME, "value": self.auth_token})
+        else:
+            msg = "A worker auth token is required for Kubernetes workers."
+            raise WorkerBackendError(msg)
+
+        for name, value in sorted(self.config.extra_env.items()):
+            env.append({"name": name, "value": value})
+        return env
+
+    def _volume_mounts(self, state_subpath: str) -> list[dict[str, object]]:
+        mounts: list[dict[str, object]] = [
+            {
+                "name": "worker-storage",
+                "mountPath": self.config.storage_mount_path,
+                "subPath": state_subpath,
+            },
+        ]
+        if self.config.config_map_name is not None:
+            mounts.append(
+                {
+                    "name": "worker-config",
+                    "mountPath": self.config.config_path,
+                    "subPath": self.config.config_key,
+                    "readOnly": True,
+                },
+            )
+        return mounts
+
+    def _volumes(self) -> list[dict[str, object]]:
+        volumes: list[dict[str, object]] = [
+            {
+                "name": "worker-storage",
+                "persistentVolumeClaim": {"claimName": self.config.storage_pvc_name},
+            },
+        ]
+        if self.config.config_map_name is not None:
+            volumes.append(
+                {
+                    "name": "worker-config",
+                    "configMap": {"name": self.config.config_map_name},
+                },
+            )
+        return volumes
+
+    def _worker_node_name_or_none(self) -> str | None:
+        if self.config.node_name is not None:
+            return self.config.node_name
+        if not self.config.colocate_with_control_plane_node:
+            return None
+        if self._control_plane_node_name_loaded:
+            return self._control_plane_node_name
+
+        pod_name = os.getenv(_HOSTNAME_ENV, "").strip()
+        if not pod_name:
+            self._control_plane_node_name_loaded = True
+            return None
+        try:
+            pod = self.core.read_namespaced_pod(pod_name, self.config.namespace)
+        except self.api_exception as exc:
+            if exc.status != 404:
+                raise
+            pod = None
+        self._control_plane_node_name = None if pod is None else pod.spec.node_name
+        self._control_plane_node_name_loaded = True
+        return self._control_plane_node_name
+
+    def _owner_reference_or_none(self) -> dict[str, object] | None:
+        if self._owner_reference_loaded:
+            return self._owner_reference
+        if self.config.owner_deployment_name is None:
+            self._owner_reference_loaded = True
+            return None
+
+        owner_deployment = self.read_deployment(self.config.owner_deployment_name)
+        if owner_deployment is None:
+            msg = f"Configured Kubernetes worker owner deployment '{self.config.owner_deployment_name}' was not found."
+            raise WorkerBackendError(msg)
+
+        owner_uid = owner_deployment.metadata.uid
+        if owner_uid is None or not owner_uid.strip():
+            msg = (
+                f"Configured Kubernetes worker owner deployment '{self.config.owner_deployment_name}' is missing a UID."
+            )
+            raise WorkerBackendError(msg)
+
+        self._owner_reference = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "name": self.config.owner_deployment_name,
+            "uid": owner_uid,
+            "controller": False,
+            "blockOwnerDeletion": False,
+        }
+        self._owner_reference_loaded = True
+        return self._owner_reference
+
+
+ApiStatusError = _ApiStatusError
+AppsApiProtocol = _AppsApiProtocol
+CoreApiProtocol = _CoreApiProtocol
+KubernetesDeployment = _KubernetesDeployment
+KubernetesResourceManager = _KubernetesResourceManager
+metadata_annotations = _metadata_annotations
+parse_annotation_float = _parse_annotation_float
+parse_annotation_int = _parse_annotation_int
+service_host = _service_host
+worker_id_for_key = _worker_id_for_key
