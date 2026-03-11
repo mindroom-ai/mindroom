@@ -14,6 +14,7 @@ from mindroom.credentials import (
     merge_scoped_credentials,
     save_scoped_credentials,
     sync_env_credentials_to_worker,
+    sync_shared_credentials_to_worker,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
@@ -270,7 +271,7 @@ class TestCredentialsManager:
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Worker-rooted managers should resolve scoped credentials from the current worker root."""
+        """Worker-rooted managers should merge their shared mirror with worker-local overrides."""
         base_manager = CredentialsManager(temp_credentials_dir)
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -285,6 +286,8 @@ class TestCredentialsManager:
         )
         worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
+        base_manager.save_credentials("openweather", {"api_key": "env-key", "_source": "env", "base": "yes"})
+        sync_env_credentials_to_worker(worker_key, credentials_manager=base_manager)
         worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
 
         loaded_credentials = load_scoped_credentials(
@@ -295,19 +298,64 @@ class TestCredentialsManager:
             execution_identity=execution_identity,
         )
 
-        assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
+        assert loaded_credentials == {"api_key": "worker-key", "_source": "ui", "base": "yes"}
+
+    def test_load_scoped_credentials_uses_shared_mirror_for_unscoped_worker_manager(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Worker-rooted managers should load unscoped credentials from their mirrored shared layer."""
+        base_manager = CredentialsManager(temp_credentials_dir)
+        worker_key = "v1:tenant-123:unscoped:general"
+        worker_manager = base_manager.for_worker(worker_key)
+        base_manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
+        sync_shared_credentials_to_worker(
+            worker_key,
+            include_ui_credentials=True,
+            credentials_manager=base_manager,
+        )
+
+        loaded_credentials = load_scoped_credentials(
+            "openai",
+            worker_scope=None,
+            credentials_manager=worker_manager,
+        )
+
+        assert loaded_credentials == {"api_key": "shared-ui-key", "_source": "ui"}
+
+    def test_save_scoped_credentials_unscoped_worker_manager_writes_to_shared_mirror(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Unscoped worker-rooted saves should update the mirrored shared credential layer."""
+        base_manager = CredentialsManager(temp_credentials_dir)
+        worker_key = "v1:tenant-123:unscoped:general"
+        worker_manager = base_manager.for_worker(worker_key)
+
+        save_scoped_credentials(
+            "google",
+            {"refresh_token": "worker-refresh", "_source": "ui"},
+            worker_scope=None,
+            credentials_manager=worker_manager,
+        )
+
+        assert worker_manager.load_credentials("google") is None
+        assert worker_manager.shared_manager().load_credentials("google") == {
+            "refresh_token": "worker-refresh",
+            "_source": "ui",
+        }
 
     def test_sync_env_credentials_to_worker_copies_env_backed_credentials(
         self,
         temp_credentials_dir: Path,
     ) -> None:
-        """Dedicated workers should receive shared env-backed credentials in their own writable store."""
+        """Dedicated workers should mirror shared env-backed credentials into their shared layer."""
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
 
         sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
 
-        worker_credentials = manager.for_worker("worker-a").load_credentials("google")
+        worker_credentials = manager.for_worker("worker-a").shared_manager().load_credentials("google")
         assert worker_credentials == {"api_key": "env-key", "_source": "env"}
 
     def test_sync_env_credentials_to_worker_preserves_worker_local_credentials(
@@ -322,8 +370,34 @@ class TestCredentialsManager:
 
         sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
 
-        worker_credentials = worker_manager.load_credentials("google")
-        assert worker_credentials == {"api_key": "worker-key", "_source": "ui"}
+        assert worker_manager.load_credentials("google") == {"api_key": "worker-key", "_source": "ui"}
+        assert worker_manager.shared_manager().load_credentials("google") == {
+            "api_key": "env-key",
+            "_source": "env",
+        }
+
+    def test_sync_shared_credentials_to_worker_can_copy_ui_credentials_for_unscoped_workers(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Unscoped workers should mirror dashboard-saved shared UI credentials."""
+        manager = CredentialsManager(temp_credentials_dir)
+        manager.save_credentials("openai", {"api_key": "shared-ui-key", "_source": "ui"})
+
+        sync_shared_credentials_to_worker(
+            "v1:tenant-123:unscoped:general",
+            include_ui_credentials=True,
+            credentials_manager=manager,
+        )
+
+        shared_worker_credentials = (
+            manager.for_worker(
+                "v1:tenant-123:unscoped:general",
+            )
+            .shared_manager()
+            .load_credentials("openai")
+        )
+        assert shared_worker_credentials == {"api_key": "shared-ui-key", "_source": "ui"}
 
     def test_merge_scoped_credentials_overlays_worker_credentials(
         self,

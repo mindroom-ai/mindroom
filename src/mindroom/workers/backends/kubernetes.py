@@ -11,8 +11,8 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from mindroom.credentials import sync_env_credentials_to_worker
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.credentials import sync_shared_credentials_to_worker
+from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -378,7 +378,10 @@ class KubernetesWorkerBackend:
                 status="starting",
             )
 
-            sync_env_credentials_to_worker(worker_key)
+            sync_shared_credentials_to_worker(
+                worker_key,
+                include_ui_credentials=is_unscoped_worker_key(worker_key),
+            )
             self._apply_service(deployment_name)
             self._apply_deployment(
                 worker_key=worker_key,

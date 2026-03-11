@@ -23,6 +23,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+_WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 logger = get_logger(__name__)
 
 
@@ -41,21 +42,29 @@ def validate_service_name(service: str) -> str:
 class CredentialsManager:
     """Centralized credentials storage and retrieval for MindRoom."""
 
-    def __init__(self, base_path: Path | None = None) -> None:
+    def __init__(self, base_path: Path | None = None, *, shared_base_path: Path | None = None) -> None:
         """Initialize the credentials manager.
 
         Args:
             base_path: Base directory for storing credentials.
                       Defaults to STORAGE_PATH/credentials (usually mindroom_data/credentials)
+            shared_base_path: Optional shared credential layer used for inherited or mirrored
+                credentials within the current execution context.
 
         """
         if base_path is None:
             self.base_path = CREDENTIALS_DIR
         else:
             self.base_path = Path(base_path)
+        if shared_base_path is None:
+            self.shared_base_path = self.base_path
+        else:
+            self.shared_base_path = Path(shared_base_path)
 
         # Ensure the directory exists
         self.base_path.mkdir(parents=True, exist_ok=True)
+        if self.shared_base_path != self.base_path:
+            self.shared_base_path.mkdir(parents=True, exist_ok=True)
 
     @property
     def storage_root(self) -> Path:
@@ -64,8 +73,20 @@ class CredentialsManager:
 
     def for_worker(self, worker_key: str) -> CredentialsManager:
         """Return a credentials manager rooted in one worker's persistent state."""
-        worker_credentials_path = worker_root_path(self.storage_root, worker_key) / "credentials"
-        return CredentialsManager(base_path=worker_credentials_path)
+        worker_root = worker_root_path(self.storage_root, worker_key)
+        worker_credentials_path = worker_root / "credentials"
+        worker_shared_credentials_path = worker_root / _WORKER_SHARED_CREDENTIALS_DIRNAME
+        return CredentialsManager(
+            base_path=worker_credentials_path,
+            shared_base_path=worker_shared_credentials_path,
+        )
+
+    def shared_manager(self) -> CredentialsManager:
+        """Return a manager rooted in the shared credential layer for this execution context."""
+        return CredentialsManager(
+            base_path=self.shared_base_path,
+            shared_base_path=self.shared_base_path,
+        )
 
     def get_credentials_path(self, service: str) -> Path:
         """Get the path for a service's credentials file.
@@ -240,28 +261,50 @@ def merge_scoped_credentials(
     return merged_credentials or None
 
 
+def sync_shared_credentials_to_worker(
+    worker_key: str,
+    *,
+    include_ui_credentials: bool = False,
+    credentials_manager: CredentialsManager | None = None,
+) -> None:
+    """Sync shared credentials into one worker's dedicated shared-credential mirror.
+
+    The worker's override store remains separate. Env-backed shared credentials are always
+    copied; UI-backed shared credentials are copied only when explicitly requested.
+    """
+    manager = credentials_manager or get_credentials_manager()
+    worker_shared_manager = manager.for_worker(worker_key).shared_manager()
+    mirrored_services = set(worker_shared_manager.list_services())
+    allowed_services: set[str] = set()
+
+    for service in manager.list_services():
+        shared_credentials = manager.load_credentials(service)
+        if not isinstance(shared_credentials, Mapping):
+            continue
+        source = shared_credentials.get("_source")
+        if source != "env" and not include_ui_credentials:
+            continue
+        if source not in {"env", "ui"}:
+            continue
+
+        allowed_services.add(service)
+        worker_shared_manager.save_credentials(service, dict(shared_credentials))
+
+    for service in mirrored_services - allowed_services:
+        worker_shared_manager.delete_credentials(service)
+
+
 def sync_env_credentials_to_worker(
     worker_key: str,
     *,
     credentials_manager: CredentialsManager | None = None,
 ) -> None:
-    """Copy env-backed shared credentials into one worker's writable credentials store.
-
-    Worker-local non-env credentials are preserved. Existing env-backed copies are updated.
-    """
-    manager = credentials_manager or get_credentials_manager()
-    worker_manager = manager.for_worker(worker_key)
-
-    for service in manager.list_services():
-        shared_credentials = manager.load_credentials(service)
-        if not isinstance(shared_credentials, Mapping) or shared_credentials.get("_source") != "env":
-            continue
-
-        worker_credentials = worker_manager.load_credentials(service)
-        if isinstance(worker_credentials, Mapping) and worker_credentials.get("_source") != "env":
-            continue
-
-        worker_manager.save_credentials(service, dict(shared_credentials))
+    """Backward-compatible wrapper for syncing env-backed shared credentials."""
+    sync_shared_credentials_to_worker(
+        worker_key,
+        include_ui_credentials=False,
+        credentials_manager=credentials_manager,
+    )
 
 
 def load_scoped_credentials(
@@ -274,8 +317,9 @@ def load_scoped_credentials(
 ) -> dict[str, Any] | None:
     """Load credentials for a service, resolving worker-scoped overrides when available."""
     manager = credentials_manager or get_credentials_manager()
+    shared_manager = manager.shared_manager()
     if worker_scope is None:
-        return manager.load_credentials(service)
+        return shared_manager.load_credentials(service)
 
     worker_manager = _resolve_worker_credentials_manager(
         worker_scope=worker_scope,
@@ -285,7 +329,7 @@ def load_scoped_credentials(
     )
     return merge_scoped_credentials(
         service,
-        base_manager=manager,
+        base_manager=shared_manager,
         worker_manager=worker_manager,
     )
 
@@ -301,11 +345,15 @@ def save_scoped_credentials(
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
     manager = credentials_manager or get_credentials_manager()
+    if worker_scope is None:
+        manager.shared_manager().save_credentials(service, credentials)
+        return
+
     worker_manager = _resolve_worker_credentials_manager(
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
         execution_identity=execution_identity,
     )
-    target_manager = worker_manager or manager
+    target_manager = worker_manager or manager.shared_manager()
     target_manager.save_credentials(service, credentials)

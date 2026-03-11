@@ -42,6 +42,7 @@ class TestHomeAssistantTools:
         """Test HomeAssistantTools initialization."""
         with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
             mock_manager = MagicMock()
+            mock_manager.shared_manager.return_value = mock_manager
             mock_get_manager.return_value = mock_manager
 
             ha_tools = HomeAssistantTools()
@@ -104,6 +105,7 @@ class TestHomeAssistantTools:
         with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
             mock_manager = MagicMock()
             mock_manager.load_credentials.return_value = None
+            mock_manager.shared_manager.return_value = mock_manager
             mock_get_manager.return_value = mock_manager
 
             ha_tools = HomeAssistantTools()
@@ -117,6 +119,7 @@ class TestHomeAssistantTools:
         with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
             mock_manager = MagicMock()
             mock_manager.load_credentials.return_value = None
+            mock_manager.shared_manager.return_value = mock_manager
             mock_get_manager.return_value = mock_manager
 
             ha_tools = HomeAssistantTools()
@@ -131,6 +134,7 @@ class TestHomeAssistantTools:
             mock_manager = MagicMock()
             # Missing access_token
             mock_manager.load_credentials.return_value = {"instance_url": "http://localhost"}
+            mock_manager.shared_manager.return_value = mock_manager
             mock_get_manager.return_value = mock_manager
 
             ha_tools = HomeAssistantTools()

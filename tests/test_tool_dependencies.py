@@ -106,6 +106,9 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
 
+        def shared_manager(self) -> DummyCredentialsManager:
+            return self
+
     def flaky_factory() -> type[DummyToolkit]:
         calls["count"] += 1
         if calls["count"] == 1:
@@ -144,6 +147,9 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     class DummyCredentialsManager:
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
+
+        def shared_manager(self) -> DummyCredentialsManager:
+            return self
 
     def failing_factory() -> type:
         msg = "dependency missing forever"

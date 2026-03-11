@@ -243,6 +243,58 @@ def test_kubernetes_backend_honors_custom_worker_port() -> None:
     assert container["livenessProbe"]["httpGet"]["port"] == "api"
 
 
+def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
+    backend, _apps_api, _core_api = _backend()
+    sync_calls: list[tuple[str, bool]] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        include_ui_credentials: bool,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del credentials_manager
+        sync_calls.append((worker_key, include_ui_credentials))
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:unscoped:general"), now=10.0)
+
+    assert sync_calls == [("v1:tenant-123:unscoped:general", True)]
+
+
+def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scoped dedicated workers should mirror only env-backed shared credentials."""
+    backend, _apps_api, _core_api = _backend()
+    sync_calls: list[tuple[str, bool]] = []
+
+    def _record_sync(
+        worker_key: str,
+        *,
+        include_ui_credentials: bool,
+        credentials_manager: object | None = None,
+    ) -> None:
+        del credentials_manager
+        sync_calls.append((worker_key, include_ui_credentials))
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
+        _record_sync,
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+
+    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", False)]
+
+
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     """Idle cleanup should scale dedicated workers to zero while keeping their metadata."""
     backend, apps_api, core_api = _backend(idle_timeout_seconds=5.0)

@@ -171,6 +171,12 @@ def resolve_unscoped_worker_key(
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
+def is_unscoped_worker_key(worker_key: str) -> bool:
+    """Return whether a worker key uses the unscoped backend worker form."""
+    parts = worker_key.split(":")
+    return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
+
+
 def resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
     *,

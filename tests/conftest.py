@@ -49,6 +49,10 @@ class FakeCredentialsManager:
             ),
         )
 
+    def shared_manager(self) -> "FakeCredentialsManager":
+        """Return the shared credential layer for this fake manager."""
+        return self
+
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Skip tests marked with requires_matrix unless MATRIX_SERVER_URL is set."""
