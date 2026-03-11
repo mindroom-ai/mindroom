@@ -83,6 +83,7 @@ class TestGmailTools:
         # Setup empty credentials manager
         mock_manager = MagicMock()
         mock_manager.load_credentials.return_value = None
+        mock_manager.shared_manager.return_value = mock_manager
         mock_get_manager.return_value = mock_manager
 
         # Initialize GmailTools
@@ -204,6 +205,7 @@ class TestGmailTools:
         # Setup empty credentials manager
         mock_manager = MagicMock()
         mock_manager.load_credentials.return_value = None
+        mock_manager.shared_manager.return_value = mock_manager
         mock_get_manager.return_value = mock_manager
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:

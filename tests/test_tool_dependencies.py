@@ -32,8 +32,13 @@ HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool
 def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
     failed = []
+    # OpenBB is still imported by the config-sync suite; skipping it here avoids
+    # a duplicate parallel import against the same shared CI virtualenv.
+    skip_parallel_imports = {"openbb"}
 
     for tool_name in _TOOL_REGISTRY:
+        if tool_name in skip_parallel_imports:
+            continue
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
@@ -98,8 +103,15 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         name = "dummy"
 
     class DummyCredentialsManager:
+        def __init__(self) -> None:
+            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
+            self.shared_base_path = self.base_path
+
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
+
+        def shared_manager(self) -> DummyCredentialsManager:
+            return self
 
     def flaky_factory() -> type[DummyToolkit]:
         calls["count"] += 1
@@ -137,8 +149,15 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     tool_name = "test_auto_install_failure_tool"
 
     class DummyCredentialsManager:
+        def __init__(self) -> None:
+            self.base_path = Path("/var/empty/mindroom-dummy-credentials")
+            self.shared_base_path = self.base_path
+
         def load_credentials(self, _tool_name: str) -> dict[str, str]:
             return {}
+
+        def shared_manager(self) -> DummyCredentialsManager:
+            return self
 
     def failing_factory() -> type:
         msg = "dependency missing forever"

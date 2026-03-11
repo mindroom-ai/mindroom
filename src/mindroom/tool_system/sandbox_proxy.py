@@ -20,12 +20,21 @@ from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
+)
+from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
+from mindroom.workers.runtime import (
+    get_primary_worker_manager,
+    primary_worker_backend_available,
+    primary_worker_backend_name,
 )
 
 if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
+
+    from mindroom.workers.manager import WorkerManager
 
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
 _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
@@ -190,7 +199,7 @@ def _collect_credential_overrides(
 def _create_credential_lease(
     client: httpx.Client,
     *,
-    base_url: str,
+    lease_url: str,
     headers: Mapping[str, str],
     tool_name: str,
     function_name: str,
@@ -213,7 +222,7 @@ def _create_credential_lease(
         "ttl_seconds": _CREDENTIAL_LEASE_TTL,
         "max_uses": 1,
     }
-    response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
+    response = client.post(lease_url, json=lease_payload, headers=headers)
     response.raise_for_status()
     lease_data = response.json()
     if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
@@ -228,9 +237,34 @@ def _build_worker_routing_payload(
     function_name: str,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], WorkerHandle | None]:
     if worker_scope is None:
-        return {}
+        if primary_worker_backend_name() != "kubernetes":
+            return {}, None
+
+        effective_agent_name = routing_agent_name
+        execution_identity = get_tool_execution_identity()
+        if effective_agent_name is None and execution_identity is not None:
+            effective_agent_name = execution_identity.agent_name
+        if effective_agent_name is None:
+            msg = (
+                f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
+                "when using the Kubernetes worker backend."
+            )
+            raise RuntimeError(msg)
+
+        worker_key = resolve_unscoped_worker_key(
+            agent_name=effective_agent_name,
+            execution_identity=execution_identity,
+        )
+        worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
+        return (
+            {
+                "routing_agent_name": routing_agent_name,
+                "worker_key": worker_key,
+            },
+            worker_handle,
+        )
 
     execution_identity = get_tool_execution_identity()
     if execution_identity is None:
@@ -245,18 +279,35 @@ def _build_worker_routing_payload(
         )
         raise RuntimeError(msg)
 
-    return {
-        "worker_scope": worker_scope,
-        "routing_agent_name": routing_agent_name,
-        "worker_key": worker_key,
-        "execution_identity": to_json_compatible(asdict(execution_identity)),
-    }
+    worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
+    return (
+        {
+            "worker_scope": worker_scope,
+            "routing_agent_name": routing_agent_name,
+            "worker_key": worker_key,
+            "execution_identity": to_json_compatible(asdict(execution_identity)),
+        },
+        worker_handle,
+    )
+
+
+def _get_worker_manager() -> WorkerManager:
+    return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
+
+
+def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:
+    token = worker_handle.auth_token if worker_handle is not None else _PROXY_TOKEN
+    if token is None:
+        msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
+        raise RuntimeError(msg)
+    return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
     worker_tools_override: list[str] | None = None,
+    worker_scope: WorkerScope | None = None,
 ) -> bool:
     """Return whether the given tool should execute through the sandbox proxy.
 
@@ -264,20 +315,31 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
-    if _SANDBOX_RUNNER_MODE or _PROXY_URL is None or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
+    if _SANDBOX_RUNNER_MODE or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
     if worker_tools_override is not None:
-        return tool_name in worker_tools_override
+        requested = tool_name in worker_tools_override
+    elif _EXECUTION_MODE in {"off", "local", "disabled"}:
+        requested = False
+    else:
+        requested = _EXECUTION_MODE in {"all", "sandbox_all"}
+        if not requested:
+            requested = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
 
-    if _EXECUTION_MODE in {"off", "local", "disabled"}:
+    if not requested:
         return False
 
-    enabled = _EXECUTION_MODE in {"all", "sandbox_all"}
-    if not enabled:
-        enabled = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+    backend_name = primary_worker_backend_name()
+    if backend_name == "static_runner" and _PROXY_URL is None and worker_scope is None:
+        return False
 
-    return enabled
+    if primary_worker_backend_available(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN):
+        return True
+
+    # Dedicated-worker backends must fail closed when routing is intended but the
+    # provider config is incomplete; otherwise tools silently execute locally.
+    return backend_name == "kubernetes"
 
 
 def _call_proxy_sync(
@@ -290,54 +352,69 @@ def _call_proxy_sync(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> object:
-    if _PROXY_TOKEN is None:
-        msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
-        raise RuntimeError(msg)
-    if _PROXY_URL is None:
+    payload: dict[str, object] = {
+        "tool_name": tool_name,
+        "function_name": function_name,
+        "args": [to_json_compatible(arg) for arg in args],
+        "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
+    }
+    worker_payload, worker_handle = _build_worker_routing_payload(
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
+    payload.update(worker_payload)
+    if worker_handle is None and _PROXY_URL is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
-    headers = {_SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
-    base_url = _PROXY_URL
 
-    with httpx.Client(timeout=_PROXY_TIMEOUT) as client:
-        lease_id = _create_credential_lease(
-            client,
-            base_url=base_url,
-            headers=headers,
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
+    try:
+        headers = _request_headers_for_handle(worker_handle)
+        execute_url = (
+            worker_api_endpoint(worker_handle, "execute")
+            if worker_handle is not None
+            else (f"{_PROXY_URL}{_SANDBOX_PROXY_EXECUTE_PATH}")
         )
-        payload: dict[str, object] = {
-            "tool_name": tool_name,
-            "function_name": function_name,
-            "args": [to_json_compatible(arg) for arg in args],
-            "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
-        }
         if tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(tool_init_overrides)
-        payload.update(
-            _build_worker_routing_payload(
+        lease_url = (
+            worker_api_endpoint(worker_handle, "leases")
+            if worker_handle is not None
+            else (f"{_PROXY_URL}{_SANDBOX_PROXY_LEASE_PATH}")
+        )
+
+        with httpx.Client(timeout=_PROXY_TIMEOUT) as client:
+            lease_id = _create_credential_lease(
+                client,
+                lease_url=lease_url,
+                headers=headers,
                 tool_name=tool_name,
                 function_name=function_name,
                 worker_scope=worker_scope,
                 routing_agent_name=routing_agent_name,
-            ),
-        )
-        if lease_id is not None:
-            payload["lease_id"] = lease_id
+            )
+            if lease_id is not None:
+                payload["lease_id"] = lease_id
 
-        response = client.post(f"{base_url}{_SANDBOX_PROXY_EXECUTE_PATH}", json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
+            response = client.post(execute_url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        if worker_handle is not None:
+            _get_worker_manager().record_failure(worker_handle.worker_key, str(exc))
+        raise
 
     if not isinstance(data, Mapping):
         msg = "Sandbox proxy returned a non-object response."
         raise TypeError(msg)
     if data.get("ok") is True:
+        if worker_handle is not None:
+            _get_worker_manager().touch_worker(worker_handle.worker_key)
         return data.get("result")
     error = data.get("error") or "Sandbox execution failed."
+    if worker_handle is not None:
+        _get_worker_manager().record_failure(worker_handle.worker_key, str(error))
     raise RuntimeError(str(error))
 
 
@@ -412,7 +489,11 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not _sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=worker_tools_override):
+    if not _sandbox_proxy_enabled_for_tool(
+        tool_name,
+        worker_tools_override=worker_tools_override,
+        worker_scope=worker_scope,
+    ):
         return toolkit
 
     toolkit.functions = {

@@ -261,6 +261,13 @@ class SetupType(str, Enum):
     SPECIAL = "special"  # Special setup (e.g., for Google)
 
 
+class ToolExecutionTarget(str, Enum):
+    """Default runtime location for one tool."""
+
+    PRIMARY = "primary"
+    WORKER = "worker"
+
+
 @dataclass
 class ConfigField:
     """Definition of a configuration field."""
@@ -286,6 +293,7 @@ class ToolMetadata:
     category: ToolCategory
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
+    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     icon: str | None = None  # Icon identifier for frontend
     icon_color: str | None = None  # Tailwind color class like "text-blue-500"
     config_fields: list[ConfigField] | None = None  # Detailed field definitions
@@ -308,6 +316,7 @@ def register_tool_with_metadata(
     category: ToolCategory,
     status: ToolStatus = ToolStatus.AVAILABLE,
     setup_type: SetupType = SetupType.NONE,
+    default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     icon: str | None = None,
     icon_color: str | None = None,
     config_fields: list[ConfigField] | None = None,
@@ -328,6 +337,7 @@ def register_tool_with_metadata(
         category: Tool category for organization
         status: Availability status of the tool
         setup_type: Type of setup required
+        default_execution_target: Default runtime location for the tool
         icon: Icon identifier for frontend
         icon_color: CSS color class for the icon
         config_fields: List of configuration fields
@@ -350,6 +360,7 @@ def register_tool_with_metadata(
             category=category,
             status=status,
             setup_type=setup_type,
+            default_execution_target=default_execution_target,
             icon=icon,
             icon_color=icon_color,
             config_fields=config_fields,
@@ -384,6 +395,16 @@ def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Pa
     load_plugins(config, config_path=config_path)
 
 
+def default_worker_routed_tools(tool_names: list[str]) -> list[str]:
+    """Return the tool names that default to worker execution."""
+    selected_tools: list[str] = []
+    for tool_name in tool_names:
+        metadata = TOOL_METADATA.get(tool_name)
+        if metadata is not None and metadata.default_execution_target == ToolExecutionTarget.WORKER:
+            selected_tools.append(tool_name)
+    return selected_tools
+
+
 def export_tools_metadata() -> list[dict[str, Any]]:
     """Export tool metadata as JSON-serializable dictionaries."""
     tools: list[dict[str, Any]] = []
@@ -393,6 +414,7 @@ def export_tools_metadata() -> list[dict[str, Any]]:
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
+        tool_dict["default_execution_target"] = metadata.default_execution_target.value
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 

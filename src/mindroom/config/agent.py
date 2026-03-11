@@ -84,7 +84,7 @@ class AgentConfig(BaseModel):
     )
     worker_tools: list[str] | None = Field(
         default=None,
-        description="Tool names to route through scoped workers (overrides defaults; None = inherit)",
+        description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
     )
     worker_scope: WorkerScope | None = Field(
         default=None,

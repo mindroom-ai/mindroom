@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+
+_BUN_INSTALL_MAX_ATTEMPTS = 3
+_BUN_INSTALL_RETRY_DELAY_SECONDS = 2.0
 
 
 class FrontendBuildHook(BuildHookInterface):
@@ -54,10 +58,35 @@ def _build_frontend(frontend_dir: Path, output_dir: Path, bun: str) -> None:
     """Install frontend deps and write a production build to the output directory."""
     shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run([bun, "install", "--frozen-lockfile"], check=True, cwd=frontend_dir)
-    subprocess.run([bun, "run", "tsc"], check=True, cwd=frontend_dir)
-    subprocess.run(
+    _run_command(
+        [bun, "install", "--frozen-lockfile"],
+        cwd=frontend_dir,
+        retries=_BUN_INSTALL_MAX_ATTEMPTS,
+        retry_delay_seconds=_BUN_INSTALL_RETRY_DELAY_SECONDS,
+    )
+    _run_command([bun, "run", "tsc"], cwd=frontend_dir)
+    _run_command(
         [bun, "run", "vite", "build", "--outDir", str(output_dir)],
-        check=True,
         cwd=frontend_dir,
     )
+
+
+def _run_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    retries: int = 1,
+    retry_delay_seconds: float = 0.0,
+) -> None:
+    """Run one build command, retrying transient subprocess failures when configured."""
+    max_attempts = max(1, retries)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(cmd, check=True, cwd=cwd)
+        except subprocess.CalledProcessError:
+            if attempt >= max_attempts:
+                raise
+            if retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds)
+        else:
+            return

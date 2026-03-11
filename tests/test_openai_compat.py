@@ -327,6 +327,33 @@ class TestChatCompletions:
         identity = _build_tool_execution_identity(agent_name="general", session_id="session-123")
         assert identity.requester_id is None
 
+    def test_requester_header_is_not_used_for_execution_identity(self, authed_client: TestClient) -> None:
+        """Caller-supplied requester headers must not become `/v1` execution identity."""
+        seen_requester_ids: list[str | None] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            identity = get_tool_execution_identity()
+            seen_requester_ids.append(identity.requester_id if identity is not None else None)
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            response = authed_client.post(
+                "/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer test-key-1",
+                    "X-Mindroom-Requester-Id": "@alice:example.com",
+                },
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert seen_requester_ids == [None]
+
     def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
         """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
         from fastapi import FastAPI  # noqa: PLC0415

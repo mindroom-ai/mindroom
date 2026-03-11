@@ -73,6 +73,11 @@ def _normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
+def _normalize_worker_dir_part(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
+    return normalized or "worker"
+
+
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_key_part(identity.requester_id)
@@ -146,6 +151,32 @@ def resolve_worker_key(
     return worker_key
 
 
+def resolve_unscoped_worker_key(
+    *,
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> str:
+    """Derive a stable backend worker key for unscoped sandbox execution."""
+    identity = execution_identity or get_tool_execution_identity()
+    tenant_key = _normalize_worker_key_part(
+        identity.tenant_id
+        if identity is not None and identity.tenant_id is not None
+        else (
+            identity.account_id
+            if identity is not None and identity.account_id is not None
+            else os.getenv("CUSTOMER_ID") or os.getenv("ACCOUNT_ID") or "default"
+        ),
+    )
+    effective_agent_name = _normalize_worker_key_part(agent_name)
+    return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
+
+
+def is_unscoped_worker_key(worker_key: str) -> bool:
+    """Return whether a worker key uses the unscoped backend worker form."""
+    parts = worker_key.split(":")
+    return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
+
+
 def resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
     *,
@@ -208,7 +239,7 @@ def resolve_agent_worker_key(
 
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
-    prefix = _normalize_worker_key_part(worker_key)
+    prefix = _normalize_worker_dir_part(worker_key)
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"

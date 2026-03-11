@@ -63,7 +63,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: set[WorkerScope | None] = {None, "shared"}
+_OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES: frozenset[WorkerScope | None] = frozenset({None, "shared"})
 
 
 @dataclass(slots=True)
@@ -101,14 +101,20 @@ def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[
     ]
 
 
-def _unsupported_worker_scope_error(agent_names: list[str]) -> JSONResponse:
+def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
+    invalid_scopes = {
+        config.get_agent_worker_scope(agent_name) for agent_name in agent_names if agent_name in config.agents
+    }
+    message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
+    if invalid_scopes & {"user", "user_agent"}:
+        message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    if "room_thread" in invalid_scopes:
+        message += " worker_scope=room_thread is not supported on /v1."
+
     return _error_response(
         400,
-        (
-            "OpenAI-compatible chat completions only support unscoped agents and worker_scope=shared. "
-            f"Unsupported agents: {invalid_agents}"
-        ),
+        f"{message} Unsupported agents: {invalid_agents}",
         param="model",
         code="unsupported_worker_scope",
     )
@@ -124,7 +130,7 @@ def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse
         )
     invalid_agents = _openai_incompatible_agents(config.teams[team_name].agents, config)
     if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents)
+        return _unsupported_worker_scope_error(invalid_agents, config)
     return None
 
 
@@ -138,7 +144,7 @@ def _validate_agent_model_request(agent_name: str, config: Config) -> JSONRespon
         )
     invalid_agents = _openai_incompatible_agents([agent_name], config)
     if invalid_agents:
-        return _unsupported_worker_scope_error(invalid_agents)
+        return _unsupported_worker_scope_error(invalid_agents, config)
     return None
 
 
@@ -292,11 +298,10 @@ def _error_response(
     return JSONResponse(status_code=status_code, content=body.model_dump())
 
 
-def _verify_api_key(authorization: str | None) -> JSONResponse | None:
-    """Verify bearer token against OPENAI_COMPAT_API_KEYS.
-
-    Returns None if valid, or an error JSONResponse if invalid.
-    """
+def _authenticate_request(
+    authorization: str | None,
+) -> JSONResponse | None:
+    """Authenticate one `/v1` request."""
     keys_env = os.getenv("OPENAI_COMPAT_API_KEYS", "")
     allow_unauthenticated = os.getenv("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED", "").strip().lower() in {
         "1",
@@ -505,8 +510,6 @@ def _build_tool_execution_identity(
     return ToolExecutionIdentity(
         channel="openai_compat",
         agent_name=agent_name,
-        # The OpenAI-compatible request-body `user` field is caller-supplied and
-        # not a trusted identity source for worker routing.
         requester_id=None,
         room_id=None,
         thread_id=None,
@@ -610,8 +613,8 @@ async def list_models(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    auth_error = _verify_api_key(authorization)
-    if auth_error:
+    auth_error = _authenticate_request(authorization)
+    if auth_error is not None:
         return auth_error
 
     config, config_path = _load_config()
@@ -672,8 +675,8 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    auth_error = _verify_api_key(authorization)
-    if auth_error:
+    auth_error = _authenticate_request(authorization)
+    if auth_error is not None:
         return auth_error
 
     # Parse and validate request
@@ -685,7 +688,11 @@ async def chat_completions(
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
     if agent_name == _AUTO_MODEL_NAME:
-        result = await _resolve_auto_route(prompt, config, thread_history)
+        result = await _resolve_auto_route(
+            prompt,
+            config,
+            thread_history,
+        )
         if isinstance(result, JSONResponse):
             return result
         agent_name = result

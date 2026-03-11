@@ -307,6 +307,26 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
     assert expected_workspace.is_dir()
 
 
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_uses_default_worker_tool_policy_when_unset(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agent creation should pass the built-in default worker-routing policy when worker_tools is omitted."""
+    mock_get_tool_by_name.return_value = MagicMock()
+    config = Config.from_yaml()
+    config.agents["summary"].tools = ["openclaw_compat"]
+    config.agents["summary"].include_default_tools = False
+    config.agents["summary"].worker_tools = None
+
+    create_agent("summary", config=config)
+
+    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
+    assert worker_overrides
+    assert all(override == ["shell", "coding"] for override in worker_overrides)
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should stay in the list and imply matrix_message."""

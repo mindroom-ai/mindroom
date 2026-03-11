@@ -54,7 +54,7 @@ class DefaultsConfig(BaseModel):
     )
     worker_tools: list[str] | None = Field(
         default=None,
-        description="Tool names to route through scoped workers by default (None = use env var config)",
+        description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
