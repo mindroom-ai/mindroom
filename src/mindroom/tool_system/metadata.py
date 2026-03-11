@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import importlib
 import inspect
+import os
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -39,6 +40,23 @@ class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
 
 
+def _sanitize_safe_tool_init_override_value(
+    tool_name: str,
+    field_name: str,
+    value: object,
+) -> object:
+    """Validate one safe tool init override value."""
+    if field_name == "base_dir":
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, os.PathLike):
+            return os.fspath(value)
+        msg = f"Unsupported value for tool init override '{tool_name}.{field_name}': expected a string path or null."
+        raise ToolInitOverrideError(msg)
+
+    return value
+
+
 def sanitize_tool_init_overrides(
     tool_name: str,
     tool_init_overrides: dict[str, object] | None,
@@ -58,7 +76,10 @@ def sanitize_tool_init_overrides(
         msg = f"Unsupported tool init override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
         raise ToolInitOverrideError(msg)
 
-    return {name: tool_init_overrides[name] for name in tool_init_overrides}
+    return {
+        name: _sanitize_safe_tool_init_override_value(tool_name, name, tool_init_overrides[name])
+        for name in tool_init_overrides
+    }
 
 
 def _build_tool_config_init_kwargs(

@@ -229,6 +229,29 @@ def test_sandbox_runner_rejects_unsafe_tool_init_overrides(
     assert "api_key" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_invalid_base_dir_override_type(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed base_dir overrides should be rejected before toolkit construction."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
+
+
 def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -251,6 +274,30 @@ def test_sandbox_runner_subprocess_rejects_unsafe_tool_init_overrides(
 
     assert response.status_code == 400
     assert "api_key" in response.json()["detail"]
+
+
+def test_sandbox_runner_subprocess_rejects_invalid_base_dir_override_type(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed base_dir overrides should be rejected before subprocess dispatch."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
 
 
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

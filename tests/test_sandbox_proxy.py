@@ -156,6 +156,12 @@ def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
         get_tool_by_name("openai", tool_init_overrides={"api_key": "sk-test"})
 
 
+def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
+    """base_dir overrides should be validated before toolkit construction."""
+    with pytest.raises(ToolInitOverrideError, match="base_dir"):
+        get_tool_by_name("coding", tool_init_overrides={"base_dir": {"bad": "value"}})
+
+
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy mode should fail closed when no shared token is configured."""
 
