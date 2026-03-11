@@ -645,7 +645,10 @@ async def execute_tool_call(
     request.credential_overrides = credential_overrides
     if _runner_uses_subprocess():
         return await _execute_request_subprocess(request)
-    if request.worker_key is not None and not _runner_uses_dedicated_worker():
+    # Worker-routed execution stays on the subprocess path so the per-worker
+    # virtualenv and worker-specific process environment remain authoritative,
+    # even when this pod is itself a dedicated worker runtime.
+    if request.worker_key is not None:
         return await _execute_request_subprocess(request)
     return await _execute_request_inprocess(request)
 

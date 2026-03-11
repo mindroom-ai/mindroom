@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 from mindroom.tool_system.worker_routing import worker_dir_name
@@ -23,11 +24,20 @@ def _to_namespace(value: object) -> object:
     return value
 
 
+def _namespace_to_dict(value: object) -> object:
+    if isinstance(value, SimpleNamespace):
+        return {key: _namespace_to_dict(item) for key, item in vars(value).items()}
+    if isinstance(value, list):
+        return [_namespace_to_dict(item) for item in value]
+    return value
+
+
 class _FakeAppsApi:
     def __init__(self) -> None:
         self.deployments: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
+        self.list_label_selectors: list[str] = []
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> object:
         _ = namespace
@@ -73,8 +83,22 @@ class _FakeAppsApi:
         self.deployments.pop(name, None)
 
     def list_namespaced_deployment(self, namespace: str, label_selector: str) -> object:
-        _ = namespace, label_selector
-        return SimpleNamespace(items=list(self.deployments.values()))
+        _ = namespace
+        self.list_label_selectors.append(label_selector)
+        selectors = {}
+        for expression in filter(None, (part.strip() for part in label_selector.split(","))):
+            key, sep, value = expression.partition("=")
+            if not sep:
+                continue
+            selectors[key] = value
+
+        def matches_selector(deployment: object) -> bool:
+            raw_labels = getattr(getattr(deployment, "metadata", None), "labels", {}) or {}
+            labels = _namespace_to_dict(raw_labels)
+            assert isinstance(labels, dict)
+            return all(labels.get(key) == value for key, value in selectors.items())
+
+        return SimpleNamespace(items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)])
 
 
 class _FakeCoreApi:
@@ -155,13 +179,16 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert len(apps_api.created_bodies) == 1
     deployment = apps_api.created_bodies[0]
     container = deployment["spec"]["template"]["spec"]["containers"][0]
-    env_names = {env["name"] for env in container["env"]}
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    env_names = set(env_values)
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
+    assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
     assert deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
+    assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
 
 
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
@@ -190,3 +217,35 @@ def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resou
     assert evicted is None
     assert handle.worker_id not in apps_api.deployments
     assert handle.worker_id not in core_api.services
+
+
+def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
+    """Worker discovery should stay confined to this backend's label set within a shared namespace."""
+    backend, apps_api, _core_api = _backend()
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+
+    unrelated_body = deepcopy(apps_api.created_bodies[0])
+    unrelated_name = "mindroom-worker-unrelated"
+    unrelated_body["metadata"]["name"] = unrelated_name
+    unrelated_body["metadata"]["annotations"]["mindroom.ai/worker-key"] = "worker-b"
+    unrelated_body["metadata"]["labels"]["mindroom.ai/tenant"] = "other"
+    unrelated_body["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_body["spec"]["selector"]["matchLabels"]["mindroom.ai/tenant"] = "other"
+    unrelated_body["spec"]["selector"]["matchLabels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_body["spec"]["template"]["metadata"]["labels"]["mindroom.ai/tenant"] = "other"
+    unrelated_body["spec"]["template"]["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
+    unrelated_body["spec"]["replicas"] = 1
+    unrelated = _to_namespace(unrelated_body)
+    unrelated.metadata.generation = 1
+    unrelated.status = SimpleNamespace(ready_replicas=1, observed_generation=1)
+    apps_api.deployments[unrelated_name] = unrelated
+
+    workers = backend.list_workers(now=10.0)
+
+    assert [worker.worker_key for worker in workers] == [handle.worker_key]
+    assert apps_api.list_label_selectors[-1] == (
+        "app.kubernetes.io/managed-by=mindroom,"
+        "app.kubernetes.io/name=mindroom-worker,"
+        "mindroom.ai/component=worker,"
+        "mindroom.ai/tenant=test"
+    )

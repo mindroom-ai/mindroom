@@ -427,10 +427,19 @@ class KubernetesWorkerBackend:
             _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
             _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
             _LABEL_NAME: _LABEL_NAME_VALUE,
-            _LABEL_WORKER_ID: worker_id,
         }
         labels.update(self.config.extra_labels)
+        labels[_LABEL_WORKER_ID] = worker_id
         return labels
+
+    def _list_selector(self) -> str:
+        selector_labels = {
+            _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
+            _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
+            _LABEL_NAME: _LABEL_NAME_VALUE,
+        }
+        selector_labels.update(self.config.extra_labels)
+        return ",".join(f"{key}={value}" for key, value in sorted(selector_labels.items()))
 
     def _metadata_annotations(
         self,
@@ -463,6 +472,7 @@ class KubernetesWorkerBackend:
     def _worker_env(self, *, worker_key: str) -> list[dict[str, object]]:
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
+            {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
@@ -678,7 +688,7 @@ class KubernetesWorkerBackend:
             raise
 
     def _list_deployments(self) -> list[Any]:
-        selector = f"{_LABEL_COMPONENT}={_LABEL_COMPONENT_VALUE}"
+        selector = self._list_selector()
         response = self._apps.list_namespaced_deployment(self.config.namespace, label_selector=selector)
         return list(getattr(response, "items", []) or [])
 

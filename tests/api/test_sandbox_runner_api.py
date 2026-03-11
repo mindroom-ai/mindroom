@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 from types import SimpleNamespace
@@ -518,7 +519,41 @@ def test_dedicated_worker_mode_uses_mounted_root(
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
 
-    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+    def fake_run(
+        cmd: list[str],
+        *,
+        input: str,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+        env: dict[str, str] | None,
+        cwd: str | None,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, timeout, check
+        assert env is not None
+        assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
+        assert cwd == str(worker_root / "workspace")
+        assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
+        assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
+        request_payload = json.loads(input)
+        assert request_payload["worker_key"] == "worker-a"
+        assert cwd is not None
+        note_path = worker_root / "workspace" / request_payload["args"][1]
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(request_payload["args"][0], encoding="utf-8")
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="saved")
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    with (
+        patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create),
+        patch("mindroom.api.sandbox_runner.subprocess.run", new=fake_run),
+    ):
         save_response = runner_client.post(
             "/api/sandbox-runner/execute",
             headers=SANDBOX_HEADERS,
