@@ -11,6 +11,8 @@ from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
 
 from ._policy import (
+    agent_name_from_scope_user_id,
+    agent_scope_user_id,
     agent_uses_worker_scoped_memory,
     build_team_user_id,
     effective_storage_paths_for_context,
@@ -19,6 +21,7 @@ from ._policy import (
     get_team_ids_for_agent,
     mutation_target_storage_paths,
     resolve_file_memory_resolution,
+    room_scope_user_id,
 )
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
@@ -68,12 +71,6 @@ def _resolve_scope_markdown_path(scope_path: Path, relative_path: str) -> Path |
     return candidate
 
 
-def _agent_name_from_scope_id(scope_user_id: str) -> str | None:
-    if scope_user_id.startswith("agent_"):
-        return scope_user_id[len("agent_") :]
-    return None
-
-
 def _scope_dir(
     scope_user_id: str,
     resolution: FileMemoryResolution,
@@ -81,7 +78,7 @@ def _scope_dir(
     *,
     create: bool,
 ) -> Path:
-    agent_name = _agent_name_from_scope_id(scope_user_id)
+    agent_name = agent_name_from_scope_user_id(scope_user_id)
     if agent_name is not None:
         agent_config = config.agents.get(agent_name)
         if (
@@ -468,7 +465,7 @@ def add_file_agent_memory(
     config: Config,
 ) -> None:
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    append_scope_memory_entry(f"agent_{agent_name}", content, resolution, config)
+    append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
     logger.info("File memory added", agent=agent_name)
 
 
@@ -489,7 +486,7 @@ def append_agent_daily_file_memory(
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     result = append_scope_memory_entry(
-        f"agent_{agent_name}",
+        agent_scope_user_id(agent_name),
         content,
         resolution,
         config,
@@ -508,7 +505,7 @@ def search_file_agent_memories(
     limit: int,
 ) -> list[MemoryResult]:
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    results = search_scope_memory_entries(f"agent_{agent_name}", query, resolution, config, limit=limit)
+    results = search_scope_memory_entries(agent_scope_user_id(agent_name), query, resolution, config, limit=limit)
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
         team_results = search_scope_memory_entries(team_id, query, resolution, config, limit=limit)
@@ -536,7 +533,7 @@ def list_file_agent_memories(
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
-    results, _ = load_scope_id_entries(f"agent_{agent_name}", resolution, config)
+    results, _ = load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
     return results[:limit]
 
 
@@ -624,8 +621,7 @@ def add_file_room_memory(
     agent_name: str | None,
 ) -> None:
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    safe_room_id = room_id.replace(":", "_").replace("!", "")
-    append_scope_memory_entry(f"room_{safe_room_id}", content, resolution, config)
+    append_scope_memory_entry(room_scope_user_id(room_id), content, resolution, config)
     logger.debug("File room memory added", room_id=room_id)
 
 
@@ -639,8 +635,7 @@ def search_file_room_memories(
     limit: int,
 ) -> list[MemoryResult]:
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    safe_room_id = room_id.replace(":", "_").replace("!", "")
-    return search_scope_memory_entries(f"room_{safe_room_id}", query, resolution, config, limit=limit)
+    return search_scope_memory_entries(room_scope_user_id(room_id), query, resolution, config, limit=limit)
 
 
 def store_file_conversation_memory(
@@ -655,9 +650,9 @@ def store_file_conversation_memory(
         return
 
     target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
-    scope_user_id = f"agent_{agent_name}" if isinstance(agent_name, str) else build_team_user_id(agent_name)
+    scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
-    safe_room_id = room_id.replace(":", "_").replace("!", "") if room_id else None
+    room_user_id = room_scope_user_id(room_id) if room_id else None
 
     for target_storage_path in target_storage_paths:
         resolution = file_memory_resolution_from_paths(
@@ -671,9 +666,9 @@ def store_file_conversation_memory(
             config,
             memory_id=team_memory_id,
         )
-        if safe_room_id is not None:
+        if room_user_id is not None:
             append_scope_memory_entry(
-                f"room_{safe_room_id}",
+                room_user_id,
                 condensed_prompt,
                 resolution,
                 config,

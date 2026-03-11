@@ -36,10 +36,17 @@ from ._mem0_backend import (
     update_mem0_agent_memory,
 )
 from ._policy import (
+    agent_scope_user_id,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
+    room_scope_user_id,
     team_uses_file_memory_backend,
     use_file_memory_backend,
+)
+from ._prompting import (
+    build_file_prompt_with_memory_context,
+    build_memory_messages,
+    build_prompt_with_memories,
 )
 from ._shared import FileMemoryResolution, MemoryResult, new_memory_id
 
@@ -133,7 +140,6 @@ async def list_all_agent_memories(
         storage_path,
         config,
         limit=limit,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         create_memory=create_memory_instance,
     )
 
@@ -248,19 +254,6 @@ async def search_room_memories(
     )
 
 
-def format_memories_as_context(memories: list[MemoryResult], context_type: str = "agent") -> str:
-    """Format memories into a context string."""
-    if not memories:
-        return ""
-
-    context_parts = [
-        f"[Automatically extracted {context_type} memories - may not be relevant to current context]",
-        f"Previous {context_type} memories that might be related:",
-    ]
-    context_parts.extend(f"- {memory.get('memory', '')}" for memory in memories)
-    return "\n".join(context_parts)
-
-
 async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
@@ -272,21 +265,13 @@ async def build_memory_enhanced_prompt(
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
     logger.debug("Building enhanced prompt", agent=agent_name)
     if use_file_memory_backend(config, agent_name=agent_name):
-        return await _build_file_memory_enhanced_prompt(
-            prompt,
-            agent_name,
-            storage_path,
-            resolution,
-            config,
-            room_id,
-        )
+        return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, resolution, config, room_id)
 
-    enhanced_prompt = prompt
     agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
     if agent_memories:
-        enhanced_prompt = f"{format_memories_as_context(agent_memories, 'agent')}\n\n{prompt}"
         logger.debug("Agent memories added", count=len(agent_memories))
 
+    room_memories: list[MemoryResult] = []
     if room_id:
         room_memories = await search_room_memories(
             prompt,
@@ -296,10 +281,13 @@ async def build_memory_enhanced_prompt(
             agent_name=agent_name,
         )
         if room_memories:
-            enhanced_prompt = f"{format_memories_as_context(room_memories, 'room')}\n\n{enhanced_prompt}"
             logger.debug("Room memories added", count=len(room_memories))
 
-    return enhanced_prompt
+    return build_prompt_with_memories(
+        prompt,
+        agent_memories=agent_memories,
+        room_memories=room_memories,
+    )
 
 
 async def _build_file_memory_enhanced_prompt(
@@ -310,22 +298,13 @@ async def _build_file_memory_enhanced_prompt(
     config: Config,
     room_id: str | None,
 ) -> str:
-    context_chunks: list[str] = []
-
-    agent_entrypoint = load_scope_entrypoint_context(f"agent_{agent_name}", resolution, config)
-    if agent_entrypoint:
-        context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")
-
+    agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
     agent_memories = await search_agent_memories(prompt, agent_name, base_storage_path, config)
-    if agent_memories:
-        context_chunks.append(format_memories_as_context(agent_memories, "agent file"))
 
+    room_entrypoint = ""
+    room_memories: list[MemoryResult] = []
     if room_id:
-        safe_room_id = room_id.replace(":", "_").replace("!", "")
-        room_entrypoint = load_scope_entrypoint_context(f"room_{safe_room_id}", resolution, config)
-        if room_entrypoint:
-            context_chunks.append(f"[File memory entrypoint (room)]\n{room_entrypoint}")
-
+        room_entrypoint = load_scope_entrypoint_context(room_scope_user_id(room_id), resolution, config)
         room_memories = await search_room_memories(
             prompt,
             room_id,
@@ -333,34 +312,14 @@ async def _build_file_memory_enhanced_prompt(
             config,
             agent_name=agent_name,
         )
-        if room_memories:
-            context_chunks.append(format_memories_as_context(room_memories, "room file"))
 
-    if context_chunks:
-        return f"{'\n\n'.join(context_chunks)}\n\n{prompt}"
-    return prompt
-
-
-def _build_conversation_messages(
-    thread_history: list[dict],
-    current_prompt: str,
-    user_id: str,
-) -> list[dict]:
-    messages: list[dict] = []
-    for message in thread_history:
-        body = message.get("body", "").strip()
-        if not body:
-            continue
-        role = "user" if message.get("sender", "") == user_id else "assistant"
-        messages.append({"role": role, "content": body})
-    messages.append({"role": "user", "content": current_prompt})
-    return messages
-
-
-def _build_memory_messages(prompt: str, thread_history: list[dict] | None, user_id: str | None) -> list[dict]:
-    if thread_history and user_id:
-        return _build_conversation_messages(thread_history, prompt, user_id)
-    return [{"role": "user", "content": prompt}]
+    return build_file_prompt_with_memory_context(
+        prompt,
+        agent_entrypoint=agent_entrypoint,
+        agent_memories=agent_memories,
+        room_entrypoint=room_entrypoint,
+        room_memories=room_memories,
+    )
 
 
 async def store_conversation_memory(
@@ -379,7 +338,7 @@ async def store_conversation_memory(
         return
 
     with tool_execution_identity(execution_identity or get_tool_execution_identity()):
-        messages = _build_memory_messages(prompt, thread_history, user_id)
+        messages = build_memory_messages(prompt, thread_history, user_id)
         use_file_backend = (
             use_file_memory_backend(config, agent_name=agent_name)
             if isinstance(agent_name, str)

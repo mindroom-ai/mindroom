@@ -89,6 +89,24 @@ def build_team_user_id(agent_names: list[str]) -> str:
     return f"team_{'+'.join(sorted(agent_names))}"
 
 
+def agent_scope_user_id(agent_name: str) -> str:
+    return f"agent_{agent_name}"
+
+
+def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
+    if scope_user_id.startswith("agent_"):
+        return scope_user_id[len("agent_") :]
+    return None
+
+
+def sanitize_room_id_for_scope(room_id: str) -> str:
+    return room_id.replace(":", "_").replace("!", "")
+
+
+def room_scope_user_id(room_id: str) -> str:
+    return f"room_{sanitize_room_id_for_scope(room_id)}"
+
+
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     """Get all team scope IDs that include the specified agent."""
     if not config.teams:
@@ -128,10 +146,10 @@ def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config)
     if isinstance(caller_context, list):
         allowed_user_ids = {build_team_user_id(caller_context)}
         if config.memory.team_reads_member_memory:
-            allowed_user_ids.update(f"agent_{agent_name}" for agent_name in caller_context)
+            allowed_user_ids.update(agent_scope_user_id(agent_name) for agent_name in caller_context)
         return allowed_user_ids
 
-    allowed_user_ids = {f"agent_{caller_context}"}
+    allowed_user_ids = {agent_scope_user_id(caller_context)}
     allowed_user_ids.update(get_team_ids_for_agent(caller_context, config))
     return allowed_user_ids
 

@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, cast
 from mindroom.logging_config import get_logger
 
 from ._policy import (
+    agent_scope_user_id,
     build_team_user_id,
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     mutation_target_storage_paths,
     resolve_context_storage_path,
+    room_scope_user_id,
 )
 from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
@@ -24,6 +26,15 @@ if TYPE_CHECKING:
 MemoryFactory = Callable[[Path, "Config"], Awaitable[ScopedMemoryCrud]]
 
 logger = get_logger(__name__)
+
+
+def _mem0_results(payload: object) -> list[MemoryResult]:
+    if isinstance(payload, dict):
+        payload_dict = cast("dict[str, object]", payload)
+        results = payload_dict.get("results")
+        if isinstance(results, list):
+            return cast("list[MemoryResult]", results)
+    return []
 
 
 async def _get_scoped_memory_by_id(
@@ -36,13 +47,7 @@ async def _get_scoped_memory_by_id(
     if not isinstance(result, dict):
         allowed_user_ids = get_allowed_memory_user_ids(caller_context, config)
         for scope_user_id in sorted(allowed_user_ids):
-            scoped_result = await memory.get_all(user_id=scope_user_id, limit=1000)
-            scoped_results = (
-                scoped_result["results"]
-                if isinstance(scoped_result, dict) and isinstance(scoped_result.get("results"), list)
-                else []
-            )
-            for entry in scoped_results:
+            for entry in _mem0_results(await memory.get_all(user_id=scope_user_id, limit=1000)):
                 if not isinstance(entry, dict):
                     continue
                 metadata = entry.get("metadata")
@@ -80,12 +85,10 @@ async def _find_mem0_replica_memory_ids(
     scope_user_id: str,
     anchor_result: MemoryResult,
 ) -> list[str]:
-    result = await memory.get_all(user_id=scope_user_id, limit=1000)
-    scoped_results = result["results"] if isinstance(result, dict) and isinstance(result.get("results"), list) else []
     replica_key = _mem0_replica_key(anchor_result)
 
     matches: list[str] = []
-    for entry in scoped_results:
+    for entry in _mem0_results(await memory.get_all(user_id=scope_user_id, limit=1000)):
         if not isinstance(entry, dict):
             continue
         if entry.get("user_id") != scope_user_id:
@@ -205,7 +208,7 @@ async def add_mem0_agent_memory(
     metadata["agent"] = agent_name
     messages = [{"role": "user", "content": content}]
     try:
-        await memory.add(messages, user_id=f"agent_{agent_name}", metadata=metadata)
+        await memory.add(messages, user_id=agent_scope_user_id(agent_name), metadata=metadata)
         logger.info("Memory added", agent=agent_name)
     except Exception:
         logger.exception("Failed to add memory", agent=agent_name)
@@ -224,12 +227,10 @@ async def search_mem0_agent_memories(
     resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
     memory = await create_memory(resolved_storage_path, config)
 
-    search_result = await memory.search(query, user_id=f"agent_{agent_name}", limit=limit)
-    results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
+    results = _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
 
     for team_id in get_team_ids_for_agent(agent_name, config):
-        team_result = await memory.search(query, user_id=team_id, limit=limit)
-        team_memories = team_result["results"] if isinstance(team_result, dict) and "results" in team_result else []
+        team_memories = _mem0_results(await memory.search(query, user_id=team_id, limit=limit))
         existing_memories = {result.get("memory", "") for result in results}
         for memory_result in team_memories:
             if memory_result.get("memory", "") not in existing_memories:
@@ -246,15 +247,11 @@ async def list_mem0_agent_memories(
     config: Config,
     *,
     limit: int,
-    preserve_resolved_storage_path: bool = False,
     create_memory: MemoryFactory,
 ) -> list[MemoryResult]:
-    # The facade shares this signature with the file backend, but mem0 only needs the resolved path.
-    _ = preserve_resolved_storage_path
     resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
     result = await create_memory(resolved_storage_path, config)
-    payload = await result.get_all(user_id=f"agent_{agent_name}", limit=limit)
-    return payload["results"] if isinstance(payload, dict) and "results" in payload else []
+    return _mem0_results(await result.get_all(user_id=agent_scope_user_id(agent_name), limit=limit))
 
 
 async def get_mem0_agent_memory(
@@ -355,7 +352,6 @@ async def add_mem0_room_memory(
     create_memory: MemoryFactory,
 ) -> None:
     resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
-    safe_room_id = room_id.replace(":", "_").replace("!", "")
     memory = await create_memory(resolved_storage_path, config)
 
     metadata = dict(metadata or {})
@@ -364,7 +360,7 @@ async def add_mem0_room_memory(
         metadata["contributed_by"] = agent_name
 
     messages = [{"role": "user", "content": content}]
-    await memory.add(messages, user_id=f"room_{safe_room_id}", metadata=metadata)
+    await memory.add(messages, user_id=room_scope_user_id(room_id), metadata=metadata)
     logger.debug("Room memory added", room_id=room_id)
 
 
@@ -379,10 +375,8 @@ async def search_mem0_room_memories(
     create_memory: MemoryFactory,
 ) -> list[MemoryResult]:
     resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
-    safe_room_id = room_id.replace(":", "_").replace("!", "")
     memory = await create_memory(resolved_storage_path, config)
-    search_result = await memory.search(query, user_id=f"room_{safe_room_id}", limit=limit)
-    results = search_result["results"] if isinstance(search_result, dict) and "results" in search_result else []
+    results = _mem0_results(await memory.search(query, user_id=room_scope_user_id(room_id), limit=limit))
     logger.debug("Room memories found", count=len(results), room_id=room_id)
     return results
 
@@ -413,7 +407,7 @@ async def store_mem0_conversation_memory(
         failure_log = "Failed to add team memory"
         failure_context: dict[str, object] = {"team_id": scope_user_id}
     else:
-        scope_user_id = f"agent_{agent_name}"
+        scope_user_id = agent_scope_user_id(agent_name)
         metadata = {
             "type": "conversation",
             "session_id": session_id,
@@ -422,7 +416,7 @@ async def store_mem0_conversation_memory(
         failure_log = "Failed to add memory"
         failure_context = {"agent": agent_name}
 
-    room_scope_user_id: str | None = None
+    room_scope_id: str | None = None
     room_metadata: dict[str, object] | None = None
     if room_id:
         contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
@@ -432,7 +426,7 @@ async def store_mem0_conversation_memory(
             "room_id": room_id,
             "contributed_by": contributed_by,
         }
-        room_scope_user_id = f"room_{room_id.replace(':', '_').replace('!', '')}"
+        room_scope_id = room_scope_user_id(room_id)
 
     for target_storage_path in target_storage_paths:
         memory = await create_memory(target_storage_path, config)
@@ -444,11 +438,11 @@ async def store_mem0_conversation_memory(
             failure_log=failure_log,
             failure_context=failure_context,
         )
-        if room_scope_user_id is not None and room_metadata is not None:
+        if room_scope_id is not None and room_metadata is not None:
             await _add_mem0_scope_messages(
                 memory=memory,
                 messages=messages,
-                user_id=room_scope_user_id,
+                user_id=room_scope_id,
                 metadata=room_metadata,
                 failure_log="Failed to add room memory",
                 failure_context={"room_id": room_id},
