@@ -51,3 +51,33 @@ def test_get_output_dir_for_editable_build_uses_repo_frontend_dist(
     output_dir = hatch_build_module._get_output_dir(frontend_dir, str(tmp_path / "dist"), "editable")
 
     assert output_dir == frontend_dir / "dist"
+
+
+def test_standard_wheel_build_force_includes_bundled_frontend(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Standard wheel builds should bundle the compiled frontend into the package."""
+    frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir()
+
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+
+    build_calls: list[tuple[Path, Path, str]] = []
+
+    def _fake_build(frontend_path: Path, output_dir: Path, bun: str) -> None:
+        build_calls.append((frontend_path, output_dir, bun))
+
+    monkeypatch.setattr(hatch_build_module, "_build_frontend", _fake_build)
+    monkeypatch.setattr(hatch_build_module.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+
+    build_data: dict[str, object] = {}
+    hook.initialize("standard", build_data)
+
+    output_dir = tmp_path / ".frontend-build" / "frontend-dist"
+    assert build_calls == [(frontend_dir, output_dir, "/usr/bin/bun")]
+    assert build_data == {"force_include": {str(output_dir): "mindroom/_frontend"}}
