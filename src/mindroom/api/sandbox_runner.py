@@ -378,10 +378,7 @@ def _prepare_worker(worker_key: str) -> WorkerHandle:
     dedicated_worker_key = _runner_dedicated_worker_key()
     if dedicated_worker_key is not None:
         if worker_key != dedicated_worker_key:
-            msg = (
-                f"Dedicated sandbox worker is pinned to '{dedicated_worker_key}' "
-                f"but received '{worker_key}'."
-            )
+            msg = f"Dedicated sandbox worker is pinned to '{dedicated_worker_key}' but received '{worker_key}'."
             raise WorkerBackendError(msg)
         dedicated_root = _runner_dedicated_worker_root()
         if dedicated_root is None:

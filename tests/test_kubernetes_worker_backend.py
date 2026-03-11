@@ -101,7 +101,9 @@ class _FakeAppsApi:
             assert isinstance(labels, dict)
             return all(labels.get(key) == value for key, value in selectors.items())
 
-        return SimpleNamespace(items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)])
+        return SimpleNamespace(
+            items=[deployment for deployment in self.deployments.values() if matches_selector(deployment)],
+        )
 
 
 class _FakeCoreApi:
@@ -190,7 +192,9 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
-    assert deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
+    assert (
+        deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
+    )
     assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
     assert "annotations" not in deployment["spec"]["template"]["metadata"]
 

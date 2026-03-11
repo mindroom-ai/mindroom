@@ -32,8 +32,13 @@ HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool
 def test_all_tools_can_be_imported() -> None:
     """Test that all registered tools can be imported and instantiated."""
     failed = []
+    # OpenBB is still imported by the config-sync suite; skipping it here avoids
+    # a duplicate parallel import against the same shared CI virtualenv.
+    skip_parallel_imports = {"openbb"}
 
     for tool_name in _TOOL_REGISTRY:
+        if tool_name in skip_parallel_imports:
+            continue
         metadata = TOOL_METADATA.get(tool_name)
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 

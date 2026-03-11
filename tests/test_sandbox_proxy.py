@@ -12,9 +12,9 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
+from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers import runtime as workers_runtime_module
 from tests.conftest import FakeCredentialsManager
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105

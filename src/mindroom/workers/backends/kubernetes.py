@@ -270,7 +270,9 @@ class KubernetesWorkerBackend:
             1 if current_handle is None or current_handle.status == "idle" else 0
         )
         created_at = current_handle.created_at if current_handle is not None else timestamp
-        last_started_at = timestamp if current_handle is None or current_handle.status == "idle" else current_handle.last_started_at
+        last_started_at = (
+            timestamp if current_handle is None or current_handle.status == "idle" else current_handle.last_started_at
+        )
         annotations = self._metadata_annotations(
             worker_key=worker_key,
             state_subpath=state_subpath,
@@ -749,7 +751,7 @@ class KubernetesWorkerBackend:
             msg = f"Deployment '{getattr(metadata, 'name', '<unknown>')}' is missing worker metadata."
             raise WorkerBackendError(msg)
 
-        worker_id = str(getattr(metadata, "name"))
+        worker_id = str(metadata.name)
         last_used_at = _parse_annotation_float(annotations, _ANNOTATION_LAST_USED_AT, now)
         created_at = _parse_annotation_float(annotations, _ANNOTATION_CREATED_AT, last_used_at)
         last_started_at = annotations.get(_ANNOTATION_LAST_STARTED_AT)
