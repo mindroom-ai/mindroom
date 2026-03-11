@@ -1,8 +1,8 @@
 # Persistent Worker Runtime Plan
 
-Last updated: 2026-03-10
+Last updated: 2026-03-11
 Owner: MindRoom backend
-Status: Phase 2 complete and validated in a live GKE deployment, and Phase 3 is now the backend/provider abstraction phase
+Status: Phase 2 complete and smoke-validated in GKE on the current shared sandbox-runner provider, and Phase 3 is now the backend/provider abstraction phase
 
 ## Objective
 
@@ -24,7 +24,10 @@ Doing the work in this order prevents expensive lifecycle and deployment work fr
 Phase 1 is implemented and already useful for proving persistent tool execution.
 The current prototype provides generic worker routing for tool calls rather than a `shell`-only special case.
 The current prototype validates persistence with `shell`, `file`, and `python`.
-The current prototype carries execution identity from Matrix and OpenAI-compatible ingress into worker-routed tool calls.
+Phase 2 has been smoke-validated in GKE on the current shared provider shape of one shared MindRoom pod, one shared sandbox-runner sidecar, and one shared PVC.
+That smoke validation confirmed same-worker-key persistence across turns, isolation across different worker keys, persistent Python environments, and survival of worker-owned state across pod replacement.
+That smoke validation did not validate dynamic per-user Kubernetes workers.
+The current prototype carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
 The current prototype persists worker workspace, cache, and Python packages inside worker-owned state.
 The current prototype aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
 Sessions, learning, and most credentials are now worker-scope-aware.
@@ -32,6 +35,7 @@ Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
 The dashboard does not manage credentials for `user`, `user_agent`, or `room_thread` workers.
+The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.
 
 ## Product Boundary
 
@@ -112,8 +116,9 @@ The execution identity should contain these fields.
 Matrix already provides a trustworthy requester identity path through the sender and existing runtime context.
 The OpenAI-compatible path must not use a request-body `user` field as a durable trust source.
 Current `/v1` behavior only allows unscoped agents and agents with `worker_scope=shared`.
+That restriction is intentional and remains in place until trusted requester identity is solved.
+User-scoped `/v1` workers do not currently ship as a supported product behavior.
 Future `/v1` support should allow additional worker scopes only when a trusted authenticated principal is present.
-If `/v1` lacks a trusted requester identity, only scopes that do not require a requester identity should be allowed.
 One intended final rule is that `shared` and possibly session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
 That `room_thread` expansion is not implemented today and should not be treated as current `/v1` behavior.
 The dashboard also has an authenticated user identity, but that identity is a dashboard principal rather than the Matrix requester identity used by runtime worker routing.
@@ -195,8 +200,9 @@ The recommended layout is:
   metadata/
 ```
 
-The current prototype already uses the worker root as `MINDROOM_STORAGE_PATH` for worker execution.
-That keeps existing storage helper code reusable while still isolating worker-owned state.
+What Phase 2 proved is worker-keyed state resolution plus runtime overrides that make mutable state land in the correct worker-owned locations.
+MindRoom core should describe the ownership boundary in those terms rather than assume one blanket implementation such as "the worker process always runs with worker root as `MINDROOM_STORAGE_PATH`."
+Concrete providers may realize the same contract through storage-path overrides, tool runtime overrides, mounted volumes, or other provider-specific mechanisms.
 The worker workspace should remain at `<worker_root>/workspace`.
 The persistent Python environment should remain at `<worker_root>/venv`.
 Caches should stay inside `<worker_root>/cache`.
@@ -217,14 +223,14 @@ The final memory rules are:
 
 ## Sessions And Learning
 
-Sessions and learning are currently per-agent and must become worker-scope-aware.
-The storage resolver should choose paths from the same worker root when a worker-scoped agent is active.
-This should be done through path resolvers rather than duplicating logic at every call site.
+Sessions and learning are already worker-scope-aware.
+The storage resolver now chooses paths from the same worker-owned state boundary when a worker-scoped agent is active.
+That remains a path-resolution concern rather than something duplicated across call sites.
 
-The target rules are:
+The steady-state rules are:
 
-- Session SQLite paths become worker-scoped when the active agent has a worker scope.
-- Learning SQLite paths become worker-scoped when the active agent has a worker scope.
+- Session SQLite paths resolve into worker-owned state when the active agent has a worker scope.
+- Learning SQLite paths resolve into worker-owned state when the active agent has a worker scope.
 - Non-worker-scoped agents continue using the existing shared per-agent locations.
 - Prompt assembly and tool execution must agree on the same session and learning scope.
 
@@ -270,8 +276,10 @@ The current product rule is:
 
 MindRoom core owns worker scope semantics, execution identity resolution, worker key resolution, tool routing policy, and worker-owned state semantics.
 MindRoom core must not own Kubernetes object names, namespaces, storage classes, pod names, or other provider-specific control-plane concepts.
+MindRoom core should ship the interface and the built-in local/shared-runner provider implementations needed for development and the current deployment shape.
 The local development model and the current shared sandbox-runner deployment are providers behind the same worker backend contract.
 Kubernetes is a future provider rather than a core MindRoom runtime concept.
+A Kubernetes-backed provider or controller may live outside MindRoom core and consume the same worker contract without changing core routing logic.
 
 ## Local Provider
 
@@ -282,7 +290,8 @@ The local provider should support introspection of active workers and cleanup of
 ## Kubernetes Provider
 
 The Kubernetes provider belongs to Phase 4 and should be implemented against the worker backend contract introduced in Phase 3.
-The long-term Kubernetes model is a provider that can realize worker handles from worker keys using cluster-native primitives without changing MindRoom core routing semantics.
+The long-term Kubernetes model is a provider or controller that can realize worker handles from worker keys using cluster-native primitives without changing MindRoom core routing semantics.
+A Kubernetes-backed implementation does not need to live inside MindRoom core as long as it satisfies the same contract.
 Each Kubernetes worker still needs durable worker-owned storage and an authenticated internal endpoint.
 
 ## Provider Interface Contract
@@ -459,10 +468,11 @@ The first concrete targets are explicit worker lifecycle through the backend int
 - `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
 - `src/mindroom/agents.py` now resolves session and learning storage through worker-aware paths and remains the place to keep agent construction aligned with scoped state.
 - `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
-- `src/mindroom/api/openai_compat.py` still needs to keep enforcing trusted requester identity rules and scope eligibility for `/v1`.
+- `src/mindroom/api/openai_compat.py` keeps enforcing conservative `/v1` scope eligibility and trusted requester identity rules.
 - `src/mindroom/api/sandbox_runner.py` should remain an execution runtime component over the worker backend contract rather than a lifecycle owner.
 - `src/mindroom/tool_system/sandbox_proxy.py` should resolve worker handles through the worker manager and stay free of provider-specific assumptions.
-- `src/mindroom/workers/` should remain the home of the backend-neutral worker models, manager, and provider implementations.
+- `src/mindroom/workers/` should remain the home of the backend-neutral worker contract plus the built-in local/shared-runner providers that ship with core.
+- External providers or controllers, including a future Kubernetes-backed implementation, should consume the same contract without forcing Kubernetes concepts into core routing code.
 - `cluster/k8s/instance/templates/deployment-mindroom.yaml` remains only the current shared-runner deployment model rather than the final provider architecture.
 
 ## Open Decisions
