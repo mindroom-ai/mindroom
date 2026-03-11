@@ -26,8 +26,8 @@ from mindroom.tool_system.worker_routing import (
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
-DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
+_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 logger = get_logger(__name__)
 
 
@@ -213,12 +213,12 @@ def _default_shared_credentials_base_path(base_path: Path) -> Path:
 
 
 def _current_dedicated_worker_key() -> str | None:
-    raw_worker_key = os.getenv(DEDICATED_WORKER_KEY_ENV, "").strip()
+    raw_worker_key = os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip()
     return raw_worker_key or None
 
 
 def _current_dedicated_worker_root() -> Path | None:
-    raw_worker_root = os.getenv(DEDICATED_WORKER_ROOT_ENV, "").strip()
+    raw_worker_root = os.getenv(_DEDICATED_WORKER_ROOT_ENV, "").strip()
     if not raw_worker_root:
         return None
     return Path(raw_worker_root).expanduser().resolve()
@@ -355,7 +355,7 @@ def sync_shared_credentials_to_worker(
         worker_shared_manager.delete_credentials(service)
 
 
-def sync_env_credentials_to_worker(
+def _sync_env_credentials_to_worker(
     worker_key: str,
     *,
     credentials_manager: CredentialsManager | None = None,

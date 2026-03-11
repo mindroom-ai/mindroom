@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from mindroom.memory._shared import MemoryResult
+    from mindroom.memory.shared import MemoryResult
 
 
 class MockTeamConfig:

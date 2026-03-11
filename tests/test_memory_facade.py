@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.memory._prompting import format_memories_as_context
 from mindroom.memory.functions import (
     add_agent_memory,
     add_room_memory,
@@ -21,12 +20,13 @@ from mindroom.memory.functions import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory.prompting import _format_memories_as_context
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.memory._shared import MemoryResult
+    from mindroom.memory.shared import MemoryResult
 
 
 class TestMemoryFacade:
@@ -264,7 +264,7 @@ class TestMemoryFacade:
             {"memory": "Second memory", "id": "2"},
         ]
 
-        context = format_memories_as_context(memories, "agent")
+        context = _format_memories_as_context(memories, "agent")
         expected = (
             "[Automatically extracted agent memories - may not be relevant to current context]\n"
             "Previous agent memories that might be related:\n"
@@ -274,7 +274,7 @@ class TestMemoryFacade:
         assert context == expected
 
     def test_format_memories_as_context_empty(self) -> None:
-        assert format_memories_as_context([], "room") == ""
+        assert _format_memories_as_context([], "room") == ""
 
     @pytest.mark.asyncio
     async def test_build_memory_enhanced_prompt(

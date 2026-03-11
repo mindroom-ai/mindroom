@@ -28,7 +28,7 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.credentials import get_credentials_manager, save_scoped_credentials
-from mindroom.custom_tools._google_oauth import GOOGLE_OAUTH_DEPS
+from mindroom.custom_tools.google_oauth import GOOGLE_OAUTH_DEPS
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:

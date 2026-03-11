@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from mindroom.config.main import Config
-from mindroom.memory._policy import (
+from mindroom.memory.policy import (
+    _sanitize_room_id_for_scope,
     agent_scope_user_id,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     room_scope_user_id,
-    sanitize_room_id_for_scope,
 )
 from tests.memory_test_support import MockTeamConfig
 
@@ -44,7 +44,7 @@ def test_get_team_ids_for_agent(config: Config) -> None:
 def test_scope_user_id_helpers() -> None:
     """Agent and room scope IDs are normalized consistently."""
     assert agent_scope_user_id("general") == "agent_general"
-    assert sanitize_room_id_for_scope("!room:server") == "room_server"
+    assert _sanitize_room_id_for_scope("!room:server") == "room_server"
     assert room_scope_user_id("!room:server") == "room_room_server"
 
 

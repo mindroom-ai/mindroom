@@ -229,7 +229,7 @@ def _parse_annotation_int(annotations: dict[str, str], key: str, default: int = 
 
 
 @dataclass(frozen=True, slots=True)
-class KubernetesWorkerBackendConfig:
+class _KubernetesWorkerBackendConfig:
     """Resolved environment-backed configuration for the Kubernetes provider."""
 
     namespace: str
@@ -255,7 +255,7 @@ class KubernetesWorkerBackendConfig:
     owner_deployment_name: str | None
 
     @classmethod
-    def from_env(cls) -> KubernetesWorkerBackendConfig:
+    def from_env(cls) -> _KubernetesWorkerBackendConfig:
         """Build Kubernetes worker configuration from the current environment."""
         namespace = os.getenv(_NAMESPACE_ENV, "").strip() or os.getenv(_POD_NAMESPACE_ENV, "").strip() or "default"
         image = os.getenv(_IMAGE_ENV, "").strip()
@@ -300,7 +300,7 @@ class KubernetesWorkerBackendConfig:
 
 def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = KubernetesWorkerBackendConfig.from_env()
+    config = _KubernetesWorkerBackendConfig.from_env()
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (
@@ -335,7 +335,7 @@ class KubernetesWorkerBackend:
 
     backend_name = "kubernetes"
 
-    def __init__(self, *, config: KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+    def __init__(self, *, config: _KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
         self.config = config
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
@@ -352,7 +352,7 @@ class KubernetesWorkerBackend:
     @classmethod
     def from_env(cls, *, auth_token: str | None) -> KubernetesWorkerBackend:
         """Construct a backend instance from environment-backed configuration."""
-        return cls(config=KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
+        return cls(config=_KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key."""

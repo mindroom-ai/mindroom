@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 WorkerScope = Literal["shared", "user", "user_agent", "room_thread"]
-ExecutionChannel = Literal["matrix", "openai_compat"]
+_ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
@@ -36,7 +36,7 @@ SHARED_ONLY_INTEGRATION_NAMES = frozenset(
 class ToolExecutionIdentity:
     """Serializable execution identity used for worker resolution."""
 
-    channel: ExecutionChannel
+    channel: _ExecutionChannel
     agent_name: str
     requester_id: str | None
     room_id: str | None
@@ -256,7 +256,7 @@ def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
     return workers_dir / worker_dir_name(worker_key)
 
 
-def resolve_agent_worker_root(
+def _resolve_agent_worker_root(
     *,
     agent_name: str,
     base_storage_path: Path,
@@ -284,7 +284,7 @@ def resolve_agent_state_storage_path(
 ) -> Path:
     """Return the storage path that should back the agent's mutable state."""
     return (
-        resolve_agent_worker_root(
+        _resolve_agent_worker_root(
             agent_name=agent_name,
             base_storage_path=base_storage_path,
             config=config,

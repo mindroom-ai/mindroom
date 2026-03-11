@@ -11,7 +11,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 
-from ._file_backend import (
+from .file_backend import (
     add_file_agent_memory,
     add_file_room_memory,
     append_agent_daily_file_memory,
@@ -24,7 +24,7 @@ from ._file_backend import (
     store_file_conversation_memory,
     update_file_agent_memory,
 )
-from ._mem0_backend import (
+from .mem0_backend import (
     add_mem0_agent_memory,
     add_mem0_room_memory,
     delete_mem0_agent_memory,
@@ -35,7 +35,7 @@ from ._mem0_backend import (
     store_mem0_conversation_memory,
     update_mem0_agent_memory,
 )
-from ._policy import (
+from .policy import (
     agent_scope_user_id,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
@@ -43,12 +43,12 @@ from ._policy import (
     team_uses_file_memory_backend,
     use_file_memory_backend,
 )
-from ._prompting import (
+from .prompting import (
     build_file_prompt_with_memory_context,
     build_memory_messages,
     build_prompt_with_memories,
 )
-from ._shared import FileMemoryResolution, MemoryResult, new_memory_id
+from .shared import FileMemoryResolution, MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
     from pathlib import Path

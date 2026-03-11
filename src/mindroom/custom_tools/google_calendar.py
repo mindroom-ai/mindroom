@@ -12,7 +12,7 @@ from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarT
 from loguru import logger
 
 from mindroom.credentials import get_credentials_manager
-from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
+from mindroom.custom_tools.google_oauth import ScopedGoogleOAuthMixin
 
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope

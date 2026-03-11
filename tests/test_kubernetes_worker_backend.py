@@ -9,7 +9,7 @@ import pytest
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
@@ -147,7 +147,7 @@ def _backend(
     name_prefix: str = "mindroom-worker",
     owner_deployment_name: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
-    config = KubernetesWorkerBackendConfig(
+    config = _KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
         image_pull_policy="IfNotPresent",
