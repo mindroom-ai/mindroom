@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchJSON } from '@/lib/api';
+import { API_ENDPOINTS, fetchJSON, withAgentName } from '@/lib/api';
 import { useFetchData } from './useFetchData';
 
 export interface ToolInfo {
@@ -24,13 +24,15 @@ export interface ToolsResponse {
 
 const DEFAULT: ToolInfo[] = [];
 
-export function useTools() {
+export function useTools(agentName?: string | null) {
   const fetcher = useMemo(
     () => async () => {
-      const response = (await fetchJSON<ToolsResponse>(API_ENDPOINTS.tools)) as ToolsResponse;
+      const response = (await fetchJSON<ToolsResponse>(
+        withAgentName(API_ENDPOINTS.tools, agentName)
+      )) as ToolsResponse;
       return response.tools;
     },
-    []
+    [agentName]
   );
   const { data: tools, ...rest } = useFetchData(fetcher, DEFAULT);
   return { tools, ...rest };

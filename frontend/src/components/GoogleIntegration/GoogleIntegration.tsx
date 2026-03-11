@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { API_ENDPOINTS } from '@/lib/api';
+import { API_ENDPOINTS, withAgentName } from '@/lib/api';
 
 interface GoogleStatus {
   connected: boolean;
@@ -23,13 +23,14 @@ const serviceIcons = {
 
 interface GoogleIntegrationProps {
   onSuccess?: () => void;
+  agentName?: string | null;
 }
 
 const GOOGLE_ADMIN_SETUP_DOCS_URL = 'https://docs.mindroom.chat/deployment/google-services-oauth/';
 const GOOGLE_USER_SETUP_DOCS_URL =
   'https://docs.mindroom.chat/deployment/google-services-user-oauth/';
 
-export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
+export function GoogleIntegration({ onSuccess, agentName }: GoogleIntegrationProps = {}) {
   const [status, setStatus] = useState<GoogleStatus>({
     connected: false,
     services: [],
@@ -63,7 +64,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
 
   const checkGoogleStatus = async () => {
     try {
-      const response = await fetch(API_ENDPOINTS.google.status);
+      const response = await fetch(withAgentName(API_ENDPOINTS.google.status, agentName));
       const data = await response.json();
       setStatus({
         connected: data.connected,
@@ -82,7 +83,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const connectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.google.connect, {
+      const response = await fetch(withAgentName(API_ENDPOINTS.google.connect, agentName), {
         method: 'POST',
       });
 
@@ -146,7 +147,7 @@ export function GoogleIntegration({ onSuccess }: GoogleIntegrationProps = {}) {
   const disconnectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.google.disconnect, {
+      const response = await fetch(withAgentName(API_ENDPOINTS.google.disconnect, agentName), {
         method: 'POST',
       });
 

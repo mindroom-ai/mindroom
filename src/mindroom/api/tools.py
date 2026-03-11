@@ -2,13 +2,22 @@
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from mindroom.api.credentials import (
+    dashboard_supports_worker_credentials,
+    load_credentials_for_target,
+    resolve_request_credentials_target,
+)
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
-from mindroom.credentials import CredentialsManager, get_credentials_manager
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
+from mindroom.tool_system.worker_routing import (
+    SHARED_ONLY_INTEGRATION_NAMES,
+    WorkerScope,
+    worker_scope_allows_shared_only_integrations,
+)
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
@@ -19,10 +28,9 @@ class ToolsResponse(BaseModel):
     tools: list[dict]
 
 
-def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager) -> bool:
+def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
     """Check if HomeAssistant is configured."""
     if tool_name == "homeassistant":
-        ha_creds = manager.load_credentials("homeassistant")
         if not ha_creds:
             return False
         # Check for the fields that HomeAssistantTools actually uses
@@ -32,12 +40,11 @@ def _check_homeassistant_configured(tool_name: str, manager: CredentialsManager)
     return False
 
 
-def _check_standard_tool_configured(tool: dict[str, Any], manager: CredentialsManager) -> bool:
+def _check_standard_tool_configured(tool: dict[str, Any], credentials: dict[str, Any] | None) -> bool:
     """Check if a standard tool with config_fields is configured."""
     if not tool.get("config_fields"):
         return False
 
-    credentials = manager.load_credentials(tool["name"])
     if not credentials:
         return False
 
@@ -46,22 +53,9 @@ def _check_standard_tool_configured(tool: dict[str, Any], manager: CredentialsMa
     return all(field in credentials for field in required_fields)
 
 
-@router.get("")
-@router.get("/")
-async def get_registered_tools() -> ToolsResponse:
-    """Get all registered tools from mindroom.
-
-    This builds tool metadata from the in-memory registry and updates availability
-    based on credentials (including plugin-provided tools).
-    """
-    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
-
-    config, config_path = load_runtime_config()
-    ensure_tool_registry_loaded(config, config_path=config_path)
-    tools = export_tools_metadata()
+def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
+    """Append config-only tool presets so the dashboard can display them."""
     existing_tool_names = {tool.get("name") for tool in tools}
-
-    # Append config-only tool presets so the dashboard picker can offer them.
     for preset_name, expansion in Config.TOOL_PRESETS.items():
         if preset_name in existing_tool_names:
             continue
@@ -83,25 +77,65 @@ async def get_registered_tools() -> ToolsResponse:
             },
         )
 
-    # Get credentials manager to check if tools are configured
-    manager = get_credentials_manager()
 
-    # Update status for tools that require configuration
+def _update_tools_statuses(
+    tools: list[dict[str, Any]],
+    request: Request,
+    agent_name: str | None,
+    *,
+    worker_scope: WorkerScope | None,
+) -> None:
+    """Update tool availability using the resolved credential target."""
+    if not dashboard_supports_worker_credentials(worker_scope):
+        return
+
+    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    credentials_cache: dict[str, dict[str, Any] | None] = {}
+
+    def get_credentials(service: str) -> dict[str, Any] | None:
+        if service not in credentials_cache:
+            credentials_cache[service] = load_credentials_for_target(service, target)
+        return credentials_cache[service]
+
     for tool in tools:
         tool_name = tool["name"]
-        if tool.get("status") == "requires_config":
-            # Check if tool has delegated auth
-            auth_provider = tool.get("auth_provider")
-            if auth_provider:
-                # Check if the auth provider is configured
-                provider_creds = manager.load_credentials(auth_provider)
-                if provider_creds and (
-                    (auth_provider == "google" and check_google_tool_configured(tool_name, provider_creds))
-                    or auth_provider != "google"
-                ):
-                    tool["status"] = "available"
-            # Check other configured tools
-            elif _check_homeassistant_configured(tool_name, manager) or _check_standard_tool_configured(tool, manager):
+        if tool.get("status") != "requires_config":
+            continue
+
+        auth_provider = tool.get("auth_provider")
+        if auth_provider:
+            provider_creds = get_credentials(auth_provider)
+            if provider_creds and (
+                (auth_provider == "google" and check_google_tool_configured(tool_name, provider_creds))
+                or auth_provider != "google"
+            ):
                 tool["status"] = "available"
+            continue
+
+        if _check_homeassistant_configured(
+            tool_name,
+            get_credentials("homeassistant"),
+        ) or _check_standard_tool_configured(tool, get_credentials(tool_name)):
+            tool["status"] = "available"
+
+
+@router.get("")
+@router.get("/")
+async def get_registered_tools(request: Request, agent_name: str | None = None) -> ToolsResponse:
+    """Get all registered tools from mindroom.
+
+    This builds tool metadata from the in-memory registry and updates availability
+    based on credentials (including plugin-provided tools).
+    """
+    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+
+    config, config_path = load_runtime_config()
+    ensure_tool_registry_loaded(config, config_path=config_path)
+    tools = export_tools_metadata()
+    worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None
+    if not worker_scope_allows_shared_only_integrations(worker_scope):
+        tools = [tool for tool in tools if tool["name"] not in SHARED_ONLY_INTEGRATION_NAMES]
+    _append_config_only_presets(tools)
+    _update_tools_statuses(tools, request, agent_name, worker_scope=worker_scope)
 
     return ToolsResponse(tools=tools)

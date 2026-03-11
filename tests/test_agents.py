@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,16 @@ from mindroom.config.agent import AgentConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
+)
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -184,10 +195,12 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     def _lookup_tool(
         name: str,
         *,
-        credential_overrides: dict[str, object] | None = None,  # noqa: ARG001
-        tool_init_overrides: dict[str, object] | None = None,  # noqa: ARG001
-        sandbox_tools_override: list[str] | None = None,  # noqa: ARG001
+        tool_init_overrides: dict[str, object] | None = None,
+        worker_tools_override: list[str] | None = None,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
     ) -> MagicMock:
+        del tool_init_overrides, worker_tools_override, worker_scope, routing_agent_name
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
@@ -212,23 +225,23 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_expands_openclaw_compat_for_sandbox_tool_overrides(
+def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Sandbox override list should receive expanded tool names including openclaw_compat."""
+    """Worker override list should receive expanded tool names including openclaw_compat."""
     mock_get_tool_by_name.return_value = MagicMock()
     config = Config.from_yaml()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
-    config.agents["summary"].sandbox_tools = ["openclaw_compat"]
+    config.agents["summary"].worker_tools = ["openclaw_compat"]
 
     create_agent("summary", config=config)
 
-    expected_sandbox = config.expand_tool_names(["openclaw_compat"])
-    sandbox_overrides = [call.kwargs["sandbox_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert sandbox_overrides
-    assert all(override == expected_sandbox for override in sandbox_overrides)
+    expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
+    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
+    assert worker_overrides
+    assert all(override == expected_worker_tools for override in worker_overrides)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -447,6 +460,142 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
 
 
 @patch("mindroom.agents.SqliteDb")
+def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
+    """Worker-scoped agents should keep session and learning DBs inside the resolved worker root."""
+    config = Config.from_yaml()
+    config.agents["general"].worker_scope = "user"
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    with tool_execution_identity(execution_identity):
+        create_agent("general", config=config, storage_path=tmp_path)
+
+    worker_root = worker_root_path(tmp_path, worker_key)
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert worker_root / "sessions" / "general.db" in db_files
+    assert worker_root / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_get_agent_uses_shared_worker_storage_without_execution_identity(
+    mock_storage: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-scope agents should resolve worker-owned state even before a live request context exists."""
+    config = Config.from_yaml()
+    config.agents["general"].worker_scope = "shared"
+    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+
+    create_agent("general", config=config, storage_path=tmp_path)
+
+    shared_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+        account_id=None,
+    )
+    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
+    assert worker_key is not None
+
+    worker_root = worker_root_path(tmp_path, worker_key)
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert worker_root / "sessions" / "general.db" in db_files
+    assert worker_root / "learning" / "general.db" in db_files
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execution_identity(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared worker credentials should be available during agent construction outside request context."""
+    config = Config.from_yaml()
+    config.defaults.tools = []
+    config.agents["general"].tools = ["credentialed_toolkit"]
+    config.agents["general"].worker_scope = "shared"
+    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+
+    credentials_manager = CredentialsManager(tmp_path / "credentials")
+    shared_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+        tenant_id="tenant-123",
+        account_id=None,
+    )
+    worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
+    assert worker_key is not None
+    credentials_manager.for_worker(worker_key).save_credentials(
+        "credentialed_toolkit",
+        {"api_key": "worker-key", "_source": "ui"},
+    )
+
+    def _get_tool_by_name(
+        tool_name: str,
+        *,
+        tool_init_overrides: dict[str, object] | None = None,
+        worker_tools_override: list[str] | None = None,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+    ) -> MagicMock:
+        del tool_init_overrides, worker_tools_override
+        credentials = load_scoped_credentials(
+            tool_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=credentials_manager,
+        )
+        if not isinstance(credentials, dict) or "api_key" not in credentials:
+            msg = "API key required"
+            raise ValueError(msg)
+        tool = MagicMock()
+        tool.name = tool_name
+        return tool
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
+
+    agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
+
+
+def test_resolve_worker_key_rejects_unknown_scope() -> None:
+    """Unknown worker scopes should fail loudly instead of silently acting like room_thread."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with pytest.raises(ValueError, match="Unknown worker scope"):
+        resolve_worker_key(cast("WorkerScope", "bogus"), execution_identity)
+
+
+@patch("mindroom.agents.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Configured context files should be prepended to role context."""
     config = Config.from_yaml()
@@ -573,6 +722,40 @@ def test_config_rejects_legacy_agent_memory_dir_field() -> None:
                 "calculator": {
                     "display_name": "CalculatorAgent",
                     "memory_dir": "./memory",
+                },
+            },
+        )
+
+
+def test_config_rejects_legacy_agent_sandbox_tools_field() -> None:
+    """Legacy sandbox_tools field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."),
+    ):
+        Config(
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
+                    "sandbox_tools": ["shell"],
+                },
+            },
+        )
+
+
+def test_config_rejects_legacy_defaults_sandbox_tools_field() -> None:
+    """Legacy defaults.sandbox_tools field must fail fast to avoid silent drops."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape("defaults.sandbox_tools was removed. Use defaults.worker_tools instead."),
+    ):
+        Config(
+            defaults={
+                "sandbox_tools": ["shell"],
+            },
+            agents={
+                "calculator": {
+                    "display_name": "CalculatorAgent",
                 },
             },
         )

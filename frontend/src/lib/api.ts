@@ -65,6 +65,31 @@ export const API_ENDPOINTS = {
   rooms: `${API_BASE_URL}/api/rooms`,
 };
 
+export function withQueryParams(
+  url: string,
+  params: Record<string, string | null | undefined>
+): string {
+  const isAbsolute = /^https?:\/\//.test(url);
+  const parsed = isAbsolute ? new URL(url) : new URL(url, 'http://localhost');
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value == null || value === '') {
+      parsed.searchParams.delete(key);
+      return;
+    }
+    parsed.searchParams.set(key, value);
+  });
+
+  if (isAbsolute) {
+    return parsed.toString();
+  }
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+export function withAgentName(url: string, agentName?: string | null): string {
+  return withQueryParams(url, { agent_name: agentName });
+}
+
 export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
   // Add a timeout to prevent hanging requests
   const controller = new AbortController();

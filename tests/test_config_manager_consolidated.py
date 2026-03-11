@@ -567,71 +567,67 @@ class TestConsolidatedConfigManager:
             config_path.unlink(missing_ok=True)
 
 
-class TestGetAgentSandboxTools:
-    """Tests for Config.get_agent_sandbox_tools resolution."""
+class TestGetAgentWorkerTools:
+    """Tests for Config.get_agent_worker_tools and get_agent_worker_scope."""
 
-    def test_agent_override_takes_precedence(self) -> None:
-        """Agent-level sandbox_tools should override defaults."""
+    def test_agent_worker_tools_override_takes_precedence(self) -> None:
+        """Agent-level worker_tools should override defaults."""
         config = Config(
-            defaults=DefaultsConfig(sandbox_tools=["shell", "file"]),
+            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
             agents={
-                "code": AgentConfig(display_name="Code", sandbox_tools=["python"]),
+                "code": AgentConfig(display_name="Code", worker_tools=["python"]),
             },
         )
-        assert config.get_agent_sandbox_tools("code") == ["python"]
+        assert config.get_agent_worker_tools("code") == ["python"]
 
-    def test_falls_back_to_defaults(self) -> None:
-        """When agent has no sandbox_tools, should fall back to defaults."""
+    def test_worker_tools_fall_back_to_defaults(self) -> None:
+        """When agent has no worker_tools, defaults should apply."""
         config = Config(
-            defaults=DefaultsConfig(sandbox_tools=["shell", "file"]),
-            agents={
-                "code": AgentConfig(display_name="Code"),
-            },
-        )
-        assert config.get_agent_sandbox_tools("code") == ["shell", "file"]
-
-    def test_both_none_returns_none(self) -> None:
-        """When neither agent nor defaults set sandbox_tools, returns None."""
-        config = Config(
+            defaults=DefaultsConfig(worker_tools=["shell", "file"]),
             agents={
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_sandbox_tools("code") is None
+        assert config.get_agent_worker_tools("code") == ["shell", "file"]
 
-    def test_agent_empty_list_disables(self) -> None:
-        """Agent can explicitly disable sandboxing with empty list."""
+    def test_worker_tools_returns_none_when_unset(self) -> None:
+        """When worker_tools are omitted everywhere, the agent has no explicit override."""
         config = Config(
-            defaults=DefaultsConfig(sandbox_tools=["shell"]),
-            agents={
-                "research": AgentConfig(display_name="Research", sandbox_tools=[]),
-            },
-        )
-        assert config.get_agent_sandbox_tools("research") == []
-
-    def test_defaults_empty_list_disables(self) -> None:
-        """Defaults can explicitly disable sandboxing with empty list."""
-        config = Config(
-            defaults=DefaultsConfig(sandbox_tools=[]),
             agents={
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_sandbox_tools("code") == []
+        assert config.get_agent_worker_tools("code") is None
 
-    def test_agent_override_expands_sandbox_implied_tools(self) -> None:
-        """Agent-level sandbox tools should expand implied tools and dedupe in order."""
+    def test_worker_tools_empty_list_disables_routing(self) -> None:
+        """Empty worker_tools should explicitly disable worker routing for that agent."""
         config = Config(
-            defaults=DefaultsConfig(sandbox_tools=["file"]),
+            defaults=DefaultsConfig(worker_tools=["shell"]),
             agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    sandbox_tools=["openclaw_compat", "python", "shell"],
-                ),
+                "research": AgentConfig(display_name="Research", worker_tools=[]),
             },
         )
+        assert config.get_agent_worker_tools("research") == []
 
-        assert config.get_agent_sandbox_tools("code") == [
+    def test_defaults_empty_list_disables_worker_routing(self) -> None:
+        """Empty default worker_tools should disable worker routing for inheriting agents."""
+        config = Config(
+            defaults=DefaultsConfig(worker_tools=[]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == []
+
+    def test_worker_tools_expand_implied_tools(self) -> None:
+        """Worker tool resolution should preserve the normal preset expansion behavior."""
+        config = Config(
+            defaults=DefaultsConfig(worker_tools=["openclaw_compat", "python", "shell"]),
+            agents={
+                "code": AgentConfig(display_name="Code"),
+            },
+        )
+        assert config.get_agent_worker_tools("code") == [
             "openclaw_compat",
             "python",
             "shell",
@@ -645,25 +641,22 @@ class TestGetAgentSandboxTools:
             "attachments",
         ]
 
-    def test_defaults_expand_sandbox_implied_tools(self) -> None:
-        """Default sandbox tools should expand implied tools for agents that inherit defaults."""
+    def test_worker_scope_prefers_agent_override(self) -> None:
+        """Agent-level worker_scope should override defaults."""
         config = Config(
-            defaults=DefaultsConfig(sandbox_tools=["openclaw_compat", "python", "shell"]),
+            defaults=DefaultsConfig(worker_scope="shared"),
+            agents={
+                "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
+            },
+        )
+        assert config.get_agent_worker_scope("code") == "user_agent"
+
+    def test_worker_scope_falls_back_to_defaults(self) -> None:
+        """Worker scope should inherit from defaults when agent config omits it."""
+        config = Config(
+            defaults=DefaultsConfig(worker_scope="room_thread"),
             agents={
                 "code": AgentConfig(display_name="Code"),
             },
         )
-
-        assert config.get_agent_sandbox_tools("code") == [
-            "openclaw_compat",
-            "python",
-            "shell",
-            "coding",
-            "duckduckgo",
-            "website",
-            "browser",
-            "scheduler",
-            "subagents",
-            "matrix_message",
-            "attachments",
-        ]
+        assert config.get_agent_worker_scope("code") == "room_thread"

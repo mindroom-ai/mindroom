@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import functools
 import importlib
+import inspect
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
@@ -14,6 +15,12 @@ from mindroom.config.main import Config
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
+from mindroom.tool_system.worker_routing import (
+    WorkerScope,
+    requires_shared_only_integration_scope,
+    unsupported_shared_only_integration_message,
+    worker_scope_allows_shared_only_integrations,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,7 +28,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -54,22 +61,47 @@ def sanitize_tool_init_overrides(
     return {name: tool_init_overrides[name] for name in tool_init_overrides}
 
 
-def _register_tool(name: str) -> Callable[[Callable[[], type[Toolkit]]], Callable[[], type[Toolkit]]]:
-    """Decorator to register a tool factory function.
+def _build_tool_config_init_kwargs(
+    metadata: ToolMetadata,
+    *,
+    credentials: dict[str, object],
+    tool_init_overrides: dict[str, object] | None,
+    runtime_overrides: dict[str, object] | None,
+) -> dict[str, object]:
+    """Collect safe config-field kwargs for one tool constructor."""
+    if not metadata.config_fields:
+        return {}
 
-    Args:
-        name: The name to register the tool under
+    config_field_names = {field.name for field in metadata.config_fields}
+    init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_init_overrides:
+        init_kwargs.update(
+            {
+                field.name: tool_init_overrides[field.name]
+                for field in metadata.config_fields
+                if field.name in tool_init_overrides
+            },
+        )
+    if runtime_overrides:
+        init_kwargs.update(
+            {field_name: value for field_name, value in runtime_overrides.items() if field_name in config_field_names},
+        )
+    return init_kwargs
 
-    Returns:
-        Decorator function
 
-    """
-
-    def decorator(func: Callable[[], type[Toolkit]]) -> Callable[[], type[Toolkit]]:
-        _TOOL_REGISTRY[name] = func
-        return func
-
-    return decorator
+def _add_worker_context_init_kwargs(
+    tool_class: type[Toolkit],
+    *,
+    init_kwargs: dict[str, object],
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> None:
+    """Inject worker-routing constructor args when a toolkit supports them."""
+    init_signature = inspect.signature(tool_class.__init__)
+    if "worker_scope" in init_signature.parameters:
+        init_kwargs["worker_scope"] = worker_scope
+    if "routing_agent_name" in init_signature.parameters:
+        init_kwargs["routing_agent_name"] = routing_agent_name
 
 
 def _build_tool_instance(
@@ -78,33 +110,61 @@ def _build_tool_instance(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    sandbox_tools_override: list[str] | None = None,
+    worker_tools_override: list[str] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
+    if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
+        worker_scope,
+    ):
+        msg = unsupported_shared_only_integration_message(
+            tool_name,
+            worker_scope,
+            agent_name=routing_agent_name,
+            subject="Tool",
+        )
+        raise ValueError(msg)
+
     tool_class = _TOOL_REGISTRY[tool_name]()
     creds_manager = get_credentials_manager()
-    credentials = creds_manager.load_credentials(tool_name) or {}
+    credentials = (
+        load_scoped_credentials(
+            tool_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=creds_manager,
+        )
+        or {}
+    )
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
+    init_kwargs = _build_tool_config_init_kwargs(
+        metadata,
+        credentials=credentials,
+        tool_init_overrides=safe_tool_init_overrides,
+        runtime_overrides=runtime_overrides,
+    )
+    _add_worker_context_init_kwargs(
+        tool_class,
+        init_kwargs=init_kwargs,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
 
-    init_kwargs = {}
-    if metadata.config_fields:
-        for field in metadata.config_fields:
-            if field.name in credentials:
-                init_kwargs[field.name] = credentials[field.name]
-            if safe_tool_init_overrides and field.name in safe_tool_init_overrides:
-                init_kwargs[field.name] = safe_tool_init_overrides[field.name]
-
-    toolkit = tool_class(**init_kwargs)
+    toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
-        sandbox_tools_override=sandbox_tools_override,
         tool_init_overrides=safe_tool_init_overrides,
+        worker_tools_override=worker_tools_override,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
     )
 
 
@@ -114,7 +174,10 @@ def get_tool_by_name(
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    sandbox_tools_override: list[str] | None = None,
+    worker_tools_override: list[str] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:
@@ -128,7 +191,10 @@ def get_tool_by_name(
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         tool_init_overrides=tool_init_overrides,
-        sandbox_tools_override=sandbox_tools_override,
+        worker_tools_override=worker_tools_override,
+        runtime_overrides=runtime_overrides,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing
@@ -303,16 +369,6 @@ def register_tool_with_metadata(
         return func
 
     return decorator
-
-
-def _get_tool_metadata(name: str) -> ToolMetadata | None:
-    """Get metadata for a tool by name."""
-    return TOOL_METADATA.get(name)
-
-
-def _get_all_tool_metadata() -> dict[str, ToolMetadata]:
-    """Get all tool metadata."""
-    return TOOL_METADATA.copy()
 
 
 def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:

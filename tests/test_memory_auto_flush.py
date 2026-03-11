@@ -11,8 +11,16 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
+    _build_existing_memory_context,
     mark_auto_flush_dirty_session,
     reprioritize_auto_flush_sessions,
+)
+from mindroom.memory.functions import add_agent_memory, append_agent_daily_memory
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
 )
 
 if TYPE_CHECKING:
@@ -78,8 +86,8 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
 
     state_file = storage_path / "memory_flush_state.json"
     payload = state_file.read_text(encoding="utf-8")
-    assert '"general:s1"' in payload
-    assert '"general:s2"' in payload
+    assert '"shared:general:s1"' in payload
+    assert '"shared:general:s2"' in payload
     assert '"priority_boost_at"' in payload
 
 
@@ -99,7 +107,7 @@ def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config)
     )
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert "general:s1" in payload["sessions"]
+    assert "shared:general:s1" in payload["sessions"]
 
 
 def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config) -> None:
@@ -151,7 +159,7 @@ async def test_worker_respects_batch_limits(
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
-        lambda _storage, _agent, _sid: fake_session,
+        lambda _storage, _config, _agent, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -174,6 +182,141 @@ async def test_worker_respects_batch_limits(
     await worker._run_cycle(config)
 
     assert len(writes) == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-scoped flushes should keep daily file memory inside the worker root."""
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.memory.file.path = str(tmp_path / "shared-memory")
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+
+    with tool_execution_identity(alice_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="session-alice",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this worker-isolated detail")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._load_agent_session",
+        lambda _storage, _config, _agent, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+
+    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    await worker._run_cycle(config)
+
+    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    assert worker_key is not None
+    worker_daily_files = list((worker_root_path(tmp_path, worker_key) / "memory_files").rglob("*.md"))
+    assert len(worker_daily_files) == 1
+    assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
+
+    assert not list((tmp_path / "shared-memory").rglob("*.md"))
+    assert not list((tmp_path / "custom-agent-memory").rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
+    tmp_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped flushes should still honor per-agent custom file-memory paths."""
+    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.memory.file.path = str(tmp_path / "shared-memory")
+
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._load_agent_session",
+        lambda _storage, _config, _agent, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+
+    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    wrote_memory = await worker._flush_session(
+        config,
+        agent_name="general",
+        session_id="session-general",
+        worker_key=None,
+    )
+
+    assert wrote_memory is True
+    custom_daily_files = list((tmp_path / "custom-agent-memory" / "memory").rglob("*.md"))
+    assert len(custom_daily_files) == 1
+    assert "important decision" in custom_daily_files[0].read_text(encoding="utf-8")
+    assert not list((tmp_path / "shared-memory").rglob("*.md"))
+    assert not list((tmp_path / "memory_files").rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_existing_memory_context_reads_worker_root_instead_of_shared_custom_path(
+    tmp_path: Path,
+    config: Config,
+) -> None:
+    """Duplicate-avoidance context should read worker-local file memory, not shared custom-path memory."""
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 5
+    config.memory.auto_flush.extractor.include_memory_context.snippet_max_chars = 200
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    assert worker_key is not None
+
+    with tool_execution_identity(alice_identity):
+        await add_agent_memory("Alice isolated memory", "general", tmp_path, config)
+
+    append_agent_daily_memory("Shared leaked memory", "general", tmp_path, config)
+
+    worker_context = await _build_existing_memory_context(
+        agent_name="general",
+        storage_path=worker_root_path(tmp_path, worker_key),
+        config=config,
+        preserve_resolved_storage_path=True,
+    )
+
+    assert "Alice isolated memory" in worker_context
+    assert "Shared leaked memory" not in worker_context
 
 
 async def _fake_extract_memory_summary(**_: object) -> str:
@@ -199,7 +342,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         thread_id="t1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+    def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="important detail")],
@@ -221,7 +364,8 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
 
     worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
 
-    async def _fake_flush(config: Config, *, agent_name: str, session_id: str) -> bool:
+    async def _fake_flush(config: Config, *, agent_name: str, session_id: str, worker_key: str | None) -> bool:
+        assert worker_key is None
         nonlocal session_updated_at
         session_updated_at = 200
         mark_auto_flush_dirty_session(
@@ -238,7 +382,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
+    session_state = payload["sessions"]["shared:general:s1"]
     assert session_state["dirty"] is True
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
@@ -263,7 +407,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         thread_id="t1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str) -> _FakeSession:
+    def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="no durable memory here")],
@@ -289,9 +433,54 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["general:s1"]
+    session_state = payload["sessions"]["shared:general:s1"]
     assert session_state["dirty"] is False
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
     assert session_state["last_session_updated_at"] == 200
     assert append_calls == []
+
+
+def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config) -> None:
+    """Two users with the same session ID should get separate auto-flush entries under worker scope."""
+    config.agents["general"].worker_scope = "user"
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-bob",
+    )
+
+    with tool_execution_identity(alice_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="shared-session-id",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+    with tool_execution_identity(bob_identity):
+        mark_auto_flush_dirty_session(
+            tmp_path,
+            config,
+            agent_name="general",
+            session_id="shared-session-id",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+
+    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    assert len(payload["sessions"]) == 2

@@ -8,13 +8,20 @@ import hmac
 import json
 import os
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
 from mindroom.constants import env_flag
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.tool_system.worker_routing import (
+    SHARED_ONLY_INTEGRATION_NAMES,
+    WorkerScope,
+    get_tool_execution_identity,
+    resolve_worker_key,
+)
 
 if TYPE_CHECKING:
     from agno.tools.function import Function
@@ -26,6 +33,7 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
+_LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
 
 _SANDBOX_RUNNER_MODE = env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
 
@@ -154,7 +162,13 @@ def _filter_internal_credential_keys(credentials: Mapping[str, object]) -> dict[
     return {str(key): value for key, value in credentials.items() if not str(key).startswith("_")}
 
 
-def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> dict[str, object]:
+def _collect_credential_overrides(
+    tool_name: str,
+    function_name: str,
+    *,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> dict[str, object]:
     services = _credential_services_for_call(tool_name, function_name)
     if not services:
         return {}
@@ -162,39 +176,108 @@ def _collect_shared_credential_overrides(tool_name: str, function_name: str) -> 
     credentials_manager = get_credentials_manager()
     merged_overrides: dict[str, object] = {}
     for service in services:
-        credentials = credentials_manager.load_credentials(service)
-        if not isinstance(credentials, Mapping):
-            continue
-        merged_overrides.update(_filter_internal_credential_keys(credentials))
+        credentials = load_scoped_credentials(
+            service,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            credentials_manager=credentials_manager,
+        )
+        if isinstance(credentials, Mapping):
+            merged_overrides.update(_filter_internal_credential_keys(credentials))
     return merged_overrides
+
+
+def _create_credential_lease(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    headers: Mapping[str, str],
+    tool_name: str,
+    function_name: str,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> str | None:
+    credential_overrides = _collect_credential_overrides(
+        tool_name,
+        function_name,
+        worker_scope=worker_scope,
+        routing_agent_name=routing_agent_name,
+    )
+    if not credential_overrides:
+        return None
+
+    lease_payload = {
+        "tool_name": tool_name,
+        "function_name": function_name,
+        "credential_overrides": to_json_compatible(credential_overrides),
+        "ttl_seconds": _CREDENTIAL_LEASE_TTL,
+        "max_uses": 1,
+    }
+    response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
+    response.raise_for_status()
+    lease_data = response.json()
+    if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
+        msg = "Sandbox proxy lease response is missing lease_id."
+        raise TypeError(msg)
+    return lease_data["lease_id"]
+
+
+def _build_worker_routing_payload(
+    *,
+    tool_name: str,
+    function_name: str,
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+) -> dict[str, object]:
+    if worker_scope is None:
+        return {}
+
+    execution_identity = get_tool_execution_identity()
+    if execution_identity is None:
+        msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
+        raise RuntimeError(msg)
+
+    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    if worker_key is None:
+        msg = (
+            f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+            "could not be resolved from the current execution identity."
+        )
+        raise RuntimeError(msg)
+
+    return {
+        "worker_scope": worker_scope,
+        "routing_agent_name": routing_agent_name,
+        "worker_key": worker_key,
+        "execution_identity": to_json_compatible(asdict(execution_identity)),
+    }
 
 
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
-    sandbox_tools_override: list[str] | None = None,
+    worker_tools_override: list[str] | None = None,
 ) -> bool:
     """Return whether the given tool should execute through the sandbox proxy.
 
-    When *sandbox_tools_override* is not ``None``, it takes precedence over the
-    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic.  An empty list
-    means "sandbox nothing for this agent".
+    When *worker_tools_override* is not ``None``, it takes precedence over the
+    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
+    means "route nothing through the proxy for this agent".
     """
-    if _SANDBOX_RUNNER_MODE:
+    if _SANDBOX_RUNNER_MODE or _PROXY_URL is None or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
-    if _PROXY_URL is None:
-        return False
-
-    if sandbox_tools_override is not None:
-        return tool_name in sandbox_tools_override
+    if worker_tools_override is not None:
+        return tool_name in worker_tools_override
 
     if _EXECUTION_MODE in {"off", "local", "disabled"}:
         return False
-    if _EXECUTION_MODE in {"all", "sandbox_all"}:
-        return True
 
-    return _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+    enabled = _EXECUTION_MODE in {"all", "sandbox_all"}
+    if not enabled:
+        enabled = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+
+    return enabled
 
 
 def _call_proxy_sync(
@@ -204,6 +287,8 @@ def _call_proxy_sync(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     tool_init_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> object:
     if _PROXY_TOKEN is None:
         msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
@@ -214,25 +299,16 @@ def _call_proxy_sync(
     headers = {_SANDBOX_PROXY_TOKEN_HEADER: _PROXY_TOKEN}
     base_url = _PROXY_URL
 
-    credential_overrides = _collect_shared_credential_overrides(tool_name, function_name)
     with httpx.Client(timeout=_PROXY_TIMEOUT) as client:
-        lease_id: str | None = None
-        if credential_overrides:
-            lease_payload = {
-                "tool_name": tool_name,
-                "function_name": function_name,
-                "credential_overrides": to_json_compatible(credential_overrides),
-                "ttl_seconds": _CREDENTIAL_LEASE_TTL,
-                "max_uses": 1,
-            }
-            response = client.post(f"{base_url}{_SANDBOX_PROXY_LEASE_PATH}", json=lease_payload, headers=headers)
-            response.raise_for_status()
-            lease_data = response.json()
-            if not isinstance(lease_data, Mapping) or not isinstance(lease_data.get("lease_id"), str):
-                msg = "Sandbox proxy lease response is missing lease_id."
-                raise RuntimeError(msg)
-            lease_id = lease_data["lease_id"]
-
+        lease_id = _create_credential_lease(
+            client,
+            base_url=base_url,
+            headers=headers,
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+        )
         payload: dict[str, object] = {
             "tool_name": tool_name,
             "function_name": function_name,
@@ -241,6 +317,14 @@ def _call_proxy_sync(
         }
         if tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(tool_init_overrides)
+        payload.update(
+            _build_worker_routing_payload(
+                tool_name=tool_name,
+                function_name=function_name,
+                worker_scope=worker_scope,
+                routing_agent_name=routing_agent_name,
+            ),
+        )
         if lease_id is not None:
             payload["lease_id"] = lease_id
 
@@ -263,6 +347,8 @@ def _wrap_sync_function(
     function_name: str,
     *,
     tool_init_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -275,6 +361,8 @@ def _wrap_sync_function(
             args=args,
             kwargs=dict(kwargs),
             tool_init_overrides=tool_init_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -287,6 +375,8 @@ def _wrap_async_function(
     function_name: str,
     *,
     tool_init_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -300,6 +390,8 @@ def _wrap_async_function(
             args=args,
             kwargs=dict(kwargs),
             tool_init_overrides=tool_init_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -310,15 +402,17 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
-    sandbox_tools_override: list[str] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    worker_tools_override: list[str] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
     """
-    if not _sandbox_proxy_enabled_for_tool(tool_name, sandbox_tools_override=sandbox_tools_override):
+    if not _sandbox_proxy_enabled_for_tool(tool_name, worker_tools_override=worker_tools_override):
         return toolkit
 
     toolkit.functions = {
@@ -327,6 +421,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             tool_name,
             function_name,
             tool_init_overrides=tool_init_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
         for function_name, function in toolkit.functions.items()
     }
@@ -336,6 +432,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             tool_name,
             function_name,
             tool_init_overrides=tool_init_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
         for function_name, function in toolkit.async_functions.items()
     }

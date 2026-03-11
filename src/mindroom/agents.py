@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
+from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -288,18 +290,61 @@ def _resolve_agent_learning(
     )
 
 
-def create_session_storage(agent_name: str, storage_path: Path) -> SqliteDb:
+def create_session_storage(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> SqliteDb:
     """Create persistent session storage for an agent."""
-    sessions_dir = storage_path / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=f"{agent_name}_sessions", db_file=str(sessions_dir / f"{agent_name}.db"))
+    return _create_agent_state_db(
+        agent_name,
+        storage_path,
+        config,
+        subdir="sessions",
+        session_table=f"{agent_name}_sessions",
+        execution_identity=execution_identity,
+    )
 
 
-def _create_learning_storage(agent_name: str, storage_path: Path) -> SqliteDb:
+def _create_learning_storage(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> SqliteDb:
     """Create persistent learning storage for an agent."""
-    learning_dir = storage_path / "learning"
-    learning_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=f"{agent_name}_learning_sessions", db_file=str(learning_dir / f"{agent_name}.db"))
+    return _create_agent_state_db(
+        agent_name,
+        storage_path,
+        config,
+        subdir="learning",
+        session_table=f"{agent_name}_learning_sessions",
+        execution_identity=execution_identity,
+    )
+
+
+def _create_agent_state_db(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    subdir: str,
+    session_table: str,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> SqliteDb:
+    """Create a scope-aware SQLite database for one agent state category."""
+    state_storage_path = resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+        config=config,
+        execution_identity=execution_identity,
+    )
+    db_dir = state_storage_path / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
 
 
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
@@ -461,8 +506,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     load_plugins(config)
 
     tool_names = config.get_agent_tools(agent_name)
-    sandbox_tools = config.get_agent_sandbox_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_scope = config.get_agent_worker_scope(agent_name)
     workspace_path = _resolve_agent_workspace_path(agent_config)
+    memory_storage_path = resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=resolved_storage_path,
+        config=config,
+    )
 
     # Create tools
     tools: list[Toolkit] = []
@@ -474,7 +525,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(
                     MemoryTools(
                         agent_name=agent_name,
-                        storage_path=resolved_storage_path,
+                        storage_path=memory_storage_path,
                         config=config,
                     ),
                 )
@@ -510,7 +561,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                     get_tool_by_name(
                         tool_name,
                         tool_init_overrides=_tool_init_overrides(tool_name, workspace_path=workspace_path),
-                        sandbox_tools_override=sandbox_tools,
+                        worker_tools_override=worker_tools,
+                        worker_scope=worker_scope,
+                        routing_agent_name=agent_name,
                     ),
                 )
         except (ValueError, ImportError) as e:
@@ -539,9 +592,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
         tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 
-    storage = create_session_storage(agent_name, resolved_storage_path)
+    storage = create_session_storage(agent_name, resolved_storage_path, config)
     learning_storage = (
-        _create_learning_storage(agent_name, resolved_storage_path)
+        _create_learning_storage(agent_name, resolved_storage_path, config)
         if _is_learning_enabled(agent_config, defaults)
         else None
     )

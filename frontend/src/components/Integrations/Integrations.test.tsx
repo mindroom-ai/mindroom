@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { Integrations } from './Integrations';
+import { useConfigStore } from '@/store/configStore';
 
 // Mock hooks
 const mockTools = [
@@ -58,6 +59,7 @@ vi.mock('./iconMapping', () => ({
 // Mock API base URL
 vi.mock('@/lib/api', () => ({
   API_BASE_URL: 'http://localhost:8080',
+  withAgentName: (url: string) => url,
 }));
 
 // Mock EnhancedConfigDialog
@@ -86,7 +88,6 @@ vi.mock('./integrations/index', () => ({
         },
         onAction: vi.fn(),
         ConfigComponent: () => <div>Google Config Component</div>,
-        checkConnection: vi.fn().mockResolvedValue(false),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
     },
@@ -104,7 +105,6 @@ vi.mock('./integrations/index', () => ({
         },
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
-        checkConnection: vi.fn().mockResolvedValue(false),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
     },
@@ -123,7 +123,6 @@ vi.mock('./integrations/index', () => ({
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
         ConfigComponent: () => <div>Plex Config Component</div>,
-        checkConnection: vi.fn().mockResolvedValue(true),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
     },
@@ -143,7 +142,6 @@ vi.mock('./integrations/index', () => ({
         },
         onAction: vi.fn(),
         ConfigComponent: () => <div>Google Config Component</div>,
-        checkConnection: vi.fn().mockResolvedValue(false),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
     }),
@@ -161,7 +159,6 @@ vi.mock('./integrations/index', () => ({
         },
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
-        checkConnection: vi.fn().mockResolvedValue(false),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
     }),
@@ -180,7 +177,6 @@ vi.mock('./integrations/index', () => ({
         onAction: vi.fn(),
         onDisconnect: vi.fn(),
         ConfigComponent: () => <div>Plex Config Component</div>,
-        checkConnection: vi.fn().mockResolvedValue(true),
       }),
       loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
     }),
@@ -191,6 +187,11 @@ describe('Integrations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockToast.mockReset();
+    useConfigStore.setState({ agents: [] });
+    Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
+      configurable: true,
+      value: () => false,
+    });
   });
 
   it('should render integrations list', async () => {
@@ -399,6 +400,93 @@ describe('Integrations', () => {
           description: 'Plex has been disconnected.',
         });
       });
+    }
+  });
+
+  it('lists only explicitly worker-scoped agents in the scope selector', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'general',
+          display_name: 'Unscoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: null,
+        },
+        {
+          id: 'code',
+          display_name: 'Scoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: 'shared',
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Unscoped Agent')).not.toBeInTheDocument();
+  });
+
+  it('hides shared-only integrations for isolating worker scopes', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'code',
+          display_name: 'Scoped Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: 'user',
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+    fireEvent.keyDown(combobox, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Scoped Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/dashboard credential setup, editing, and disconnect are only supported/i)
+      ).toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByText(
+        /google services, home assistant, spotify, gmail, google calendar, and google sheets/i
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText('worker_scope=shared', { selector: 'code' })).toBeInTheDocument();
+    expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
+    expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
+    expect(screen.queryByText('Weather')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /shared-only config/i })).toHaveLength(2);
+    for (const button of screen.getAllByRole('button', { name: /shared-only config/i })) {
+      expect(button).toBeDisabled();
     }
   });
 });

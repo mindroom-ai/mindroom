@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,12 +24,30 @@ __all__ = [
 class FakeCredentialsManager:
     """Stub credentials manager for tests that need credential lookup."""
 
-    def __init__(self, credentials_by_service: dict[str, dict[str, object]]) -> None:
+    def __init__(
+        self,
+        credentials_by_service: dict[str, dict[str, object]],
+        worker_managers: dict[str, "FakeCredentialsManager"] | None = None,
+        *,
+        storage_root: Path | None = None,
+    ) -> None:
         self._credentials_by_service = credentials_by_service
+        self._worker_managers = worker_managers or {}
+        self.storage_root = storage_root or Path("/var/empty/mindroom-fake-storage")
 
     def load_credentials(self, service: str) -> dict[str, object]:
         """Return stored credentials for *service*, or empty dict."""
         return self._credentials_by_service.get(service, {})
+
+    def for_worker(self, worker_key: str) -> "FakeCredentialsManager":
+        """Return a worker-scoped credentials manager."""
+        return self._worker_managers.get(
+            worker_key,
+            FakeCredentialsManager(
+                {},
+                storage_root=self.storage_root / "workers" / worker_key,
+            ),
+        )
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, NoReturn
+from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
@@ -11,7 +13,28 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
 from mindroom.api import main
+from mindroom.config.main import Config
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+
+
+def _config_with_worker_scope(worker_scope: str | None) -> Config:
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "role": "test",
+                    "tools": ["homeassistant"],
+                    "instructions": ["hi"],
+                    "rooms": ["lobby"],
+                },
+            },
+            "defaults": {"markdown": True},
+        },
+    )
+    config.agents["general"].worker_scope = worker_scope
+    return config
 
 
 def test_init_supabase_auth_returns_none_without_credentials() -> None:
@@ -335,6 +358,246 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "description" in first_tool
     assert "category" in first_tool
     assert "icon_color" in first_tool  # New field we added
+
+
+def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(test_client: TestClient) -> None:
+    """Shared-only integrations should be hidden for isolating worker scopes."""
+    config = _config_with_worker_scope("user")
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert "homeassistant" not in tools_by_name
+    assert "gmail" not in tools_by_name
+    assert "spotify" not in tools_by_name
+    assert "calculator" in tools_by_name
+
+
+def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
+    """Google dashboard actions should reject unsupported worker scopes."""
+    config = _config_with_worker_scope("user")
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        response = test_client.post("/api/google/disconnect?agent_name=general")
+
+    assert response.status_code == 400
+    assert "worker_scope=user" in response.json()["detail"]
+
+
+def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client: TestClient) -> None:
+    """Home Assistant OAuth should reject unsupported worker scopes."""
+    config = _config_with_worker_scope("user")
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        response = test_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "https://ha.example.com",
+                "client_id": "client-id",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "worker_scope=user" in response.json()["detail"]
+
+
+def test_google_connect_uses_pending_oauth_state(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google connect should issue an opaque server-bound state token."""
+    config = _config_with_worker_scope("shared")
+    issued_state: dict[str, str] = {}
+
+    class _FakeFlow:
+        def authorization_url(
+            self,
+            *,
+            access_type: str,
+            include_granted_scopes: str,
+            prompt: str,
+            state: str,
+        ) -> tuple[str, str]:
+            assert access_type == "offline"
+            assert include_granted_scopes == "true"
+            assert prompt == "consent"
+            issued_state["state"] = state
+            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
+
+    class _FakeFlowFactory:
+        @staticmethod
+        def from_client_config(
+            client_config: object,
+            *,
+            scopes: list[str],
+            redirect_uri: str,
+        ) -> _FakeFlow:
+            assert client_config
+            assert scopes
+            assert redirect_uri
+            return _FakeFlow()
+
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._get_oauth_credentials",
+        lambda: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+    )
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._ensure_google_packages",
+        lambda: (object, object, _FakeFlowFactory),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post("/api/google/connect?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
+    assert issued_state["state"]
+    assert issued_state["state"] != "general"
+
+
+def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
+    """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
+    config = _config_with_worker_scope("shared")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "homeassistant.local:8123",
+                "client_id": "client-id",
+            },
+        )
+
+    assert response.status_code == 200
+    auth_url = response.json()["auth_url"]
+    parsed = urlparse(auth_url)
+    params = parse_qs(parsed.query)
+    assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == "http://homeassistant.local:8123/auth/authorize"
+    assert params["state"][0]
+    assert params["state"][0] != "general"
+    assert "agent_name=general" not in params["redirect_uri"][0]
+
+
+def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
+    api_key_client: TestClient,
+) -> None:
+    """Home Assistant OAuth should save only the final token payload, not temp callback state."""
+    config = _config_with_worker_scope("shared")
+    target = MagicMock()
+    target.target_manager = MagicMock()
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    token_response = MagicMock()
+    token_response.status_code = 200
+    token_response.json.return_value = {
+        "access_token": "ha-access",
+        "refresh_token": "ha-refresh",
+        "expires_in": 3600,
+    }
+    async_client = MagicMock()
+    async_client.__aenter__.return_value.post.return_value = token_response
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
+        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
+    ):
+        connect_response = api_key_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general",
+            json={
+                "instance_url": "homeassistant.local:8123",
+                "client_id": "client-id",
+            },
+        )
+        assert connect_response.status_code == 200
+        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
+
+        callback_response = api_key_client.get(
+            f"/api/homeassistant/callback?code=test-code&state={state}",
+            follow_redirects=False,
+        )
+
+    assert callback_response.status_code in {302, 307}
+    async_client.__aenter__.return_value.post.assert_called_once_with(
+        "http://homeassistant.local:8123/auth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": "test-code",
+            "client_id": "client-id",
+        },
+        timeout=10.0,
+    )
+    target.target_manager.save_credentials.assert_called_once_with(
+        "homeassistant",
+        {
+            "instance_url": "http://homeassistant.local:8123",
+            "client_id": "client-id",
+            "access_token": "ha-access",
+            "refresh_token": "ha-refresh",
+            "expires_in": 3600,
+        },
+    )
+
+
+def test_spotify_connect_uses_pending_oauth_state(
+    api_key_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spotify connect should issue an opaque server-bound state token."""
+    config = _config_with_worker_scope("shared")
+    issued_state: dict[str, str] = {}
+
+    class _FakeSpotifyOAuth:
+        def get_authorize_url(self, state: str | None = None) -> str:
+            issued_state["state"] = state or ""
+            return "https://accounts.spotify.test/authorize"
+
+    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "client-secret")
+
+    def _spotify_oauth_factory(**_kwargs: object) -> _FakeSpotifyOAuth:
+        return _FakeSpotifyOAuth()
+
+    monkeypatch.setattr(
+        "mindroom.api.integrations._ensure_spotify_packages",
+        lambda: (object, _spotify_oauth_factory),
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.spotify.test/authorize"
+    assert issued_state["state"]
+    assert issued_state["state"] != "general"
+
+
+def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
+    """Spotify dashboard status should reject unsupported worker scopes."""
+    config = _config_with_worker_scope("user")
+
+    with (
+        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        response = test_client.get("/api/integrations/spotify/status?agent_name=general")
+
+    assert response.status_code == 400
+    assert "worker_scope=user" in response.json()["detail"]
 
 
 def test_get_tools_includes_openclaw_compat_metadata(test_client: TestClient) -> None:
@@ -871,18 +1134,22 @@ def test_api_key_authenticated_teams_access(api_key_client: TestClient) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/google/callback?code=test-code",
-        "/api/homeassistant/callback?code=test-code",
-        "/api/integrations/spotify/callback?code=test-code",
+        "/api/google/callback?code=test-code&state=missing",
+        "/api/homeassistant/callback?code=test-code&state=missing",
+        "/api/integrations/spotify/callback?code=test-code&state=missing",
     ],
 )
 def test_api_key_keeps_oauth_callbacks_open(
     api_key_client: TestClient,
     path: str,
 ) -> None:
-    """OAuth callbacks must remain reachable without Authorization headers."""
+    """OAuth callbacks should stay reachable via the dashboard auth cookie."""
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
     response = api_key_client.get(path)
-    assert response.status_code != 401
+    assert response.status_code == 400
+    assert "OAuth state is invalid or expired" in response.json()["detail"]
 
 
 def _set_platform_auth(

@@ -319,7 +319,7 @@ describe('AgentEditor', () => {
     render(<AgentEditor />);
 
     // Find the calculator checkbox (should be checked) — use exact name to
-    // distinguish from the sandbox-tools checkboxes which have "sandbox ..." labels
+    // distinguish from the worker-tools checkboxes which have "worker ..." labels
     const calculatorCheckbox = screen.getByRole('checkbox', { name: 'Calculator' });
     expect(calculatorCheckbox).toBeChecked();
 
@@ -560,37 +560,37 @@ describe('AgentEditor', () => {
     );
   });
 
-  describe('sandbox_tools inheritance', () => {
+  describe('worker_tools inheritance', () => {
     const twoToolAgent = { ...mockAgent, tools: ['calculator', 'file'] };
 
     it('shows inherited defaults as checked with (default) label', () => {
       (useConfigStore as any).mockReturnValue({
         ...mockStore,
-        agents: [{ ...twoToolAgent, sandbox_tools: undefined }],
+        agents: [{ ...twoToolAgent, worker_tools: undefined }],
         config: {
           ...mockConfig,
-          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+          defaults: { ...mockConfig.defaults, worker_tools: ['calculator'] },
         },
         rooms: mockStore.rooms,
       });
 
       render(<AgentEditor />);
 
-      const sandboxCalc = screen.getByRole('checkbox', { name: 'sandbox calculator' });
-      expect(sandboxCalc).toBeChecked();
+      const workerCalc = screen.getByRole('checkbox', { name: 'worker calculator' });
+      expect(workerCalc).toBeChecked();
       expect(screen.getByText('calculator (default)')).toBeTruthy();
 
-      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
-      expect(sandboxFile).not.toBeChecked();
+      const workerFile = screen.getByRole('checkbox', { name: 'worker file' });
+      expect(workerFile).not.toBeChecked();
     });
 
     it('seeds from defaults on first toggle so other defaults are preserved', () => {
       (useConfigStore as any).mockReturnValue({
         ...mockStore,
-        agents: [{ ...twoToolAgent, sandbox_tools: undefined }],
+        agents: [{ ...twoToolAgent, worker_tools: undefined }],
         config: {
           ...mockConfig,
-          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+          defaults: { ...mockConfig.defaults, worker_tools: ['calculator'] },
         },
         rooms: mockStore.rooms,
       });
@@ -598,13 +598,13 @@ describe('AgentEditor', () => {
       render(<AgentEditor />);
 
       // Toggle file ON — should seed from defaults first, so calculator stays
-      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
-      fireEvent.click(sandboxFile);
+      const workerFile = screen.getByRole('checkbox', { name: 'worker file' });
+      fireEvent.click(workerFile);
 
       expect(mockStore.updateAgent).toHaveBeenCalledWith(
         'test_agent',
         expect.objectContaining({
-          sandbox_tools: ['calculator', 'file'],
+          worker_tools: ['calculator', 'file'],
         })
       );
     });
@@ -612,23 +612,23 @@ describe('AgentEditor', () => {
     it('renders empty list as explicit disable (all unchecked, no default labels)', () => {
       (useConfigStore as any).mockReturnValue({
         ...mockStore,
-        agents: [{ ...twoToolAgent, sandbox_tools: [] }],
+        agents: [{ ...twoToolAgent, worker_tools: [] }],
         config: {
           ...mockConfig,
-          defaults: { ...mockConfig.defaults, sandbox_tools: ['calculator'] },
+          defaults: { ...mockConfig.defaults, worker_tools: ['calculator'] },
         },
         rooms: mockStore.rooms,
       });
 
       render(<AgentEditor />);
 
-      const sandboxCalc = screen.getByRole('checkbox', { name: 'sandbox calculator' });
-      expect(sandboxCalc).not.toBeChecked();
+      const workerCalc = screen.getByRole('checkbox', { name: 'worker calculator' });
+      expect(workerCalc).not.toBeChecked();
 
-      const sandboxFile = screen.getByRole('checkbox', { name: 'sandbox file' });
-      expect(sandboxFile).not.toBeChecked();
+      const workerFile = screen.getByRole('checkbox', { name: 'worker file' });
+      expect(workerFile).not.toBeChecked();
 
-      // No sandbox tool label should show "(default)"
+      // No worker tool label should show "(default)"
       expect(screen.queryByText('calculator (default)')).toBeNull();
       expect(screen.queryByText('file (default)')).toBeNull();
     });

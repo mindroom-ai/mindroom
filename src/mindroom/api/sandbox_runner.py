@@ -7,12 +7,15 @@ import inspect
 import io
 import os
 import secrets
+import site
 import subprocess
 import sys
 import threading
 import time
+import venv
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -28,10 +31,15 @@ from mindroom.tool_system.metadata import (
     sanitize_tool_init_overrides,
 )
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    tool_execution_identity,
+    worker_dir_name,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools.toolkit import Toolkit
 
@@ -43,21 +51,21 @@ _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
+_RUNNER_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_WORKER_ROOT"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 
-def _load_config_from_env() -> tuple[Config | None, Path]:
+def _load_config_from_env() -> tuple[Config | None, Path | None]:
     """Read runner config path from environment variables."""
     from mindroom.config.main import Config as _Config  # noqa: PLC0415
     from mindroom.constants import find_config  # noqa: PLC0415
 
     config_path = find_config()
-    config: _Config | None = None
     if config_path.exists():
-        config = _Config.from_yaml(config_path)
-    return config, config_path
+        return _Config.from_yaml(config_path), config_path
+    return None, None
 
 
 def ensure_registry_loaded_with_config() -> None:
@@ -82,10 +90,22 @@ class _CredentialLease:
     uses_remaining: int
 
 
+@dataclass(frozen=True)
+class _WorkerStatePaths:
+    """Filesystem layout for one persistent worker scope."""
+
+    root: Path
+    workspace: Path
+    venv_dir: Path
+    cache_dir: Path
+    storage_dir: Path
+
+
 # NOTE: In-process dict — leases are not shared across multiple uvicorn workers.
 # The sandbox runner must be deployed with a single worker for lease correctness.
 _LEASES_BY_ID: dict[str, _CredentialLease] = {}
 _LEASES_LOCK = threading.Lock()
+_WORKER_INIT_LOCK = threading.Lock()
 
 
 class SandboxRunnerExecuteRequest(BaseModel):
@@ -101,6 +121,10 @@ class SandboxRunnerExecuteRequest(BaseModel):
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     lease_id: str | None = None
+    worker_key: str | None = None
+    worker_scope: WorkerScope | None = None
+    routing_agent_name: str | None = None
+    execution_identity: dict[str, Any] = Field(default_factory=dict)
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -157,6 +181,9 @@ def _resolve_entrypoint(
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
+    runtime_overrides: dict[str, object] | None = None,
+    worker_scope: WorkerScope | None = None,
+    routing_agent_name: str | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config()
     try:
@@ -165,6 +192,9 @@ def _resolve_entrypoint(
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             tool_init_overrides=tool_init_overrides,
+            runtime_overrides=runtime_overrides,
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
         )
     except ToolInitOverrideError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -243,48 +273,146 @@ def _runner_subprocess_timeout_seconds() -> float:
     return max(1.0, timeout)
 
 
-async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    toolkit, entrypoint = _resolve_entrypoint(
-        tool_name=request.tool_name,
-        function_name=request.function_name,
-        credential_overrides=request.credential_overrides or None,
-        tool_init_overrides=request.tool_init_overrides or None,
+def _runner_worker_root() -> Path:
+    configured_root = os.getenv(_RUNNER_WORKER_ROOT_ENV)
+    if configured_root:
+        return Path(configured_root).expanduser().resolve()
+
+    storage_path = os.getenv("MINDROOM_STORAGE_PATH", "/app/workspace/.mindroom")
+    return Path(storage_path).expanduser().resolve() / "workers"
+
+
+def _worker_state_paths(worker_key: str) -> _WorkerStatePaths:
+    worker_root = _runner_worker_root() / worker_dir_name(worker_key)
+    return _WorkerStatePaths(
+        root=worker_root,
+        workspace=worker_root / "workspace",
+        venv_dir=worker_root / "venv",
+        cache_dir=worker_root / "cache",
+        storage_dir=worker_root,
     )
 
-    try:
-        if toolkit.requires_connect:
-            await _maybe_await(toolkit.connect())
-            try:
+
+def _ensure_worker_state(paths: _WorkerStatePaths) -> None:
+    with _WORKER_INIT_LOCK:
+        paths.workspace.mkdir(parents=True, exist_ok=True)
+        paths.cache_dir.mkdir(parents=True, exist_ok=True)
+        if (paths.venv_dir / "bin" / "python").exists():
+            return
+
+        builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
+        builder.create(paths.venv_dir)
+
+
+def _project_src_path() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _current_runtime_site_packages() -> list[str]:
+    site_package_paths = list(site.getsitepackages())
+    user_site = site.getusersitepackages()
+    if isinstance(user_site, str):
+        site_package_paths.append(user_site)
+
+    discovered_paths: list[str] = []
+    for path_text in site_package_paths:
+        path = Path(path_text).expanduser()
+        if path.is_dir():
+            discovered_paths.append(str(path.resolve()))
+
+    return list(dict.fromkeys(discovered_paths))
+
+
+def _worker_subprocess_env(paths: _WorkerStatePaths) -> dict[str, str]:
+    env = os.environ.copy()
+    env["HOME"] = str(paths.root)
+    env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
+    env["XDG_CACHE_HOME"] = str(paths.cache_dir)
+    env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
+    env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
+    env["PYTHONPYCACHEPREFIX"] = str(paths.cache_dir / "pycache")
+    env["VIRTUAL_ENV"] = str(paths.venv_dir)
+
+    current_path = env.get("PATH", "")
+    env["PATH"] = f"{paths.venv_dir / 'bin'}:{current_path}" if current_path else str(paths.venv_dir / "bin")
+
+    project_src = str(_project_src_path())
+    python_path_parts = [project_src, *_current_runtime_site_packages()]
+    existing_python_path = env.get("PYTHONPATH", "")
+    if existing_python_path:
+        python_path_parts.append(existing_python_path)
+    env["PYTHONPATH"] = ":".join(python_path_parts)
+    return env
+
+
+async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+    runtime_overrides: dict[str, object] | None = None
+    if request.worker_key is not None:
+        paths = _worker_state_paths(request.worker_key)
+        _ensure_worker_state(paths)
+        runtime_overrides = {"base_dir": paths.workspace}
+
+    execution_identity: ToolExecutionIdentity | None = None
+    if request.execution_identity:
+        execution_identity = ToolExecutionIdentity(**request.execution_identity)
+
+    with tool_execution_identity(execution_identity):
+        toolkit, entrypoint = _resolve_entrypoint(
+            tool_name=request.tool_name,
+            function_name=request.function_name,
+            credential_overrides=request.credential_overrides or None,
+            tool_init_overrides=request.tool_init_overrides or None,
+            runtime_overrides=runtime_overrides,
+            worker_scope=request.worker_scope,
+            routing_agent_name=request.routing_agent_name,
+        )
+
+        try:
+            if toolkit.requires_connect:
+                await _maybe_await(toolkit.connect())
+                try:
+                    result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
+                finally:
+                    await _maybe_await(toolkit.close())
+            else:
                 result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
-            finally:
-                await _maybe_await(toolkit.close())
-        else:
-            result = await _maybe_await(entrypoint(*request.args, **request.kwargs))
-    except Exception as exc:
-        logger.opt(exception=True).warning(
-            f"Sandbox tool execution failed: {request.tool_name}.{request.function_name}",
-        )
-        return SandboxRunnerExecuteResponse(
-            ok=False,
-            error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
-        )
+        except Exception as exc:
+            logger.opt(exception=True).warning(
+                f"Sandbox tool execution failed: {request.tool_name}.{request.function_name}",
+            )
+            return SandboxRunnerExecuteResponse(
+                ok=False,
+                error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
+            )
 
     return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
 
 
-def _subprocess_worker_command() -> list[str]:
-    return [sys.executable, "-m", "mindroom.api.sandbox_runner", _SUBPROCESS_WORKER_ARG]
+def _subprocess_worker_command(python_executable: str | None = None) -> list[str]:
+    return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", _SUBPROCESS_WORKER_ARG]
 
 
 def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+    subprocess_env: dict[str, str] | None = None
+    python_executable: str | None = None
+    cwd: str | None = None
+    if request.worker_key is not None:
+        paths = _worker_state_paths(request.worker_key)
+        _ensure_worker_state(paths)
+        python_executable = str(paths.venv_dir / "bin" / "python")
+        subprocess_env = _worker_subprocess_env(paths)
+        cwd = str(paths.workspace)
+
     try:
         completed = subprocess.run(
-            _subprocess_worker_command(),
+            _subprocess_worker_command(python_executable),
             input=request.model_dump_json(),
             capture_output=True,
             text=True,
             timeout=_runner_subprocess_timeout_seconds(),
             check=False,
+            env=subprocess_env,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         return SandboxRunnerExecuteResponse(ok=False, error="Sandbox subprocess timed out.")
@@ -399,7 +527,7 @@ async def execute_tool_call(
         )
 
     request.credential_overrides = credential_overrides
-    if _runner_uses_subprocess():
+    if request.worker_key is not None or _runner_uses_subprocess():
         return await _execute_request_subprocess(request)
     return await _execute_request_inprocess(request)
 

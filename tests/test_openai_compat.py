@@ -15,6 +15,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from mindroom.api.openai_compat import (
+    _build_tool_execution_identity,
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
@@ -24,6 +25,7 @@ from mindroom.api.openai_compat import (
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 
 @pytest.fixture
@@ -116,8 +118,62 @@ class TestListModels:
         general = next(m for m in data["data"] if m["id"] == "general")
         assert general["name"] == "GeneralAgent"
         assert general["description"] == "General-purpose assistant"
-        assert general["owned_by"] == "mindroom"
-        assert general["object"] == "model"
+
+    def test_hides_models_with_non_shared_worker_scopes(self, test_config: Config) -> None:
+        """Agents and teams that require non-shared worker scopes should not be advertised on /v1."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["code"].worker_scope = "user"
+        test_config.teams = {
+            "dev-team": TeamConfig(
+                display_name="Dev Team",
+                role="Engineering helpers",
+                agents=["general", "code"],
+                mode="coordinate",
+            ),
+        }
+
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "general" in model_ids
+        assert "code" not in model_ids
+        assert "team/dev-team" not in model_ids
+
+    def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
+        """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.agents["research"].worker_scope = "room_thread"
+
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "auto" not in model_ids
 
     def test_empty_role_is_none(self, app_client: TestClient) -> None:
         """Agents with empty role have description=None."""
@@ -143,8 +199,8 @@ class TestListModels:
         assert first["name"] == "Auto"
         assert "routes" in first["description"].lower() or "auto" in first["description"].lower()
 
-    def test_empty_agents_still_has_auto(self) -> None:
-        """With no agents configured, only auto is listed."""
+    def test_empty_agents_list_is_empty(self) -> None:
+        """With no agents configured, /v1/models should not advertise auto-routing."""
         from fastapi import FastAPI  # noqa: PLC0415
 
         from mindroom.api.openai_compat import router  # noqa: PLC0415
@@ -165,8 +221,7 @@ class TestListModels:
             response = client.get("/v1/models")
             assert response.status_code == 200
             data = response.json()["data"]
-            assert len(data) == 1
-            assert data[0]["id"] == "auto"
+            assert data == []
 
 
 class TestChatCompletions:
@@ -242,6 +297,129 @@ class TestChatCompletions:
             )
 
             assert mock_ai.call_args.kwargs["user_id"] == "user-123"
+
+    def test_request_body_user_is_not_used_for_execution_identity(self, app_client: TestClient) -> None:
+        """The request-body user field must not become a trusted worker-routing identity."""
+        seen_requester_ids: list[str | None] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            identity = get_tool_execution_identity()
+            seen_requester_ids.append(identity.requester_id if identity is not None else None)
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "user": "spoofed-user",
+                },
+            )
+
+        assert response.status_code == 200
+        assert seen_requester_ids == [None]
+
+    def test_openai_execution_identity_ignores_request_user(self) -> None:
+        """OpenAI-compatible execution identity should not trust the request-body user."""
+        identity = _build_tool_execution_identity(agent_name="general", session_id="session-123")
+        assert identity.requester_id is None
+
+    def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
+        """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "unscoped agents and worker_scope=shared" in error["message"]
+        assert "general" in error["message"]
+
+    def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
+        """Team requests should fail on /v1 when any member requires a non-shared worker scope."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.teams = {
+            "dev-team": TeamConfig(
+                display_name="Dev Team",
+                role="Engineering helpers",
+                agents=["general", "code"],
+                mode="coordinate",
+            ),
+        }
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/dev-team",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "unscoped agents and worker_scope=shared" in error["message"]
+        assert "code" in error["message"]
+
+    def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
+        """Auto-routing should fail when all agents require unsupported worker scopes."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["general"].worker_scope = "user"
+        test_config.agents["code"].worker_scope = "user_agent"
+        test_config.agents["research"].worker_scope = "room_thread"
+        app = FastAPI()
+        app.include_router(router)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "Route me"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["message"] == "No OpenAI-compatible agents configured for auto-routing"
 
     def test_explicit_session_id_header_is_stable_across_turns(self, app_client: TestClient) -> None:
         """Repeated requests with the same X-Session-Id should reuse one derived session ID."""
@@ -520,6 +698,35 @@ class TestStreamingCompletion:
 
         assert len(set(ids)) == 1  # All same ID
         assert ids[0].startswith("chatcmpl-")
+
+    def test_streaming_keeps_execution_identity_for_full_stream(self, app_client: TestClient) -> None:
+        """Worker-routing identity must stay active after the first streamed event."""
+        from agno.run.agent import RunContentEvent  # noqa: PLC0415
+
+        observed_session_ids: list[str | None] = []
+
+        async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
+            identity = get_tool_execution_identity()
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            yield RunContentEvent(content="Hello ")
+
+            identity = get_tool_execution_identity()
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            yield RunContentEvent(content="world!")
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(observed_session_ids) == 2
+        assert all(session_id is not None for session_id in observed_session_ids)
 
     def test_streaming_cached_response(self, app_client: TestClient) -> None:
         """Cached full response (string) is streamed correctly."""
@@ -1283,7 +1490,7 @@ class TestAutoRouting:
             )
 
         assert response.status_code == 500
-        assert "no agents" in response.json()["error"]["message"].lower()
+        assert "no openai-compatible agents" in response.json()["error"]["message"].lower()
 
     def test_auto_session_id_uses_resolved_agent(self, app_client: TestClient) -> None:
         """Session ID derivation uses the resolved agent name, not 'auto'."""
@@ -1485,6 +1692,80 @@ class TestTeamCompletion:
         # Each TeamContentEvent is a separate chunk (streamed directly)
         assert "Hello " in content_parts
         assert "world!" in content_parts
+
+    def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
+        """Team streaming must keep worker-routing identity active after preflight."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        mock_agents = [MagicMock(name="GeneralAgent")]
+        observed_session_ids: list[str | None] = []
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            identity = get_tool_execution_identity()
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            yield TeamContentEvent(content="Hello ")
+
+            identity = get_tool_execution_identity()
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            yield TeamContentEvent(content="world!")
+
+        mock_team.arun = mock_stream_events
+
+        with patch(
+            "mindroom.api.openai_compat._build_team",
+            return_value=(mock_agents, mock_team, TeamMode.COORDINATE),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(observed_session_ids) == 2
+        assert all(session_id is not None for session_id in observed_session_ids)
+
+    def test_team_streaming_builds_team_inside_execution_identity(self, team_app_client: TestClient) -> None:
+        """Streamed team requests must establish execution identity before member agents are built."""
+        from agno.run.team import RunContentEvent as TeamContentEvent  # noqa: PLC0415
+
+        from mindroom.teams import TeamMode  # noqa: PLC0415
+
+        mock_team = MagicMock()
+        observed_agent_names: list[str | None] = []
+        observed_session_ids: list[str | None] = []
+
+        async def mock_stream_events(*_a: object, **_kw: object) -> AsyncIterator[object]:
+            yield TeamContentEvent(content="Hello world!")
+
+        def fake_build_team(*_args: object, **_kwargs: object) -> tuple[list[MagicMock], MagicMock, TeamMode]:
+            identity = get_tool_execution_identity()
+            observed_agent_names.append(identity.agent_name if identity is not None else None)
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            return [MagicMock(name="GeneralAgent")], mock_team, TeamMode.COORDINATE
+
+        mock_team.arun = mock_stream_events
+
+        with patch("mindroom.api.openai_compat._build_team", side_effect=fake_build_team):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Build it"}],
+                    "stream": True,
+                },
+            )
+
+        assert response.status_code == 200
+        assert observed_agent_names == ["team/super_team"]
+        assert len(observed_session_ids) == 1
+        assert observed_session_ids[0] is not None
 
     def test_team_streaming_tool_events_emit_start_and_done_with_ids(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -20,9 +21,10 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     schedule_task,
 )
-from mindroom.thread_utils import check_agent_mentioned, get_configured_agents_for_room
+from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.skills import resolve_skill_command_spec
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -205,11 +207,22 @@ def _resolve_skill_command_agent(  # noqa: C901
 
 
 def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
-    sandbox_tools = config.get_agent_sandbox_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_scope = config.get_agent_worker_scope(agent_name)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in config.get_agent_tools(agent_name):
         try:
-            toolkits.append((tool_name, get_tool_by_name(tool_name, sandbox_tools_override=sandbox_tools)))
+            toolkits.append(
+                (
+                    tool_name,
+                    get_tool_by_name(
+                        tool_name,
+                        worker_tools_override=worker_tools,
+                        worker_scope=worker_scope,
+                        routing_agent_name=agent_name,
+                    ),
+                ),
+            )
         except ValueError as exc:
             logger.warning(
                 "Failed to load tool for skill dispatch",
@@ -343,33 +356,51 @@ async def _run_skill_command_tool(
     skill_name: str,
     args_text: str,
     command_name: str = "skill",
+    requester_user_id: str | None = None,
+    room_id: str | None = None,
+    thread_id: str | None = None,
 ) -> str:
-    toolkits = _collect_agent_toolkits(config, agent_name)
-    function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
-    if error:
-        return f"❌ {error}"
-    assert function is not None
-
-    base_args = {
-        "command": args_text,
-        "commandName": command_name,
-        "skillName": skill_name,
-    }
-    entrypoint = function.entrypoint
-    call_args = _prepare_tool_call_arguments(entrypoint, base_args)
-    if call_args.error:
-        return f"❌ {call_args.error}"
-    assert entrypoint is not None
+    execution_identity: ToolExecutionIdentity | None = None
+    if requester_user_id is not None and room_id is not None:
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name,
+            requester_id=requester_user_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            session_id=create_session_id(room_id, thread_id),
+            tenant_id=os.getenv("CUSTOMER_ID"),
+            account_id=os.getenv("ACCOUNT_ID"),
+        )
 
     try:
-        if toolkit and toolkit.requires_connect:
-            await _maybe_await(toolkit.connect())
-            try:
+        with tool_execution_identity(execution_identity):
+            toolkits = _collect_agent_toolkits(config, agent_name)
+            function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
+            if error:
+                return f"❌ {error}"
+            assert function is not None
+
+            base_args = {
+                "command": args_text,
+                "commandName": command_name,
+                "skillName": skill_name,
+            }
+            entrypoint = function.entrypoint
+            call_args = _prepare_tool_call_arguments(entrypoint, base_args)
+            if call_args.error:
+                return f"❌ {call_args.error}"
+            assert entrypoint is not None
+
+            if toolkit and toolkit.requires_connect:
+                await _maybe_await(toolkit.connect())
+                try:
+                    result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
+                finally:
+                    await _maybe_await(toolkit.close())
+            else:
                 result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
-            finally:
-                await _maybe_await(toolkit.close())
-        else:
-            result = await _maybe_await(entrypoint(*call_args.args, **call_args.kwargs))
     except Exception as exc:
         logger.warning(
             "Skill command tool dispatch failed",
@@ -545,6 +576,9 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
                         args_text=args_text,
+                        requester_user_id=requester_user_id,
+                        room_id=room.room_id,
+                        thread_id=effective_thread_id,
                     )
                 elif spec.disable_model_invocation:
                     response_text = (

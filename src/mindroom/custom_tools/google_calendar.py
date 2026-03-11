@@ -6,97 +6,46 @@ credentials stored in MindRoom's unified credentials location.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agno.tools.googlecalendar import GoogleCalendarTools as AgnoGoogleCalendarTools
 from loguru import logger
 
 from mindroom.credentials import get_credentials_manager
-from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 
-_GOOGLE_DEPS = ["google-auth", "google-auth-oauthlib"]
+if TYPE_CHECKING:
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 
-class GoogleCalendarTools(AgnoGoogleCalendarTools):
+class GoogleCalendarTools(ScopedGoogleOAuthMixin, AgnoGoogleCalendarTools):
     """Google Calendar tools wrapper that uses MindRoom's credential management."""
 
-    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
+    _oauth_tool_name = "google_calendar"
+    _oauth_log_name = "Google Calendar"
+
+    def __init__(
+        self,
+        *,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
         """Initialize Google Calendar tools with MindRoom credentials.
 
         This wrapper automatically loads credentials from MindRoom's
         unified credential storage and passes them to the Agno GoogleCalendarTools.
         """
-        # Load credentials using the credentials manager
-        creds_manager = get_credentials_manager()
-        token_data = creds_manager.load_credentials("google")
-        creds = None
+        self._creds_manager = get_credentials_manager()
+        creds = self._initialize_google_oauth(
+            worker_scope=worker_scope,
+            routing_agent_name=routing_agent_name,
+            provided_creds=kwargs.pop("creds", None),
+            logger=logger,
+        )
 
-        if token_data:
-            try:
-                ensure_tool_deps(_GOOGLE_DEPS, "google_calendar")
-                from google.oauth2.credentials import Credentials  # noqa: PLC0415
-
-                # Create Google Credentials object from stored data
-                creds = Credentials(
-                    token=token_data.get("token"),
-                    refresh_token=token_data.get("refresh_token"),
-                    token_uri=token_data.get("token_uri"),
-                    client_id=token_data.get("client_id"),
-                    client_secret=token_data.get("client_secret"),
-                    scopes=token_data.get("scopes", self.DEFAULT_SCOPES),
-                )
-                logger.info("Loaded Google Calendar credentials from MindRoom storage")
-            except Exception as e:
-                logger.error(f"Failed to load Google Calendar credentials: {e}")
-                creds = None
-        else:
-            logger.warning("Google Calendar credentials not found in MindRoom storage")
-
-        # Pass credentials to parent class
-        super().__init__(creds=creds, **kwargs)
+        super().__init__(**kwargs)
+        self.creds = creds
 
         # Store original auth method for fallback
-        self._original_auth = super()._auth
-
-    def _auth(self) -> None:
-        """Custom auth method that uses MindRoom's credential storage."""
-        # If we already have valid credentials, don't re-authenticate
-        if self.creds and self.creds.valid:
-            return
-
-        # Reload credentials from MindRoom's storage in case they've been updated
-        creds_manager = get_credentials_manager()
-        token_data = creds_manager.load_credentials("google")
-
-        if token_data:
-            try:
-                ensure_tool_deps(_GOOGLE_DEPS, "google_calendar")
-                from google.auth.transport.requests import Request  # noqa: PLC0415
-                from google.oauth2.credentials import Credentials  # noqa: PLC0415
-
-                self.creds = Credentials(
-                    token=token_data.get("token"),
-                    refresh_token=token_data.get("refresh_token"),
-                    token_uri=token_data.get("token_uri"),
-                    client_id=token_data.get("client_id"),
-                    client_secret=token_data.get("client_secret"),
-                    scopes=token_data.get("scopes", self.DEFAULT_SCOPES),
-                )
-
-                # Refresh if expired
-                if self.creds.expired and self.creds.refresh_token:
-                    self.creds.refresh(Request())
-
-                    # Save the refreshed credentials back
-                    token_data["token"] = self.creds.token
-                    creds_manager.save_credentials("google", token_data)
-
-                logger.info("Google Calendar authentication successful")
-            except Exception as e:
-                logger.error(f"Failed to authenticate with Google Calendar: {e}")
-                raise
-        else:
-            # If no credentials found, fall back to original auth method
-            # This will prompt for OAuth flow
-            logger.warning("No stored credentials found, initiating OAuth flow")
-            self._original_auth()
+        self._set_original_auth(AgnoGoogleCalendarTools._auth)

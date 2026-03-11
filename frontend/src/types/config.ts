@@ -2,6 +2,7 @@ import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
+export type WorkerScope = 'shared' | 'user' | 'user_agent' | 'room_thread';
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -91,7 +92,8 @@ export interface Agent {
   memory_file_path?: string; // Per-agent file-memory scope directory (used when effective backend is file)
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
-  sandbox_tools?: string[]; // Tool names to execute through sandbox proxy (overrides defaults)
+  worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
+  worker_scope?: WorkerScope | null;
   delegate_to?: string[]; // Agent names this agent can delegate tasks to
   thread_mode?: ThreadMode; // Conversation threading mode
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
@@ -157,7 +159,7 @@ export interface Config {
     learning?: boolean;
     learning_mode?: LearningMode;
     show_tool_calls?: boolean;
-    sandbox_tools?: string[]; // Tool names to sandbox by default for all agents
+    worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
     show_stop_button?: boolean;

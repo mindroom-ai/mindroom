@@ -1,4 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@/lib/api', () => ({
+  API_BASE_URL: 'https://backend.example.test',
+  withAgentName: (url: string, agentName?: string | null) => {
+    const parsed = new URL(url);
+    if (agentName) {
+      parsed.searchParams.set('agent_name', agentName);
+    }
+    return parsed.toString();
+  },
+}));
+
 import { googleIntegration } from './index';
 
 // Mock fetch
@@ -23,21 +35,9 @@ describe('GoogleIntegrationProvider', () => {
       expect(config.integration.connected).toBe(false);
     });
 
-    it('should provide onAction handler', () => {
-      const config = googleIntegration.getConfig();
-      expect(config.onAction).toBeDefined();
-      expect(typeof config.onAction).toBe('function');
-    });
-
     it('should provide ConfigComponent', () => {
       const config = googleIntegration.getConfig();
       expect(config.ConfigComponent).toBeDefined();
-    });
-
-    it('should provide checkConnection method', () => {
-      const config = googleIntegration.getConfig();
-      expect(config.checkConnection).toBeDefined();
-      expect(typeof config.checkConnection).toBe('function');
     });
   });
 
@@ -52,7 +52,7 @@ describe('GoogleIntegrationProvider', () => {
 
       expect(status.status).toBe('connected');
       expect(status.connected).toBe(true);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/api/google/status'));
+      expect(global.fetch).toHaveBeenCalledWith('https://backend.example.test/api/google/status');
     });
 
     it('should return available status when not configured', async () => {
@@ -75,40 +75,32 @@ describe('GoogleIntegrationProvider', () => {
       expect(status.status).toBe('available');
       expect(status.connected).toBe(false);
     });
-  });
 
-  describe('checkConnection', () => {
-    it('should return true when configured', async () => {
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ connected: true }),
-      });
-
-      const config = googleIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
-
-      expect(isConnected).toBe(true);
-    });
-
-    it('should return false when not configured', async () => {
+    it('appends agent_name when checking scoped status', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
 
-      const config = googleIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
+      await googleIntegration.loadStatus({ agentName: 'code' });
 
-      expect(isConnected).toBe(false);
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://backend.example.test/api/google/status?agent_name=code'
+      );
     });
+  });
 
-    it('should return false on error', async () => {
-      (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
+  describe('disconnect', () => {
+    it('appends agent_name for scoped disconnect', async () => {
+      (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
-      const config = googleIntegration.getConfig();
-      const isConnected = await config.checkConnection!();
+      const config = googleIntegration.getConfig({ agentName: 'code' });
+      await config.onDisconnect!('google');
 
-      expect(isConnected).toBe(false);
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://backend.example.test/api/google/disconnect?agent_name=code',
+        expect.objectContaining({ method: 'POST' })
+      );
     });
   });
 });

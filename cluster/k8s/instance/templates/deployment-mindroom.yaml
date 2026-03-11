@@ -160,12 +160,18 @@ spec:
         - name: MINDROOM_CONFIG_PATH
           value: "/app/config.yaml"
         - name: MINDROOM_STORAGE_PATH
-          value: "/app/workspace/.mindroom"
+          value: {{ .Values.storagePath }}
+        - name: MINDROOM_SANDBOX_WORKER_ROOT
+          value: "{{ .Values.storagePath }}/workers"
+        - name: HOME
+          value: {{ .Values.storagePath }}
         volumeMounts:
         - name: config
           mountPath: /app/config.yaml
           subPath: config.yaml
           readOnly: true
+        - name: storage
+          mountPath: {{ .Values.storagePath }}
         - name: sandbox-workspace
           mountPath: /app/workspace
         resources:
