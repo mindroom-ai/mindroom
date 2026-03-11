@@ -206,6 +206,9 @@ Concrete providers may realize the same contract through storage-path overrides,
 The worker workspace should remain at `<worker_root>/workspace`.
 The persistent Python environment should remain at `<worker_root>/venv`.
 Caches should stay inside `<worker_root>/cache`.
+Non-secret tool init overrides such as `base_dir` are allowed only as a narrow transport mechanism for workspace-aware tools.
+Those overrides must be explicitly whitelisted, type-validated before toolkit construction, and rejected with a client error when malformed.
+For worker-routed execution, runtime worker workspace resolution remains authoritative over any forwarded tool init override.
 
 ## Memory Design
 
