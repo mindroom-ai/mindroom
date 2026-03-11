@@ -10,8 +10,11 @@ metadata:
     customer: {{ .Values.customer | quote }}
 rules:
 - apiGroups: [""]
-  resources: ["services", "pods"]
+  resources: ["services"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]

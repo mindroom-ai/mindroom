@@ -20,10 +20,15 @@ from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
+    resolve_unscoped_worker_key,
     resolve_worker_key,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
-from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
+from mindroom.workers.runtime import (
+    get_primary_worker_manager,
+    primary_worker_backend_available,
+    primary_worker_backend_name,
+)
 
 if TYPE_CHECKING:
     from agno.tools.function import Function
@@ -232,7 +237,32 @@ def _build_worker_routing_payload(
     routing_agent_name: str | None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     if worker_scope is None:
-        return {}, None
+        if primary_worker_backend_name() != "kubernetes":
+            return {}, None
+
+        effective_agent_name = routing_agent_name
+        execution_identity = get_tool_execution_identity()
+        if effective_agent_name is None and execution_identity is not None:
+            effective_agent_name = execution_identity.agent_name
+        if effective_agent_name is None:
+            msg = (
+                f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
+                "when using the Kubernetes worker backend."
+            )
+            raise RuntimeError(msg)
+
+        worker_key = resolve_unscoped_worker_key(
+            agent_name=effective_agent_name,
+            execution_identity=execution_identity,
+        )
+        worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
+        return (
+            {
+                "routing_agent_name": routing_agent_name,
+                "worker_key": worker_key,
+            },
+            worker_handle,
+        )
 
     execution_identity = get_tool_execution_identity()
     if execution_identity is None:
@@ -286,10 +316,10 @@ def _sandbox_proxy_enabled_for_tool(
     if _SANDBOX_RUNNER_MODE or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
-    if not primary_worker_backend_available(proxy_url=_PROXY_URL):
+    if not primary_worker_backend_available(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN):
         return False
 
-    if _PROXY_URL is None and worker_scope is None:
+    if _PROXY_URL is None and worker_scope is None and primary_worker_backend_name() == "static_runner":
         return False
 
     if worker_tools_override is not None:

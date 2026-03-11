@@ -56,7 +56,10 @@ def _worker_cleanup_interval_seconds() -> float:
 
 def _cleanup_workers_once() -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    if not primary_worker_backend_available(proxy_url=sandbox_proxy_module._PROXY_URL):
+    if not primary_worker_backend_available(
+        proxy_url=sandbox_proxy_module._PROXY_URL,
+        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+    ):
         return 0
 
     worker_manager = get_primary_worker_manager(

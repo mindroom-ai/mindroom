@@ -31,14 +31,16 @@ def primary_worker_backend_name() -> str:
     return _normalize_backend_name(os.getenv(_PRIMARY_WORKER_BACKEND_ENV))
 
 
-def primary_worker_backend_available(*, proxy_url: str | None) -> bool:
+def primary_worker_backend_available(*, proxy_url: str | None, proxy_token: str | None) -> bool:
     """Return whether the configured primary-runtime worker backend can route tool calls."""
     backend_name = primary_worker_backend_name()
     if backend_name == "static_runner":
         return bool(proxy_url)
     if backend_name == "kubernetes":
+        if not proxy_token:
+            return False
         try:
-            kubernetes_backend_config_signature(auth_token=None)
+            kubernetes_backend_config_signature(auth_token=proxy_token)
         except WorkerBackendError:
             return False
         return True

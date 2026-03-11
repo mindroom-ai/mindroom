@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from mindroom.workers.backend import WorkerBackendError
 from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
 
@@ -99,6 +99,7 @@ class _FakeAppsApi:
 class _FakeCoreApi:
     def __init__(self) -> None:
         self.services: dict[str, object] = {}
+        self.pods: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
 
     def read_namespaced_service(self, name: str, namespace: str) -> object:
@@ -125,13 +126,24 @@ class _FakeCoreApi:
         _ = namespace
         self.services.pop(name, None)
 
+    def read_namespaced_pod(self, name: str, namespace: str) -> object:
+        _ = namespace
+        pod = self.pods.get(name)
+        if pod is None:
+            raise _FakeApiException(404)
+        return pod
 
-def _backend(*, idle_timeout_seconds: float = 60.0) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
+
+def _backend(
+    *,
+    idle_timeout_seconds: float = 60.0,
+    worker_port: int = 8766,
+) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
         image_pull_policy="IfNotPresent",
-        worker_port=8766,
+        worker_port=worker_port,
         service_account_name="mindroom-worker",
         storage_pvc_name="mindroom-storage",
         storage_mount_path="/app/worker",
@@ -181,12 +193,38 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_STORAGE_PATH" in env_names
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )
     assert deployment["metadata"]["labels"]["mindroom.ai/tenant"] == "test"
     assert "annotations" not in deployment["spec"]["template"]["metadata"]
+    assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
+    assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
+    assert container["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
+
+
+def test_kubernetes_backend_honors_custom_worker_port() -> None:
+    """Dedicated workers should wire the configured port through env, service, and probes."""
+    backend, apps_api, core_api = _backend(worker_port=9777)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    service = core_api.created_bodies[0]
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert handle.endpoint == f"http://{handle.worker_id}.chat.svc.cluster.local:9777/api/sandbox-runner/execute"
+    assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "9777"
+    assert service["spec"]["ports"] == [{"name": "api", "port": 9777, "targetPort": 9777}]
+    assert container["ports"] == [{"containerPort": 9777, "name": "api"}]
+    assert container["readinessProbe"]["httpGet"]["port"] == "api"
+    assert container["livenessProbe"]["httpGet"]["port"] == "api"
 
 
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
@@ -203,6 +241,23 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     assert cleaned[0].worker_key == "worker-a"
     assert cleaned[0].status == "idle"
     assert deployment.spec.replicas == 0
+
+
+def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> None:
+    """Cleanup should not report or patch workers that are already scaled to zero."""
+    backend, apps_api, _core_api = _backend(idle_timeout_seconds=5.0)
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "ready"
+
+    first_cleaned = backend.cleanup_idle_workers(now=10.0)
+    patch_count_after_first_cleanup = len(apps_api.patched_bodies)
+    second_cleaned = backend.cleanup_idle_workers(now=11.0)
+
+    assert [worker.worker_key for worker in first_cleaned] == ["worker-a"]
+    assert second_cleaned == []
+    assert len(apps_api.patched_bodies) == patch_count_after_first_cleanup
 
 
 def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resources() -> None:
@@ -263,6 +318,23 @@ def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     assert "template" not in patch_body.get("spec", {})
 
 
+def test_kubernetes_backend_pins_workers_to_control_plane_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated workers should co-locate with the control-plane pod when using a shared RWO PVC."""
+    backend, apps_api, core_api = _backend()
+    core_api.pods["mindroom-control-plane"] = SimpleNamespace(
+        metadata=SimpleNamespace(name="mindroom-control-plane"),
+        spec=SimpleNamespace(node_name="gke-chat-node-1"),
+    )
+    monkeypatch.setenv("HOSTNAME", "mindroom-control-plane")
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    assert deployment["spec"]["template"]["spec"]["nodeName"] == "gke-chat-node-1"
+
+
 def test_kubernetes_backend_records_failed_startup_state() -> None:
     """Workers that never become ready should surface as failed instead of starting forever."""
     backend, apps_api, _core_api = _backend()
@@ -280,6 +352,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
     assert deployment.metadata.annotations["mindroom.ai/failure-reason"] == "worker never became ready"
     assert deployment.metadata.annotations["mindroom.ai/failure-count"] == "1"
+    assert deployment.spec.replicas == 0
 
     handle = backend.get_worker("worker-a", now=11.0)
     assert handle is not None

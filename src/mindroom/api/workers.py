@@ -63,7 +63,10 @@ def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
 
 
 def _worker_manager():
-    if not primary_worker_backend_available(proxy_url=sandbox_proxy_module._PROXY_URL):
+    if not primary_worker_backend_available(
+        proxy_url=sandbox_proxy_module._PROXY_URL,
+        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+    ):
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
     return get_primary_worker_manager(
         proxy_url=sandbox_proxy_module._PROXY_URL,

@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,8 @@ _DEFAULT_CONFIG_PATH = "/app/config.yaml"
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_SERVICE_ACCOUNT_NAME = "default"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
+_DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
+_DEFAULT_RESOURCE_LIMITS = {"memory": "1Gi", "cpu": "500m"}
 _READY_POLL_INTERVAL_SECONDS = 1.0
 
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
@@ -46,6 +49,7 @@ _NAME_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_KUBERNETES_WORKER_LABELS_JSON"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
+_HOSTNAME_ENV = "HOSTNAME"
 
 _ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
 _ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
@@ -67,6 +71,7 @@ _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 
 _CONTAINER_NAME = "sandbox-runner"
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"
+_RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 
@@ -246,58 +251,62 @@ class KubernetesWorkerBackend:
         self._apps_api: Any | None = None
         self._core_api: Any | None = None
         self._api_exception_cls: type[Exception] | None = None
+        self._worker_locks: dict[str, threading.Lock] = {}
+        self._worker_locks_lock = threading.Lock()
+        self._control_plane_node_name: str | None = None
+        self._control_plane_node_name_loaded = False
 
     @classmethod
     def from_env(cls, *, auth_token: str | None) -> KubernetesWorkerBackend:
         return cls(config=KubernetesWorkerBackendConfig.from_env(), auth_token=auth_token)
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
-        timestamp = time.time() if now is None else now
-        deployment_name = self._worker_id(spec.worker_key)
-        state_subpath = self._state_subpath(spec.worker_key)
-        worker_key = spec.worker_key
-        existing = self._read_deployment(deployment_name)
-        current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
-        startup_count = (current_handle.startup_count if current_handle is not None else 0) + (
-            1 if current_handle is None or current_handle.status == "idle" else 0
-        )
-        created_at = current_handle.created_at if current_handle is not None else timestamp
-        last_started_at = (
-            timestamp if current_handle is None or current_handle.status == "idle" else current_handle.last_started_at
-        )
-        annotations = self._metadata_annotations(
-            worker_key=worker_key,
-            state_subpath=state_subpath,
-            created_at=created_at,
-            last_used_at=timestamp,
-            last_started_at=last_started_at,
-            startup_count=startup_count,
-            failure_count=current_handle.failure_count if current_handle is not None else 0,
-            failure_reason=None,
-            status="starting",
-        )
+        with self._worker_lock(spec.worker_key):
+            timestamp = time.time() if now is None else now
+            deployment_name = self._worker_id(spec.worker_key)
+            state_subpath = self._state_subpath(spec.worker_key)
+            worker_key = spec.worker_key
+            existing = self._read_deployment(deployment_name)
+            current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
+            should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
+            startup_count = (current_handle.startup_count if current_handle is not None else 0) + (
+                1 if should_restart else 0
+            )
+            created_at = current_handle.created_at if current_handle is not None else timestamp
+            last_started_at = timestamp if should_restart else current_handle.last_started_at
+            annotations = self._metadata_annotations(
+                worker_key=worker_key,
+                state_subpath=state_subpath,
+                created_at=created_at,
+                last_used_at=timestamp,
+                last_started_at=last_started_at,
+                startup_count=startup_count,
+                failure_count=current_handle.failure_count if current_handle is not None else 0,
+                failure_reason=None,
+                status="starting",
+            )
 
-        self._apply_service(deployment_name)
-        self._apply_deployment(
-            worker_key=worker_key,
-            deployment_name=deployment_name,
-            state_subpath=state_subpath,
-            annotations=annotations,
-            replicas=1,
-        )
-        try:
-            deployment = self._wait_for_ready(deployment_name, timeout_seconds=self.config.ready_timeout_seconds)
-        except Exception as exc:
-            failure_reason = str(exc)
-            self.record_failure(worker_key, failure_reason, now=timestamp)
-            if isinstance(exc, WorkerBackendError):
-                raise
-            raise WorkerBackendError(failure_reason) from exc
-        final_annotations = dict(annotations)
-        final_annotations[_ANNOTATION_WORKER_STATUS] = "ready"
-        self._patch_deployment_metadata(deployment_name, annotations=final_annotations)
-        deployment.metadata.annotations = final_annotations
-        return self._handle_from_deployment(deployment, now=timestamp)
+            self._apply_service(deployment_name)
+            self._apply_deployment(
+                worker_key=worker_key,
+                deployment_name=deployment_name,
+                state_subpath=state_subpath,
+                annotations=annotations,
+                replicas=1,
+            )
+            try:
+                deployment = self._wait_for_ready(deployment_name, timeout_seconds=self.config.ready_timeout_seconds)
+            except Exception as exc:
+                failure_reason = str(exc)
+                self.record_failure(worker_key, failure_reason, now=timestamp)
+                if isinstance(exc, WorkerBackendError):
+                    raise
+                raise WorkerBackendError(failure_reason) from exc
+            final_annotations = dict(annotations)
+            final_annotations[_ANNOTATION_WORKER_STATUS] = "ready"
+            self._patch_deployment_metadata(deployment_name, annotations=final_annotations)
+            deployment.metadata.annotations = final_annotations
+            return self._handle_from_deployment(deployment, now=timestamp)
 
     def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         deployment = self._read_deployment(self._worker_id(worker_key))
@@ -358,7 +367,7 @@ class KubernetesWorkerBackend:
         cleaned: list[WorkerHandle] = []
         for deployment in self._list_deployments():
             handle = self._handle_from_deployment(deployment, now=timestamp)
-            if handle.status != "idle":
+            if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
             annotations = dict(deployment.metadata.annotations or {})
             annotations[_ANNOTATION_WORKER_STATUS] = "idle"
@@ -380,9 +389,18 @@ class KubernetesWorkerBackend:
         annotations[_ANNOTATION_WORKER_STATUS] = "failed"
         annotations[_ANNOTATION_FAILURE_REASON] = failure_reason
         annotations[_ANNOTATION_FAILURE_COUNT] = str(_parse_annotation_int(annotations, _ANNOTATION_FAILURE_COUNT) + 1)
-        self._patch_deployment_metadata(deployment_name, annotations=annotations)
+        self._patch_deployment(deployment_name, replicas=0, annotations=annotations)
+        deployment.spec.replicas = 0
         deployment.metadata.annotations = annotations
         return self._handle_from_deployment(deployment, now=timestamp)
+
+    def _worker_lock(self, worker_key: str) -> threading.Lock:
+        with self._worker_locks_lock:
+            worker_lock = self._worker_locks.get(worker_key)
+            if worker_lock is None:
+                worker_lock = threading.Lock()
+                self._worker_locks[worker_key] = worker_lock
+        return worker_lock
 
     def _worker_id(self, worker_key: str) -> str:
         return _worker_id_for_key(worker_key, prefix=self.config.name_prefix)
@@ -482,6 +500,7 @@ class KubernetesWorkerBackend:
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
+            {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
             {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
@@ -582,6 +601,44 @@ class KubernetesWorkerBackend:
         replicas: int,
     ) -> dict[str, object]:
         labels = self._labels(worker_id)
+        pod_spec: dict[str, object] = {
+            "serviceAccountName": self.config.service_account_name,
+            "containers": [
+                {
+                    "name": _CONTAINER_NAME,
+                    "image": self.config.image,
+                    "imagePullPolicy": self.config.image_pull_policy,
+                    "command": ["/app/run-sandbox-runner.sh"],
+                    "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
+                    "env": self._worker_env(worker_key=worker_key),
+                    "volumeMounts": self._volume_mounts(state_subpath=state_subpath),
+                    "readinessProbe": {
+                        "httpGet": {"path": "/healthz", "port": "api"},
+                        "periodSeconds": 5,
+                        "failureThreshold": 6,
+                    },
+                    "livenessProbe": {
+                        "httpGet": {"path": "/healthz", "port": "api"},
+                        "periodSeconds": 10,
+                        "failureThreshold": 6,
+                    },
+                    "resources": {
+                        "requests": dict(_DEFAULT_RESOURCE_REQUESTS),
+                        "limits": dict(_DEFAULT_RESOURCE_LIMITS),
+                    },
+                    "securityContext": {
+                        "allowPrivilegeEscalation": False,
+                        "capabilities": {
+                            "drop": ["ALL"],
+                        },
+                    },
+                },
+            ],
+            "volumes": self._volumes(),
+        }
+        node_name = self._control_plane_node_name_or_none()
+        if node_name is not None:
+            pod_spec["nodeName"] = node_name
         return {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -598,31 +655,7 @@ class KubernetesWorkerBackend:
                     "metadata": {
                         "labels": labels,
                     },
-                    "spec": {
-                        "serviceAccountName": self.config.service_account_name,
-                        "containers": [
-                            {
-                                "name": _CONTAINER_NAME,
-                                "image": self.config.image,
-                                "imagePullPolicy": self.config.image_pull_policy,
-                                "command": ["/app/run-sandbox-runner.sh"],
-                                "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
-                                "env": self._worker_env(worker_key=worker_key),
-                                "volumeMounts": self._volume_mounts(state_subpath=state_subpath),
-                                "readinessProbe": {
-                                    "httpGet": {"path": "/healthz", "port": "api"},
-                                    "periodSeconds": 5,
-                                    "failureThreshold": 6,
-                                },
-                                "livenessProbe": {
-                                    "httpGet": {"path": "/healthz", "port": "api"},
-                                    "periodSeconds": 10,
-                                    "failureThreshold": 6,
-                                },
-                            },
-                        ],
-                        "volumes": self._volumes(),
-                    },
+                    "spec": pod_spec,
                 },
             },
         }
@@ -634,7 +667,12 @@ class KubernetesWorkerBackend:
         except self._api_exception as exc:
             if exc.status != 404:
                 raise
-            self._core.create_namespaced_service(self.config.namespace, manifest)
+            try:
+                self._core.create_namespaced_service(self.config.namespace, manifest)
+            except self._api_exception as create_exc:
+                if create_exc.status != 409:
+                    raise
+                self._core.patch_namespaced_service(worker_id, self.config.namespace, manifest)
             return
         self._core.patch_namespaced_service(worker_id, self.config.namespace, manifest)
 
@@ -659,7 +697,12 @@ class KubernetesWorkerBackend:
         except self._api_exception as exc:
             if exc.status != 404:
                 raise
-            self._apps.create_namespaced_deployment(self.config.namespace, manifest)
+            try:
+                self._apps.create_namespaced_deployment(self.config.namespace, manifest)
+            except self._api_exception as create_exc:
+                if create_exc.status != 409:
+                    raise
+                self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, manifest)
             return
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, manifest)
 
@@ -694,6 +737,27 @@ class KubernetesWorkerBackend:
         selector = self._list_selector()
         response = self._apps.list_namespaced_deployment(self.config.namespace, label_selector=selector)
         return list(response.items or [])
+
+    def _control_plane_node_name_or_none(self) -> str | None:
+        if self._control_plane_node_name_loaded:
+            return self._control_plane_node_name
+
+        pod_name = os.getenv(_HOSTNAME_ENV, "").strip()
+        if not pod_name:
+            self._control_plane_node_name_loaded = True
+            return None
+
+        try:
+            pod = self._core.read_namespaced_pod(pod_name, self.config.namespace)
+        except self._api_exception as exc:
+            if exc.status == 404:
+                self._control_plane_node_name_loaded = True
+                return None
+            raise
+
+        self._control_plane_node_name = pod.spec.node_name
+        self._control_plane_node_name_loaded = True
+        return self._control_plane_node_name
 
     def _delete_deployment(self, deployment_name: str) -> None:
         try:

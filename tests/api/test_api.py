@@ -250,7 +250,7 @@ def test_readiness_check_reports_startup_detail(test_client: TestClient) -> None
 
 def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Background worker cleanup should no-op when no backend is configured."""
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda proxy_url: False)
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: False)
 
     assert main._cleanup_workers_once() == 0
 
@@ -275,8 +275,8 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
                 ),
             ]
 
-    monkeypatch.setattr(main, "primary_worker_backend_available", lambda proxy_url: True)
-    monkeypatch.setattr(main, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+    monkeypatch.setattr(main, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
+    monkeypatch.setattr(main, "get_primary_worker_manager", lambda *, proxy_url, proxy_token: _FakeWorkerManager())
 
     assert main._cleanup_workers_once() == 1
 
@@ -301,8 +301,12 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
                 ),
             ]
 
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda proxy_url: True)
-    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
+    monkeypatch.setattr(
+        workers_api,
+        "get_primary_worker_manager",
+        lambda *, proxy_url, proxy_token: _FakeWorkerManager(),
+    )
 
     response = test_client.get("/api/workers")
 
@@ -331,8 +335,12 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
                 ),
             ]
 
-    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda proxy_url: True)
-    monkeypatch.setattr(workers_api, "get_primary_worker_manager", lambda proxy_url, proxy_token: _FakeWorkerManager())
+    monkeypatch.setattr(workers_api, "primary_worker_backend_available", lambda *, proxy_url, proxy_token: True)
+    monkeypatch.setattr(
+        workers_api,
+        "get_primary_worker_manager",
+        lambda *, proxy_url, proxy_token: _FakeWorkerManager(),
+    )
 
     response = test_client.post("/api/workers/cleanup")
 

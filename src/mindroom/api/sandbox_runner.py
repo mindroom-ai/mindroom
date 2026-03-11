@@ -34,7 +34,7 @@ from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
     LOCAL_WORKER_ROOT_ENV,
     LocalWorkerStatePaths,
-    ensure_local_worker_state,
+    ensure_local_worker_state_locked,
     get_local_worker_manager,
     local_worker_state_paths_for_root,
     local_worker_state_paths_from_handle,
@@ -386,7 +386,7 @@ def _prepare_worker(worker_key: str) -> WorkerHandle:
             raise WorkerBackendError(msg)
         paths = local_worker_state_paths_for_root(dedicated_root)
         try:
-            ensure_local_worker_state(paths)
+            ensure_local_worker_state_locked(worker_key, paths)
         except Exception as exc:
             failure_reason = f"Failed to initialize dedicated worker '{worker_key}': {exc}"
             raise WorkerBackendError(failure_reason) from exc
