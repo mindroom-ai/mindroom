@@ -12,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-import venv
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,11 +24,11 @@ from pydantic import BaseModel, Field, ValidationError
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
+from mindroom.tool_system.worker_manager import PreparedWorker, WorkerHandle, WorkerStatePaths, get_worker_manager
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     tool_execution_identity,
-    worker_dir_name,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +44,6 @@ _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 120.0
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
-_RUNNER_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_WORKER_ROOT"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
@@ -84,22 +82,10 @@ class _CredentialLease:
     uses_remaining: int
 
 
-@dataclass(frozen=True)
-class _WorkerStatePaths:
-    """Filesystem layout for one persistent worker scope."""
-
-    root: Path
-    workspace: Path
-    venv_dir: Path
-    cache_dir: Path
-    storage_dir: Path
-
-
 # NOTE: In-process dict — leases are not shared across multiple uvicorn workers.
 # The sandbox runner must be deployed with a single worker for lease correctness.
 _LEASES_BY_ID: dict[str, _CredentialLease] = {}
 _LEASES_LOCK = threading.Lock()
-_WORKER_INIT_LOCK = threading.Lock()
 
 
 class SandboxRunnerExecuteRequest(BaseModel):
@@ -145,6 +131,35 @@ class SandboxRunnerExecuteResponse(BaseModel):
     ok: bool
     result: Any | None = None
     error: str | None = None
+
+
+class SandboxWorkerResponse(BaseModel):
+    """Serialized worker metadata for sandbox-runner observability."""
+
+    worker_key: str
+    endpoint: str
+    state_root: str
+    status: str
+    backend: str
+    last_seen_at: float
+    created_at: float
+    last_started_at: float | None = None
+    startup_count: int = 0
+    failure_count: int = 0
+    failure_reason: str | None = None
+
+
+class SandboxWorkerListResponse(BaseModel):
+    """List of known sandbox workers."""
+
+    workers: list[SandboxWorkerResponse]
+
+
+class SandboxWorkerCleanupResponse(BaseModel):
+    """Result of one idle-worker cleanup pass."""
+
+    idle_timeout_seconds: float
+    cleaned_workers: list[SandboxWorkerResponse]
 
 
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
@@ -261,37 +276,6 @@ def _runner_subprocess_timeout_seconds() -> float:
     return max(1.0, timeout)
 
 
-def _runner_worker_root() -> Path:
-    configured_root = os.getenv(_RUNNER_WORKER_ROOT_ENV)
-    if configured_root:
-        return Path(configured_root).expanduser().resolve()
-
-    storage_path = os.getenv("MINDROOM_STORAGE_PATH", "/app/workspace/.mindroom")
-    return Path(storage_path).expanduser().resolve() / "workers"
-
-
-def _worker_state_paths(worker_key: str) -> _WorkerStatePaths:
-    worker_root = _runner_worker_root() / worker_dir_name(worker_key)
-    return _WorkerStatePaths(
-        root=worker_root,
-        workspace=worker_root / "workspace",
-        venv_dir=worker_root / "venv",
-        cache_dir=worker_root / "cache",
-        storage_dir=worker_root,
-    )
-
-
-def _ensure_worker_state(paths: _WorkerStatePaths) -> None:
-    with _WORKER_INIT_LOCK:
-        paths.workspace.mkdir(parents=True, exist_ok=True)
-        paths.cache_dir.mkdir(parents=True, exist_ok=True)
-        if (paths.venv_dir / "bin" / "python").exists():
-            return
-
-        builder = venv.EnvBuilder(with_pip=True, system_site_packages=True)
-        builder.create(paths.venv_dir)
-
-
 def _project_src_path() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -311,7 +295,7 @@ def _current_runtime_site_packages() -> list[str]:
     return list(dict.fromkeys(discovered_paths))
 
 
-def _worker_subprocess_env(paths: _WorkerStatePaths) -> dict[str, str]:
+def _worker_subprocess_env(paths: WorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
     env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
@@ -333,12 +317,37 @@ def _worker_subprocess_env(paths: _WorkerStatePaths) -> dict[str, str]:
     return env
 
 
+def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
+    return SandboxWorkerResponse(
+        worker_key=worker.worker_key,
+        endpoint=worker.endpoint,
+        state_root=str(worker.state_root),
+        status=worker.status,
+        backend=worker.backend,
+        last_seen_at=worker.last_seen_at,
+        created_at=worker.created_at,
+        last_started_at=worker.last_started_at,
+        startup_count=worker.startup_count,
+        failure_count=worker.failure_count,
+        failure_reason=worker.failure_reason,
+    )
+
+
+def _prepare_worker(worker_key: str) -> PreparedWorker | SandboxRunnerExecuteResponse:
+    try:
+        return get_worker_manager().get_or_create_worker(worker_key)
+    except Exception as exc:
+        logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
+        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+
+
 async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
-        paths = _worker_state_paths(request.worker_key)
-        _ensure_worker_state(paths)
-        runtime_overrides = {"base_dir": paths.workspace}
+        prepared_worker = _prepare_worker(request.worker_key)
+        if isinstance(prepared_worker, SandboxRunnerExecuteResponse):
+            return prepared_worker
+        runtime_overrides = {"base_dir": prepared_worker.paths.workspace}
 
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -379,33 +388,36 @@ def _subprocess_worker_command(python_executable: str | None = None) -> list[str
     return [python_executable or sys.executable, "-m", "mindroom.api.sandbox_runner", _SUBPROCESS_WORKER_ARG]
 
 
-def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    subprocess_env: dict[str, str] | None = None
-    python_executable: str | None = None
-    cwd: str | None = None
+def _subprocess_failure_response(
+    request: SandboxRunnerExecuteRequest,
+    error: str,
+) -> SandboxRunnerExecuteResponse:
     if request.worker_key is not None:
-        paths = _worker_state_paths(request.worker_key)
-        _ensure_worker_state(paths)
-        python_executable = str(paths.venv_dir / "bin" / "python")
-        subprocess_env = _worker_subprocess_env(paths)
-        cwd = str(paths.workspace)
+        get_worker_manager().record_failure(request.worker_key, error)
+    return SandboxRunnerExecuteResponse(ok=False, error=error)
 
-    try:
-        completed = subprocess.run(
-            _subprocess_worker_command(python_executable),
-            input=request.model_dump_json(),
-            capture_output=True,
-            text=True,
-            timeout=_runner_subprocess_timeout_seconds(),
-            check=False,
-            env=subprocess_env,
-            cwd=cwd,
-        )
-    except subprocess.TimeoutExpired:
-        return SandboxRunnerExecuteResponse(ok=False, error="Sandbox subprocess timed out.")
-    except OSError as exc:
-        return SandboxRunnerExecuteResponse(ok=False, error=f"Failed to start sandbox subprocess: {exc}")
 
+def _resolve_subprocess_worker_context(
+    request: SandboxRunnerExecuteRequest,
+) -> tuple[str | None, dict[str, str] | None, str | None] | SandboxRunnerExecuteResponse:
+    if request.worker_key is None:
+        return None, None, None
+
+    prepared_worker = _prepare_worker(request.worker_key)
+    if isinstance(prepared_worker, SandboxRunnerExecuteResponse):
+        return prepared_worker
+
+    return (
+        str(prepared_worker.paths.venv_dir / "bin" / "python"),
+        _worker_subprocess_env(prepared_worker.paths),
+        str(prepared_worker.paths.workspace),
+    )
+
+
+def _parse_subprocess_response(
+    request: SandboxRunnerExecuteRequest,
+    completed: subprocess.CompletedProcess[str],
+) -> SandboxRunnerExecuteResponse:
     # The worker writes the JSON response to stderr after a marker line so that
     # tool stdout (e.g. print() inside python tools) does not corrupt the protocol.
     stderr = completed.stderr or ""
@@ -422,9 +434,34 @@ def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> Sa
         error = (
             stderr.strip() or completed.stdout.strip() or f"Sandbox subprocess exited with code {completed.returncode}."
         )
-        return SandboxRunnerExecuteResponse(ok=False, error=error)
+        return _subprocess_failure_response(request, error)
 
-    return SandboxRunnerExecuteResponse(ok=False, error="Sandbox subprocess returned an invalid response.")
+    return _subprocess_failure_response(request, "Sandbox subprocess returned an invalid response.")
+
+
+def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+    worker_context = _resolve_subprocess_worker_context(request)
+    if isinstance(worker_context, SandboxRunnerExecuteResponse):
+        return worker_context
+    python_executable, subprocess_env, cwd = worker_context
+
+    try:
+        completed = subprocess.run(
+            _subprocess_worker_command(python_executable),
+            input=request.model_dump_json(),
+            capture_output=True,
+            text=True,
+            timeout=_runner_subprocess_timeout_seconds(),
+            check=False,
+            env=subprocess_env,
+            cwd=cwd,
+        )
+    except subprocess.TimeoutExpired:
+        return _subprocess_failure_response(request, "Sandbox subprocess timed out.")
+    except OSError as exc:
+        return _subprocess_failure_response(request, f"Failed to start sandbox subprocess: {exc}")
+
+    return _parse_subprocess_response(request, completed)
 
 
 async def _execute_request_subprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
@@ -487,6 +524,24 @@ async def create_credential_lease(
         lease_id=lease.lease_id,
         expires_at=lease.expires_at,
         max_uses=lease.uses_remaining,
+    )
+
+
+@router.get("/workers", response_model=SandboxWorkerListResponse)
+async def list_workers(include_idle: bool = True) -> SandboxWorkerListResponse:
+    """List known workers and their current lifecycle status."""
+    workers = [_serialize_worker(worker) for worker in get_worker_manager().list_workers(include_idle=include_idle)]
+    return SandboxWorkerListResponse(workers=workers)
+
+
+@router.post("/workers/cleanup", response_model=SandboxWorkerCleanupResponse)
+async def cleanup_idle_workers() -> SandboxWorkerCleanupResponse:
+    """Mark idle workers inactive while retaining their persisted state."""
+    worker_manager = get_worker_manager()
+    cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
+    return SandboxWorkerCleanupResponse(
+        idle_timeout_seconds=worker_manager.idle_timeout_seconds,
+        cleaned_workers=cleaned_workers,
     )
 
 

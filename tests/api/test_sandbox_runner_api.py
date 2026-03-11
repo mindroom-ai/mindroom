@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+import mindroom.tool_system.worker_manager as worker_manager_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
 from mindroom.tool_system.worker_routing import worker_dir_name
@@ -23,6 +26,13 @@ SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
 @pytest.fixture(autouse=True)
 def _load_tools() -> None:
     ensure_tool_registry_loaded()
+
+
+@pytest.fixture(autouse=True)
+def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(worker_manager_module, "_worker_manager", None)
+    monkeypatch.setattr(worker_manager_module, "_worker_manager_config", None)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
 
 
 @pytest.fixture
@@ -349,3 +359,114 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
 
     expected_prefix = worker_root / worker_dir_name("worker-a") / "venv"
     assert str(expected_prefix) in data["result"]
+
+
+def test_sandbox_runner_lists_known_workers(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox runner should expose worker metadata for debugging and observability."""
+    _set_sandbox_token(monkeypatch)
+
+    execute_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from worker A", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+    assert execute_response.status_code == 200
+    assert execute_response.json()["ok"] is True
+
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+    assert workers_response.status_code == 200
+
+    worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-a")
+    assert worker["status"] == "ready"
+    assert worker["backend"] == "local_sandbox_runner"
+    assert worker["startup_count"] == 1
+    assert worker["state_root"] == str((tmp_path / "workers" / worker_dir_name("worker-a")).resolve())
+
+
+def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Idle cleanup should evict the live worker handle but keep its persisted state."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS", "60")
+
+    save_response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from worker A", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+    assert save_response.status_code == 200
+    assert save_response.json()["ok"] is True
+
+    metadata_path = tmp_path / "workers" / worker_dir_name("worker-a") / "metadata" / "worker.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["last_seen_at"] = 0.0
+    metadata["status"] = "ready"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    cleanup_response = runner_client.post("/api/sandbox-runner/workers/cleanup", headers=SANDBOX_HEADERS)
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+
+    assert cleanup_response.status_code == 200
+    cleaned_worker = cleanup_response.json()["cleaned_workers"][0]
+    assert cleaned_worker["worker_key"] == "worker-a"
+    assert cleaned_worker["status"] == "idle"
+
+    listed_worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-a")
+    assert listed_worker["status"] == "idle"
+
+    worker_file = tmp_path / "workers" / worker_dir_name("worker-a") / "workspace" / "note.txt"
+    assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+def test_sandbox_runner_records_worker_initialization_failures(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker bootstrap failures should be returned to callers and exposed in worker metadata."""
+    _set_sandbox_token(monkeypatch)
+
+    with patch("mindroom.tool_system.worker_manager.venv.EnvBuilder.create", side_effect=OSError("boom")):
+        execute_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "args": ["note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-fail",
+            },
+        )
+
+    assert execute_response.status_code == 200
+    data = execute_response.json()
+    assert data["ok"] is False
+    assert "Failed to initialize worker 'worker-fail'" in data["error"]
+    assert "boom" in data["error"]
+
+    workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
+    assert workers_response.status_code == 200
+
+    worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-fail")
+    assert worker["status"] == "failed"
+    assert "boom" in worker["failure_reason"]
+    assert worker["failure_count"] == 1
