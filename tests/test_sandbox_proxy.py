@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any, Self
 
 import pytest
@@ -360,6 +361,59 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
     assert len(cleaned_workers) == 1
     assert cleaned_workers[0].worker_key == "worker-a"
     assert cleaned_workers[0].status == "idle"
+
+
+def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent proxy requests should not build multiple static worker managers for one config."""
+    monkeypatch.setattr(sandbox_proxy_module, "_WORKER_MANAGER", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_WORKER_MANAGER_CONFIG", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+
+    first_init_started = threading.Event()
+    allow_first_init_to_finish = threading.Event()
+    init_count_lock = threading.Lock()
+    init_count = 0
+    managers: list[object] = []
+    exceptions: list[Exception] = []
+
+    class FakeBackend:
+        backend_name = "fake_static_backend"
+        idle_timeout_seconds = 60.0
+
+        def __init__(self, *, api_root: str, auth_token: str | None) -> None:
+            del api_root, auth_token
+            nonlocal init_count
+            with init_count_lock:
+                init_count += 1
+                call_number = init_count
+            if call_number == 1:
+                first_init_started.set()
+                assert allow_first_init_to_finish.wait(timeout=1.0)
+
+    def load_manager() -> None:
+        try:
+            managers.append(sandbox_proxy_module._get_worker_manager())
+        except Exception as exc:  # pragma: no cover - surfaced by assertion below
+            exceptions.append(exc)
+
+    monkeypatch.setattr(sandbox_proxy_module, "StaticSandboxRunnerBackend", FakeBackend)
+
+    first_thread = threading.Thread(target=load_manager)
+    second_thread = threading.Thread(target=load_manager)
+
+    first_thread.start()
+    assert first_init_started.wait(timeout=1.0)
+    second_thread.start()
+    assert init_count == 1
+    allow_first_init_to_finish.set()
+    first_thread.join(timeout=1.0)
+    second_thread.join(timeout=1.0)
+
+    assert exceptions == []
+    assert init_count == 1
+    assert len(managers) == 2
+    assert managers[0] is managers[1]
 
 
 class TestWorkerToolsOverride:

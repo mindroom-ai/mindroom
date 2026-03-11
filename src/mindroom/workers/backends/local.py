@@ -18,7 +18,7 @@ from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_WORKER_API_ROOT = "/api/sandbox-runner"
-_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_WORKER_ROOT"
+LOCAL_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_WORKER_ROOT"
 _WORKER_ENDPOINT_ENV = "MINDROOM_SANDBOX_WORKER_ENDPOINT"
 _WORKER_IDLE_TIMEOUT_ENV = "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS"
 
@@ -52,7 +52,7 @@ class _LocalWorkerMetadata:
 
 
 def _default_worker_root() -> Path:
-    configured_root = os.getenv(_WORKER_ROOT_ENV)
+    configured_root = os.getenv(LOCAL_WORKER_ROOT_ENV)
     if configured_root:
         return Path(configured_root).expanduser().resolve()
 
@@ -81,20 +81,25 @@ def _read_worker_api_root() -> str:
     return _normalize_worker_api_root(os.getenv(_WORKER_ENDPOINT_ENV, _DEFAULT_WORKER_API_ROOT))
 
 
-def local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths owned by one worker key."""
-    resolved_root = worker_root.expanduser().resolve()
-    state_root = resolved_root / worker_dir_name(worker_key)
-    metadata_dir = state_root / "metadata"
+def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
+    """Return the filesystem paths for one concrete worker state root."""
+    resolved_root = state_root.expanduser().resolve()
+    metadata_dir = resolved_root / "metadata"
     return LocalWorkerStatePaths(
-        root=state_root,
-        workspace=state_root / "workspace",
-        venv_dir=state_root / "venv",
-        cache_dir=state_root / "cache",
-        storage_dir=state_root,
+        root=resolved_root,
+        workspace=resolved_root / "workspace",
+        venv_dir=resolved_root / "venv",
+        cache_dir=resolved_root / "cache",
+        storage_dir=resolved_root,
         metadata_dir=metadata_dir,
         metadata_file=metadata_dir / "worker.json",
     )
+
+
+def local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
+    """Return the filesystem paths owned by one worker key."""
+    resolved_root = worker_root.expanduser().resolve()
+    return _local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
 
 
 def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerStatePaths:
@@ -103,7 +108,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     if state_root is None:
         msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
         raise WorkerBackendError(msg)
-    return local_worker_state_paths(handle.worker_key, worker_root=Path(state_root).expanduser().resolve().parent)
+    return _local_worker_state_paths_for_root(Path(state_root))
 
 
 class LocalWorkerBackend:
@@ -146,11 +151,11 @@ class LocalWorkerBackend:
                 self._ensure_worker_state(paths)
             except Exception as exc:
                 failure_reason = f"Failed to initialize worker '{spec.worker_key}': {exc}"
-                self.record_failure(spec.worker_key, failure_reason, now=timestamp)
+                with self._lock:
+                    self._record_failure_locked(paths, spec.worker_key, failure_reason, now=timestamp)
                 raise WorkerBackendError(failure_reason) from exc
 
             with self._lock:
-                metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
                 metadata.status = "ready"
                 metadata.last_used_at = timestamp
                 self._save_metadata(paths, metadata)
@@ -169,8 +174,9 @@ class LocalWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
+        worker_lock = self._worker_lock(worker_key)
         paths = local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        with self._lock:
+        with worker_lock, self._lock:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 return None
@@ -239,16 +245,11 @@ class LocalWorkerBackend:
     def record_failure(self, worker_key: str, failure_reason: str, *, now: float | None = None) -> WorkerHandle:
         """Persist one local worker failure."""
         timestamp = time.time() if now is None else now
+        worker_lock = self._worker_lock(worker_key)
         paths = local_worker_state_paths(worker_key, worker_root=self.worker_root)
 
-        with self._lock:
-            metadata = self._load_metadata(paths) or self._default_metadata(worker_key, timestamp)
-            metadata.status = "failed"
-            metadata.last_used_at = timestamp
-            metadata.failure_count += 1
-            metadata.failure_reason = failure_reason
-            self._save_metadata(paths, metadata)
-            return self._to_handle(metadata, paths, now=timestamp)
+        with worker_lock, self._lock:
+            return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
 
     def _worker_lock(self, worker_key: str) -> threading.Lock:
         with self._lock:
@@ -283,22 +284,10 @@ class LocalWorkerBackend:
         if not self.worker_root.exists():
             return []
 
-        paths: list[LocalWorkerStatePaths] = []
-        for metadata_file in sorted(self.worker_root.glob("*/metadata/worker.json")):
-            worker_root = metadata_file.parents[1]
-            metadata_dir = metadata_file.parent
-            paths.append(
-                LocalWorkerStatePaths(
-                    root=worker_root,
-                    workspace=worker_root / "workspace",
-                    venv_dir=worker_root / "venv",
-                    cache_dir=worker_root / "cache",
-                    storage_dir=worker_root,
-                    metadata_dir=metadata_dir,
-                    metadata_file=metadata_file,
-                ),
-            )
-        return paths
+        return [
+            _local_worker_state_paths_for_root(metadata_file.parents[1])
+            for metadata_file in sorted(self.worker_root.glob("*/metadata/worker.json"))
+        ]
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _LocalWorkerMetadata | None:
         if not paths.metadata_file.exists():
@@ -324,6 +313,22 @@ class LocalWorkerBackend:
             return "idle"
         return metadata.status
 
+    def _record_failure_locked(
+        self,
+        paths: LocalWorkerStatePaths,
+        worker_key: str,
+        failure_reason: str,
+        *,
+        now: float,
+    ) -> WorkerHandle:
+        metadata = self._load_metadata(paths) or self._default_metadata(worker_key, now)
+        metadata.status = "failed"
+        metadata.last_used_at = now
+        metadata.failure_count += 1
+        metadata.failure_reason = failure_reason
+        self._save_metadata(paths, metadata)
+        return self._to_handle(metadata, paths, now=now)
+
     def _to_handle(self, metadata: _LocalWorkerMetadata, paths: LocalWorkerStatePaths, *, now: float) -> WorkerHandle:
         return WorkerHandle(
             worker_id=metadata.worker_id,
@@ -348,6 +353,7 @@ class LocalWorkerBackend:
 
 _local_worker_manager: WorkerManager | None = None
 _local_worker_manager_config: tuple[str, str, float] | None = None
+_local_worker_manager_lock = threading.Lock()
 
 
 def get_local_worker_manager() -> WorkerManager:
@@ -359,14 +365,15 @@ def get_local_worker_manager() -> WorkerManager:
     idle_timeout_seconds = _read_idle_timeout_seconds()
     config = (str(worker_root), api_root, idle_timeout_seconds)
 
-    if _local_worker_manager is None or _local_worker_manager_config != config:
-        _local_worker_manager = WorkerManager(
-            LocalWorkerBackend(
-                worker_root=worker_root,
-                api_root=api_root,
-                idle_timeout_seconds=idle_timeout_seconds,
-            ),
-        )
-        _local_worker_manager_config = config
+    with _local_worker_manager_lock:
+        if _local_worker_manager is None or _local_worker_manager_config != config:
+            _local_worker_manager = WorkerManager(
+                LocalWorkerBackend(
+                    worker_root=worker_root,
+                    api_root=api_root,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                ),
+            )
+            _local_worker_manager_config = config
 
     return _local_worker_manager

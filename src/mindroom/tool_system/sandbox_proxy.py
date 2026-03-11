@@ -7,6 +7,7 @@ import functools
 import hmac
 import json
 import os
+import threading
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
@@ -101,6 +102,7 @@ _CREDENTIAL_LEASE_TTL = _read_credential_lease_ttl()
 _PROXY_TOOLS = _read_proxy_tools(_EXECUTION_MODE)
 _WORKER_MANAGER: WorkerManager | None = None
 _WORKER_MANAGER_CONFIG: tuple[str | None, str | None] | None = None
+_WORKER_MANAGER_LOCK = threading.Lock()
 
 
 def sandbox_proxy_token_matches(provided_token: str | None) -> bool:
@@ -273,14 +275,15 @@ def _get_worker_manager() -> WorkerManager:
 
     api_root = _proxy_api_root()
     config = (api_root, _PROXY_TOKEN)
-    if _WORKER_MANAGER is None or config != _WORKER_MANAGER_CONFIG:
-        _WORKER_MANAGER = WorkerManager(
-            StaticSandboxRunnerBackend(
-                api_root=api_root or "",
-                auth_token=_PROXY_TOKEN,
-            ),
-        )
-        _WORKER_MANAGER_CONFIG = config
+    with _WORKER_MANAGER_LOCK:
+        if _WORKER_MANAGER is None or config != _WORKER_MANAGER_CONFIG:
+            _WORKER_MANAGER = WorkerManager(
+                StaticSandboxRunnerBackend(
+                    api_root=api_root or "",
+                    auth_token=_PROXY_TOKEN,
+                ),
+            )
+            _WORKER_MANAGER_CONFIG = config
     return _WORKER_MANAGER
 
 

@@ -16,6 +16,7 @@ class WorkerBackend(Protocol):
     """Backend contract for realizing persistent workers."""
 
     backend_name: str
+    idle_timeout_seconds: float
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or create the worker described by *spec*."""

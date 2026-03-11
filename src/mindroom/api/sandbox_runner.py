@@ -29,7 +29,9 @@ from mindroom.tool_system.worker_routing import (
     WorkerScope,
     tool_execution_identity,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
+    LOCAL_WORKER_ROOT_ENV,
     LocalWorkerStatePaths,
     get_local_worker_manager,
     local_worker_state_paths_from_handle,
@@ -306,6 +308,7 @@ def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
     env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
+    env[LOCAL_WORKER_ROOT_ENV] = str(paths.root.parent)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
@@ -342,20 +345,25 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     )
 
 
-def _prepare_worker(worker_key: str) -> WorkerHandle | SandboxRunnerExecuteResponse:
-    try:
-        return get_local_worker_manager().ensure_worker(WorkerSpec(worker_key))
-    except Exception as exc:
-        logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
-        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+def _prepare_worker(worker_key: str) -> WorkerHandle:
+    return get_local_worker_manager().ensure_worker(WorkerSpec(worker_key))
+
+
+def _worker_initialization_failure_response(
+    worker_key: str,
+    exc: WorkerBackendError,
+) -> SandboxRunnerExecuteResponse:
+    logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
+    return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
 
 async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
-        worker_handle = _prepare_worker(request.worker_key)
-        if isinstance(worker_handle, SandboxRunnerExecuteResponse):
-            return worker_handle
+        try:
+            worker_handle = _prepare_worker(request.worker_key)
+        except WorkerBackendError as exc:
+            return _worker_initialization_failure_response(request.worker_key, exc)
         runtime_overrides = {"base_dir": local_worker_state_paths_from_handle(worker_handle).workspace}
 
     execution_identity: ToolExecutionIdentity | None = None
@@ -408,14 +416,11 @@ def _subprocess_failure_response(
 
 def _resolve_subprocess_worker_context(
     request: SandboxRunnerExecuteRequest,
-) -> tuple[str | None, dict[str, str] | None, str | None] | SandboxRunnerExecuteResponse:
+) -> tuple[str | None, dict[str, str] | None, str | None]:
     if request.worker_key is None:
         return None, None, None
 
     worker_handle = _prepare_worker(request.worker_key)
-    if isinstance(worker_handle, SandboxRunnerExecuteResponse):
-        return worker_handle
-
     paths = local_worker_state_paths_from_handle(worker_handle)
     return (
         str(paths.venv_dir / "bin" / "python"),
@@ -450,10 +455,13 @@ def _parse_subprocess_response(
 
 
 def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    worker_context = _resolve_subprocess_worker_context(request)
-    if isinstance(worker_context, SandboxRunnerExecuteResponse):
-        return worker_context
-    python_executable, subprocess_env, cwd = worker_context
+    try:
+        python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(request)
+    except WorkerBackendError as exc:
+        if request.worker_key is None:
+            msg = "Worker initialization failed without a worker key."
+            raise RuntimeError(msg) from exc
+        return _worker_initialization_failure_response(request.worker_key, exc)
 
     try:
         completed = subprocess.run(
@@ -552,7 +560,7 @@ async def cleanup_idle_workers() -> SandboxWorkerCleanupResponse:
     worker_manager = get_local_worker_manager()
     cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
-        idle_timeout_seconds=worker_manager.idle_timeout_seconds or 0.0,
+        idle_timeout_seconds=worker_manager.idle_timeout_seconds,
         cleaned_workers=cleaned_workers,
     )
 

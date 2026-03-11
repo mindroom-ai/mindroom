@@ -22,9 +22,9 @@ class WorkerManager:
         return self.backend.backend_name
 
     @property
-    def idle_timeout_seconds(self) -> float | None:
-        """Return the backend idle timeout when it exists."""
-        return getattr(self.backend, "idle_timeout_seconds", None)
+    def idle_timeout_seconds(self) -> float:
+        """Return the configured backend idle timeout."""
+        return self.backend.idle_timeout_seconds
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or create a worker."""

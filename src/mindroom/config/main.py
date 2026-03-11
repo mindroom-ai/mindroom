@@ -414,6 +414,7 @@ class Config(BaseModel):
         if configured is None:
             configured = self.defaults.worker_tools
         if configured is None:
+            # Imported lazily to avoid a circular import: tool metadata also imports Config.
             from mindroom.tool_system.metadata import (  # noqa: PLC0415
                 default_worker_routed_tools,
                 ensure_tool_registry_loaded,

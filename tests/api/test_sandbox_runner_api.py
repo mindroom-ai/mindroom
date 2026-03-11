@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
@@ -437,6 +438,82 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
 
     worker_file = tmp_path / "workers" / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess workers should resolve back to the parent worker root even when only storage path is set."""
+    monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+
+    worker_root = local_workers_module._default_worker_root()
+    paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=worker_root)
+    subprocess_env = sandbox_runner_module._worker_subprocess_env(paths)
+
+    with patch.dict("os.environ", subprocess_env, clear=True):
+        child_worker_root = local_workers_module._default_worker_root()
+
+    child_paths = local_workers_module.local_worker_state_paths("worker-a", worker_root=child_worker_root)
+    assert child_worker_root == worker_root
+    assert child_paths.root == paths.root
+    assert subprocess_env["MINDROOM_SANDBOX_WORKER_ROOT"] == str(worker_root)
+
+
+def test_get_local_worker_manager_singleton_creation_is_thread_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent access should build the local worker manager only once per config."""
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
+
+    first_init_started = threading.Event()
+    allow_first_init_to_finish = threading.Event()
+    init_count_lock = threading.Lock()
+    init_count = 0
+    managers: list[object] = []
+    exceptions: list[Exception] = []
+
+    class FakeBackend:
+        backend_name = "fake_local_backend"
+        idle_timeout_seconds = 60.0
+
+        def __init__(self, *, worker_root: Path, api_root: str, idle_timeout_seconds: float) -> None:
+            del worker_root, api_root, idle_timeout_seconds
+            nonlocal init_count
+            with init_count_lock:
+                init_count += 1
+                call_number = init_count
+            if call_number == 1:
+                first_init_started.set()
+                assert allow_first_init_to_finish.wait(timeout=1.0)
+
+    def load_manager() -> None:
+        try:
+            managers.append(local_workers_module.get_local_worker_manager())
+        except Exception as exc:  # pragma: no cover - surfaced by assertion below
+            exceptions.append(exc)
+
+    monkeypatch.setattr(local_workers_module, "LocalWorkerBackend", FakeBackend)
+
+    first_thread = threading.Thread(target=load_manager)
+    second_thread = threading.Thread(target=load_manager)
+
+    first_thread.start()
+    assert first_init_started.wait(timeout=1.0)
+    second_thread.start()
+    assert init_count == 1
+    allow_first_init_to_finish.set()
+    first_thread.join(timeout=1.0)
+    second_thread.join(timeout=1.0)
+
+    assert exceptions == []
+    assert init_count == 1
+    assert len(managers) == 2
+    assert managers[0] is managers[1]
 
 
 def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Path) -> None:
