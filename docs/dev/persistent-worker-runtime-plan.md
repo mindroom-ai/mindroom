@@ -2,7 +2,11 @@
 
 Last updated: 2026-03-11
 Owner: MindRoom backend
-Status: Phase 2 complete and smoke-validated in GKE on the current shared sandbox-runner provider, and Phase 3 is now the backend/provider abstraction phase
+Status: Phases 1-3 are complete in code.
+Phase 4 is in progress.
+The backend-neutral worker contract, lifecycle handling, and default routing policy are implemented.
+The built-in Kubernetes provider is also implemented and deployment-wired.
+What remains is production hardening, richer metrics, operator documentation, dedicated-worker production validation, and deferred product-boundary decisions around `/v1` identity and credential defaults.
 
 ## Objective
 
@@ -22,17 +26,26 @@ Doing the work in this order prevents expensive lifecycle and deployment work fr
 ## Current Status
 
 Phase 1 is implemented and already useful for proving persistent tool execution.
-The current prototype provides generic worker routing for tool calls rather than a `shell`-only special case.
-The current prototype validates persistence with `shell`, `file`, and `python`.
-Phase 2 has been smoke-validated in GKE on the current shared provider shape of one shared MindRoom pod, one shared sandbox-runner sidecar, and one shared PVC.
+The implementation provides generic worker routing for tool calls rather than a `shell`-only special case.
+The implementation validates persistence with `shell`, `file`, and `python`.
+Phase 2 has been smoke-validated in GKE on the shared provider shape of one shared MindRoom pod, one shared sandbox-runner sidecar, and one shared PVC.
 That smoke validation confirmed same-worker-key persistence across turns, isolation across different worker keys, persistent Python environments, and survival of worker-owned state across pod replacement.
-That smoke validation did not validate dynamic per-user Kubernetes workers.
-The current prototype carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
-The current prototype persists worker workspace, cache, and Python packages inside worker-owned state.
-The current prototype aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
+The implementation carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
+The implementation persists worker workspace, cache, and Python packages inside worker-owned state.
+The implementation aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
 For file-backed agents that set `memory_file_path`, local workspace-aware tools now derive their base directory from that same path.
 Worker-routed scoped tools still execute against the resolved worker workspace, so the agent-level workspace hint does not bypass worker-owned state.
 Sessions, learning, and most credentials are now worker-scope-aware.
+Phase 3 is implemented in code.
+The worker backend contract, worker manager facade, worker handle model, and handle-based routed execution are the active runtime architecture.
+The primary runtime now ships built-in `static_runner` and `kubernetes` backends behind the same contract.
+The primary runtime exposes backend-neutral worker observability and cleanup endpoints through `/api/workers`.
+The primary runtime also runs optional background idle cleanup using the configured backend.
+The built-in default worker-routing policy now comes from per-tool metadata plus agent/default `worker_tools` overrides rather than only from environment-driven sandbox selection.
+Phase 4 has started.
+The built-in Kubernetes backend now provisions dedicated worker Deployments and Services, mounts durable worker state from the shared PVC by worker subpath, waits for readiness, records failure metadata, and evicts idle workers by scaling them to zero while keeping state.
+The current codebase and test suite therefore already include a production-provider implementation, even though some rollout and operator work remains.
+This document does not claim a recent dedicated-worker GKE smoke or soak validation for the Kubernetes backend.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
@@ -130,7 +143,10 @@ That means the dashboard must not read or write credentials for `user`, `user_ag
 
 Tool execution policy should become an explicit concept rather than a side effect of the old sandbox settings.
 The minimum policy categories are local execution in the primary runtime and worker-routed execution in a scoped worker.
-The source of truth is `worker_tools` and `worker_scope`.
+The source of truth is the combination of tool metadata, `worker_tools`, and `worker_scope`.
+
+The current policy model already supports the first item below.
+The remaining items are still design goals rather than fully explicit first-class config.
 
 The final policy model should support these per-tool decisions.
 
@@ -215,7 +231,7 @@ For worker-routed execution, runtime worker workspace resolution remains authori
 ## Memory Design
 
 If worker-routed tools can edit memory, memory reads during prompt assembly must resolve against the same worker-owned storage.
-The current prototype already does this for file-backed memory.
+The current implementation already does this for file-backed memory.
 The full design should keep file-backed memory as the only worker-editable memory backend until another backend has a deliberate synchronization model.
 
 The final memory rules are:
@@ -248,7 +264,7 @@ The target credentials model is:
 
 - Credentials are stored under a scope-aware namespace rather than only `service_name`.
 - The common credential scopes are `shared`, `user`, and `worker`.
-- The current leading option is to default worker-routed tools to `user` when a requester identity exists, but the exact per-tool defaults are still a Phase 3 policy decision.
+- The current leading option is to default worker-routed tools to `user` when a requester identity exists, but the exact per-tool defaults are still an open policy decision.
 - Shared credentials require explicit opt-in.
 - Credential leases are created on the target worker and are short-lived and single-use by default.
 - Leased credentials never become part of the model prompt or normal tool arguments.
@@ -280,11 +296,11 @@ The current product rule is:
 ## Provider Model
 
 MindRoom core owns worker scope semantics, execution identity resolution, worker key resolution, tool routing policy, and worker-owned state semantics.
-MindRoom core must not own Kubernetes object names, namespaces, storage classes, pod names, or other provider-specific control-plane concepts.
-MindRoom core should ship the interface and the built-in local/shared-runner provider implementations needed for development and the current deployment shape.
-The local development model and the current shared sandbox-runner deployment are providers behind the same worker backend contract.
-Kubernetes is a future provider rather than a core MindRoom runtime concept.
-A Kubernetes-backed provider or controller may live outside MindRoom core and consume the same worker contract without changing core routing logic.
+MindRoom core must not leak provider-specific lifecycle details into the generic routing layer.
+MindRoom core now ships the interface and the built-in `static_runner` and `kubernetes` backends needed for current development and hosted deployment shapes.
+The local development model, the shared sandbox-runner deployment, and the dedicated Kubernetes-worker deployment are providers behind the same worker backend contract.
+The current codebase therefore treats Kubernetes as a built-in provider, not only a future idea.
+A future external provider or controller can still consume the same contract without changing core routing logic.
 
 ## Local Provider
 
@@ -294,10 +310,11 @@ The local provider should support introspection of active workers and cleanup of
 
 ## Kubernetes Provider
 
-The Kubernetes provider belongs to Phase 4 and should be implemented against the worker backend contract introduced in Phase 3.
-The long-term Kubernetes model is a provider or controller that can realize worker handles from worker keys using cluster-native primitives without changing MindRoom core routing semantics.
-A Kubernetes-backed implementation does not need to live inside MindRoom core as long as it satisfies the same contract.
-Each Kubernetes worker still needs durable worker-owned storage and an authenticated internal endpoint.
+The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
+The current implementation creates dedicated worker Deployments and Services, mounts durable worker-owned storage from the shared PVC via worker-specific subpaths, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
+Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
+The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
+Each Kubernetes worker still needs durable worker-owned storage and an authenticated internal endpoint, and the current implementation satisfies that contract.
 
 ## Provider Interface Contract
 
@@ -350,7 +367,9 @@ The initialization rules are:
 
 ## Observability
 
-The full system should expose enough telemetry to answer whether worker routing is correct and whether isolation boundaries are holding.
+The system already exposes backend-neutral worker listing and idle cleanup through the primary runtime and local worker listing and cleanup through the sandbox-runner runtime.
+Worker handles already carry startup counts, failure counts, failure reasons, timestamps, and provider debug metadata.
+What is still missing is richer aggregate telemetry that can be scraped or graphed over time.
 
 At minimum we need:
 
@@ -361,6 +380,33 @@ At minimum we need:
 - Credential lease creation and expiration counts.
 - Storage path resolution traces for debugging.
 - Health and failure reason visibility for worker startup errors.
+
+## What Is Left Now
+
+The remaining work is no longer core routing architecture.
+It is productionization, deferred policy decisions, and operator experience.
+
+1. Trusted `/v1` identity for isolating worker scopes.
+   Current `/v1` requests still build execution identity with `requester_id=None`, and the API intentionally only supports unscoped agents and `worker_scope=shared`.
+   Remaining work is to decide the authenticated principal source for `/v1`, decide whether `room_thread` should key from conversation or session identity, and then safely enable additional scopes.
+
+2. Finalize explicit credential policy defaults.
+   Credentials are already scope-aware and leased to workers, but the long-term default policy by tool class is still not fully codified as a first-class model.
+   The main remaining decision is when worker-routed tools should default to `user`, `shared`, or another explicit credential scope.
+
+3. Add aggregate metrics and dashboards.
+   We still need counters and histograms for worker creation and reuse, startup latency, idle eviction counts, execute requests by tool and scope, and credential lease issuance and expiry.
+   The current `/api/workers` surfaces are useful for debugging but are not sufficient for fleet-level observability.
+
+4. Do dedicated-worker production validation beyond unit and integration coverage.
+   The Kubernetes backend is implemented and tested, but this document should still treat dedicated-worker GKE smoke and soak validation as remaining rollout work unless and until it is recorded explicitly.
+   The most valuable checks are end-to-end persistence across worker recreation, failure injection, restart handling, and concurrency or capacity behavior under real cluster conditions.
+
+5. Finish operator-facing documentation.
+   We still need final docs for retention and cleanup behavior per provider, storage layout and PVC expectations, deployment mode selection, and incident handling for stuck or unhealthy workers.
+
+6. Decide optional product affordances.
+   Open decisions remain around user-facing worker reset commands, long-term retention controls, and whether any of that should surface in the dashboard or chat UX.
 
 ## Operational Policies
 
@@ -436,49 +482,54 @@ Phase 2 delivered:
 
 ### Phase 3: Backend Contract, Policy, And Observability
 
-Phase 3 should introduce the backend/provider abstraction that makes future providers possible without rewriting core routing code.
-Phase 3 is the abstraction and policy phase.
+Phase 3 is complete.
+Phase 3 was the abstraction and policy phase.
 
-Phase 3 work items are:
+Phase 3 delivered:
 
 - Introduce a first-class backend-neutral worker manager and worker backend contract.
 - Refactor routed tool execution to resolve a worker handle through that contract.
 - Treat the current shared sandbox-runner deployment as the first concrete provider so Phase 2 behavior remains unchanged.
 - Implement idle cleanup and state retention rules.
 - Tighten `/v1` scope eligibility based on trusted requester identity.
-- Add observability surfaces for active workers and worker failures.
-- Finalize defaults for which tools are local versus worker-routed.
+- Add backend-neutral observability surfaces for active workers and worker failures.
+- Add per-tool default execution targets so built-in routing defaults are explicit.
 
 ### Phase 4: Production Provider Implementations
 
-Phase 4 should move the design from backend-neutral correctness to production providers.
-Phase 4 is the provider-implementation phase.
+Phase 4 is in progress.
+Phase 4 is the provider-implementation and productionization phase.
 
-Phase 4 work items are:
+Phase 4 already delivered:
 
 - Implement a Kubernetes-backed worker provider.
 - Attach durable storage to provider-managed workers.
 - Add provider health checks and readiness handling.
-- Add metrics and debugging endpoints for provider operations.
+
+Phase 4 remaining work is:
+
+- Add aggregate metrics and dashboards for provider operations.
+- Record dedicated-worker production validation, especially on GKE.
 - Document retention, cleanup, and storage strategy per provider.
 - Document incident handling for stuck or unhealthy workers.
 
 ## Recommended Immediate Next Step
 
-The next step is to complete Phase 3 around the new backend contract.
-The first concrete targets are explicit worker lifecycle through the backend interface, backend-neutral observability, conservative `/v1` trust enforcement, and final local-versus-worker tool policy defaults.
+The next step is to finish the remaining productionization work rather than redesign the routing model again.
+The highest-value targets are richer metrics, dedicated-worker GKE smoke and soak validation, provider and incident documentation, and the deferred `/v1` identity plus credential-policy decisions.
 
 ## File Map For Remaining Work
 
 - `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
+- `src/mindroom/tool_system/metadata.py` is the source of truth for per-tool default execution targets and for the built-in default worker-routing policy.
 - `src/mindroom/agents.py` now resolves session and learning storage through worker-aware paths and remains the place to keep agent construction aligned with scoped state.
 - `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
 - `src/mindroom/api/openai_compat.py` keeps enforcing conservative `/v1` scope eligibility and trusted requester identity rules.
 - `src/mindroom/api/sandbox_runner.py` should remain an execution runtime component over the worker backend contract rather than a lifecycle owner.
 - `src/mindroom/tool_system/sandbox_proxy.py` should resolve worker handles through the worker manager and stay free of provider-specific assumptions.
-- `src/mindroom/workers/` should remain the home of the backend-neutral worker contract plus the built-in local/shared-runner providers that ship with core.
-- External providers or controllers, including a future Kubernetes-backed implementation, should consume the same contract without forcing Kubernetes concepts into core routing code.
-- `cluster/k8s/instance/templates/deployment-mindroom.yaml` remains only the current shared-runner deployment model rather than the final provider architecture.
+- `src/mindroom/workers/` is now the home of the backend-neutral worker contract plus the built-in `static_runner` and `kubernetes` backends that ship with core.
+- `src/mindroom/api/workers.py` and the background cleanup loop in `src/mindroom/api/main.py` are the current backend-neutral observability and lifecycle surfaces.
+- `cluster/k8s/instance/templates/deployment-mindroom.yaml` and related worker templates now encode both the shared-runner and dedicated Kubernetes-worker deployment shapes.
 
 ## Open Decisions
 

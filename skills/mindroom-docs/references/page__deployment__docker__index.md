@@ -143,6 +143,6 @@ MindRoom stores data in the `mindroom_data` directory:
 
 When configured, `shell`, `file`, and `python` tool calls can be proxied to a separate **sandbox-runner** sidecar container. The sidecar runs the same image but without access to secrets, credentials, or the primary data volume. This provides real process-level isolation for code-execution tools. Without proxy configuration, all tools execute locally in the MindRoom process.
 
-See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes sidecar setup, host-machine-with-container mode, credential leases, and environment variable reference.
+See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 
 > [!TIP] For production, use a reverse proxy (Traefik, Nginx) in front of the MindRoom container when you want TLS, host routing, or additional auth layers. See `local/instances/deploy/docker-compose.yml` for an example with Traefik labels.
