@@ -30,6 +30,8 @@ That smoke validation did not validate dynamic per-user Kubernetes workers.
 The current prototype carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
 The current prototype persists worker workspace, cache, and Python packages inside worker-owned state.
 The current prototype aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
+For file-backed agents that set `memory_file_path`, local workspace-aware tools now derive their base directory from that same path.
+Worker-routed scoped tools still execute against the resolved worker workspace, so the agent-level workspace hint does not bypass worker-owned state.
 Sessions, learning, and most credentials are now worker-scope-aware.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
