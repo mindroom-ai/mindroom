@@ -73,6 +73,11 @@ def _normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
+def _normalize_worker_dir_part(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
+    return normalized or "worker"
+
+
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_key_part(identity.requester_id)
@@ -208,7 +213,7 @@ def resolve_agent_worker_key(
 
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
-    prefix = _normalize_worker_key_part(worker_key)
+    prefix = _normalize_worker_dir_part(worker_key)
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"
