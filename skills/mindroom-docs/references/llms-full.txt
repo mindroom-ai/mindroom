@@ -797,8 +797,7 @@ memory:
     config: {}
 #
 # Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
-# MindRoom auto-installs that optional extra on first use, or preinstall it with:
-# uv sync --extra sentence_transformers
+# MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
 knowledge_bases:
@@ -2731,8 +2730,6 @@ memory:
 | `ollama`                | `nomic-embed-text`                       | Self-hosted, set `host` or `OLLAMA_HOST`                                  |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
-Preinstall the local runtime with `uv sync --extra sentence_transformers` or `pip install 'mindroom[sentence_transformers]'` if you want to avoid the first-run install step.
-
 ## Storage
 
 Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
@@ -2823,7 +2820,7 @@ memory:
       model: sentence-transformers/all-MiniLM-L6-v2
 ```
 
-MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used. Preinstall it with `uv sync --extra sentence_transformers` or `pip install 'mindroom[sentence_transformers]'` if you want to avoid the cold-start install step.
+MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used.
 
 ## Backend: `file`
 

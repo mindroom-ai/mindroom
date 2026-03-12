@@ -170,8 +170,7 @@ memory:
     config: {}
 #
 # Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
-# MindRoom auto-installs that optional extra on first use, or preinstall it with:
-# uv sync --extra sentence_transformers
+# MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
 knowledge_bases:

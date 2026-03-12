@@ -56,7 +56,7 @@ memory:
       model: sentence-transformers/all-MiniLM-L6-v2
 ```
 
-MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used. Preinstall it with `uv sync --extra sentence_transformers` or `pip install 'mindroom[sentence_transformers]'` if you want to avoid the cold-start install step.
+MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used.
 
 ## Backend: `file`
 

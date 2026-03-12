@@ -190,8 +190,7 @@ cd mindroom
 uv sync --all-extras
 ```
 
-To preinstall the fully local sentence-transformers embedder runtime, run `uv sync --extra sentence_transformers`.
-If you skip that, MindRoom auto-installs it on first use when `memory.embedder.provider: sentence_transformers` is configured.
+MindRoom auto-installs the fully local sentence-transformers embedder runtime on first use when `memory.embedder.provider: sentence_transformers` is configured.
 
 ```bash
 # Start MindRoom (agents + API + web dashboard)

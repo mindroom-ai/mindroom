@@ -225,8 +225,6 @@ memory:
 | `ollama`                | `nomic-embed-text`                       | Self-hosted, set `host` or `OLLAMA_HOST`                                  |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
-Preinstall the local runtime with `uv sync --extra sentence_transformers` or `pip install 'mindroom[sentence_transformers]'` if you want to avoid the first-run install step.
-
 ## Storage
 
 Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
