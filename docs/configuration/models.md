@@ -38,7 +38,7 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-5-latest
+    id: claude-sonnet-4-6-latest
     context_window: 200000
 
   haiku:
@@ -49,7 +49,7 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-5.2
+    id: gpt-5.4
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
@@ -108,7 +108,7 @@ A warning is logged whenever history is trimmed, including the original and redu
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-5-latest
+    id: claude-sonnet-4-6-latest
     context_window: 200000  # 200K tokens
 ```
 
