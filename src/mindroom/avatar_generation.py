@@ -138,7 +138,7 @@ def get_avatar_path(entity_type: str, entity_name: str) -> Path:
 
 def _managed_room_avatar_keys(config: Config) -> set[str]:
     """Return room keys that participate in managed avatar generation and sync."""
-    return {room_name for room_name in config.get_all_configured_rooms() if not room_name.startswith("!")}
+    return {room_name for room_name in config.get_all_configured_rooms() if not room_name.startswith(("!", "#"))}
 
 
 def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:

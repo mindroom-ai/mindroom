@@ -147,6 +147,47 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
     assert not generate_avatars.has_missing_managed_avatars(config)
 
 
+def test_has_missing_managed_avatars_ignores_full_room_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """External room aliases should not be treated as managed avatar targets."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["#external:localhost"],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    config = generate_avatars.Config.model_validate(raw_config)
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"avatar")
+
+    def _avatars_dir(**_kwargs: object) -> Path:
+        return tmp_path / "avatars"
+
+    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
+
+    assert not generate_avatars.has_missing_managed_avatars(config)
+
+
 @pytest.mark.asyncio
 async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_exist(
     monkeypatch: pytest.MonkeyPatch,
