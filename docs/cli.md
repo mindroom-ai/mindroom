@@ -165,8 +165,8 @@ Generate and sync managed avatar assets.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync configured room and root-space avatars to Matrix using the             │
-│            initialized router account.                                                 │
+│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
+│            router account.                                                             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -224,8 +224,8 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized
- router account.
+ Sync configured room and root-space avatars to Matrix using the initialized router
+ account.
 
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
