@@ -91,6 +91,8 @@ class TestConfigInit:
         assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
+        assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
+        assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
@@ -289,7 +291,7 @@ class TestConfigInit:
         assert result.exit_code == 0
         content = target.read_text()
         assert "provider: openai" in content
-        assert "id: gpt-5.2" in content
+        assert "id: gpt-5.4" in content
 
     def test_init_openrouter_preset_uses_openrouter_models(self, tmp_path: Path) -> None:
         """Config init --provider openrouter uses OpenRouter with Claude model."""
@@ -299,6 +301,23 @@ class TestConfigInit:
         content = target.read_text()
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4-5" in content
+
+    def test_init_anthropic_preset_uses_anthropic_models_and_local_embedder(self, tmp_path: Path) -> None:
+        """Config init --provider anthropic should only require the Anthropic API key."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "anthropic"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "anthropic"
+        assert config["models"]["default"]["id"] == "claude-sonnet-4-6-latest"
+        assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
+        assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "ANTHROPIC_API_KEY=your-anthropic-key-here" in env_content
+        assert "\n# OPENAI_API_KEY=your-openai-key-here" in env_content
+        assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in env_content
 
     def test_init_vertexai_claude_preset_uses_vertex_models(self, tmp_path: Path) -> None:
         """Config init --provider vertexai_claude uses Vertex AI Claude defaults."""
@@ -376,7 +395,7 @@ class TestConfigValidate:
         """Config validate reports success for a valid config."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -403,7 +422,7 @@ class TestConfigValidate:
         """Config validate does not warn when provider secrets are supplied via *_FILE."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: openai\n    id: gpt-5.2\n"
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
             "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -525,7 +544,7 @@ class TestRunApiFlags:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -545,7 +564,7 @@ class TestRunApiFlags:
         """Run --no-api passes api=False to bot main."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -560,7 +579,7 @@ class TestRunApiFlags:
         """Run --api-port and --api-host are forwarded to bot main."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -615,7 +634,7 @@ class TestRunApiFlags:
 # ---------------------------------------------------------------------------
 
 _VALID_CONFIG = (
-    "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+    "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
     "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
     "router:\n  model: default\n"
 )
@@ -811,7 +830,7 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
-            "  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "  fast:\n    provider: anthropic\n    id: claude-haiku-3-5-latest\n"
             "  gpt:\n    provider: openai\n    id: gpt-4o\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
@@ -1068,7 +1087,7 @@ class TestDoctor:
         """Doctor checks ollama embedder reachability via /api/tags."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -1096,7 +1115,7 @@ class TestDoctor:
         """Doctor validates configured memory LLM API key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -1125,7 +1144,7 @@ class TestDoctor:
         """Doctor warns when memory LLM API key is not set."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -1153,7 +1172,7 @@ class TestDoctor:
         """Doctor validates custom OpenAI embedder hosts using /embeddings."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -1191,7 +1210,7 @@ class TestDoctor:
         """Doctor adds a local-network hint for .local routing failures."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
@@ -1229,7 +1248,7 @@ class TestDoctor:
         """Doctor validates sentence-transformers embedders by loading the local model."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6-latest\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "memory:\n"
