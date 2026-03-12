@@ -15,8 +15,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
+import yaml
 
-from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ
+from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, sync_shared_credentials_to_worker
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name, worker_root_path
@@ -61,6 +62,7 @@ _DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
@@ -204,6 +206,41 @@ def _container_config_dir(config_path: str) -> str:
 
 def _container_config_dotenv_path(config_path: str) -> str:
     return str(PurePosixPath(_container_config_dir(config_path)) / ".env")
+
+
+def _projected_config_value(relative_path: PurePosixPath) -> str:
+    return f"./{relative_path.as_posix()}"
+
+
+def _safe_projection_name(raw_value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_value).strip(".-")
+    return normalized or "item"
+
+
+def _projection_display_name(host_path: Path, *, fallback: str) -> str:
+    return _safe_projection_name(host_path.name or fallback)
+
+
+def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
+    if plugin_path.startswith(("python:", "pkg:", "module:")):
+        return False
+    candidate = resolve_config_relative_path(plugin_path, config_path=config_path)
+    if candidate.exists():
+        return True
+    unresolved = Path(plugin_path).expanduser()
+    return unresolved.is_absolute() or plugin_path.startswith((".", "~")) or "/" in plugin_path or "\\" in plugin_path
+
+
+@dataclass(frozen=True, slots=True)
+class _DockerProjectedConfigAsset:
+    host_path: Path
+    relative_path: PurePosixPath
+
+
+@dataclass(frozen=True, slots=True)
+class _DockerProjectedConfig:
+    root: Path
+    assets: tuple[_DockerProjectedConfigAsset, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,26 +671,7 @@ class DockerWorkerBackend:
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
-        if self.config.host_config_path is not None:
-            mount_checks.extend(
-                [
-                    (
-                        self.config.host_config_path.parent,
-                        _container_config_dir(self.config.config_path),
-                        True,
-                    ),
-                    (
-                        self.config.host_config_path,
-                        self.config.config_path,
-                        True,
-                    ),
-                    (
-                        self._masked_config_dotenv_host_path(paths),
-                        _container_config_dotenv_path(self.config.config_path),
-                        True,
-                    ),
-                ],
-            )
+        mount_checks.extend(self._config_mount_specs(paths))
         return all(
             self._container_mount_matches(
                 container,
@@ -768,27 +786,299 @@ class DockerWorkerBackend:
         env.update(self.config.extra_env)
         return env
 
+    def _config_mount_specs(self, paths: LocalWorkerStatePaths) -> list[tuple[Path, str, bool]]:
+        if self.config.host_config_path is None:
+            return []
+
+        projection = self._projected_config(paths)
+        config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
+        mounts: list[tuple[Path, str, bool]] = [(projection.root, str(config_dir), True)]
+        mounts.extend((asset.host_path, str(config_dir / asset.relative_path), True) for asset in projection.assets)
+        return mounts
+
     def _container_volumes(self, paths: LocalWorkerStatePaths) -> dict[str, dict[str, str]]:
         volumes = {
             str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
         }
-        if self.config.host_config_path is not None:
-            volumes[str(self.config.host_config_path.parent)] = {
-                "bind": _container_config_dir(self.config.config_path),
-                "mode": "ro",
-            }
-            volumes[str(self.config.host_config_path)] = {"bind": self.config.config_path, "mode": "ro"}
-            volumes[str(self._masked_config_dotenv_host_path(paths))] = {
-                "bind": _container_config_dotenv_path(self.config.config_path),
-                "mode": "ro",
+        for host_path, container_path, read_only in self._config_mount_specs(paths):
+            volumes[str(host_path)] = {
+                "bind": container_path,
+                "mode": "ro" if read_only else "rw",
             }
         return volumes
 
-    def _masked_config_dotenv_host_path(self, paths: LocalWorkerStatePaths) -> Path:
-        masked_dotenv = paths.metadata_dir / "config-dir.env"
-        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
-        masked_dotenv.write_text("", encoding="utf-8")
-        return masked_dotenv
+    def _projected_config(self, paths: LocalWorkerStatePaths) -> _DockerProjectedConfig:
+        host_config_path = self.config.host_config_path
+        if host_config_path is None:
+            msg = "Projected Docker worker config requires a host config path."
+            raise WorkerBackendError(msg)
+
+        config_data = self._load_host_config_data(host_config_path)
+        asset_paths_by_host: dict[Path, PurePosixPath] = {}
+        assets: list[_DockerProjectedConfigAsset] = []
+        self._rewrite_projected_config_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        projected_yaml = yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True)
+        projection_manifest = {
+            "config_yaml": projected_yaml,
+            "assets": [
+                {
+                    "host_path": str(asset.host_path),
+                    "relative_path": asset.relative_path.as_posix(),
+                }
+                for asset in assets
+            ],
+        }
+        projection_hash = hashlib.sha256(
+            json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        ).hexdigest()[:12]
+        projection_dir = paths.metadata_dir / f"config-projection-{projection_hash}"
+        self._write_projected_config(projection_dir, projected_yaml, assets)
+        return _DockerProjectedConfig(root=projection_dir, assets=tuple(assets))
+
+    def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
+        try:
+            data = yaml.safe_load(host_config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
+            raise WorkerBackendError(msg) from exc
+        if not isinstance(data, dict):
+            msg = f"Docker worker config file '{host_config_path}' must contain a YAML object."
+            raise WorkerBackendError(msg)
+        return data
+
+    def _rewrite_projected_config_paths(
+        self,
+        config_data: dict[str, object],
+        host_config_path: Path,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        self._rewrite_projected_plugin_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        self._rewrite_projected_knowledge_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        self._rewrite_projected_agent_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        self._rewrite_projected_memory_paths(config_data, host_config_path, asset_paths_by_host, assets)
+
+    def _rewrite_projected_plugin_paths(
+        self,
+        config_data: dict[str, object],
+        host_config_path: Path,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_plugins = config_data.get("plugins")
+        if not isinstance(raw_plugins, list):
+            return
+
+        plugins = cast("list[object]", raw_plugins)
+        for index, raw_plugin in enumerate(plugins):
+            if not isinstance(raw_plugin, str) or not _plugin_uses_filesystem_path(
+                raw_plugin,
+                config_path=host_config_path,
+            ):
+                continue
+            host_path = resolve_config_relative_path(raw_plugin, config_path=host_config_path)
+            plugins[index] = self._projected_path_value(
+                host_path,
+                PurePosixPath(
+                    _PROJECTED_ASSETS_DIRNAME,
+                    "plugins",
+                    f"{index:02d}-{_projection_display_name(host_path, fallback=raw_plugin)}",
+                ),
+                asset_paths_by_host=asset_paths_by_host,
+                assets=assets,
+            )
+
+    def _rewrite_projected_knowledge_paths(
+        self,
+        config_data: dict[str, object],
+        host_config_path: Path,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_knowledge_bases = config_data.get("knowledge_bases")
+        if not isinstance(raw_knowledge_bases, dict):
+            return
+
+        knowledge_bases = cast("dict[object, object]", raw_knowledge_bases)
+        for base_id, raw_knowledge_base in knowledge_bases.items():
+            if not isinstance(base_id, str) or not isinstance(raw_knowledge_base, dict):
+                continue
+            knowledge_base = cast("dict[str, object]", raw_knowledge_base)
+            raw_path = knowledge_base.get("path")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            host_path = resolve_config_relative_path(raw_path, config_path=host_config_path)
+            knowledge_base["path"] = self._projected_path_value(
+                host_path,
+                PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
+                asset_paths_by_host=asset_paths_by_host,
+                assets=assets,
+            )
+
+    def _rewrite_projected_agent_paths(
+        self,
+        config_data: dict[str, object],
+        host_config_path: Path,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_agents = config_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return
+
+        agents = cast("dict[object, object]", raw_agents)
+        for agent_name, raw_agent in agents.items():
+            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
+                continue
+            agent = cast("dict[str, object]", raw_agent)
+            agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", _safe_projection_name(agent_name))
+            self._rewrite_projected_context_files(
+                agent,
+                host_config_path,
+                agent_dir,
+                asset_paths_by_host=asset_paths_by_host,
+                assets=assets,
+            )
+            self._rewrite_projected_agent_memory_file_path(
+                agent,
+                host_config_path,
+                agent_dir,
+                asset_paths_by_host=asset_paths_by_host,
+                assets=assets,
+            )
+
+    def _rewrite_projected_context_files(
+        self,
+        raw_agent: dict[str, object],
+        host_config_path: Path,
+        agent_dir: PurePosixPath,
+        *,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_context_files = raw_agent.get("context_files")
+        if not isinstance(raw_context_files, list):
+            return
+
+        context_files = cast("list[object]", raw_context_files)
+        for index, raw_context_file in enumerate(context_files):
+            if not isinstance(raw_context_file, str) or not raw_context_file.strip():
+                continue
+            host_path = resolve_config_relative_path(raw_context_file, config_path=host_config_path)
+            context_files[index] = self._projected_path_value(
+                host_path,
+                agent_dir
+                / "context_files"
+                / f"{index:02d}-{_projection_display_name(host_path, fallback=raw_context_file)}",
+                asset_paths_by_host=asset_paths_by_host,
+                assets=assets,
+            )
+
+    def _rewrite_projected_agent_memory_file_path(
+        self,
+        raw_agent: dict[str, object],
+        host_config_path: Path,
+        agent_dir: PurePosixPath,
+        *,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_memory_file_path = raw_agent.get("memory_file_path")
+        if not isinstance(raw_memory_file_path, str) or not raw_memory_file_path.strip():
+            return
+
+        host_path = resolve_config_relative_path(raw_memory_file_path, config_path=host_config_path)
+        raw_agent["memory_file_path"] = self._projected_path_value(
+            host_path,
+            agent_dir / "memory_file_path",
+            asset_paths_by_host=asset_paths_by_host,
+            assets=assets,
+        )
+
+    def _rewrite_projected_memory_paths(
+        self,
+        config_data: dict[str, object],
+        host_config_path: Path,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        raw_memory = config_data.get("memory")
+        if not isinstance(raw_memory, dict):
+            return
+
+        memory = cast("dict[str, object]", raw_memory)
+        raw_file_memory = memory.get("file")
+        if not isinstance(raw_file_memory, dict):
+            return
+
+        file_memory = cast("dict[str, object]", raw_file_memory)
+        raw_path = file_memory.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return
+
+        host_path = resolve_config_relative_path(raw_path, config_path=host_config_path)
+        file_memory["path"] = self._projected_path_value(
+            host_path,
+            PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "memory", "file"),
+            asset_paths_by_host=asset_paths_by_host,
+            assets=assets,
+        )
+
+    def _projected_path_value(
+        self,
+        host_path: Path,
+        suggested_relative_path: PurePosixPath,
+        *,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> str:
+        relative_path = self._projected_asset_path(
+            host_path,
+            suggested_relative_path,
+            asset_paths_by_host=asset_paths_by_host,
+            assets=assets,
+        )
+        return _projected_config_value(relative_path)
+
+    def _projected_asset_path(
+        self,
+        host_path: Path,
+        suggested_relative_path: PurePosixPath,
+        *,
+        asset_paths_by_host: dict[Path, PurePosixPath],
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> PurePosixPath:
+        resolved_host_path = host_path.expanduser().resolve()
+        existing_relative_path = asset_paths_by_host.get(resolved_host_path)
+        if existing_relative_path is not None:
+            return existing_relative_path
+
+        asset_paths_by_host[resolved_host_path] = suggested_relative_path
+        if resolved_host_path.exists():
+            assets.append(
+                _DockerProjectedConfigAsset(
+                    host_path=resolved_host_path,
+                    relative_path=suggested_relative_path,
+                ),
+            )
+        return suggested_relative_path
+
+    def _write_projected_config(
+        self,
+        projection_dir: Path,
+        projected_yaml: str,
+        assets: list[_DockerProjectedConfigAsset],
+    ) -> None:
+        projection_dir.mkdir(parents=True, exist_ok=True)
+        (projection_dir / PurePosixPath(self.config.config_path).name).write_text(projected_yaml, encoding="utf-8")
+        (projection_dir / ".env").write_text("", encoding="utf-8")
+        for asset in assets:
+            placeholder_path = projection_dir.joinpath(*asset.relative_path.parts)
+            if asset.host_path.is_dir():
+                placeholder_path.mkdir(parents=True, exist_ok=True)
+                continue
+            placeholder_path.parent.mkdir(parents=True, exist_ok=True)
+            placeholder_path.touch(exist_ok=True)
 
     def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:
         labels = {
