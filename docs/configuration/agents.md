@@ -311,6 +311,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+Dedicated Docker workers mount the config directory read-only so config-relative plugins and knowledge paths under that directory remain available, but they intentionally mask config-adjacent `.env` files.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 The shared-only integrations require `worker_scope` unset or `shared`.
 That list includes `google`, `spotify`, `gmail`, `google_calendar`, `google_sheets`, `homeassistant`, and all configured `mcp_<server_id>` tools.
