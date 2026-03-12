@@ -26,7 +26,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ## Quick Start
 
-### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
+### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 **Prereqs:** Docker + Docker Compose.
 
@@ -42,8 +42,12 @@ docker compose up -d
 Open:
 
 - MindRoom UI: http://localhost:8765
-- Element: http://localhost:8080
-- Matrix homeserver: http://matrix.localhost:8008
+- MindRoom client: http://localhost:8080
+- Matrix homeserver: http://localhost:8008
+
+The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+
+If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Manual Install (advanced)
 
@@ -234,7 +238,7 @@ Send a message mentioning your agent in a room where it is configured.
 
 For a detailed architecture and credential model, see: [Hosted Matrix deployment guide](https://docs.mindroom.chat/deployment/hosted-matrix/index.md).
 
-## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
@@ -263,8 +267,12 @@ docker compose up -d
 Open:
 
 - MindRoom UI: http://localhost:8765
-- Element: http://localhost:8080
-- Matrix homeserver: http://matrix.localhost:8008
+- MindRoom client: http://localhost:8080
+- Matrix homeserver: http://localhost:8008
+
+The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
+
+If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ## Manual Install (advanced)
 
@@ -4041,13 +4049,13 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                         | Best For                                                   |
-| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally        |
-| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix    |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                              |
-| Direct                                                                                         | Development, simple setups                                 |
+| Method                                                                                         | Best For                                                           |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally                |
+| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix            |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                                      |
+| Direct                                                                                         | Development, simple setups                                         |
 
 ## Bridges
 
@@ -4089,6 +4097,8 @@ $EDITOR .env  # add at least one AI provider key
 
 docker compose up -d
 ```
+
+The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`. The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default. If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Direct (Development)
 
