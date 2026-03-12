@@ -265,7 +265,7 @@ agents:
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-5-latest
+    id: claude-sonnet-4-6-latest
 
 mindroom_user:
   username: mindroom_user  # Set this before first run; username is immutable after bootstrap

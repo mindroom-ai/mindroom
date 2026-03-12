@@ -47,15 +47,17 @@ _CONFIG_PATH_OPTION: Path | None = typer.Option(
 )
 
 _ConfigInitProfile = Literal["full", "minimal", "public"]
-_ProviderPreset = Literal["openai", "openrouter", "vertexai_claude"]
+_ProviderPreset = Literal["anthropic", "openai", "openrouter", "vertexai_claude"]
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
-    "openai": ("openai", "gpt-5.2"),
+    "anthropic": ("anthropic", "claude-sonnet-4-6-latest"),
+    "openai": ("openai", "gpt-5.4"),
     "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
     "vertexai_claude": ("vertexai_claude", "claude-opus-4-6@default"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
     "vertexai_claude": (),
@@ -219,7 +221,7 @@ def config_init(
     provider: str | None = typer.Option(
         None,
         "--provider",
-        help="Provider preset for generated config: openai, openrouter, or vertexai_claude.",
+        help="Provider preset for generated config: anthropic, openai, openrouter, or vertexai_claude.",
     ),
 ) -> None:
     """Create a starter config.yaml with example agents and models.
@@ -455,7 +457,9 @@ def _resolve_config_init_selection(
 
     provider_preset = _normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
-        console.print("[red]Invalid --provider value.[/red] Use: openai, openrouter, or vertexai_claude.")
+        console.print(
+            "[red]Invalid --provider value.[/red] Use: anthropic, openai, openrouter, or vertexai_claude.",
+        )
         raise typer.Exit(1)
 
     if selected_profile == "minimal":
@@ -497,6 +501,9 @@ def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
     """Normalize provider preset values used by prompts and CLI flags."""
     normalized = provider.strip().lower()
     aliases: dict[str, _ProviderPreset] = {
+        "anthropic": "anthropic",
+        "claude": "anthropic",
+        "a": "anthropic",
         "openai": "openai",
         "o": "openai",
         "openrouter": "openrouter",
@@ -515,14 +522,14 @@ def _prompt_provider_preset() -> _ProviderPreset:
     """Prompt the user for a starter provider preset."""
     while True:
         raw_value = typer.prompt(
-            "Choose provider preset [openai/openrouter/vertexai_claude]",
+            "Choose provider preset [anthropic/openai/openrouter/vertexai_claude]",
             default="openai",
             show_default=True,
         )
         provider_preset = _normalize_provider_preset(raw_value)
         if provider_preset is not None:
             return provider_preset
-        console.print("[red]Invalid choice.[/red] Enter openai, openrouter, or vertexai_claude.")
+        console.print("[red]Invalid choice.[/red] Enter anthropic, openai, openrouter, or vertexai_claude.")
 
 
 def _model_template_block(provider_preset: _ProviderPreset) -> str:
@@ -623,9 +630,13 @@ knowledge_bases:
     path: ./mind_data/memory
     watch: true
 
-# File-based memory requires no external embedder or LLM.
+# File-based memory avoids external memory LLMs, and starter configs use a local embedder for knowledge indexing.
 memory:
   backend: file
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
   file:
     max_entrypoint_lines: 200
   auto_flush:
@@ -760,11 +771,12 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:
 
     required_env_keys = set(_REQUIRED_ENV_KEYS[provider_preset])
     key_placeholders = {
+        "ANTHROPIC_API_KEY": "your-anthropic-key-here",
         "OPENAI_API_KEY": "your-openai-key-here",
         "OPENROUTER_API_KEY": "your-openrouter-key-here",
     }
     provider_lines: list[str] = ["# AI provider API keys (set the uncommented keys for this preset)"]
-    for env_key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+    for env_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         prefix = "" if env_key in required_env_keys else "# "
         provider_lines.append(f"{prefix}{env_key}={key_placeholders[env_key]}")
     return "\n".join(provider_lines)
