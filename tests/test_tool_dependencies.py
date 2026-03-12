@@ -76,6 +76,12 @@ def test_tool_extras_in_sync_with_pyproject() -> None:
         pytest.fail(f"Tool extras out of sync with pyproject.toml:\n{output}")
 
 
+def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
+    """The full image should not preinstall the runtime-only sentence_transformers extra."""
+    dockerfile = Path("local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
+    assert "--all-extras --no-extra sentence_transformers" in dockerfile
+
+
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []
