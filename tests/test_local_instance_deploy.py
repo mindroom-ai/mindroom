@@ -5,10 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
@@ -38,7 +36,6 @@ def _instance(
 def test_sync_matrix_host_overrides_writes_peer_domains(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Each Matrix instance should get a compose override for the other Matrix domains."""
     env_dir = tmp_path / "envs"
-    env_dir.mkdir()
     monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
 
     instances = {
@@ -59,25 +56,38 @@ def test_sync_matrix_host_overrides_writes_peer_domains(tmp_path: Path, monkeypa
     assert not (env_dir / "gamma.matrix-hosts.yml").exists()
 
 
-def test_refresh_running_matrix_services_recreates_running_peers(
+def test_running_matrix_peer_names_excludes_current_instance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Starting one Matrix instance should refresh already-running peers with the new host mappings."""
-    env_dir = tmp_path / "envs"
-    env_dir.mkdir()
-    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
-    monkeypatch.setattr(deploy, "REPO_ROOT", tmp_path)
-
+    """Only other running Matrix instances should be flagged for manual restarts."""
     instances = {
         "alpha": _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path),
         "beta": _instance("beta", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path),
+        "gamma": _instance("gamma", matrix_type=None, data_root=tmp_path),
     }
-    for name in instances:
-        (env_dir / f"{name}.env").write_text(f"INSTANCE_NAME={name}\n")
+    monkeypatch.setattr(
+        deploy,
+        "get_actual_status",
+        lambda name: {
+            "alpha": (False, True),
+            "beta": (False, True),
+            "gamma": (False, False),
+        }[name],
+    )
 
-    deploy._sync_matrix_host_overrides(instances)
-    monkeypatch.setattr(deploy, "get_actual_status", lambda name: (False, name == "beta"))
+    assert deploy._running_matrix_peer_names(instances, exclude_name="alpha") == ["beta"]
+
+
+def test_stop_uses_project_down_without_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping should still work even if the env file is already gone."""
+    registry = deploy.Registry(
+        instances={
+            "alpha": _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path),
+        },
+    )
+    monkeypatch.setattr(deploy, "load_registry", lambda: registry)
+    monkeypatch.setattr(deploy, "save_registry", lambda _registry: None)
 
     commands: list[str] = []
 
@@ -87,11 +97,40 @@ def test_refresh_running_matrix_services_recreates_running_peers(
 
     monkeypatch.setattr(deploy.subprocess, "run", _run)
 
-    deploy._refresh_running_matrix_services_for_host_updates(
-        instances,
-        updated_instance_name="alpha",
+    deploy.stop("alpha")
+
+    assert commands == ["docker compose -p alpha down"]
+    assert registry.instances["alpha"].status == deploy.InstanceStatus.STOPPED
+
+
+def test_remove_instance_preserves_state_when_teardown_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed teardown must not orphan containers by deleting local instance state."""
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+    data_dir = Path(instance.data_dir)
+    data_dir.mkdir(parents=True)
+    env_file = env_dir / "alpha.env"
+    env_file.write_text("INSTANCE_NAME=alpha\n")
+
+    registry = deploy.Registry(
+        instances={"alpha": instance},
+        allocated_ports=deploy.AllocatedPorts(mindroom=[instance.mindroom_port], matrix=[instance.matrix_port or 8448]),
     )
 
-    assert len(commands) == 1
-    assert "beta.matrix-hosts.yml" in commands[0]
-    assert "up -d --no-deps --force-recreate synapse" in commands[0]
+    def _run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stderr="boom")
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    with pytest.raises(deploy.typer.Exit):
+        deploy._remove_instance("alpha", registry, deploy.console)
+
+    assert "alpha" in registry.instances
+    assert data_dir.exists()
+    assert env_file.exists()

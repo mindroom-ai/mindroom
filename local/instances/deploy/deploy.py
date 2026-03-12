@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml", "jinja2"]
+# dependencies = ["typer", "rich", "pydantic", "jinja2"]
 # ///
 """Docker MindRoom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -42,9 +42,6 @@ ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 DEFAULT_REGISTRY = "ghcr.io/mindroom-ai"
 EXTERNAL_NETWORK = "mynetwork"
-
-# Ensure env directory exists
-ENV_DIR.mkdir(exist_ok=True)
 
 
 # Pydantic Models
@@ -246,10 +243,14 @@ def _prepare_matrix_config(
             shutil.copy(file, target_dir / file.name)
 
 
+def _ensure_env_dir() -> None:
+    """Create the env directory lazily when generated files are needed."""
+    ENV_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def _get_docker_compose_files(instance: Instance, name: str, project_root: Path) -> str:
     """Get the docker-compose command with appropriate files based on matrix and auth type."""
     env_file = ENV_DIR / f"{name}.env"
-    _ensure_instance_env_file_reference(env_file)
     compose_files = [SCRIPT_DIR / "docker-compose.yml"]
 
     # Add Matrix server compose file if configured
@@ -279,6 +280,12 @@ def _get_docker_compose_files(instance: Instance, name: str, project_root: Path)
     return (
         f"cd {shlex.quote(str(project_root))} && docker compose --env-file {shlex.quote(str(env_file))} {compose_args}"
     )
+
+
+def _get_docker_compose_down_command(name: str, *, remove_volumes: bool = False) -> str:
+    """Return a teardown command that still works when config files are missing."""
+    volume_flag = " -v" if remove_volumes else ""
+    return f"docker compose -p {shlex.quote(name)} down{volume_flag}"
 
 
 def _ensure_instance_env_file_reference(env_file: Path) -> None:
@@ -324,6 +331,7 @@ def _write_matrix_host_override(instance: Instance, instances: dict[str, Instanc
         override_path.unlink(missing_ok=True)
         return
 
+    _ensure_env_dir()
     service_name = instance.matrix_type.value
     lines = [
         "services:",
@@ -338,6 +346,31 @@ def _sync_matrix_host_overrides(instances: dict[str, Instance]) -> None:
     """Regenerate peer host-mapping overrides for every managed Matrix instance."""
     for instance in instances.values():
         _write_matrix_host_override(instance, instances)
+
+
+def _running_matrix_peer_names(instances: dict[str, Instance], *, exclude_name: str) -> list[str]:
+    """Return currently running Matrix peers excluding the named instance."""
+    running_peers = []
+    for name, instance in instances.items():
+        if name == exclude_name or instance.matrix_type is None:
+            continue
+        _mindroom_running, matrix_running = get_actual_status(name)
+        if matrix_running:
+            running_peers.append(name)
+    return sorted(running_peers)
+
+
+def _print_matrix_restart_hint(peer_names: list[str]) -> None:
+    """Tell the user which running Matrix peers still need a manual restart."""
+    if not peer_names:
+        return
+
+    peers = ", ".join(peer_names)
+    console.print(
+        "[yellow]i[/yellow] Restart running Matrix peers to pick up the new federation host mappings:"
+        f" [cyan]{peers}[/cyan]",
+    )
+    console.print("  [dim]Use ./deploy.py restart --only-matrix <name> when convenient.[/dim]")
 
 
 def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
@@ -408,6 +441,7 @@ def _pull_images_from_registry(registry_url: str, console: Console) -> None:
 
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
+    _ensure_env_dir()
     env_file = ENV_DIR / f"{name}.env"
     if ENV_TEMPLATE.exists():
         shutil.copy(ENV_TEMPLATE, env_file)
@@ -439,33 +473,6 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("POSTGRES_PASSWORD=synapse_password\n")
                 f.write("SYNAPSE_REGISTRATION_ENABLED=true\n")
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
-
-
-def _refresh_running_matrix_services_for_host_updates(
-    instances: dict[str, Instance],
-    *,
-    updated_instance_name: str,
-) -> None:
-    """Recreate running peer Matrix services so new host mappings take effect immediately."""
-    for name, instance in instances.items():
-        if name == updated_instance_name or instance.matrix_type is None:
-            continue
-
-        _mindroom_running, matrix_running = get_actual_status(name)
-        if not matrix_running:
-            continue
-
-        compose_files = _get_docker_compose_files(instance, name, REPO_ROOT)
-        service_name = instance.matrix_type.value
-        cmd = f"{compose_files} -p {name} up -d --no-deps --force-recreate {service_name}"
-        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            console.print(f"  [dim]Refreshed Matrix host mappings for {name}[/dim]")
-            continue
-
-        console.print(f"[yellow]⚠️[/yellow] Could not refresh Matrix host mappings for '{name}'")
-        if result.stderr:
-            console.print(f"[dim]{result.stderr}[/dim]")
 
 
 def _ensure_external_network(name: str) -> None:
@@ -820,6 +827,7 @@ def start(  # noqa: PLR0912, PLR0915
         raise typer.Exit(1)
 
     instance = registry.instances[name]
+    previous_status = instance.status
     _sync_matrix_host_overrides(registry.instances)
 
     # Create data directories with proper permissions
@@ -848,6 +856,7 @@ def start(  # noqa: PLR0912, PLR0915
     project_root = REPO_ROOT
 
     # Build the docker compose command using helper
+    _ensure_instance_env_file_reference(env_file)
     compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to start based on flags
@@ -890,10 +899,9 @@ def start(  # noqa: PLR0912, PLR0915
             console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
-        if instance.matrix_type:
-            _refresh_running_matrix_services_for_host_updates(
-                registry.instances,
-                updated_instance_name=name,
+        if instance.matrix_type and previous_status == InstanceStatus.CREATED:
+            _print_matrix_restart_hint(
+                _running_matrix_peer_names(registry.instances, exclude_name=name),
             )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
@@ -910,10 +918,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    # Run from parent directory to match start command
-    project_root = REPO_ROOT
-    compose_files = _get_docker_compose_files(registry.instances[name], name, project_root)
-    cmd = f"{compose_files} -p {name} down"
+    cmd = _get_docker_compose_down_command(name)
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -999,9 +1004,7 @@ def _restart_instance(  # noqa: PLR0912
     _sync_matrix_host_overrides(registry.instances)
 
     # Stop the instance
-    project_root = REPO_ROOT
-    compose_files = _get_docker_compose_files(instance, name, project_root)
-    stop_cmd = f"{compose_files} -p {name} down"
+    stop_cmd = _get_docker_compose_down_command(name)
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -1019,6 +1022,8 @@ def _restart_instance(  # noqa: PLR0912
         raise typer.Exit(1)
 
     # Build compose command
+    project_root = REPO_ROOT
+    _ensure_instance_env_file_reference(env_file)
     compose_files = _get_docker_compose_files(instance, name, project_root)
 
     # Determine which services to restart based on flags
@@ -1055,11 +1060,6 @@ def _restart_instance(  # noqa: PLR0912
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
-        if instance.matrix_type:
-            _refresh_running_matrix_services_for_host_updates(
-                registry.instances,
-                updated_instance_name=name,
-            )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
@@ -1136,10 +1136,13 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
 
     with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
         # Stop containers if running
-        project_root = REPO_ROOT
-        compose_files = _get_docker_compose_files(instance, name, project_root)
-        stop_cmd = f"{compose_files} -p {name} down -v"
-        subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+        stop_cmd = _get_docker_compose_down_command(name, remove_volumes=True)
+        result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]✗[/red] Failed to tear down containers for instance '{name}'")
+            if result.stderr:
+                console.print(f"[dim]{result.stderr}[/dim]")
+            raise typer.Exit(1)
 
         # Remove data directory
         data_dir = Path(instance.data_dir)
