@@ -22,16 +22,15 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 ### Recommended: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
-**Prereqs:** Docker, Docker Compose, and a sibling `mindroom-cinny` checkout.
+**Prereqs:** Docker + Docker Compose.
 
 ```
 git clone https://github.com/mindroom-ai/mindroom-stack
-git clone https://github.com/mindroom-ai/mindroom-cinny
 cd mindroom-stack
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open:
@@ -39,6 +38,8 @@ Open:
 - MindRoom UI: http://localhost:8765
 - MindRoom client: http://localhost:8080
 - Matrix homeserver: http://localhost:8008
+
+The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 

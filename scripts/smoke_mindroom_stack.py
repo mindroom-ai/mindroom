@@ -90,11 +90,11 @@ def main() -> int:
     project_name = os.getenv("PROJECT_NAME", "mindroom-stack-smoke")
     stack_synapse_port = getenv_int("STACK_SYNAPSE_PORT", 18008)
     stack_mindroom_port = getenv_int("STACK_MINDROOM_PORT", 18765)
-    stack_element_port = getenv_int("STACK_ELEMENT_PORT", 18080)
+    stack_client_port = getenv_int("STACK_CLIENT_PORT", 18080)
 
     validate_port("STACK_SYNAPSE_PORT", stack_synapse_port)
     validate_port("STACK_MINDROOM_PORT", stack_mindroom_port)
-    validate_port("STACK_ELEMENT_PORT", stack_element_port)
+    validate_port("STACK_CLIENT_PORT", stack_client_port)
 
     compose_source = stack_dir / "compose.yaml"
     if not compose_source.is_file():
@@ -126,7 +126,7 @@ def main() -> int:
         compose_text = compose_source.read_text(encoding="utf-8")
         compose_text = compose_text.replace('"8008:8008"', f'"127.0.0.1:{stack_synapse_port}:8008"')
         compose_text = compose_text.replace('"8765:8765"', f'"127.0.0.1:{stack_mindroom_port}:8765"')
-        compose_text = compose_text.replace('"8080:80"', f'"127.0.0.1:{stack_element_port}:80"')
+        compose_text = compose_text.replace('"8080:80"', f'"127.0.0.1:{stack_client_port}:80"')
         compose_file.write_text(compose_text, encoding="utf-8")
         exit_code = 0
 
@@ -146,7 +146,6 @@ def main() -> int:
                     str(compose_file),
                     "up",
                     "-d",
-                    "--build",
                 ],
                 capture_output=True,
             )
@@ -168,22 +167,22 @@ def main() -> int:
             wait_for_http_match(
                 f"http://127.0.0.1:{stack_synapse_port}/_matrix/client/versions",
                 '"versions"',
-                "Synapse",
+                "Matrix homeserver",
                 attempts=40,
                 sleep_seconds=3,
             )
 
             wait_for_http_status(
-                f"http://127.0.0.1:{stack_element_port}/",
+                f"http://127.0.0.1:{stack_client_port}/",
                 200,
-                "Element",
+                "MindRoom client",
                 attempts=20,
                 sleep_seconds=3,
             )
             wait_for_http_match(
-                f"http://127.0.0.1:{stack_element_port}/config.json",
+                f"http://127.0.0.1:{stack_client_port}/config.json",
                 f'"http://localhost:{stack_synapse_port}"',
-                "Element config",
+                "MindRoom client config",
                 attempts=20,
                 sleep_seconds=3,
             )

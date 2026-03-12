@@ -69,13 +69,12 @@ For a detailed architecture and credential model, see:
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
-**Prereqs:** Docker, Docker Compose, and a sibling `mindroom-cinny` checkout.
+**Prereqs:** Docker + Docker Compose.
 
-### 1. Clone the full stack repos
+### 1. Clone the full stack repo
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
-git clone https://github.com/mindroom-ai/mindroom-cinny
 cd mindroom-stack
 ```
 
@@ -89,7 +88,7 @@ $EDITOR .env  # add at least one AI provider key
 ### 3. Start everything
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open:
@@ -97,6 +96,8 @@ Open:
 - MindRoom UI: http://localhost:8765
 - MindRoom client: http://localhost:8080
 - Matrix homeserver: http://localhost:8008
+
+The stack uses published `mindroom`, `mindroom-cinny`, and `mindroom-tuwunel` images by default.
 
 If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
