@@ -52,6 +52,7 @@ class _FakeContainer:
                 "Labels": dict(labels),
                 "User": user or "",
             },
+            "Mounts": [],
             "NetworkSettings": {
                 "Ports": {
                     "8766/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}],
@@ -99,6 +100,7 @@ class _FakeContainersApi:
         self.next_host_port += 1
         environment = kwargs.get("environment")
         labels = kwargs.get("labels")
+        volumes = kwargs.get("volumes")
         container = _FakeContainer(
             name=str(kwargs["name"]),
             image=image,
@@ -107,6 +109,18 @@ class _FakeContainersApi:
             labels=dict(labels) if isinstance(labels, dict) else {},
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
+        if isinstance(volumes, dict):
+            container.attrs["Mounts"] = [
+                {
+                    "Type": "bind",
+                    "Source": source,
+                    "Destination": str(spec.get("bind", "")),
+                    "Mode": str(spec.get("mode", "")),
+                    "RW": str(spec.get("mode", "rw")) != "ro",
+                }
+                for source, spec in volumes.items()
+                if isinstance(source, str) and isinstance(spec, dict)
+            ]
         self.by_name[container.name] = container
         self.run_calls.append({"image": image, **kwargs})
         return container
@@ -115,6 +129,10 @@ class _FakeContainersApi:
 class _FakeDockerClient:
     def __init__(self) -> None:
         self.containers = _FakeContainersApi()
+
+
+def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
+    return None
 
 
 def _backend(
@@ -205,6 +223,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert isinstance(labels, dict)
     assert labels["mindroom.ai/component"] == "worker"
     assert labels["mindroom.ai/worker-key"] == "worker-a"
+    assert labels["mindroom.ai/runtime-namespace"]
     assert labels["mindroom.ai/tenant"] == "test"
 
     metadata_path = worker_root_path(tmp_path, "worker-a") / "metadata" / "worker.json"
@@ -318,3 +337,89 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _ROTATED_AUTH_TOKEN
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
+
+
+def test_docker_backend_uses_distinct_container_names_for_different_storage_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Separate runtimes should not share Docker worker identities."""
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config.yaml",
+        host_config_path=None,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    fake_client = _FakeDockerClient()
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker._load_docker_client_and_errors",
+        lambda: (
+            fake_client,
+            SimpleNamespace(
+                DockerException=_FakeDockerError,
+                NotFound=_FakeNotFoundError,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _noop_sync_shared_credentials,
+    )
+
+    first_storage_root = tmp_path / "runtime-a"
+    second_storage_root = tmp_path / "runtime-b"
+    monkeypatch.setattr("mindroom.workers.backends.docker.STORAGE_PATH_OBJ", first_storage_root)
+    first_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    monkeypatch.setattr(
+        first_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{first_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.STORAGE_PATH_OBJ", second_storage_root)
+    second_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    monkeypatch.setattr(
+        second_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{second_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    first_handle = first_backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    second_handle = second_backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    assert first_handle.worker_id != second_handle.worker_id
+    assert len(fake_client.containers.run_calls) == 2
+    assert fake_client.containers.run_calls[0]["name"] != fake_client.containers.run_calls[1]["name"]
+
+
+def test_docker_backend_recreates_container_when_storage_mount_does_not_match(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker reuse should fail closed when an existing container points at the wrong state root."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    existing_container.attrs["Mounts"][0]["Source"] = str(tmp_path / "wrong-root")
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2

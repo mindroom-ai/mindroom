@@ -18,7 +18,7 @@ import httpx
 
 from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, sync_shared_credentials_to_worker
-from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_root_path
+from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
@@ -91,6 +91,7 @@ _LABEL_NAME_VALUE = "mindroom-docker-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _LABEL_WORKER_KEY = "mindroom.ai/worker-key"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
+_LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -158,8 +159,13 @@ def _normalize_name_prefix(raw_value: str) -> str:
     return normalized or _DEFAULT_NAME_PREFIX
 
 
-def _container_name_for_worker(worker_key: str, *, prefix: str) -> str:
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:24]
+def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
+    resolved_workers_root = workers_root.expanduser().resolve()
+    return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
+
+
+def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespace: str) -> str:
+    digest = hashlib.sha256(f"{runtime_namespace}:{worker_key}".encode()).hexdigest()[:24]
     normalized_prefix = _normalize_name_prefix(prefix)
     max_prefix_length = 63 - len(digest) - 1
     safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
@@ -218,6 +224,7 @@ class _DockerWorkerBackendConfig:
 def docker_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
     config = _DockerWorkerBackendConfig.from_env()
+    workers_root = _workers_root(STORAGE_PATH_OBJ)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (
@@ -233,6 +240,7 @@ def docker_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...
         config.publish_host,
         config.endpoint_host,
         config.user or "",
+        str(workers_root),
         extra_env_json,
         extra_labels_json,
         auth_token or "",
@@ -296,6 +304,7 @@ class DockerWorkerBackend:
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
         self._workers_root = _workers_root(STORAGE_PATH_OBJ)
+        self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
 
@@ -313,7 +322,7 @@ class DockerWorkerBackend:
             metadata.last_used_at = timestamp
             metadata.failure_reason = None
 
-            should_restart = self._should_restart(metadata)
+            should_restart = self._should_restart(metadata, paths)
             if should_restart:
                 metadata.status = "starting"
                 metadata.last_started_at = timestamp
@@ -457,10 +466,14 @@ class DockerWorkerBackend:
         return worker_lock
 
     def _state_paths(self, worker_key: str) -> LocalWorkerStatePaths:
-        return local_worker_state_paths_for_root(worker_root_path(STORAGE_PATH_OBJ, worker_key))
+        return local_worker_state_paths_for_root(self._workers_root / worker_dir_name(worker_key))
 
     def _default_metadata(self, worker_key: str, now: float) -> _DockerWorkerMetadata:
-        worker_id = _container_name_for_worker(worker_key, prefix=self.config.name_prefix)
+        worker_id = _container_name_for_worker(
+            worker_key,
+            prefix=self.config.name_prefix,
+            runtime_namespace=self._runtime_namespace,
+        )
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
@@ -512,13 +525,13 @@ class DockerWorkerBackend:
             msg = f"Failed to inspect Docker worker '{container_name}': {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _should_restart(self, metadata: _DockerWorkerMetadata) -> bool:
+    def _should_restart(self, metadata: _DockerWorkerMetadata, paths: LocalWorkerStatePaths) -> bool:
         container = self._read_container(metadata.container_name)
         if metadata.status == "failed":
             return True
         if container is None:
             return True
-        if not self._container_matches_config(metadata, container):
+        if not self._container_matches_config(metadata, container, paths):
             return True
         return not self._container_is_running(container)
 
@@ -526,15 +539,32 @@ class DockerWorkerBackend:
         self,
         metadata: _DockerWorkerMetadata,
         container: _DockerContainer | None,
+        paths: LocalWorkerStatePaths,
     ) -> bool:
         if metadata.launch_config_hash != self._launch_config_hash:
             return False
-        return self._container_launch_config_hash(container) == self._launch_config_hash
+        if self._container_launch_config_hash(container) != self._launch_config_hash:
+            return False
+        if not self._container_mount_matches(
+            container,
+            host_path=paths.root,
+            container_path=self.config.storage_mount_path,
+            read_only=False,
+        ):
+            return False
+        if self.config.host_config_path is None:
+            return True
+        return self._container_mount_matches(
+            container,
+            host_path=self.config.host_config_path,
+            container_path=self.config.config_path,
+            read_only=True,
+        )
 
     def _ensure_container(self, metadata: _DockerWorkerMetadata, paths: LocalWorkerStatePaths) -> _DockerContainer:
         paths.root.mkdir(parents=True, exist_ok=True)
         container = self._read_container(metadata.container_name)
-        if container is not None and not self._container_matches_config(metadata, container):
+        if container is not None and not self._container_matches_config(metadata, container, paths):
             self._remove_container(container)
             container = None
 
@@ -651,6 +681,7 @@ class DockerWorkerBackend:
             _LABEL_WORKER_ID: metadata.worker_id,
             _LABEL_WORKER_KEY: metadata.worker_key,
             _LABEL_LAUNCH_CONFIG_HASH: self._launch_config_hash,
+            _LABEL_RUNTIME_NAMESPACE: self._runtime_namespace,
         }
         labels.update(self.config.extra_labels)
         return labels
@@ -665,6 +696,7 @@ class DockerWorkerBackend:
             "image": self.config.image,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
+            "workers_root": str(self._workers_root),
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,
         }
@@ -681,6 +713,43 @@ class DockerWorkerBackend:
         if isinstance(launch_config_hash, str) and launch_config_hash:
             return launch_config_hash
         return None
+
+    def _container_mount_matches(
+        self,
+        container: _DockerContainer | None,
+        *,
+        host_path: Path,
+        container_path: str,
+        read_only: bool,
+    ) -> bool:
+        if container is None:
+            return False
+
+        expected_host_path = str(host_path.expanduser().resolve())
+        attrs = getattr(container, "attrs", {})
+        mounts = attrs.get("Mounts", []) if isinstance(attrs, dict) else []
+        if not isinstance(mounts, list):
+            return False
+
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                continue
+            source = mount.get("Source")
+            destination = mount.get("Destination")
+            if not isinstance(source, str) or not isinstance(destination, str):
+                continue
+            if destination != container_path:
+                continue
+            if str(Path(source).expanduser().resolve()) != expected_host_path:
+                continue
+            writable = mount.get("RW")
+            if isinstance(writable, bool):
+                return writable is (not read_only)
+            mode = mount.get("Mode")
+            if isinstance(mode, str):
+                return "ro" in mode if read_only else "ro" not in mode
+            return True
+        return False
 
     def _container_status(self, container: _DockerContainer) -> str | None:
         status = getattr(container, "status", None)
