@@ -186,8 +186,10 @@ def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
 def _projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
     plugin_root = tmp_path / "plugins" / "my-plugin"
     plugin_root.mkdir(parents=True)
+    (plugin_root / "plugin.py").write_text("PLUGIN_VERSION = 'v1'\n", encoding="utf-8")
     knowledge_root = tmp_path / "knowledge_docs"
     knowledge_root.mkdir()
+    (knowledge_root / "guide.md").write_text("# Guide v1\n", encoding="utf-8")
     context_file = tmp_path / "context.md"
     context_file.write_text("# Context\n", encoding="utf-8")
     memory_root = tmp_path / "memory_files"
@@ -253,18 +255,37 @@ def _assert_projected_worker_mounts(
     assert worker_root not in projection_root.parents
     assert str(tmp_path) not in volumes
     assert str(tmp_path / "mindroom_data") not in volumes
-    assert (
-        volumes[str(projected_paths["plugin_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/plugins/00-my-plugin"
-    )
-    assert (
-        volumes[str(projected_paths["knowledge_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/knowledge_bases/docs"
-    )
+    assert str(projected_paths["plugin_root"].resolve()) not in volumes
+    assert str(projected_paths["knowledge_root"].resolve()) not in volumes
     assert str(projected_paths["context_file"].resolve()) not in volumes
     assert str(projected_paths["memory_root"].resolve()) not in volumes
     assert str(projected_paths["agent_memory_root"].resolve()) not in volumes
     return projection_root
+
+
+def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> None:
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
+    assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
+    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+
+    projected_context_path = (
+        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
+    )
+    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
+    projected_plugin_path = projection_root / ".mindroom-worker-assets" / "plugins" / "00-my-plugin" / "plugin.py"
+    assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'v1'\n"
+    projected_knowledge_path = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
+    assert projected_knowledge_path.read_text(encoding="utf-8") == "# Guide v1\n"
+    assert (
+        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
+    )
+    assert (projection_root / ".env").read_text(encoding="utf-8") == ""
+    assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
+    assert (
+        worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
+    ).is_dir()
 
 
 def _backend(
@@ -357,24 +378,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     volumes = run_call["volumes"]
     assert isinstance(volumes, dict)
     projection_root = _assert_projected_worker_mounts(tmp_path, volumes, projected_paths)
-
-    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
-    assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
-    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
-    projected_context_path = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
-    assert (
-        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
-    )
-    assert (projection_root / ".env").read_text(encoding="utf-8") == ""
-    assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
-    assert (
-        worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
-    ).is_dir()
+    _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
 
@@ -752,6 +756,44 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
         second_projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
     )
     assert projected_context_path.read_text(encoding="utf-8") == "# Updated Context\n"
+
+
+def test_docker_backend_recreates_container_when_projected_directory_asset_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing a projected directory asset should rotate the worker."""
+    config_text, projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(first_volumes, dict)
+    first_projection_root = _projection_root(first_volumes)
+
+    replacement_knowledge_root = projected_paths["knowledge_root"].with_name("knowledge_docs.updated")
+    replacement_knowledge_root.mkdir()
+    (replacement_knowledge_root / "guide.md").write_text("# Guide v2\n", encoding="utf-8")
+    archived_knowledge_root = projected_paths["knowledge_root"].with_name("knowledge_docs.previous")
+    projected_paths["knowledge_root"].replace(archived_knowledge_root)
+    replacement_knowledge_root.replace(projected_paths["knowledge_root"])
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    assert isinstance(second_volumes, dict)
+    second_projection_root = _projection_root(second_volumes)
+    assert second_projection_root != first_projection_root
+    projected_knowledge_path = (
+        second_projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
+    )
+    assert projected_knowledge_path.read_text(encoding="utf-8") == "# Guide v2\n"
 
 
 def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(

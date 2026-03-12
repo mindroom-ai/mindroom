@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-import mindroom.credentials
 from mindroom.credentials import CredentialsManager, get_credentials_manager, set_primary_credentials_storage_path
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
@@ -22,7 +21,6 @@ class TestCredentialsSync:
     def reset_runtime_credentials_path(self) -> None:
         """Reset the primary runtime credentials override before each test."""
         set_primary_credentials_storage_path(None)
-        mindroom.credentials._credentials_manager = None
 
     @pytest.fixture
     def temp_credentials_dir(self, tmp_path: Path) -> Path:

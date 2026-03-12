@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
@@ -556,7 +555,6 @@ class TestGlobalCredentialsManager:
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
         set_primary_credentials_storage_path(None)
-        mindroom.credentials._credentials_manager = None
 
     def test_get_credentials_manager_singleton(self) -> None:
         """Test that get_credentials_manager returns the same instance."""
@@ -595,6 +593,24 @@ class TestGlobalCredentialsManager:
         assert manager.base_path == runtime_storage / "credentials"
         assert manager.storage_root == runtime_storage
 
+    def test_resetting_to_default_rebuilds_cached_global_manager(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Resetting to the default path should clear the cached manager."""
+        first_storage = (tmp_path / "runtime-a").resolve()
+        second_storage = (tmp_path / "runtime-b").resolve()
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(first_storage))
+        first_manager = get_credentials_manager()
+
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(second_storage))
+        set_primary_credentials_storage_path(None)
+        second_manager = get_credentials_manager()
+
+        assert second_manager is not first_manager
+        assert second_manager.base_path == second_storage / "credentials"
+
     def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
         self,
         tmp_path: Path,
@@ -621,7 +637,7 @@ class TestGlobalCredentialsManager:
 
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
         monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
-        mindroom.credentials._credentials_manager = None
+        set_primary_credentials_storage_path(None)
 
         manager = get_credentials_manager()
         loaded_credentials = load_scoped_credentials(

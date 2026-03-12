@@ -344,10 +344,37 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
 
 
 def _asset_contents_hash(host_path: Path) -> str:
+    resolved_host_path = host_path.expanduser().resolve()
+    hasher = hashlib.sha256()
     try:
-        return hashlib.sha256(host_path.read_bytes()).hexdigest()
+        if resolved_host_path.is_dir():
+            for asset_path in sorted(
+                resolved_host_path.rglob("*"),
+                key=lambda path: path.relative_to(resolved_host_path).as_posix(),
+            ):
+                relative_path = asset_path.relative_to(resolved_host_path).as_posix()
+                if asset_path.is_dir():
+                    hasher.update(f"dir:{relative_path}\0".encode())
+                    continue
+
+                hasher.update(f"file:{relative_path}\0".encode())
+                with asset_path.open("rb") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        hasher.update(chunk)
+            return hasher.hexdigest()
+
+        with resolved_host_path.open("rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
     except OSError as exc:
-        msg = f"Failed to read Docker worker asset '{host_path}': {exc}"
+        msg = f"Failed to read Docker worker asset '{resolved_host_path}': {exc}"
         raise WorkerBackendError(msg) from exc
 
 
@@ -853,13 +880,7 @@ class DockerWorkerBackend:
 
         projection = self._projected_config(paths)
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
-        mounts: list[tuple[Path, str, bool]] = [(projection.root, str(config_dir), True)]
-        mounts.extend(
-            (asset.host_path, str(config_dir / asset.relative_path), True)
-            for asset in projection.assets
-            if asset.is_directory
-        )
-        return mounts
+        return [(projection.root, str(config_dir), True)]
 
     def _container_volumes(self, paths: LocalWorkerStatePaths) -> dict[str, dict[str, str]]:
         volumes = {
@@ -896,7 +917,7 @@ class DockerWorkerBackend:
                     "host_path": str(asset.host_path),
                     "relative_path": asset.relative_path.as_posix(),
                     "kind": "dir" if asset.is_directory else "file",
-                    "content_hash": "" if asset.is_directory else _asset_contents_hash(asset.host_path),
+                    "content_hash": _asset_contents_hash(asset.host_path),
                 }
                 for asset in assets
             ],
@@ -1133,13 +1154,17 @@ class DockerWorkerBackend:
         projected_yaml: str,
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
+        if projection_dir.exists():
+            return
+
         projection_dir.mkdir(parents=True, exist_ok=True)
         (projection_dir / PurePosixPath(self.config.config_path).name).write_text(projected_yaml, encoding="utf-8")
         (projection_dir / ".env").write_text("", encoding="utf-8")
         for asset in assets:
             placeholder_path = projection_dir.joinpath(*asset.relative_path.parts)
             if asset.is_directory:
-                placeholder_path.mkdir(parents=True, exist_ok=True)
+                placeholder_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(asset.host_path, placeholder_path)
                 continue
             placeholder_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(asset.host_path, placeholder_path)

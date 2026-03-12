@@ -235,7 +235,12 @@ def set_primary_credentials_storage_path(storage_path: Path | None) -> None:
     """Set the primary runtime storage root used for default credentials access."""
     global _credentials_manager, _PRIMARY_CREDENTIALS_STORAGE_PATH
 
-    normalized_storage_path = None if storage_path is None else storage_path.expanduser().resolve()
+    if storage_path is None:
+        _PRIMARY_CREDENTIALS_STORAGE_PATH = None
+        _credentials_manager = None
+        return
+
+    normalized_storage_path = storage_path.expanduser().resolve()
     if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
         return
 
