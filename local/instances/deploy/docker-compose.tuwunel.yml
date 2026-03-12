@@ -4,7 +4,7 @@
 
 services:
   tuwunel:
-    image: ghcr.io/matrix-construct/tuwunel:latest
+    image: ${TUWUNEL_IMAGE:-ghcr.io/mindroom-ai/mindroom-tuwunel:latest}
     container_name: ${INSTANCE_NAME:-mindroom}-tuwunel
     restart: unless-stopped
     volumes:
@@ -27,21 +27,11 @@ services:
         client=https://${MATRIX_SERVER_NAME:-m-${INSTANCE_DOMAIN}},
         server=${MATRIX_SERVER_NAME:-m-${INSTANCE_DOMAIN}}:443
         }
-    # Federation requires Matrix domains to resolve to Traefik
-    # For LOCAL deployments: Add your Matrix domains here pointing to your Docker network gateway
-    # To find your gateway IP, run: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'
-    # For PUBLIC deployments: Remove the entire extra_hosts section
+    ports:
+      - "${MATRIX_PORT:-8448}:6167"
     extra_hosts:
-      - "m-demo.localhost:172.20.0.1"
-      - "m-try.mindroom.chat:172.20.0.1"
-      - "m-alt.mindroom.chat:172.20.0.1"
-      - "m-default.mindroom.chat:172.20.0.1"
-      - "m-test-2.mindroom.chat:172.20.0.1"
-      - "m-test-3.mindroom.chat:172.20.0.1"
-      - "m-test-4.mindroom.chat:172.20.0.1"
-      - "m-test-5.mindroom.chat:172.20.0.1"
-      - "m-test.mindroom.chat:172.20.0.1"
-      - "m-default.localhost:172.20.0.1"
+      - "${MATRIX_SERVER_NAME}:host-gateway"
+      - "host.docker.internal:host-gateway"
     ulimits:
       nofile:
         soft: 1048567

@@ -10,13 +10,14 @@
 ### Using the Instance Manager
 
 The `deploy` script manages multiple MindRoom instances with optional Matrix server integration.
+All commands below are run from `local/instances/deploy/`.
 
 ## Basic Commands
 
 ### 1. Create an Instance
 
 ```bash
-cd deploy
+cd local/instances/deploy
 
 # Basic instance (no Matrix server, no auth)
 ./deploy.py create myapp
@@ -39,11 +40,11 @@ cd deploy
 
 ### 2. Configure Your Instance
 
-After creating an instance, edit the generated `.env.{instance_name}` file:
+After creating an instance, edit the generated `envs/{instance_name}.env` file:
 
 ```bash
 # Edit the environment file
-nano .env.myapp
+nano envs/myapp.env
 
 # Add your API keys:
 OPENAI_API_KEY=sk-...
@@ -117,17 +118,17 @@ Output:
 ```bash
 # Create and start production instance with Synapse
 ./deploy.py create prod --domain prod.mindroom.com --matrix synapse
-nano .env.prod  # Add API keys
+nano envs/prod.env  # Add API keys
 ./deploy.py start prod
 
 # Create and start development instance with Tuwunel
 ./deploy.py create dev --domain dev.mindroom.com --matrix tuwunel
-nano .env.dev  # Add API keys
+nano envs/dev.env  # Add API keys
 ./deploy.py start dev
 
 # Create and start test instance without Matrix
 ./deploy.py create test
-nano .env.test  # Add API keys
+nano envs/test.env  # Add API keys
 ./deploy.py start test
 
 # All three instances now running on different ports
@@ -158,14 +159,8 @@ nano .env.test  # Add API keys
 After starting an instance with Matrix:
 
 ```bash
-# Test the Matrix server (requires requests library)
-cd ..  # Go to project root
-source .venv/bin/activate
-python deploy/test_matrix.py <MATRIX_PORT> <SERVER_TYPE>
-
-# Examples:
-python deploy/test_matrix.py 8448 Tuwunel
-python deploy/test_matrix.py 8450 Synapse
+# Basic Matrix client API smoke test
+curl -fsS http://localhost:<MATRIX_PORT>/_matrix/client/versions
 ```
 
 ## Port Management
@@ -180,7 +175,7 @@ The instance manager ensures no port conflicts.
 
 Each instance has its own data directory:
 ```
-deploy/instance_data/
+local/instances/deploy/instance_data/
 ├── myapp/
 │   ├── config/       # MindRoom configuration
 │   ├── tmp/          # Temporary files
@@ -198,7 +193,7 @@ deploy/instance_data/
 ### Instance Won't Start
 1. Check if ports are already in use: `docker ps`
 2. Check logs: `docker logs {instance_name}-mindroom`
-3. Ensure `.env.{instance_name}` has valid API keys
+3. Ensure `envs/{instance_name}.env` has valid API keys
 4. Try stopping and starting again
 
 ### Port Conflicts
@@ -212,8 +207,8 @@ docker stop $(docker ps -q)
 
 ### Clean Up Everything
 ```bash
-# Stop all instances
-./deploy.py reset
+# Stop and remove all managed instances
+./deploy.py remove --all --force
 
 # Remove all Docker resources
 docker system prune -a
@@ -224,9 +219,8 @@ docker system prune -a
 #### Synapse Permission Issues
 If Synapse fails with permission errors:
 ```bash
-# The entrypoint.sh script should handle this automatically
 # If not, files might need proper ownership
-ls -la instance_data/{instance_name}/synapse/
+ls -la local/instances/deploy/instance_data/{instance_name}/synapse/
 ```
 
 #### Tuwunel Connection Issues
@@ -245,8 +239,8 @@ docker logs {instance_name}-tuwunel
 ### Docker Compose Structure
 The system uses parameterized Docker Compose files:
 - `docker-compose.yml` - Base MindRoom services (runtime + bundled dashboard/API)
-- `docker-compose.tuwunel.yml` - Adds Tuwunel Matrix server
-- `docker-compose.synapse.yml` - Adds Synapse with PostgreSQL and Redis
+- `docker-compose.tuwunel.yml` - Adds the MindRoom Tuwunel fork (`ghcr.io/mindroom-ai/mindroom-tuwunel:latest`)
+- `docker-compose.synapse.yml` - Adds the MindRoom Synapse fork (`ghcr.io/mindroom-ai/mindroom-synapse:develop`) with PostgreSQL and Redis
 
 Container names use `${INSTANCE_NAME}` prefix to avoid conflicts.
 
@@ -254,15 +248,16 @@ Container names use `${INSTANCE_NAME}` prefix to avoid conflicts.
 You can also use Docker Compose directly:
 ```bash
 # From project root
-docker compose --env-file deploy/.env.myapp \
-  -f deploy/docker-compose.yml \
-  -f deploy/docker-compose.tuwunel.yml \
+docker compose --env-file local/instances/deploy/envs/myapp.env \
+  -f local/instances/deploy/docker-compose.yml \
+  -f local/instances/deploy/docker-compose.tuwunel.yml \
+  -f local/instances/deploy/docker-compose.wellknown.yml \
   -p myapp up -d
 ```
 
 ## Environment Variables
 
-Each `.env.{instance_name}` file contains:
+Each `envs/{instance_name}.env` file contains:
 
 ### Required (add these yourself)
 ```env
@@ -288,7 +283,7 @@ INSTANCE_DOMAIN=myapp.localhost
 
 # Matrix configuration (if enabled)
 MATRIX_PORT=8448
-MATRIX_SERVER_NAME=myapp.localhost
+MATRIX_SERVER_NAME=m-myapp.localhost
 ```
 
 ## Examples
@@ -297,8 +292,8 @@ MATRIX_SERVER_NAME=myapp.localhost
 ```bash
 # Create a dev instance with all features
 ./deploy.py create dev --matrix tuwunel
-echo "OPENAI_API_KEY=sk-..." >> .env.dev
-echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
+echo "OPENAI_API_KEY=sk-..." >> envs/dev.env
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> envs/dev.env
 ./deploy.py start dev
 
 # Access at the MindRoom port shown by ./deploy.py list
@@ -312,7 +307,7 @@ echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env.dev
   --matrix synapse
 
 # Configure with production API keys
-nano .env.prod
+nano envs/prod.env
 
 # Start the instance
 ./deploy.py start prod
@@ -325,7 +320,7 @@ nano .env.prod
 ```bash
 # Quick test instance without Matrix
 ./deploy.py create test
-cp .env.template .env.test  # Use template
+nano envs/test.env
 ./deploy.py start test
 # Run tests...
 ./deploy.py remove test  # Clean up

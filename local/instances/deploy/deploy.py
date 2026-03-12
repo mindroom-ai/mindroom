@@ -14,6 +14,7 @@ import json
 import os
 import platform as plat
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -22,7 +23,6 @@ from enum import Enum
 from pathlib import Path
 
 import typer
-import yaml
 from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -36,10 +36,12 @@ console = Console()
 
 # Get the script's directory to ensure paths are relative to it
 SCRIPT_DIR = Path(__file__).parent.absolute()
+REPO_ROOT = SCRIPT_DIR.parents[2]
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
 ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 DEFAULT_REGISTRY = "ghcr.io/mindroom-ai"
+EXTERNAL_NETWORK = "mynetwork"
 
 # Ensure env directory exists
 ENV_DIR.mkdir(exist_ok=True)
@@ -246,20 +248,49 @@ def _prepare_matrix_config(
 
 def _get_docker_compose_files(instance: Instance, name: str, project_root: Path) -> str:
     """Get the docker-compose command with appropriate files based on matrix and auth type."""
-    env_file_relative = f"deploy/envs/{name}.env"
-    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
+    env_file = ENV_DIR / f"{name}.env"
+    _ensure_instance_env_file_reference(env_file)
+    compose_files = [SCRIPT_DIR / "docker-compose.yml"]
 
     # Add Matrix server compose file if configured
     if instance.matrix_type == MatrixType.TUWUNEL:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+        compose_files.extend(
+            [
+                SCRIPT_DIR / "docker-compose.tuwunel.yml",
+                SCRIPT_DIR / "docker-compose.wellknown.yml",
+            ],
+        )
     elif instance.matrix_type == MatrixType.SYNAPSE:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+        compose_files.extend(
+            [
+                SCRIPT_DIR / "docker-compose.synapse.yml",
+                SCRIPT_DIR / "docker-compose.wellknown.yml",
+            ],
+        )
 
     # Add Authelia compose file if configured
     if instance.auth_type == AuthType.AUTHELIA:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
+        compose_files.append(SCRIPT_DIR / "docker-compose.authelia.yml")
 
-    return base_cmd
+    compose_args = " ".join(f"-f {shlex.quote(str(compose_file))}" for compose_file in compose_files)
+    return (
+        f"cd {shlex.quote(str(project_root))} && docker compose --env-file {shlex.quote(str(env_file))} {compose_args}"
+    )
+
+
+def _ensure_instance_env_file_reference(env_file: Path) -> None:
+    """Ensure the per-instance env file can also be mounted into the container."""
+    reference = f"INSTANCE_ENV_FILE={env_file}"
+    if not env_file.exists():
+        return
+
+    content = env_file.read_text()
+    if "INSTANCE_ENV_FILE=" in content:
+        return
+
+    suffix = "" if not content or content.endswith("\n") else "\n"
+    with env_file.open("a") as f:
+        f.write(f"{suffix}{reference}\n")
 
 
 def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
@@ -274,9 +305,9 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
     services = ["mindroom"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
-        services.extend(["postgres", "redis", "synapse"])
+        services.extend(["postgres", "redis", "synapse", "wellknown"])
     elif instance.matrix_type == MatrixType.TUWUNEL:
-        services.append("tuwunel")
+        services.extend(["tuwunel", "wellknown"])
 
     if instance.auth_type == AuthType.AUTHELIA:
         services.append("authelia")
@@ -287,9 +318,9 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
 def _get_matrix_services(matrix_type: MatrixType | None) -> str:
     """Get the list of services to start based on matrix type."""
     if matrix_type == MatrixType.SYNAPSE:
-        return " postgres redis synapse"
+        return " postgres redis synapse wellknown"
     if matrix_type == MatrixType.TUWUNEL:
-        return " tuwunel"
+        return " tuwunel wellknown"
     return ""
 
 
@@ -343,6 +374,7 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
 
     with env_file.open("a") as f:
         f.write("\n# Instance configuration\n")
+        f.write(f"INSTANCE_ENV_FILE={env_file}\n")
         f.write(f"INSTANCE_NAME={name}\n")
         f.write(f"MINDROOM_PORT={instance.mindroom_port}\n")
         f.write(f"DATA_DIR={abs_data_dir}\n")
@@ -363,66 +395,33 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
 
 
 def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances: dict[str, Instance]) -> None:
-    """Verify that docker-compose files have required extra_hosts entries for federation."""
+    """Warn when local multi-instance federation will require external DNS routing."""
     if not matrix_type:
         return
 
-    # Get all active Matrix domains that need to be in extra_hosts
-    required_domains = set()
-    for inst in instances.values():
-        if inst.matrix_type:
-            required_domains.add(f"m-{inst.domain}")
-
-    if not required_domains:
+    active_matrix_instances = [inst for inst in instances.values() if inst.matrix_type]
+    if len(active_matrix_instances) < 2:
         return
 
-    # Check the appropriate docker-compose file
-    compose_file = SCRIPT_DIR / f"docker-compose.{matrix_type.value}.yml"
-    if not compose_file.exists():
+    console.print(
+        "[yellow]⚠️  Federation Note:[/yellow] Running multiple local Matrix instances "
+        "still requires DNS or reverse-proxy routing between their matrix domains.",
+    )
+
+
+def _ensure_external_network(name: str) -> None:
+    """Create an external Docker network when the stack expects it."""
+    inspect_cmd = f"docker network inspect {shlex.quote(name)}"
+    result = subprocess.run(inspect_cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
         return
 
-    # Parse the YAML file
-    with compose_file.open() as f:
-        compose_data = yaml.safe_load(f)
-
-    # Get the service name (tuwunel or synapse)
-    service_name = matrix_type.value
-
-    # Check if the service exists and has extra_hosts
-    if not compose_data.get("services", {}).get(service_name):
-        console.print(f"[yellow]⚠️  Warning:[/yellow] Service '{service_name}' not found in {compose_file.name}")
-        return
-
-    service_config = compose_data["services"][service_name]
-    extra_hosts = service_config.get("extra_hosts", [])
-
-    # Parse existing extra_hosts entries
-    existing_domains = set()
-    for entry in extra_hosts:
-        if ":" in entry:
-            domain, _ = entry.split(":", 1)
-            existing_domains.add(domain.strip('"').strip("'"))
-
-    # Find missing domains
-    missing_domains = required_domains - existing_domains
-
-    if not extra_hosts:
-        console.print("[yellow]⚠️  Federation Warning:[/yellow] Missing extra_hosts configuration")
-        console.print(f"[dim]Add the following to {compose_file.name} under the {service_name} service:[/dim]")
-        console.print("\n    extra_hosts:")
-        for domain in sorted(required_domains):
-            console.print(f'      - "{domain}:172.20.0.1"')
-        console.print(
-            "\n[dim]To find your gateway IP: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'[/dim]",
-        )
-        raise typer.Exit(1)
-
-    if missing_domains:
-        console.print(f"[yellow]⚠️  Federation Warning:[/yellow] Missing domains in extra_hosts for {compose_file.name}")
-        console.print("[dim]Add these entries to the extra_hosts section:[/dim]")
-        for domain in sorted(missing_domains):
-            console.print(f'      - "{domain}:172.20.0.1"')
-        console.print("\n[dim]This is required for local federation to work properly.[/dim]")
+    create_cmd = f"docker network create {shlex.quote(name)}"
+    result = subprocess.run(create_cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Failed to create Docker network '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
         raise typer.Exit(1)
 
 
@@ -455,7 +454,7 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
 
 def _copy_config_to_instance(instance: Instance) -> None:
     """Copy config.yaml from the main mindroom directory to instance config directory."""
-    source_config = SCRIPT_DIR.parent / "config.yaml"
+    source_config = REPO_ROOT / "config.yaml"
     if not source_config.exists():
         console.print("[yellow]Warning:[/yellow] config.yaml not found in mindroom directory")
         return
@@ -519,7 +518,8 @@ def _setup_tuwunel_directory(instance: Instance, env_file: Path) -> None:
                     break
 
         # If server name changed, clear the database (safe - Tuwunel recreates it)
-        if current_server_name and current_server_name != instance.domain:
+        expected_server_name = f"m-{instance.domain}"
+        if current_server_name and current_server_name != expected_server_name:
             console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
             shutil.rmtree(tuwunel_dir)
 
@@ -787,7 +787,7 @@ def start(  # noqa: PLR0912, PLR0915
 
     # Start with docker compose (modern syntax) - run from parent directory for build context
     # Get the parent directory (project root)
-    project_root = SCRIPT_DIR.parent
+    project_root = REPO_ROOT
 
     # Build the docker compose command using helper
     compose_files = _get_docker_compose_files(instance, name, project_root)
@@ -812,19 +812,11 @@ def start(  # noqa: PLR0912, PLR0915
     else:
         build_flag = "--build"
 
+    _ensure_external_network(EXTERNAL_NETWORK)
     cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
-
-    # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
-        env_file_relative = f"deploy/envs/{name}.env"
-        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
-        with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
-            wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
-            if wellknown_result.returncode != 0:
-                console.print("[yellow]ℹ[/yellow] Well-known service start skipped (optional for federation)")  # noqa: RUF001
 
     if result.returncode == 0:
         # Update status to reflect what's actually running
@@ -856,8 +848,9 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
         raise typer.Exit(1)
 
     # Run from parent directory to match start command
-    project_root = SCRIPT_DIR.parent
-    cmd = f"cd {project_root} && docker compose -p {name} down"
+    project_root = REPO_ROOT
+    compose_files = _get_docker_compose_files(registry.instances[name], name, project_root)
+    cmd = f"{compose_files} -p {name} down"
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -930,7 +923,7 @@ def restart(
     _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(  # noqa: PLR0912, PLR0915
+def _restart_instance(  # noqa: PLR0912
     name: str,
     instance: Instance,
     registry: Registry,
@@ -945,8 +938,9 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
         _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
 
     # Stop the instance
-    project_root = SCRIPT_DIR.parent
-    stop_cmd = f"cd {project_root} && docker compose -p {name} down"
+    project_root = REPO_ROOT
+    compose_files = _get_docker_compose_files(instance, name, project_root)
+    stop_cmd = f"{compose_files} -p {name} down"
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
@@ -982,16 +976,11 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
     else:
         build_flag = "--build"
 
+    _ensure_external_network(EXTERNAL_NETWORK)
     start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
         result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
-
-    # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
-        env_file_relative = f"deploy/envs/{name}.env"
-        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
-        subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
 
     if result.returncode == 0:
         # Update status
@@ -1063,7 +1052,7 @@ def remove(
     if not force:
         console.print(f"[yellow]⚠️  Warning:[/yellow] This will permanently delete instance '[cyan]{name}[/cyan]'")
         console.print(f"  - All data in {instance.data_dir}")
-        console.print(f"  - Environment file .env.{name}")
+        console.print(f"  - Environment file envs/{name}.env")
         console.print("  - All containers and volumes")
         confirm = typer.confirm("Are you sure you want to continue?")
         if not confirm:
@@ -1081,8 +1070,9 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
 
     with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
         # Stop containers if running
-        project_root = SCRIPT_DIR.parent
-        stop_cmd = f"cd {project_root} && docker compose -p {name} down -v 2>/dev/null"
+        project_root = REPO_ROOT
+        compose_files = _get_docker_compose_files(instance, name, project_root)
+        stop_cmd = f"{compose_files} -p {name} down -v"
         subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
 
         # Remove data directory
@@ -1110,21 +1100,17 @@ def get_actual_status(name: str) -> tuple[bool, bool]:
 
     Returns: (mindroom_running, matrix_running)
     """
-    cmd = f"docker compose -p {name} ps --format json 2>/dev/null"
+    cmd = (
+        "docker ps --filter "
+        f"label=com.docker.compose.project={shlex.quote(name)} "
+        "--format '{{.Label \"com.docker.compose.service\"}}'"
+    )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:
         return False, False
 
-    running_containers = set()
-    for line in result.stdout.strip().split("\n"):
-        if line:
-            try:
-                data = json.loads(line)
-                if data.get("State") == "running":
-                    running_containers.add(data.get("Service"))
-            except json.JSONDecodeError:
-                pass
+    running_containers = {line.strip() for line in result.stdout.strip().splitlines() if line.strip()}
 
     mindroom_running = "mindroom" in running_containers
     matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])

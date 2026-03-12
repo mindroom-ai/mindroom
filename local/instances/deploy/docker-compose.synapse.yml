@@ -35,7 +35,7 @@ services:
       - mindroom-network
 
   synapse:
-    image: matrixdotorg/synapse:latest
+    image: ${SYNAPSE_IMAGE:-ghcr.io/mindroom-ai/mindroom-synapse:develop}
     container_name: ${INSTANCE_NAME:-mindroom}-synapse
     environment:
       SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
@@ -47,7 +47,8 @@ services:
       # Bind mount the entire synapse config directory
       # DATA_DIR should be set in the .env file
       - ${DATA_DIR}/synapse:/data
-    # Ports are handled by Traefik - no direct host exposure needed
+    ports:
+      - "${MATRIX_PORT:-8448}:8008"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8008/_matrix/client/versions"]
       interval: 10s
@@ -59,19 +60,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Federation requires Matrix domains to resolve to Traefik
-    # For LOCAL deployments: Add your Matrix domains here pointing to your Docker network gateway
-    # To find your gateway IP, run: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'
-    # For PUBLIC deployments: Remove the entire extra_hosts section
     extra_hosts:
-      - "m-try.mindroom.chat:172.20.0.1"
-      - "m-alt.mindroom.chat:172.20.0.1"
-      - "m-default.mindroom.chat:172.20.0.1"
-      - "m-test.mindroom.chat:172.20.0.1"
-      - "m-test-2.mindroom.chat:172.20.0.1"
-      - "m-test-3.mindroom.chat:172.20.0.1"
-      - "m-test-4.mindroom.chat:172.20.0.1"
-      - "m-test-5.mindroom.chat:172.20.0.1"
+      - "${MATRIX_SERVER_NAME}:host-gateway"
+      - "host.docker.internal:host-gateway"
     networks:
       - mindroom-network
       - mynetwork  # Add Traefik network

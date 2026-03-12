@@ -2,12 +2,15 @@ services:
   mindroom:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
-      context: ..
-      dockerfile: deploy/Dockerfile.mindroom
+      context: ../../..
+      dockerfile: local/instances/deploy/Dockerfile.mindroom
     container_name: ${INSTANCE_NAME:-mindroom}-mindroom
     restart: always
     env_file:
-      - ../.env
+      - path: ${INSTANCE_ENV_FILE}
+        required: true
+      - path: ../../../.env
+        required: false
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
       - ${DATA_DIR}/config/config.yaml:/app/config.yaml
@@ -52,8 +55,8 @@ services:
   sandbox-runner:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
-      context: ..
-      dockerfile: deploy/Dockerfile.mindroom
+      context: ../../..
+      dockerfile: local/instances/deploy/Dockerfile.mindroom
     container_name: ${INSTANCE_NAME:-mindroom}-sandbox-runner
     restart: always
     user: "${UID:-1000}:${GID:-1000}"
