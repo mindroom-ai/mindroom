@@ -274,6 +274,41 @@ def _knowledge_base_uses_agent_workspace(config: Config, base_id: str) -> bool:
     return _knowledge_base_config(config, base_id).path_relative_to_agent_workspace
 
 
+def _knowledge_base_uses_isolating_worker_workspace(
+    config: Config,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+) -> bool:
+    if agent_name is None or not _knowledge_base_uses_agent_workspace(config, base_id):
+        return False
+    return config.get_agent_worker_scope(agent_name) not in {None, "shared"}
+
+
+def _should_start_background_watchers(
+    config: Config,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    start_watchers: bool,
+) -> bool:
+    if not start_watchers or not _knowledge_base_config(config, base_id).watch:
+        return False
+    return not _knowledge_base_uses_isolating_worker_workspace(config, base_id, agent_name=agent_name)
+
+
+def _should_incrementally_sync_on_access(
+    config: Config,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    start_watchers: bool,
+) -> bool:
+    if not start_watchers or not _knowledge_base_config(config, base_id).watch:
+        return False
+    return _knowledge_base_uses_isolating_worker_workspace(config, base_id, agent_name=agent_name)
+
+
 def _resolve_manager_storage_path(
     config: Config,
     storage_path: Path,
@@ -520,7 +555,7 @@ class KnowledgeManager:
         raw_paths = [entry for entry in output.split("\x00") if entry]
         return {path for path in raw_paths if self._include_relative_path(path)}
 
-    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
+    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         knowledge_root = self._knowledge_root()
         git_dir = knowledge_root / ".git"
         if git_dir.is_dir():
@@ -529,7 +564,7 @@ class KnowledgeManager:
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             await self._run_git(["checkout", git_config.branch])
-            return
+            return False
 
         if knowledge_root.exists() and any(knowledge_root.iterdir()):
             msg = (
@@ -551,9 +586,12 @@ class KnowledgeManager:
             ],
             cwd=knowledge_root.parent,
         )
+        return True
 
     async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        await self._ensure_git_repository(git_config)
+        cloned = await self._ensure_git_repository(git_config)
+        if cloned:
+            return await self._git_list_tracked_files(), set(), True
 
         before_head = await self._git_rev_parse("HEAD")
         before_files = await self._git_list_tracked_files()
@@ -1059,6 +1097,12 @@ async def _stop_and_remove_manager(key: KnowledgeManagerKey) -> None:
     await manager.stop_watcher()
 
 
+async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[str, Any]:
+    if manager._git_config() is not None:
+        return await manager.sync_git_repository()
+    return await manager.sync_indexed_files()
+
+
 async def _ensure_knowledge_manager(
     *,
     key: KnowledgeManagerKey,
@@ -1066,7 +1110,8 @@ async def _ensure_knowledge_manager(
     config: Config,
     storage_path: Path,
     knowledge_path: Path,
-    start_watchers: bool,
+    start_background_watchers: bool,
+    incremental_sync_on_access: bool,
     reindex_on_create: bool,
 ) -> KnowledgeManager:
     existing = _knowledge_managers.get(key)
@@ -1075,7 +1120,9 @@ async def _ensure_knowledge_manager(
         existing.knowledge_path = knowledge_path.resolve()
         existing._settings = _settings_key(config, storage_path, base_id, knowledge_path)
         existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id, knowledge_path)
-        if start_watchers:
+        if incremental_sync_on_access:
+            await _sync_manager_without_full_reindex(existing)
+        if start_background_watchers:
             await existing.start_watcher()
         return existing
 
@@ -1094,17 +1141,30 @@ async def _ensure_knowledge_manager(
     if reindex_on_create or full_reindex_required:
         await manager.initialize()
     else:
-        sync_result = await manager.sync_indexed_files()
-        logger.info(
-            "Knowledge manager initialized without full reindex",
-            base_id=base_id,
-            path=str(manager.knowledge_path),
-            loaded_count=sync_result["loaded_count"],
-            indexed_count=sync_result["indexed_count"],
-            removed_count=sync_result["removed_count"],
-        )
+        sync_result = await _sync_manager_without_full_reindex(manager)
+        sync_log_context: dict[str, object] = {
+            "base_id": base_id,
+            "path": str(manager.knowledge_path),
+        }
+        if manager._git_config() is not None:
+            sync_log_context.update(
+                {
+                    "updated": sync_result["updated"],
+                    "changed_count": sync_result["changed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        else:
+            sync_log_context.update(
+                {
+                    "loaded_count": sync_result["loaded_count"],
+                    "indexed_count": sync_result["indexed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
 
-    if start_watchers:
+    if start_background_watchers:
         await manager.start_watcher()
 
     _knowledge_managers[key] = manager
@@ -1127,6 +1187,12 @@ async def ensure_agent_knowledge_managers(
 
     managers: dict[str, KnowledgeManager] = {}
     for base_id in agent_config.knowledge_bases:
+        start_background_watchers = _should_start_background_watchers(
+            config,
+            base_id,
+            agent_name=agent_name,
+            start_watchers=start_watchers,
+        )
         key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
             config,
             storage_path,
@@ -1141,7 +1207,13 @@ async def ensure_agent_knowledge_managers(
             config=config,
             storage_path=resolved_storage_path,
             knowledge_path=knowledge_path,
-            start_watchers=start_watchers and config.knowledge_bases[base_id].watch,
+            start_background_watchers=start_background_watchers,
+            incremental_sync_on_access=_should_incrementally_sync_on_access(
+                config,
+                base_id,
+                agent_name=agent_name,
+                start_watchers=start_watchers,
+            ),
             reindex_on_create=reindex_on_create,
         )
     return managers
@@ -1159,8 +1231,8 @@ async def initialize_knowledge_managers(
     for key in list(_knowledge_managers):
         if key.base_id not in configured_base_ids:
             await _stop_and_remove_manager(key)
-            continue
-        if _knowledge_base_uses_agent_workspace(config, key.base_id):
+    for base_id, key in list(_static_knowledge_manager_keys.items()):
+        if base_id not in configured_base_ids or _knowledge_base_uses_agent_workspace(config, base_id):
             await _stop_and_remove_manager(key)
 
     _static_knowledge_manager_keys.clear()
@@ -1187,7 +1259,12 @@ async def initialize_knowledge_managers(
             config=config,
             storage_path=resolved_storage_path,
             knowledge_path=knowledge_path,
-            start_watchers=start_watchers and config.knowledge_bases[base_id].watch,
+            start_background_watchers=_should_start_background_watchers(
+                config,
+                base_id,
+                start_watchers=start_watchers,
+            ),
+            incremental_sync_on_access=False,
             reindex_on_create=reindex_on_create,
         )
         _static_knowledge_manager_keys[base_id] = key
@@ -1224,9 +1301,6 @@ def get_knowledge_manager(
     if base_id in _static_knowledge_manager_keys:
         return _knowledge_managers.get(_static_knowledge_manager_keys[base_id])
 
-    matches = [manager for key, manager in _knowledge_managers.items() if key.base_id == base_id]
-    if len(matches) == 1:
-        return matches[0]
     return None
 
 
