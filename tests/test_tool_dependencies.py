@@ -16,6 +16,7 @@ from mindroom.tool_system.dependencies import (
     _pip_name_to_import,
     auto_install_optional_extra,
     check_deps_installed,
+    install_command_for_current_python,
 )
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
@@ -265,6 +266,64 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["VIRTUAL_ENV"] == sys.prefix
+
+
+def test_install_command_for_current_python_uses_uv_system_outside_virtualenv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-venv uv installs must target the system interpreter explicitly."""
+    monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._current_python_has_module", lambda _module_name: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.shutil.which", lambda _binary: "/usr/bin/uv")
+
+    assert install_command_for_current_python() == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--system",
+    ]
+
+
+def test_install_command_for_current_python_prefers_current_python_uv_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When PATH lacks uv, the current interpreter should still be able to run `python -m uv`."""
+    monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._current_python_has_module",
+        lambda module_name: module_name == "uv",
+    )
+    monkeypatch.setattr("mindroom.tool_system.dependencies.shutil.which", lambda _binary: None)
+
+    assert install_command_for_current_python() == [
+        sys.executable,
+        "-m",
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--system",
+    ]
+
+
+def test_install_command_for_current_python_uses_pip_user_outside_virtualenv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-venv pip installs must avoid writing to the managed interpreter directly."""
+    monkeypatch.setattr("mindroom.tool_system.dependencies._in_virtualenv", lambda: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies._current_python_has_module", lambda _module_name: False)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.shutil.which", lambda _binary: None)
+
+    assert install_command_for_current_python() == [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--user",
+    ]
 
 
 def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytest.MonkeyPatch) -> None:
