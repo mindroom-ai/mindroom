@@ -6,7 +6,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from mindroom.embeddings import MindRoomOpenAIEmbedder, create_sentence_transformers_embedder
+from mindroom.embeddings import (
+    MindRoomOpenAIEmbedder,
+    create_sentence_transformers_embedder,
+    effective_knowledge_embedder_signature,
+    effective_mem0_embedder_signature,
+)
 
 if TYPE_CHECKING:
     import pytest
@@ -112,3 +117,19 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
         "id": "sentence-transformers/all-MiniLM-L6-v2",
         "dimensions": 384,
     }
+
+
+def test_mem0_and_knowledge_signatures_keep_their_own_openai_defaults() -> None:
+    """Memory and knowledge signatures should not conflate different OpenAI defaults."""
+    assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") == (
+        "openai",
+        "text-embedding-3-large",
+        "",
+        "1536",
+    )
+    assert effective_knowledge_embedder_signature("openai", "text-embedding-3-large") == (
+        "openai",
+        "text-embedding-3-large",
+        "",
+        "3072",
+    )

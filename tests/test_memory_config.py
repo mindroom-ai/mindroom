@@ -186,19 +186,30 @@ class TestMemoryConfig:
 
         assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
 
-    def test_memory_collection_name_ignores_equivalent_openai_default_dimensions(self) -> None:
-        """Equivalent OpenAI defaults should reuse the same memory collection."""
+    @pytest.mark.parametrize(
+        ("model", "effective_dimensions"),
+        [
+            ("text-embedding-3-small", 1536),
+            ("text-embedding-3-large", 1536),
+        ],
+    )
+    def test_memory_collection_name_ignores_equivalent_mem0_openai_default_dimensions(
+        self,
+        model: str,
+        effective_dimensions: int,
+    ) -> None:
+        """Equivalent Mem0 OpenAI defaults should reuse the same memory collection."""
         implicit_default = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="openai",
-                config=EmbedderConfig(model="text-embedding-3-small"),
+                config=EmbedderConfig(model=model),
             ),
             llm=None,
         )
         explicit_default = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="openai",
-                config=EmbedderConfig(model="text-embedding-3-small", dimensions=1536),
+                config=EmbedderConfig(model=model, dimensions=effective_dimensions),
             ),
             llm=None,
         )

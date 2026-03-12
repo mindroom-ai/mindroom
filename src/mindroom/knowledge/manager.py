@@ -30,7 +30,7 @@ from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
     create_sentence_transformers_embedder,
-    effective_embedder_signature,
+    effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
 
@@ -86,7 +86,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> 
         base_id,
         str(storage_path.resolve()),
         str(knowledge_path),
-        *effective_embedder_signature(
+        *effective_knowledge_embedder_signature(
             config.memory.embedder.provider,
             embedder_config.model,
             host=embedder_config.host,
