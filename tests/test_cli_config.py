@@ -91,6 +91,8 @@ class TestConfigInit:
         assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
+        assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
+        assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
@@ -290,6 +292,19 @@ class TestConfigInit:
         content = target.read_text()
         assert "provider: openai" in content
         assert "id: gpt-5.2" in content
+
+    def test_init_anthropic_preset_uses_anthropic_models(self, tmp_path: Path) -> None:
+        """Config init --provider anthropic prepopulates Anthropic defaults."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "anthropic"])
+        assert result.exit_code == 0
+        content = target.read_text()
+        assert "provider: anthropic" in content
+        assert "id: claude-sonnet-4-5-latest" in content
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "ANTHROPIC_API_KEY=your-anthropic-key-here" in env_content
+        assert "# OPENAI_API_KEY=your-openai-key-here" in env_content
 
     def test_init_openrouter_preset_uses_openrouter_models(self, tmp_path: Path) -> None:
         """Config init --provider openrouter uses OpenRouter with Claude model."""

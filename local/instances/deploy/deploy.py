@@ -267,6 +267,9 @@ def _get_docker_compose_files(instance: Instance, name: str, project_root: Path)
                 SCRIPT_DIR / "docker-compose.wellknown.yml",
             ],
         )
+    matrix_host_override = _matrix_host_override_path(name)
+    if matrix_host_override.exists():
+        compose_files.append(matrix_host_override)
 
     # Add Authelia compose file if configured
     if instance.auth_type == AuthType.AUTHELIA:
@@ -291,6 +294,50 @@ def _ensure_instance_env_file_reference(env_file: Path) -> None:
     suffix = "" if not content or content.endswith("\n") else "\n"
     with env_file.open("a") as f:
         f.write(f"{suffix}{reference}\n")
+
+
+def _matrix_host_override_path(name: str) -> Path:
+    """Return the generated compose override that adds peer Matrix host mappings."""
+    return ENV_DIR / f"{name}.matrix-hosts.yml"
+
+
+def _matrix_peer_domains(instances: dict[str, Instance], *, exclude_name: str) -> list[str]:
+    """Return peer Matrix domains that should resolve to the host gateway."""
+    return sorted(
+        {
+            f"m-{instance.domain}"
+            for name, instance in instances.items()
+            if instance.matrix_type is not None and name != exclude_name
+        },
+    )
+
+
+def _write_matrix_host_override(instance: Instance, instances: dict[str, Instance]) -> None:
+    """Write a compose override that maps peer Matrix domains to the host gateway."""
+    override_path = _matrix_host_override_path(instance.name)
+    if instance.matrix_type is None:
+        override_path.unlink(missing_ok=True)
+        return
+
+    peer_domains = _matrix_peer_domains(instances, exclude_name=instance.name)
+    if not peer_domains:
+        override_path.unlink(missing_ok=True)
+        return
+
+    service_name = instance.matrix_type.value
+    lines = [
+        "services:",
+        f"  {service_name}:",
+        "    extra_hosts:",
+    ]
+    lines.extend(f'      - "{domain}:host-gateway"' for domain in peer_domains)
+    override_path.write_text("\n".join(lines) + "\n")
+
+
+def _sync_matrix_host_overrides(instances: dict[str, Instance]) -> None:
+    """Regenerate peer host-mapping overrides for every managed Matrix instance."""
+    for instance in instances.values():
+        _write_matrix_host_override(instance, instances)
 
 
 def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
@@ -394,19 +441,31 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
 
-def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances: dict[str, Instance]) -> None:
-    """Warn when local multi-instance federation will require external DNS routing."""
-    if not matrix_type:
-        return
+def _refresh_running_matrix_services_for_host_updates(
+    instances: dict[str, Instance],
+    *,
+    updated_instance_name: str,
+) -> None:
+    """Recreate running peer Matrix services so new host mappings take effect immediately."""
+    for name, instance in instances.items():
+        if name == updated_instance_name or instance.matrix_type is None:
+            continue
 
-    active_matrix_instances = [inst for inst in instances.values() if inst.matrix_type]
-    if len(active_matrix_instances) < 2:
-        return
+        _mindroom_running, matrix_running = get_actual_status(name)
+        if not matrix_running:
+            continue
 
-    console.print(
-        "[yellow]⚠️  Federation Note:[/yellow] Running multiple local Matrix instances "
-        "still requires DNS or reverse-proxy routing between their matrix domains.",
-    )
+        compose_files = _get_docker_compose_files(instance, name, REPO_ROOT)
+        service_name = instance.matrix_type.value
+        cmd = f"{compose_files} -p {name} up -d --no-deps --force-recreate {service_name}"
+        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            console.print(f"  [dim]Refreshed Matrix host mappings for {name}[/dim]")
+            continue
+
+        console.print(f"[yellow]⚠️[/yellow] Could not refresh Matrix host mappings for '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
 
 
 def _ensure_external_network(name: str) -> None:
@@ -622,6 +681,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
     registry.allocated_ports.mindroom.append(instance.mindroom_port)
     if matrix_type and instance.matrix_port:
         registry.allocated_ports.matrix.append(instance.matrix_port)
+    _sync_matrix_host_overrides(registry.instances)
     save_registry(registry)
 
 
@@ -759,10 +819,8 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[red]✗[/red] Environment file {env_file} not found!")
         raise typer.Exit(1)
 
-    # Verify federation configuration if Matrix is enabled
     instance = registry.instances[name]
-    if instance.matrix_type:
-        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
+    _sync_matrix_host_overrides(registry.instances)
 
     # Create data directories with proper permissions
     _create_instance_directories(instance)
@@ -832,6 +890,11 @@ def start(  # noqa: PLR0912, PLR0915
             console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
+        if instance.matrix_type:
+            _refresh_running_matrix_services_for_host_updates(
+                registry.instances,
+                updated_instance_name=name,
+            )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
@@ -933,9 +996,7 @@ def _restart_instance(  # noqa: PLR0912
     no_build: bool = False,
 ) -> None:
     """Helper function to restart a single instance."""
-    # Verify federation configuration if Matrix is enabled
-    if instance.matrix_type:
-        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
+    _sync_matrix_host_overrides(registry.instances)
 
     # Stop the instance
     project_root = REPO_ROOT
@@ -994,6 +1055,11 @@ def _restart_instance(  # noqa: PLR0912
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
+        if instance.matrix_type:
+            _refresh_running_matrix_services_for_host_updates(
+                registry.instances,
+                updated_instance_name=name,
+            )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:
@@ -1084,6 +1150,7 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         env_file = ENV_DIR / f"{name}.env"
         if env_file.exists():
             env_file.unlink()
+        _matrix_host_override_path(name).unlink(missing_ok=True)
 
         # Update registry - remove instance and free up ports
         del registry.instances[name]
@@ -1093,6 +1160,8 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
             registry.allocated_ports.mindroom.remove(instance.mindroom_port)
         if instance.matrix_port and instance.matrix_port in registry.allocated_ports.matrix:
             registry.allocated_ports.matrix.remove(instance.matrix_port)
+
+        _sync_matrix_host_overrides(registry.instances)
 
 
 def get_actual_status(name: str) -> tuple[bool, bool]:

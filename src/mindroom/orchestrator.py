@@ -922,8 +922,12 @@ async def _run_auxiliary_task_forever(
             logger.warning("Auxiliary task exited; restarting", task_name=task_name)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("Auxiliary task crashed; restarting", task_name=task_name)
+        except Exception as exc:
+            logger.error(  # noqa: TRY400
+                "Auxiliary task crashed; restarting",
+                task_name=task_name,
+                error=repr(exc),
+            )
         if time.monotonic() - started_at >= _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS:
             restart_count = 0
         restart_count += 1
