@@ -47,7 +47,7 @@ Generate the pair code in `https://chat.mindroom.chat` under:
 `Settings -> Local MindRoom`.
 
 See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/) for the full walkthrough.
-If you want `shell`, `file`, or `python` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+If you want worker-routed tools, especially `shell`, `file`, and `python`, to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 ### Full Stack (recommended)
 
