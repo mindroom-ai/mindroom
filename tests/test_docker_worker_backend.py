@@ -516,3 +516,23 @@ def test_docker_backend_recreates_container_when_storage_mount_does_not_match(
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_backend_recreates_container_when_host_config_contents_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker reuse should fail closed when the mounted config file changes contents."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+
+    (tmp_path / "config.yaml").write_text("agents:\n  code:\n    tools: [shell]\n", encoding="utf-8")
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2

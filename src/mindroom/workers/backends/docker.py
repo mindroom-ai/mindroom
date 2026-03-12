@@ -260,6 +260,16 @@ def docker_backend_config_signature(
     )
 
 
+def _host_config_contents_hash(host_config_path: Path | None) -> str:
+    if host_config_path is None:
+        return ""
+    try:
+        return hashlib.sha256(host_config_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
+        raise WorkerBackendError(msg) from exc
+
+
 def ensure_docker_dependencies() -> None:
     """Install the optional Docker SDK runtime when needed."""
     try:
@@ -352,6 +362,7 @@ class DockerWorkerBackend:
         """Resolve or start the dedicated worker container for the given worker key."""
         timestamp = time.time() if now is None else now
         with self._worker_lock(spec.worker_key):
+            self._launch_config_hash = self._compute_launch_config_hash()
             paths = self._state_paths(spec.worker_key)
             metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
             identity_changed = self._sync_metadata_identity(metadata)
@@ -745,6 +756,7 @@ class DockerWorkerBackend:
         config_payload = {
             "auth_token": self.auth_token or "",
             "config_path": self.config.config_path,
+            "config_contents_hash": _host_config_contents_hash(self.config.host_config_path),
             "extra_env": self.config.extra_env,
             "extra_labels": self.config.extra_labels,
             "host_config_path": str(self.config.host_config_path or ""),
