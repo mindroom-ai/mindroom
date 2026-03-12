@@ -181,7 +181,8 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 ### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
 
-Use this when you want the primary MindRoom runtime on the host, but you want `shell`, `file`, or `python` tools to execute in dedicated Docker workers.
+Use this when you want the primary MindRoom runtime on the host, but you want worker-routed tools to execute in dedicated Docker workers.
+That most commonly means `shell`, `file`, and `python`, but other tools can also be routed through workers.
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 
@@ -346,6 +347,7 @@ The `worker_tools` field has three states:
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
+Any tool can be listed in `worker_tools`, and MindRoom will attempt to route it through the worker runtime.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
@@ -353,8 +355,9 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` chooses which tools execute through the sandbox proxy.
 `worker_scope` chooses which proxied calls share the same worker-owned storage root.
-Some credential-backed custom tools stay local even if they are listed in `worker_tools`.
+Some tools still stay local even if they are listed in `worker_tools`.
 Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`google` and `spotify` may be worker-routed, but only for unscoped agents or agents with `worker_scope=shared`.
 
 You can set `worker_scope` per agent or in `defaults`:
 

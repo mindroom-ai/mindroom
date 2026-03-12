@@ -75,7 +75,8 @@ MindRoom then:
 
 ## Optional: Docker worker isolation
 
-If you want `shell`, `file`, or `python` tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](sandbox-proxy.md).
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](sandbox-proxy.md).
+That especially includes `shell`, `file`, and `python`, which are the most common isolated tools.
 Use `worker_scope: shared` when you want one persistent container per agent.
 Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
 
