@@ -57,6 +57,16 @@ describe('MemoryConfig', () => {
     expect(providerSelect).toHaveTextContent('OpenAI');
   });
 
+  it('lists sentence-transformers as an embedder provider option', async () => {
+    render(<MemoryConfig />);
+
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
+    fireEvent.click(providerSelect!);
+
+    expect(await screen.findByText('Sentence Transformers')).toBeInTheDocument();
+  });
+
   it('shows model as free-text input', () => {
     render(<MemoryConfig />);
 
@@ -119,6 +129,33 @@ describe('MemoryConfig', () => {
     expect(hostInput).toHaveValue('http://localhost:11434');
   });
 
+  it('hides host input for sentence-transformers provider', () => {
+    const localConfig: Partial<Config> = {
+      memory: {
+        embedder: {
+          provider: 'sentence_transformers',
+          config: {
+            model: 'sentence-transformers/all-MiniLM-L6-v2',
+          },
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      config: localConfig,
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+
+    render(<MemoryConfig />);
+
+    expect(document.getElementById('host')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Fully local embeddings using the sentence-transformers Python runtime')
+    ).toBeInTheDocument();
+  });
+
   it('changes provider and resets model to default', async () => {
     render(<MemoryConfig />);
 
@@ -141,6 +178,49 @@ describe('MemoryConfig', () => {
           }),
         })
       );
+    });
+  });
+
+  it('changes provider to sentence-transformers and clears host', async () => {
+    const configWithHost: Partial<Config> = {
+      memory: {
+        embedder: {
+          provider: 'openai',
+          config: {
+            model: 'text-embedding-3-small',
+            host: 'http://localhost:9292/v1',
+            dimensions: 1536,
+          },
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      config: configWithHost,
+      updateMemoryConfig: mockUpdateMemoryConfig,
+      saveConfig: mockSaveConfig,
+      isDirty: false,
+    });
+
+    render(<MemoryConfig />);
+
+    const providerSelect = document.getElementById('provider');
+    expect(providerSelect).toBeInTheDocument();
+    fireEvent.click(providerSelect!);
+
+    const sentenceTransformersOption = await screen.findByText('Sentence Transformers');
+    fireEvent.click(sentenceTransformersOption);
+
+    await waitFor(() => {
+      const calls = mockUpdateMemoryConfig.mock.calls;
+      const nextConfig = calls[calls.length - 1]?.[0];
+      expect(nextConfig?.embedder).toEqual({
+        provider: 'sentence_transformers',
+        config: {
+          model: 'sentence-transformers/all-MiniLM-L6-v2',
+          host: '',
+        },
+      });
     });
   });
 
@@ -276,6 +356,21 @@ describe('MemoryConfig', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Local embeddings using Ollama')).toBeInTheDocument();
+    });
+  });
+
+  it('shows provider description for sentence-transformers', async () => {
+    render(<MemoryConfig />);
+
+    const providerSelect = document.getElementById('provider');
+    fireEvent.click(providerSelect!);
+    const sentenceTransformersOption = await screen.findByText('Sentence Transformers');
+    fireEvent.click(sentenceTransformersOption);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Fully local embeddings using the sentence-transformers Python runtime')
+      ).toBeInTheDocument();
     });
   });
 

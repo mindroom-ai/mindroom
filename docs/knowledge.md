@@ -218,7 +218,7 @@ Knowledge bases use the same embedder configured in the `memory` section:
 ```yaml
 memory:
   embedder:
-    provider: openai        # or "ollama"
+    provider: openai        # or "ollama" or "sentence_transformers"
     config:
       model: text-embedding-3-small
       host: null             # For self-hosted (Ollama)
@@ -228,6 +228,7 @@ memory:
 |----------|---------------|-------|
 | `openai` | `text-embedding-3-small` | Requires `OPENAI_API_KEY` |
 | `ollama` | `nomic-embed-text` | Self-hosted, set `host` or `OLLAMA_HOST` |
+| `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
 ## Storage
 

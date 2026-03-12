@@ -787,7 +787,7 @@ defaults:
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
   embedder:
-    provider: openai               # Default: openai
+    provider: openai               # Default: openai (openai, ollama, or sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
@@ -795,6 +795,9 @@ memory:
   llm:                             # Optional: LLM for memory operations
     provider: ollama
     config: {}
+#
+# Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
+# MindRoom auto-installs that optional extra on first use.
 
 # Knowledge base configuration (optional)
 knowledge_bases:
@@ -2715,16 +2718,17 @@ Knowledge bases use the same embedder configured in the `memory` section:
 ```
 memory:
   embedder:
-    provider: openai        # or "ollama"
+    provider: openai        # or "ollama" or "sentence_transformers"
     config:
       model: text-embedding-3-small
       host: null             # For self-hosted (Ollama)
 ```
 
-| Provider | Model Example            | Notes                                    |
-| -------- | ------------------------ | ---------------------------------------- |
-| `openai` | `text-embedding-3-small` | Requires `OPENAI_API_KEY`                |
-| `ollama` | `nomic-embed-text`       | Self-hosted, set `host` or `OLLAMA_HOST` |
+| Provider                | Model Example                            | Notes                                                                     |
+| ----------------------- | ---------------------------------------- | ------------------------------------------------------------------------- |
+| `openai`                | `text-embedding-3-small`                 | Requires `OPENAI_API_KEY`                                                 |
+| `ollama`                | `nomic-embed-text`                       | Self-hosted, set `host` or `OLLAMA_HOST`                                  |
+| `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Fully local Python runtime; auto-installs the optional extra on first use |
 
 ## Storage
 
@@ -2804,6 +2808,19 @@ memory:
     config:
       model: text-embedding-3-small
 ```
+
+Fully local embedder example:
+
+```
+memory:
+  backend: mem0
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
+```
+
+MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used.
 
 ## Backend: `file`
 

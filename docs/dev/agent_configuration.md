@@ -56,7 +56,7 @@ The memory system uses embeddings to help agents remember and retrieve relevant 
 memory:
   backend: "mem0"  # Global default backend: "mem0" or "file"
   embedder:
-    provider: "ollama"  # Options: openai, ollama, huggingface, sentence-transformers
+    provider: "ollama"  # Options: openai, ollama, sentence_transformers
     config:
       model: "nomic-embed-text"  # Embedding model to use
       host: "http://localhost:11434"  # Ollama host URL
@@ -64,6 +64,7 @@ memory:
 
 You can override the memory backend per agent with `memory_backend`.
 You can set a per-agent file-memory scope directory with `memory_file_path` when using file memory.
+Use `provider: "sentence_transformers"` to run embeddings locally inside MindRoom with the optional `sentence-transformers` package.
 
 ## Router Configuration
 
