@@ -141,17 +141,25 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     return result.returncode == 0
 
 
+def _current_python_has_module(module_name: str) -> bool:
+    """Return whether the active interpreter can import a module."""
+    return importlib.util.find_spec(module_name) is not None
+
+
 def install_command_for_current_python() -> list[str]:
     """Build the pip/uv install command for the current interpreter."""
     in_venv = _in_virtualenv()
-    if shutil.which("uv"):
+    if _current_python_has_module("uv"):
+        cmd = [sys.executable, "-m", "uv", "pip", "install", "--python", sys.executable]
+    elif shutil.which("uv"):
         cmd = ["uv", "pip", "install", "--python", sys.executable]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install"]
         if not in_venv:
-            cmd.append("--system")
+            cmd.append("--user")
         return cmd
-    cmd = [sys.executable, "-m", "pip", "install"]
     if not in_venv:
-        cmd.append("--user")
+        cmd.append("--system")
     return cmd
 
 

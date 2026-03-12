@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+
+import pytest
 
 from mindroom.tools import python as python_tools_module
-
-if TYPE_CHECKING:
-    import pytest
 
 
 @dataclass
@@ -24,18 +22,28 @@ class _DummyPythonTools:
         self.init_kwargs = kwargs
 
 
-def test_python_tools_excludes_plain_pip_install_but_keeps_uv() -> None:
-    """MindRoom should only expose the uv-based package installer."""
+def test_python_tools_preserve_both_install_entrypoints() -> None:
+    """MindRoom should keep both installer names available for compatibility."""
     tool = python_tools_module.python_tools()()
 
-    assert "pip_install_package" not in tool.functions
+    assert "pip_install_package" in tool.functions
     assert "uv_pip_install_package" in tool.functions
 
 
-def test_uv_pip_install_package_uses_shared_install_command_and_warns(
+@pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
+def test_python_tools_respect_include_tools_for_installers(installer_name: str) -> None:
+    """Toolkit include filters should still expose whichever installer was requested."""
+    tool = python_tools_module.python_tools()(include_tools=[installer_name])
+
+    assert sorted(tool.functions) == [installer_name]
+
+
+@pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
+def test_python_tool_installers_use_shared_install_command_and_warn(
     monkeypatch: pytest.MonkeyPatch,
+    installer_name: str,
 ) -> None:
-    """Install should reuse the shared command builder and preserve Agno warnings."""
+    """Both installer names should reuse the shared command builder and warnings."""
     commands: list[list[str]] = []
     calls: list[str] = []
     logger = _FakeLogger()
@@ -44,7 +52,7 @@ def test_uv_pip_install_package_uses_shared_install_command_and_warns(
     monkeypatch.setattr(
         python_tools_module,
         "install_command_for_current_python",
-        lambda: ["uv", "pip", "install", "--python", "/worker/python", "--system"],
+        lambda: ["/worker/python", "-m", "uv", "pip", "install", "--python", "/worker/python", "--system"],
     )
     monkeypatch.setattr(
         python_tools_module,
@@ -58,16 +66,22 @@ def test_uv_pip_install_package_uses_shared_install_command_and_warns(
     )
 
     tool_cls = python_tools_module.python_tools()
-    result = tool_cls().uv_pip_install_package("pyfiglet")
+    result = getattr(tool_cls(), installer_name)("pyfiglet")
 
     assert result == "successfully installed package pyfiglet"
-    assert commands == [["uv", "pip", "install", "--python", "/worker/python", "--system", "pyfiglet"]]
+    assert commands == [
+        ["/worker/python", "-m", "uv", "pip", "install", "--python", "/worker/python", "--system", "pyfiglet"],
+    ]
     assert calls == ["warn", "debug:Installing package pyfiglet"]
     assert logger.exceptions == []
 
 
-def test_uv_pip_install_package_logs_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Install failures should be logged and returned to the caller."""
+@pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
+def test_python_tool_installers_log_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    installer_name: str,
+) -> None:
+    """Install failures should be logged and returned for both installer entrypoints."""
     calls: list[str] = []
     logger = _FakeLogger()
 
@@ -88,7 +102,7 @@ def test_uv_pip_install_package_logs_errors(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     tool_cls = python_tools_module.python_tools()
-    result = tool_cls().uv_pip_install_package("pyfiglet")
+    result = getattr(tool_cls(), installer_name)("pyfiglet")
 
     assert result == "Error installing package pyfiglet: boom"
     assert calls == ["warn", "debug:Installing package pyfiglet"]
