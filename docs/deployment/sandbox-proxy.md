@@ -182,11 +182,11 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 ### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
 
 Use this when you want the primary MindRoom runtime on the host, but you want worker-routed tools to execute in dedicated Docker workers.
-That most commonly means `shell`, `file`, and `python`, but other worker-safe tools can also be routed through workers when they only need worker state or files under the mounted config directory.
+That most commonly means `shell`, `file`, and `python`, but other worker-safe tools can also be routed through workers when they only need worker state or config-referenced filesystem assets.
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
-MindRoom mounts the directory containing `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` read-only into each worker so config-relative plugin and knowledge paths keep working.
-MindRoom also masks config-adjacent `.env` inside the worker container, so primary-runtime secrets stay local unless you pass worker-specific env vars explicitly.
+MindRoom builds a projected read-only config tree for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that tree, and mounts only the referenced host assets that the worker needs.
+MindRoom also masks config-adjacent `.env` inside the worker container, so primary-runtime secrets and unrelated runtime state stay local unless you pass worker-specific env vars explicitly.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
 If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
@@ -272,7 +272,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml`; its parent directory is mounted read-only into workers and `.env` is masked inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config tree; only referenced config-relative assets are mounted and `.env` is masked inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |

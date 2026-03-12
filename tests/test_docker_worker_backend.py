@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -18,8 +19,6 @@ from mindroom.workers.backends.docker import (
 from mindroom.workers.models import WorkerSpec
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
@@ -141,11 +140,99 @@ def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
     return None
 
 
+def _projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
+    plugin_root = tmp_path / "plugins" / "my-plugin"
+    plugin_root.mkdir(parents=True)
+    knowledge_root = tmp_path / "knowledge_docs"
+    knowledge_root.mkdir()
+    context_file = tmp_path / "context.md"
+    context_file.write_text("# Context\n", encoding="utf-8")
+    memory_root = tmp_path / "memory_files"
+    memory_root.mkdir()
+    agent_memory_root = tmp_path / "agent_memory" / "code"
+    agent_memory_root.mkdir(parents=True)
+    primary_runtime_data = tmp_path / "mindroom_data" / "credentials"
+    primary_runtime_data.mkdir(parents=True)
+    (primary_runtime_data / "secret.json").write_text('{"api_key":"leak"}', encoding="utf-8")
+    return (
+        """
+plugins:
+  - ./plugins/my-plugin
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+memory:
+  backend: file
+  file:
+    path: ./memory_files
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    context_files:
+      - ./context.md
+    memory_file_path: ./agent_memory/code
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+        {
+            "plugin_root": plugin_root,
+            "knowledge_root": knowledge_root,
+            "context_file": context_file,
+            "memory_root": memory_root,
+            "agent_memory_root": agent_memory_root,
+        },
+    )
+
+
+def _projection_root(volumes: dict[str, dict[str, str]]) -> Path:
+    return next(Path(source) for source, spec in volumes.items() if spec["bind"] == "/app/config-host")
+
+
+def _assert_projected_worker_mounts(
+    tmp_path: Path,
+    volumes: dict[str, dict[str, str]],
+    projected_paths: dict[str, Path],
+) -> Path:
+    state_root = str(worker_root_path(tmp_path, "worker-a"))
+    assert volumes[state_root]["bind"] == "/app/worker"
+
+    projection_root = _projection_root(volumes)
+    assert projection_root.parent == worker_root_path(tmp_path, "worker-a") / "metadata"
+    assert str(tmp_path) not in volumes
+    assert str(tmp_path / "mindroom_data") not in volumes
+    assert (
+        volumes[str(projected_paths["plugin_root"].resolve())]["bind"]
+        == "/app/config-host/.mindroom-worker-assets/plugins/00-my-plugin"
+    )
+    assert (
+        volumes[str(projected_paths["knowledge_root"].resolve())]["bind"]
+        == "/app/config-host/.mindroom-worker-assets/knowledge_bases/docs"
+    )
+    assert (
+        volumes[str(projected_paths["context_file"].resolve())]["bind"]
+        == "/app/config-host/.mindroom-worker-assets/agents/code/context_files/00-context.md"
+    )
+    assert (
+        volumes[str(projected_paths["memory_root"].resolve())]["bind"]
+        == "/app/config-host/.mindroom-worker-assets/memory/file"
+    )
+    assert (
+        volumes[str(projected_paths["agent_memory_root"].resolve())]["bind"]
+        == "/app/config-host/.mindroom-worker-assets/agents/code/memory_file_path"
+    )
+    return projection_root
+
+
 def _backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
     idle_timeout_seconds: float = 60.0,
+    config_text: str = "agents: {}\n",
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, bool]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -162,7 +249,7 @@ def _backend(
         extra_env={"EXTRA_ENV": "present"},
         extra_labels={"mindroom.ai/tenant": "test"},
     )
-    config.host_config_path.write_text("agents: {}\n", encoding="utf-8")
+    config.host_config_path.write_text(config_text, encoding="utf-8")
     fake_client = _FakeDockerClient()
     sync_calls: list[tuple[str, bool]] = []
 
@@ -201,8 +288,9 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Ensuring one worker should create a dedicated sandbox-runner container."""
-    backend, fake_client, sync_calls = _backend(monkeypatch, tmp_path)
+    """Ensuring one worker should project only configured config assets into the container."""
+    config_text, projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
 
     handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
@@ -227,13 +315,15 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
 
     volumes = run_call["volumes"]
     assert isinstance(volumes, dict)
-    state_root = str(worker_root_path(tmp_path, "worker-a"))
-    assert volumes[state_root]["bind"] == "/app/worker"
-    assert volumes[str(tmp_path)]["bind"] == "/app/config-host"
-    assert volumes[str(tmp_path / "config.yaml")]["bind"] == "/app/config-host/config.yaml"
-    masked_dotenv = worker_root_path(tmp_path, "worker-a") / "metadata" / "config-dir.env"
-    assert volumes[str(masked_dotenv)]["bind"] == "/app/config-host/.env"
-    assert masked_dotenv.read_text(encoding="utf-8") == ""
+    projection_root = _assert_projected_worker_mounts(tmp_path, volumes, projected_paths)
+
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
+    assert "path: ./.mindroom-worker-assets/memory/file" in projected_config
+    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    assert "memory_file_path: ./.mindroom-worker-assets/agents/code/memory_file_path" in projected_config
+    assert (projection_root / ".env").read_text(encoding="utf-8") == ""
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
 
