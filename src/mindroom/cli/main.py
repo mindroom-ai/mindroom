@@ -23,6 +23,7 @@ from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
 )
+from mindroom.error_handling import AvatarGenerationError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
@@ -121,7 +122,7 @@ def run(
     )
 
 
-async def _run(  # noqa: C901
+async def _run(  # noqa: C901, PLR0912, PLR0915
     log_level: str,
     storage_path: Path,
     *,
@@ -188,6 +189,9 @@ async def _run(  # noqa: C901
         console.print("\nStopped")
     except ConnectionError as exc:
         _print_connection_error(exc)
+        raise typer.Exit(1) from None
+    except AvatarGenerationError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():

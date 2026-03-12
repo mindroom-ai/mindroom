@@ -17,6 +17,7 @@ from rich.text import Text
 
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir, resolve_avatar_path
+from mindroom.error_handling import AvatarGenerationError
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
@@ -447,6 +448,15 @@ def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None
     )
 
 
+def _remaining_missing_avatar_targets(missing_targets: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Return targets that are still missing after a generation attempt."""
+    return {
+        (entity_type, entity_name)
+        for entity_type, entity_name in missing_targets
+        if not resolve_avatar_path(entity_type, entity_name).exists()
+    }
+
+
 async def _generate_missing_avatars(
     config: Config,
     missing_targets: set[tuple[str, str]],
@@ -478,6 +488,14 @@ async def _generate_missing_avatars(
     finally:
         await client.aio.aclose()
 
+    remaining_targets = _remaining_missing_avatar_targets(missing_targets)
+    if remaining_targets:
+        formatted_targets = ", ".join(
+            f"{entity_type}/{entity_name}" for entity_type, entity_name in sorted(remaining_targets)
+        )
+        console.print(f"\n[red]✗ Avatar generation failed for: {formatted_targets}[/red]")
+        return False
+
     console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
     return True
 
@@ -493,7 +511,8 @@ async def run_avatar_generation(
     missing_targets = _missing_avatar_targets(config)
 
     if not set_only and not await _generate_missing_avatars(config, missing_targets):
-        return
+        msg = "Avatar generation failed. See errors above."
+        raise AvatarGenerationError(msg)
 
     if sync_room_avatars:
         try:

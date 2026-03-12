@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.error_handling import AvatarGenerationError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -498,6 +499,31 @@ class TestRunErrorHandling:
         result = runner.invoke(app, ["run"])
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
+
+    def test_run_reports_avatar_generation_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should exit cleanly when startup avatar generation fails."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+
+        with patch(
+            "mindroom.orchestrator.main",
+            AsyncMock(side_effect=AvatarGenerationError("Avatar generation failed. See errors above.")),
+        ):
+            result = runner.invoke(app, ["run", "--generate-avatars"])
+
+        assert result.exit_code == 1
+        assert "Avatar generation failed" in _strip_ansi(result.output)
 
 
 # ---------------------------------------------------------------------------

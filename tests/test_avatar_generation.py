@@ -237,6 +237,60 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
 
 
 @pytest.mark.asyncio
+async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup avatar generation should fail when required assets remain missing."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    router_avatar = tmp_path / "avatars" / "agents" / "router.png"
+    router_avatar.parent.mkdir(parents=True, exist_ok=True)
+    router_avatar.write_bytes(b"avatar")
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
+    monkeypatch.setattr(
+        generate_avatars.genai,
+        "Client",
+        lambda **_kwargs: SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock())),
+    )
+    monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(side_effect=RuntimeError("boom")))
+    sync_room_avatars = AsyncMock()
+    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", sync_room_avatars)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+
+    with pytest.raises(generate_avatars.AvatarGenerationError, match="Avatar generation failed"):
+        await generate_avatars.run_avatar_generation(sync_room_avatars=True)
+
+    sync_room_avatars.assert_not_awaited()
+    assert not (tmp_path / "avatars" / "agents" / "general.png").exists()
+
+
+@pytest.mark.asyncio
 async def test_run_avatar_generation_set_only_accepts_null_optional_sections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -354,7 +408,19 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         },
         "matrix_space": {"enabled": True, "name": "Workspace"},
     }
-    generated = AsyncMock()
+
+    async def _generate_avatar(
+        _client: object,
+        entity_type: str,
+        entity_name: str,
+        _entity_data: dict,
+        _all_agents: dict | None = None,
+    ) -> None:
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"generated")
+
+    generated = AsyncMock(side_effect=_generate_avatar)
     client = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock()))
 
     def _make_client(*, api_key: str) -> object:
