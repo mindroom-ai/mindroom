@@ -214,10 +214,14 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
+    assert "VIRTUAL_ENV" in env_names
+    assert "PATH" in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
+    assert env_values["VIRTUAL_ENV"] == "/app/worker/venv"
+    assert env_values["PATH"].startswith("/app/worker/venv/bin:")
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
     assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
     assert (
@@ -259,6 +263,11 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     }
     assert container["resources"]["requests"] == {"memory": "256Mi", "cpu": "100m"}
     assert container["resources"]["limits"] == {"memory": "1Gi", "cpu": "500m"}
+    assert container["startupProbe"] == {
+        "httpGet": {"path": "/healthz", "port": "api"},
+        "periodSeconds": 5,
+        "failureThreshold": 60,
+    }
 
 
 def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> None:
