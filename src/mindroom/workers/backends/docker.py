@@ -60,7 +60,6 @@ _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
 _DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_PUBLISH_HOST = "127.0.0.1"
-_DEFAULT_DOCKER_USER = "1000:1000"
 _READY_POLL_INTERVAL_SECONDS = 1.0
 
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
@@ -150,10 +149,22 @@ def _read_host_config_path() -> Path | None:
     return None
 
 
+def _default_docker_user_for_os(os_name: str) -> str | None:
+    if os_name == "posix":
+        return f"{os.getuid()}:{os.getgid()}"
+    if os_name == "nt":
+        return None
+    return None
+
+
+def _default_docker_user() -> str | None:
+    return _default_docker_user_for_os(os.name)
+
+
 def _read_docker_user() -> str | None:
     raw_value = os.getenv(_USER_ENV)
     if raw_value is None:
-        return _DEFAULT_DOCKER_USER
+        return _default_docker_user()
     normalized = raw_value.strip()
     return normalized or None
 
