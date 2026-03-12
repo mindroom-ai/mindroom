@@ -68,6 +68,7 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
+| `path_relative_to_agent_workspace` | bool | `false` | Resolve `path` relative to each assigned agent's effective workspace instead of `config.yaml`. `path` must stay relative when this is enabled |
 | `watch` | bool | `true` | Watch for filesystem changes and reindex automatically |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
@@ -75,6 +76,34 @@ knowledge_bases:
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 If chunking is too large, indexing retries will fail with embedder 500 errors.
+
+### Workspace-Relative Knowledge
+
+Set `path_relative_to_agent_workspace: true` when the same shared agent definition should index a different folder for each worker scope.
+
+```yaml
+knowledge_bases:
+  mind_memory:
+    path: memory
+    path_relative_to_agent_workspace: true
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    worker_scope: user
+    workspace:
+      path: mind_data
+      template: mind
+    knowledge_bases: [mind_memory]
+```
+
+With this configuration, each requester's effective knowledge path becomes `<their workspace>/memory`.
+This requires every agent that uses the knowledge base to define `workspace`.
+MindRoom keeps a separate index and watcher per effective workspace path, so one requester's indexed data is not shared with another requester's runtime.
+Workspace-relative knowledge bases are initialized on first agent use instead of during the global startup pass.
 
 ### Multiple Knowledge Bases
 
@@ -233,6 +262,7 @@ memory:
 ## Storage
 
 Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
+When `path_relative_to_agent_workspace` is enabled, the effective workspace path is part of that storage key, so each scoped workspace gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 

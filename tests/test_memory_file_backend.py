@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.agent import AgentWorkspaceConfig
 from mindroom.config.main import Config
 from mindroom.memory.functions import (
     add_agent_memory,
@@ -176,6 +177,57 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(storage
         worker_root_path(storage_path, alice_worker_key) / "memory_files" / "agent_general" / "MEMORY.md"
     )
     assert alice_memory_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_root(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].workspace = AgentWorkspaceConfig(
+        path="mind_data",
+        template="mind",
+        file_memory_path=".",
+        context_files=["SOUL.md"],
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    with tool_execution_identity(alice_identity):
+        await add_agent_memory("Alice workspace memory", "general", storage_path, config)
+        alice_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
+
+    with tool_execution_identity(bob_identity):
+        bob_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
+
+    assert any(result.get("memory") == "Alice workspace memory" for result in alice_results)
+    assert not any(result.get("memory") == "Alice workspace memory" for result in bob_results)
+
+    alice_worker_key = resolve_worker_key("user", alice_identity)
+    assert alice_worker_key is not None
+    alice_memory_file = worker_root_path(storage_path, alice_worker_key) / "mind_data" / "MEMORY.md"
+    assert alice_memory_file.exists()
+    assert "Alice workspace memory" in alice_memory_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

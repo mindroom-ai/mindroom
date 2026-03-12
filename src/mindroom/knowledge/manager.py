@@ -33,6 +33,8 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.workspaces import resolve_agent_workspace
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
     from mindroom.config.main import Config
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -61,13 +64,14 @@ def _safe_identifier(value: str) -> str:
     return sanitized or "default"
 
 
-def _base_storage_key(base_id: str) -> str:
-    digest = hashlib.sha256(base_id.encode("utf-8")).hexdigest()[:8]
+def _base_storage_key(base_id: str, knowledge_path: Path) -> str:
+    digest_source = f"{base_id}:{knowledge_path.resolve()}"
+    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:8]
     return f"{_safe_identifier(base_id)}_{digest}"
 
 
-def _collection_name(base_id: str) -> str:
-    return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id)}"
+def _collection_name(base_id: str, knowledge_path: Path) -> str:
+    return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
 def _knowledge_base_config(config: Config, base_id: str) -> KnowledgeBaseConfig:
@@ -77,15 +81,14 @@ def _knowledge_base_config(config: Config, base_id: str) -> KnowledgeBaseConfig:
     return config.knowledge_bases[base_id]
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str, ...]:
+def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
     embedder_config = config.memory.embedder.config
     base_config = _knowledge_base_config(config, base_id)
-    knowledge_path = _resolve_knowledge_path(base_config.path)
     git_config = base_config.git
     return (
         base_id,
         str(storage_path.resolve()),
-        str(knowledge_path),
+        str(knowledge_path.resolve()),
         *effective_knowledge_embedder_signature(
             config.memory.embedder.provider,
             embedder_config.model,
@@ -102,11 +105,11 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> 
     )
 
 
-def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str, ...]:
+def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
     base_config = _knowledge_base_config(config, base_id)
     git_config = base_config.git
     return (
-        *_indexing_settings_key(config, storage_path, base_id),
+        *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
@@ -258,6 +261,112 @@ def _matches_root_glob(relative_path: str, pattern: str) -> bool:
     return _match(0, 0)
 
 
+@dataclass(frozen=True)
+class KnowledgeManagerKey:
+    """Stable cache key for one effective knowledge manager instance."""
+
+    base_id: str
+    storage_path: str
+    knowledge_path: str
+
+
+def _knowledge_base_uses_agent_workspace(config: Config, base_id: str) -> bool:
+    return _knowledge_base_config(config, base_id).path_relative_to_agent_workspace
+
+
+def _resolve_manager_storage_path(
+    config: Config,
+    storage_path: Path,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Path:
+    if not _knowledge_base_uses_agent_workspace(config, base_id):
+        return storage_path.expanduser().resolve()
+    if agent_name is None:
+        msg = f"Knowledge base '{base_id}' requires an agent workspace"
+        raise ValueError(msg)
+    return resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path.expanduser().resolve(),
+        config=config,
+        execution_identity=execution_identity,
+    ).resolve()
+
+
+def _resolve_effective_knowledge_path(
+    config: Config,
+    storage_path: Path,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+    create: bool = False,
+) -> tuple[Path, Path]:
+    base_config = _knowledge_base_config(config, base_id)
+    resolved_storage_path = _resolve_manager_storage_path(
+        config,
+        storage_path,
+        base_id,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
+    if not base_config.path_relative_to_agent_workspace:
+        knowledge_path = _resolve_knowledge_path(base_config.path).resolve()
+        if create:
+            knowledge_path.mkdir(parents=True, exist_ok=True)
+        return resolved_storage_path, knowledge_path
+
+    if agent_name is None:
+        msg = f"Knowledge base '{base_id}' requires an agent workspace"
+        raise ValueError(msg)
+
+    workspace = resolve_agent_workspace(
+        agent_name,
+        config,
+        base_storage_path=storage_path,
+        execution_identity=execution_identity,
+        create=create,
+    )
+    if workspace is None:
+        msg = f"Knowledge base '{base_id}' requires agent '{agent_name}' to define a workspace"
+        raise ValueError(msg)
+
+    knowledge_path = (workspace.root / base_config.path).resolve()
+    if create:
+        knowledge_path.mkdir(parents=True, exist_ok=True)
+    return resolved_storage_path, knowledge_path
+
+
+def _knowledge_manager_key(
+    config: Config,
+    storage_path: Path,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+    create: bool = False,
+) -> tuple[KnowledgeManagerKey, Path, Path]:
+    resolved_storage_path, knowledge_path = _resolve_effective_knowledge_path(
+        config,
+        storage_path,
+        base_id,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        create=create,
+    )
+    return (
+        KnowledgeManagerKey(
+            base_id=base_id,
+            storage_path=str(resolved_storage_path),
+            knowledge_path=str(knowledge_path),
+        ),
+        resolved_storage_path,
+        knowledge_path,
+    )
+
+
 @dataclass
 class KnowledgeManager:
     """Manage indexing and watching for one knowledge base folder."""
@@ -265,8 +374,7 @@ class KnowledgeManager:
     base_id: str
     config: Config
     storage_path: Path
-
-    knowledge_path: Path = field(init=False)
+    knowledge_path: Path | None = None
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
@@ -283,30 +391,52 @@ class KnowledgeManager:
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
-        base_config = _knowledge_base_config(self.config, self.base_id)
-        self.knowledge_path = _resolve_knowledge_path(base_config.path)
+        if self.knowledge_path is None:
+            self.knowledge_path = _resolve_knowledge_path(_knowledge_base_config(self.config, self.base_id).path)
+        self.knowledge_path = self.knowledge_path.resolve()
         self.knowledge_path.mkdir(parents=True, exist_ok=True)
-        self._settings = _settings_key(self.config, self.storage_path, self.base_id)
-        self._indexing_settings = _indexing_settings_key(self.config, self.storage_path, self.base_id)
-        self._base_storage_path = (self.storage_path / "knowledge_db" / _base_storage_key(self.base_id)).resolve()
+        self._settings = _settings_key(self.config, self.storage_path, self.base_id, self.knowledge_path)
+        self._indexing_settings = _indexing_settings_key(
+            self.config,
+            self.storage_path,
+            self.base_id,
+            self.knowledge_path,
+        )
+        self._base_storage_path = (
+            self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
+        ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._index_failures_path = self._base_storage_path / "index_failures.json"
 
         vector_db = ChromaDb(
-            collection=_collection_name(self.base_id),
+            collection=_collection_name(self.base_id, self.knowledge_path),
             path=str(self._base_storage_path),
             persistent_client=True,
             embedder=_create_embedder(self.config),
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
-    def matches(self, config: Config, storage_path: Path) -> bool:
-        """Return True when manager settings match the provided config."""
-        return self._settings == _settings_key(config, storage_path, self.base_id)
+    def _knowledge_root(self) -> Path:
+        knowledge_path = self.knowledge_path
+        if knowledge_path is None:
+            msg = f"Knowledge path for base '{self.base_id}' is not initialized"
+            raise RuntimeError(msg)
+        return knowledge_path
 
-    def needs_full_reindex(self, config: Config, storage_path: Path) -> bool:
+    def matches(self, config: Config, storage_path: Path, knowledge_path: Path | None = None) -> bool:
+        """Return True when manager settings match the provided config."""
+        resolved_knowledge_path = self._knowledge_root() if knowledge_path is None else knowledge_path
+        return self._settings == _settings_key(config, storage_path, self.base_id, resolved_knowledge_path)
+
+    def needs_full_reindex(self, config: Config, storage_path: Path, knowledge_path: Path | None = None) -> bool:
         """Return True when index-affecting settings changed."""
-        return self._indexing_settings != _indexing_settings_key(config, storage_path, self.base_id)
+        resolved_knowledge_path = self._knowledge_root() if knowledge_path is None else knowledge_path
+        return self._indexing_settings != _indexing_settings_key(
+            config,
+            storage_path,
+            self.base_id,
+            resolved_knowledge_path,
+        )
 
     def get_knowledge(self) -> Knowledge:
         """Return the agno Knowledge instance."""
@@ -323,8 +453,9 @@ class KnowledgeManager:
         return any(part.startswith(".") for part in relative_path.parts)
 
     def _include_file(self, file_path: Path) -> bool:
+        knowledge_root = self._knowledge_root()
         try:
-            relative_path = file_path.relative_to(self.knowledge_path)
+            relative_path = file_path.relative_to(knowledge_root)
         except ValueError:
             return False
         return file_path.is_file() and self._include_relative_path(relative_path.as_posix())
@@ -348,10 +479,11 @@ class KnowledgeManager:
         return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
     async def _run_git(self, args: list[str], *, cwd: Path | None = None) -> str:
+        knowledge_root = self._knowledge_root()
         process = await asyncio.create_subprocess_exec(
             "git",
             *args,
-            cwd=str(cwd or self.knowledge_path),
+            cwd=str(cwd or knowledge_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -389,7 +521,8 @@ class KnowledgeManager:
         return {path for path in raw_paths if self._include_relative_path(path)}
 
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
-        git_dir = self.knowledge_path / ".git"
+        knowledge_root = self._knowledge_root()
+        git_dir = knowledge_root / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
             expected_remote = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
@@ -398,14 +531,14 @@ class KnowledgeManager:
             await self._run_git(["checkout", git_config.branch])
             return
 
-        if self.knowledge_path.exists() and any(self.knowledge_path.iterdir()):
+        if knowledge_root.exists() and any(knowledge_root.iterdir()):
             msg = (
-                f"Cannot clone knowledge git repository into non-empty path {self.knowledge_path}. "
+                f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. "
                 "Clear the folder or use a dedicated path."
             )
             raise RuntimeError(msg)
 
-        self.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         clone_url = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
         await self._run_git(
             [
@@ -414,9 +547,9 @@ class KnowledgeManager:
                 "--branch",
                 git_config.branch,
                 clone_url,
-                str(self.knowledge_path),
+                str(knowledge_root),
             ],
-            cwd=self.knowledge_path.parent,
+            cwd=knowledge_root.parent,
         )
 
     async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
@@ -452,27 +585,29 @@ class KnowledgeManager:
 
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
-        if not self.knowledge_path.exists():
+        knowledge_root = self._knowledge_root()
+        if not knowledge_root.exists():
             return []
-        return sorted(path for path in self.knowledge_path.rglob("*") if self._include_file(path))
+        return sorted(path for path in knowledge_root.rglob("*") if self._include_file(path))
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
+        knowledge_root = self._knowledge_root()
         candidate = Path(file_path)
         resolved = (
-            candidate.expanduser().resolve() if candidate.is_absolute() else (self.knowledge_path / candidate).resolve()
+            candidate.expanduser().resolve() if candidate.is_absolute() else (knowledge_root / candidate).resolve()
         )
 
         try:
-            resolved.relative_to(self.knowledge_path)
+            resolved.relative_to(knowledge_root)
         except ValueError as exc:
-            msg = f"Path {resolved} is outside knowledge folder {self.knowledge_path}"
+            msg = f"Path {resolved} is outside knowledge folder {knowledge_root}"
             raise ValueError(msg) from exc
 
         return resolved
 
     def _relative_path(self, file_path: Path) -> str:
-        return file_path.relative_to(self.knowledge_path).as_posix()
+        return file_path.relative_to(self._knowledge_root()).as_posix()
 
     def _file_signature(self, file_path: Path) -> tuple[int, int]:
         stat = file_path.stat()
@@ -621,7 +756,7 @@ class KnowledgeManager:
             "Knowledge base initialized",
             base_id=self.base_id,
             indexed_count=indexed_count,
-            path=str(self.knowledge_path),
+            path=str(self._knowledge_root()),
         )
 
     async def load_indexed_files(self) -> int:
@@ -784,7 +919,7 @@ class KnowledgeManager:
 
         self._watch_stop_event = asyncio.Event()
         self._watch_task = asyncio.create_task(self._watch_loop())
-        logger.info("Knowledge folder watcher started", base_id=self.base_id, path=str(self.knowledge_path))
+        logger.info("Knowledge folder watcher started", base_id=self.base_id, path=str(self._knowledge_root()))
 
     async def stop_watcher(self) -> None:
         """Stop the background file watcher."""
@@ -883,14 +1018,14 @@ class KnowledgeManager:
         files = self.list_files()
         return {
             "base_id": self.base_id,
-            "folder_path": str(self.knowledge_path),
+            "folder_path": str(self._knowledge_root()),
             "file_count": len(files),
             "indexed_count": len(self._indexed_files),
         }
 
     async def _watch_loop(self) -> None:
         """Watch the knowledge folder for file changes."""
-        async for changes in awatch(self.knowledge_path, stop_event=self._watch_stop_event):
+        async for changes in awatch(self._knowledge_root(), stop_event=self._watch_stop_event):
             if not changes:
                 continue
 
@@ -913,7 +1048,103 @@ class KnowledgeManager:
             await self.remove_file(resolved_path)
 
 
-_knowledge_managers: dict[str, KnowledgeManager] = {}
+_knowledge_managers: dict[KnowledgeManagerKey, KnowledgeManager] = {}
+_static_knowledge_manager_keys: dict[str, KnowledgeManagerKey] = {}
+
+
+async def _stop_and_remove_manager(key: KnowledgeManagerKey) -> None:
+    manager = _knowledge_managers.pop(key, None)
+    if manager is None:
+        return
+    await manager.stop_watcher()
+
+
+async def _ensure_knowledge_manager(
+    *,
+    key: KnowledgeManagerKey,
+    base_id: str,
+    config: Config,
+    storage_path: Path,
+    knowledge_path: Path,
+    start_watchers: bool,
+    reindex_on_create: bool,
+) -> KnowledgeManager:
+    existing = _knowledge_managers.get(key)
+    if existing is not None and existing.matches(config, storage_path, knowledge_path):
+        existing.config = config
+        existing.knowledge_path = knowledge_path.resolve()
+        existing._settings = _settings_key(config, storage_path, base_id, knowledge_path)
+        existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id, knowledge_path)
+        if start_watchers:
+            await existing.start_watcher()
+        return existing
+
+    full_reindex_required = (
+        existing.needs_full_reindex(config, storage_path, knowledge_path) if existing is not None else False
+    )
+    if existing is not None:
+        await existing.stop_watcher()
+
+    manager = KnowledgeManager(
+        base_id=base_id,
+        config=config,
+        storage_path=storage_path,
+        knowledge_path=knowledge_path,
+    )
+    if reindex_on_create or full_reindex_required:
+        await manager.initialize()
+    else:
+        sync_result = await manager.sync_indexed_files()
+        logger.info(
+            "Knowledge manager initialized without full reindex",
+            base_id=base_id,
+            path=str(manager.knowledge_path),
+            loaded_count=sync_result["loaded_count"],
+            indexed_count=sync_result["indexed_count"],
+            removed_count=sync_result["removed_count"],
+        )
+
+    if start_watchers:
+        await manager.start_watcher()
+
+    _knowledge_managers[key] = manager
+    return manager
+
+
+async def ensure_agent_knowledge_managers(
+    agent_name: str,
+    config: Config,
+    storage_path: Path,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+    start_watchers: bool = True,
+    reindex_on_create: bool = False,
+) -> dict[str, KnowledgeManager]:
+    """Ensure knowledge managers exist for one agent in one execution scope."""
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or not agent_config.knowledge_bases:
+        return {}
+
+    managers: dict[str, KnowledgeManager] = {}
+    for base_id in agent_config.knowledge_bases:
+        key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
+            config,
+            storage_path,
+            base_id,
+            agent_name=agent_name,
+            execution_identity=execution_identity,
+            create=True,
+        )
+        managers[base_id] = await _ensure_knowledge_manager(
+            key=key,
+            base_id=base_id,
+            config=config,
+            storage_path=resolved_storage_path,
+            knowledge_path=knowledge_path,
+            start_watchers=start_watchers and config.knowledge_bases[base_id].watch,
+            reindex_on_create=reindex_on_create,
+        )
+    return managers
 
 
 async def initialize_knowledge_managers(
@@ -925,56 +1156,84 @@ async def initialize_knowledge_managers(
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-wide knowledge managers for all configured knowledge bases."""
     configured_base_ids = set(config.knowledge_bases)
+    for key in list(_knowledge_managers):
+        if key.base_id not in configured_base_ids:
+            await _stop_and_remove_manager(key)
+            continue
+        if _knowledge_base_uses_agent_workspace(config, key.base_id):
+            await _stop_and_remove_manager(key)
 
-    for base_id in sorted(set(_knowledge_managers) - configured_base_ids):
-        await _knowledge_managers[base_id].stop_watcher()
-        del _knowledge_managers[base_id]
+    _static_knowledge_manager_keys.clear()
 
     for base_id in sorted(configured_base_ids):
-        existing = _knowledge_managers.get(base_id)
-
-        if existing is not None and existing.matches(config, storage_path):
-            existing.config = config
-            existing._settings = _settings_key(config, storage_path, base_id)
-            existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id)
-            if start_watchers:
-                await existing.start_watcher()
+        if _knowledge_base_uses_agent_workspace(config, base_id):
             continue
 
-        full_reindex_required = existing.needs_full_reindex(config, storage_path) if existing is not None else False
-        if existing is not None:
-            await existing.stop_watcher()
+        key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
+            config,
+            storage_path,
+            base_id,
+            create=True,
+        )
 
-        manager = KnowledgeManager(base_id=base_id, config=config, storage_path=storage_path)
-        if reindex_on_create or full_reindex_required:
-            await manager.initialize()
-        else:
-            sync_result = await manager.sync_indexed_files()
-            logger.info(
-                "Knowledge manager initialized without full reindex",
-                base_id=base_id,
-                path=str(manager.knowledge_path),
-                loaded_count=sync_result["loaded_count"],
-                indexed_count=sync_result["indexed_count"],
-                removed_count=sync_result["removed_count"],
+        for other_key in [
+            candidate for candidate in _knowledge_managers if candidate.base_id == base_id and candidate != key
+        ]:
+            await _stop_and_remove_manager(other_key)
+
+        await _ensure_knowledge_manager(
+            key=key,
+            base_id=base_id,
+            config=config,
+            storage_path=resolved_storage_path,
+            knowledge_path=knowledge_path,
+            start_watchers=start_watchers and config.knowledge_bases[base_id].watch,
+            reindex_on_create=reindex_on_create,
+        )
+        _static_knowledge_manager_keys[base_id] = key
+
+    return {
+        base_id: _knowledge_managers[key]
+        for base_id, key in _static_knowledge_manager_keys.items()
+        if key in _knowledge_managers
+    }
+
+
+def get_knowledge_manager(
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+    config: Config | None = None,
+    storage_path: Path | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> KnowledgeManager | None:
+    """Get one process-wide knowledge manager by effective base/storage/path key."""
+    if config is not None and storage_path is not None:
+        try:
+            key, _, _ = _knowledge_manager_key(
+                config,
+                storage_path,
+                base_id,
+                agent_name=agent_name,
+                execution_identity=execution_identity,
             )
+        except ValueError:
+            return None
+        return _knowledge_managers.get(key)
 
-        if start_watchers:
-            await manager.start_watcher()
+    if base_id in _static_knowledge_manager_keys:
+        return _knowledge_managers.get(_static_knowledge_manager_keys[base_id])
 
-        _knowledge_managers[base_id] = manager
-
-    return dict(_knowledge_managers)
-
-
-def get_knowledge_manager(base_id: str) -> KnowledgeManager | None:
-    """Get one process-wide knowledge manager by base ID."""
-    return _knowledge_managers.get(base_id)
+    matches = [manager for key, manager in _knowledge_managers.items() if key.base_id == base_id]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 async def shutdown_knowledge_managers() -> None:
     """Shutdown and clear all process-wide knowledge managers."""
-    for manager in list(_knowledge_managers.values()):
-        await manager.stop_watcher()
+    for key in list(_knowledge_managers):
+        await _stop_and_remove_manager(key)
 
+    _static_knowledge_manager_keys.clear()
     _knowledge_managers.clear()

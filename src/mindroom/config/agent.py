@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -11,6 +12,61 @@ from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
+WorkspaceTemplate = Literal["mind"]
+
+
+def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        msg = f"{field_name} must be a relative path"
+        raise ValueError(msg)
+    if ".." in path.parts:
+        msg = f"{field_name} must stay within the workspace root"
+        raise ValueError(msg)
+    return value
+
+
+class AgentWorkspaceConfig(BaseModel):
+    """Optional scoped workspace configuration for an agent."""
+
+    path: str = Field(
+        description=(
+            "Workspace root path, resolved relative to config.yaml when unscoped and "
+            "relative to the active worker root when worker scope is active"
+        ),
+    )
+    template: WorkspaceTemplate | None = Field(
+        default=None,
+        description="Optional built-in workspace template to scaffold on first use",
+    )
+    context_files: list[str] = Field(
+        default_factory=list,
+        description="Workspace-relative files loaded into role context at agent init/reload",
+    )
+    file_memory_path: str | None = Field(
+        default=None,
+        description="Workspace-relative directory used as this agent's file-memory scope",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def validate_workspace_path(cls, value: str) -> str:
+        """Workspace roots must stay relative so worker scoping remains deterministic."""
+        return _validate_safe_relative_path(value, field_name="workspace.path")
+
+    @field_validator("context_files")
+    @classmethod
+    def validate_workspace_context_files(cls, value: list[str]) -> list[str]:
+        """Workspace context files must stay inside the workspace root."""
+        return [_validate_safe_relative_path(path, field_name="workspace.context_files") for path in value]
+
+    @field_validator("file_memory_path")
+    @classmethod
+    def validate_workspace_file_memory_path(cls, value: str | None) -> str | None:
+        """Workspace file-memory scopes must stay inside the workspace root."""
+        if value is None:
+            return None
+        return _validate_safe_relative_path(value, field_name="workspace.file_memory_path")
 
 
 class AgentConfig(BaseModel):
@@ -40,6 +96,10 @@ class AgentConfig(BaseModel):
     memory_file_path: str | None = Field(
         default=None,
         description="Custom directory to use as the file-memory scope for this agent instead of the default <root>/agent_<name>/",
+    )
+    workspace: AgentWorkspaceConfig | None = Field(
+        default=None,
+        description="Optional scoped workspace definition for per-requester files, context, and knowledge",
     )
     knowledge_bases: list[str] = Field(
         default_factory=list,

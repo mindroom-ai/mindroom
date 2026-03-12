@@ -12,12 +12,14 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge.manager import get_knowledge_manager
+from mindroom.knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
 
@@ -83,12 +85,29 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
+            await ensure_agent_knowledge_managers(
+                agent_name,
+                self._config,
+                self._storage_path,
+            )
+
+            def _get_knowledge(base_id: str) -> Knowledge | None:
+                base_config = self._config.knowledge_bases[base_id]
+                if not base_config.path_relative_to_agent_workspace:
+                    manager = get_knowledge_manager(base_id)
+                else:
+                    manager = get_knowledge_manager(
+                        base_id,
+                        agent_name=agent_name,
+                        config=self._config,
+                        storage_path=self._storage_path,
+                    )
+                return manager.get_knowledge() if manager is not None else None
+
             knowledge = resolve_agent_knowledge(
                 agent_name,
                 self._config,
-                lambda base_id: (
-                    manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None
-                ),
+                _get_knowledge,
             )
             agent = create_agent(
                 agent_name,

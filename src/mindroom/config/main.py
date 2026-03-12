@@ -217,6 +217,22 @@ class Config(BaseModel):
             )
             msg = f"Agents reference unknown knowledge bases: {formatted}"
             raise ValueError(msg)
+
+        missing_workspaces = [
+            (agent_name, base_id)
+            for agent_name, agent_config in self.agents.items()
+            for base_id in agent_config.knowledge_bases
+            if self.knowledge_bases[base_id].path_relative_to_agent_workspace and agent_config.workspace is None
+        ]
+        if missing_workspaces:
+            formatted = ", ".join(
+                f"{agent_name} -> {base_id}"
+                for agent_name, base_id in sorted(missing_workspaces, key=lambda item: (item[0], item[1]))
+            )
+            msg = (
+                f"Workspace-relative knowledge bases require agents.<name>.workspace; invalid assignments: {formatted}"
+            )
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -225,11 +241,18 @@ class Config(BaseModel):
         invalid_overrides = [
             agent_name
             for agent_name, agent_config in self.agents.items()
-            if agent_config.memory_file_path is not None and self.get_agent_memory_backend(agent_name) != "file"
+            if (
+                agent_config.memory_file_path is not None
+                or (agent_config.workspace is not None and agent_config.workspace.file_memory_path is not None)
+            )
+            and self.get_agent_memory_backend(agent_name) != "file"
         ]
         if invalid_overrides:
             formatted = ", ".join(sorted(invalid_overrides))
-            msg = f"agents.<name>.memory_file_path requires effective file memory backend; invalid agents: {formatted}"
+            msg = (
+                "agents.<name>.memory_file_path and agents.<name>.workspace.file_memory_path "
+                f"require effective file memory backend; invalid agents: {formatted}"
+            )
             raise ValueError(msg)
         return self
 

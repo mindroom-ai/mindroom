@@ -9,16 +9,19 @@ from unittest.mock import AsyncMock, call
 import pytest
 from pydantic import ValidationError
 
+from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     _create_embedder,
+    ensure_agent_knowledge_managers,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -657,6 +660,100 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     sync_indexed_files.assert_awaited_once()
 
     await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker_workspaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Workspace-relative knowledge should resolve to requester-scoped workspaces and managers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                worker_scope="user",
+                workspace=AgentWorkspaceConfig(
+                    path="mind_data",
+                    template="mind",
+                    file_memory_path=".",
+                    context_files=["SOUL.md"],
+                ),
+                knowledge_bases=["mind_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "mind_memory": KnowledgeBaseConfig(
+                path="memory",
+                path_relative_to_agent_workspace=True,
+                watch=False,
+            ),
+        },
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=alice_identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+
+        alice_manager = get_knowledge_manager(
+            "mind_memory",
+            agent_name="mind",
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=alice_identity,
+        )
+        bob_manager = get_knowledge_manager(
+            "mind_memory",
+            agent_name="mind",
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=bob_identity,
+        )
+
+        assert alice_manager is not None
+        assert bob_manager is not None
+        assert alice_manager is not bob_manager
+
+        alice_worker_key = resolve_worker_key("user", alice_identity)
+        bob_worker_key = resolve_worker_key("user", bob_identity)
+        assert alice_worker_key is not None
+        assert bob_worker_key is not None
+
+        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+        assert alice_manager.knowledge_path == (alice_workspace / "memory").resolve()
+        assert bob_manager.knowledge_path == (bob_workspace / "memory").resolve()
+        assert (alice_workspace / "SOUL.md").exists()
+        assert (alice_workspace / "MEMORY.md").exists()
+        assert (bob_workspace / "SOUL.md").exists()
+        assert (bob_workspace / "MEMORY.md").exists()
+    finally:
+        await shutdown_knowledge_managers()
 
 
 @pytest.mark.asyncio

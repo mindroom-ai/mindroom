@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config.agent import AgentConfig, CultureConfig
+from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -724,6 +724,63 @@ def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) ->
     assert "Relative soul context." in agent.role
 
 
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_worker_scoped_workspace_loads_requester_context_from_isolated_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Worker-scoped workspaces should scaffold per requester and isolate workspace context files."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].workspace = AgentWorkspaceConfig(
+        path="mind_data",
+        template="mind",
+        file_memory_path=".",
+        context_files=["USER.md"],
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    with tool_execution_identity(alice_identity):
+        create_agent("general", config=config, storage_path=tmp_path)
+        alice_worker_key = resolve_worker_key("user", alice_identity)
+        assert alice_worker_key is not None
+        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+        assert (alice_workspace / "USER.md").exists()
+        assert (alice_workspace / "MEMORY.md").exists()
+        (alice_workspace / "USER.md").write_text("Alice private workspace context.", encoding="utf-8")
+        alice_agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    with tool_execution_identity(bob_identity):
+        bob_agent = create_agent("general", config=config, storage_path=tmp_path)
+        bob_worker_key = resolve_worker_key("user", bob_identity)
+        assert bob_worker_key is not None
+        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+
+    assert alice_workspace != bob_workspace
+    assert "Alice private workspace context." in alice_agent.role
+    assert (bob_workspace / "USER.md").exists()
+    assert "Alice private workspace context." not in bob_agent.role
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):
@@ -735,6 +792,31 @@ def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
                 ),
             },
             knowledge_bases={},
+        )
+
+
+def test_config_rejects_workspace_relative_knowledge_base_without_workspace() -> None:
+    """Workspace-relative knowledge bases require an agent workspace definition."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "Workspace-relative knowledge bases require agents.<name>.workspace; "
+            "invalid assignments: general -> research",
+        ),
+    ):
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    knowledge_bases=["research"],
+                ),
+            },
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(
+                    path="memory",
+                    path_relative_to_agent_workspace=True,
+                ),
+            },
         )
 
 
@@ -862,7 +944,8 @@ def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> Non
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
+            "agents.<name>.memory_file_path and agents.<name>.workspace.file_memory_path "
+            "require effective file memory backend; invalid agents: general",
         ),
     ):
         Config(
