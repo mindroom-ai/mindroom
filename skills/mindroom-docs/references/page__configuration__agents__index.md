@@ -326,7 +326,9 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Dedicated Docker workers receive a projected read-only config tree so config-relative plugins, knowledge paths, context files, and other worker-safe configured assets remain available without exposing unrelated primary-runtime state.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
 Config-adjacent `.env` files are intentionally masked inside those workers.
 `worker_scope` controls how those sandbox runtimes are reused between calls.
 The shared-only integrations require `worker_scope` unset or `shared`.
@@ -334,6 +336,7 @@ That list includes `spotify`, `homeassistant`, and non-OAuth configured `mcp_<se
 OAuth-backed remote MCP tools use requester-scoped OAuth credentials and can be used with `worker_scope: user` or `worker_scope: user_agent`.
 Separately, `gmail`, `google_calendar`, `google_drive`, `google_sheets`, and `homeassistant` always stay local regardless of `worker_tools` (they are never proxied to the sandbox).
 `spotify` can still be proxied through the sandbox.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
