@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,11 @@ SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 logger = get_logger(__name__)
+
+# Global instance for convenience (lazy initialization)
+_credentials_manager: CredentialsManager | None = None
+_credentials_manager_lock = threading.Lock()
+_PRIMARY_CREDENTIALS_STORAGE_PATH: Path | None = None
 
 
 def validate_service_name(service: str) -> str:
@@ -226,26 +232,21 @@ def _current_dedicated_worker_root() -> Path | None:
     return Path(raw_worker_root).expanduser().resolve()
 
 
-# Global instance for convenience (lazy initialization)
-_credentials_manager: CredentialsManager | None = None
-_PRIMARY_CREDENTIALS_STORAGE_PATH: Path | None = None
-
-
 def set_primary_credentials_storage_path(storage_path: Path | None) -> None:
     """Set the primary runtime storage root used for default credentials access."""
     global _credentials_manager, _PRIMARY_CREDENTIALS_STORAGE_PATH
+    with _credentials_manager_lock:
+        if storage_path is None:
+            _PRIMARY_CREDENTIALS_STORAGE_PATH = None
+            _credentials_manager = None
+            return
 
-    if storage_path is None:
-        _PRIMARY_CREDENTIALS_STORAGE_PATH = None
+        normalized_storage_path = storage_path.expanduser().resolve()
+        if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
+            return
+
+        _PRIMARY_CREDENTIALS_STORAGE_PATH = normalized_storage_path
         _credentials_manager = None
-        return
-
-    normalized_storage_path = storage_path.expanduser().resolve()
-    if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
-        return
-
-    _PRIMARY_CREDENTIALS_STORAGE_PATH = normalized_storage_path
-    _credentials_manager = None
 
 
 def get_credentials_manager() -> CredentialsManager:
@@ -256,8 +257,9 @@ def get_credentials_manager() -> CredentialsManager:
 
     """
     global _credentials_manager
-    if _credentials_manager is None:
-        _credentials_manager = CredentialsManager()
+    with _credentials_manager_lock:
+        if _credentials_manager is None:
+            _credentials_manager = CredentialsManager()
     return _credentials_manager
 
 

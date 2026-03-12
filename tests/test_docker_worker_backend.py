@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import yaml
+
 from mindroom.tool_system.worker_routing import worker_dir_name, worker_root_path
 from mindroom.workers.backends.docker import (
     _PROJECTED_CONFIGS_DIRNAME,
@@ -222,6 +224,29 @@ models:
   default:
     provider: openai
     id: test-model
+    api_key: sk-model-secret
+voice:
+  enabled: true
+  stt:
+    provider: openai
+    model: whisper-1
+    api_key: sk-voice-secret
+teams:
+  helpers:
+    agents: [code]
+    mode: collaborate
+cultures:
+  engineering:
+    description: Keep things clean
+    agents: [code]
+    mode: automatic
+authorization:
+  global_users:
+    - "@owner:example.org"
+matrix_room_access:
+  mode: single_user_private
+mindroom_user:
+  username: mindroom
 """.lstrip(),
         {
             "plugin_root": plugin_root,
@@ -378,6 +403,7 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
         f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
     )
     assert (projection_root / ".env").read_text(encoding="utf-8") == ""
+    assert (projection_root / ".projection-ready").read_text(encoding="utf-8") == "ready\n"
     assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
     assert (
         worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
@@ -516,6 +542,30 @@ def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
     assert synced_storage_roots == [tmp_path.resolve()]
+
+
+def test_docker_backend_redacts_projected_config_secrets_and_support_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected worker config should redact secrets and strip unrelated runtime state."""
+    config_text, _projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert projected_config["models"]["default"]["api_key"] == "__REDACTED__"
+    assert projected_config["voice"]["stt"]["api_key"] == "__REDACTED__"
+    assert projected_config["teams"] == {}
+    assert projected_config["cultures"] == {}
+    assert projected_config["authorization"] == {}
+    assert projected_config["matrix_room_access"] == {}
+    assert projected_config["mindroom_user"] is None
 
 
 def test_load_docker_client_auto_installs_optional_runtime(
@@ -919,6 +969,7 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    projected_config_data = yaml.safe_load(projected_config)
 
     assert "- ./.mindroom-worker-assets/agents/alpha/context_files/00-alpha.md" in projected_config
     assert ".mindroom-worker-assets/agents/beta/context_files/00-beta.md" not in projected_config
@@ -929,6 +980,8 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
         in projected_config
     )
     assert f"/app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/beta/memory_file_path" not in projected_config
+    assert set(projected_config_data["agents"]) == {"alpha"}
+    assert set(projected_config_data["knowledge_bases"]) == {"a"}
 
     projected_alpha_context = (
         projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
@@ -950,6 +1003,39 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_backend_rebuilds_incomplete_projection_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Interrupted projection writes should be repaired instead of being reused forever."""
+    config_text, _projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(first_volumes, dict)
+    projection_root = _projection_root(first_volumes)
+
+    (projection_root / ".projection-ready").unlink()
+    (projection_root / "config.yaml").write_text("broken: true\n", encoding="utf-8")
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    assert isinstance(second_volumes, dict)
+    second_projection_root = _projection_root(second_volumes)
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+
+    assert second_projection_root == projection_root
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert (projection_root / ".projection-ready").read_text(encoding="utf-8") == "ready\n"
+    rebuilt_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+    assert "broken: true" not in rebuilt_config
+    assert "plugins:" in rebuilt_config
 
 
 def test_docker_backend_disambiguates_colliding_projected_knowledge_base_ids(

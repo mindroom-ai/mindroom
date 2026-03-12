@@ -15,7 +15,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import FakeCredentialsManager
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
@@ -342,6 +342,96 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         "tenant_id": None,
         "account_id": None,
     }
+
+
+def test_resolve_worker_handle_reuses_ready_dedicated_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ready dedicated workers should be reused without forcing another ensure call."""
+
+    class _FakeWorkerManager:
+        def __init__(self, handle: WorkerHandle) -> None:
+            self.handle = handle
+            self.get_calls: list[str] = []
+            self.ensure_calls: list[str] = []
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+            _ = now
+            self.get_calls.append(worker_key)
+            return self.handle
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+            _ = now
+            self.ensure_calls.append(spec.worker_key)
+            msg = "ensure_worker should not be called for ready workers"
+            raise AssertionError(msg)
+
+    ready_handle = WorkerHandle(
+        worker_id="worker-a",
+        worker_key="worker-a",
+        endpoint="http://sandbox-runner:8765/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=20.0,
+        created_at=10.0,
+    )
+    fake_manager = _FakeWorkerManager(ready_handle)
+    monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+
+    resolved_handle = sandbox_proxy_module._resolve_worker_handle("worker-a")
+
+    assert resolved_handle is ready_handle
+    assert fake_manager.get_calls == ["worker-a"]
+    assert fake_manager.ensure_calls == []
+
+
+def test_resolve_worker_handle_ensures_non_ready_dedicated_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing or non-ready workers should still flow through ensure_worker."""
+
+    class _FakeWorkerManager:
+        def __init__(self, existing_handle: WorkerHandle, ensured_handle: WorkerHandle) -> None:
+            self.existing_handle = existing_handle
+            self.ensured_handle = ensured_handle
+            self.get_calls: list[str] = []
+            self.ensure_calls: list[str] = []
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+            _ = now
+            self.get_calls.append(worker_key)
+            return self.existing_handle
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+            _ = now
+            self.ensure_calls.append(spec.worker_key)
+            return self.ensured_handle
+
+    idle_handle = WorkerHandle(
+        worker_id="worker-a",
+        worker_key="worker-a",
+        endpoint="http://sandbox-runner:8765/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="idle",
+        backend_name="docker",
+        last_used_at=15.0,
+        created_at=10.0,
+    )
+    ready_handle = WorkerHandle(
+        worker_id="worker-a",
+        worker_key="worker-a",
+        endpoint="http://sandbox-runner:8765/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=20.0,
+        created_at=10.0,
+    )
+    fake_manager = _FakeWorkerManager(idle_handle, ready_handle)
+    monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+
+    resolved_handle = sandbox_proxy_module._resolve_worker_handle("worker-a")
+
+    assert resolved_handle is ready_handle
+    assert fake_manager.get_calls == ["worker-a"]
+    assert fake_manager.ensure_calls == ["worker-a"]
 
 
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
