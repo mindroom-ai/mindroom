@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import avatars_dir
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client import (
@@ -33,17 +33,18 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
-_AVATARS_DIR = Path(__file__).resolve().parents[3] / "avatars"
 
 
 def _managed_avatar_path(category: str, avatar_name: str) -> Path:
     """Return the bundled avatar path for a managed room-like entity."""
-    return _AVATARS_DIR / category / f"{avatar_name}.png"
+    return avatars_dir() / category / f"{avatar_name}.png"
 
 
 async def _set_room_avatar_if_available(
@@ -165,6 +166,11 @@ def _get_room_id(room_key: str) -> str | None:
     state = MatrixState.load()
     room = state.get_room(room_key)
     return room.room_id if room else None
+
+
+def get_room_id(room_key: str) -> str | None:
+    """Get room ID for a given room key/alias."""
+    return _get_room_id(room_key)
 
 
 def _add_room(room_key: str, room_id: str, alias: str, name: str) -> None:

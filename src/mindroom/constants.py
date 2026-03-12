@@ -60,6 +60,11 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
     return (_config_base_dir(config_path) / unresolved).resolve()
 
 
+def avatars_dir(*, config_path: Path | None = None) -> Path:
+    """Return the managed avatars directory for the active workspace."""
+    return _config_base_dir(config_path) / "avatars"
+
+
 def find_config() -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 

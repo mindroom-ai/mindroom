@@ -39,7 +39,10 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 
 ### Generate agent avatars
 ```bash
-./scripts/utilities/generate_avatars.py
+GOOGLE_API_KEY=your-google-api-key uv run python scripts/utilities/generate_avatars.py
+
+# Or during normal startup
+GOOGLE_API_KEY=your-google-api-key uv run mindroom run --generate-avatars
 ```
 
 ## Requirements

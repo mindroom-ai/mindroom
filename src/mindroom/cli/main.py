@@ -94,6 +94,12 @@ def run(
         "--api-host",
         help="Host for the bundled dashboard/API server",
     ),
+    generate_avatars: bool = typer.Option(
+        False,
+        "--generate-avatars",
+        help="Generate missing avatars before startup and sync room avatars after rooms are ready",
+        envvar="MINDROOM_GENERATE_AVATARS",
+    ),
 ) -> None:
     """Run the mindroom multi-agent system.
 
@@ -110,17 +116,19 @@ def run(
             api=api,
             api_port=api_port,
             api_host=api_host,
+            generate_avatars=generate_avatars,
         ),
     )
 
 
-async def _run(
+async def _run(  # noqa: C901
     log_level: str,
     storage_path: Path,
     *,
     api: bool,
     api_port: int,
     api_host: str,
+    generate_avatars: bool,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
     ensure_writable_config_path()
@@ -144,6 +152,9 @@ async def _run(
 
     # Check for missing API keys
     _check_env_keys(config)
+    if generate_avatars and not os.getenv("GOOGLE_API_KEY"):
+        console.print("[red]Error:[/red] `--generate-avatars` requires `GOOGLE_API_KEY`.")
+        raise typer.Exit(1)
 
     console.print(make_banner())
     console.print()
@@ -168,6 +179,7 @@ async def _run(
             api=api,
             api_port=api_port,
             api_host=api_host,
+            generate_avatars=generate_avatars,
         )
     except KeyboardInterrupt:
         console.print("\nStopped")
