@@ -6,6 +6,8 @@
 - Docker and Docker Compose installed
 - Python 3.12+ installed
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
+- Optional for HTTPS/domain routing: a Traefik container attached to the external Docker network `mynetwork`
+- Without Traefik, `./deploy.py start` still exposes localhost ports, but `https://{DOMAIN}`, `https://m-{DOMAIN}`, Authelia, and Matrix `.well-known` routes stay unavailable
 
 ### Using the Instance Manager
 
@@ -62,15 +64,19 @@ GOOGLE_API_KEY=...
 This will start:
 - MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
-- Authelia authentication server if enabled (with Redis for sessions)
+- Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
 
 ### 4. Access Your Instance
 
-After starting, your instance will be available at:
+After starting, these direct host-port endpoints are available immediately:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
-- **Auth Portal** (if enabled): `https://auth-{DOMAIN}` (e.g., `https://auth-myapp.example.com`)
+
+If Traefik is already attached to `mynetwork`, these HTTPS/domain routes also work:
+- **MindRoom Domain**: `https://{DOMAIN}`
+- **Matrix Domain** (if enabled): `https://m-{DOMAIN}`
+- **Auth Portal** (if enabled): `https://auth-{DOMAIN}`
 
 To find your ports:
 ```bash
@@ -312,7 +318,8 @@ nano envs/prod.env
 # Start the instance
 ./deploy.py start prod
 
-# Set up reverse proxy (nginx, etc.) to ports shown in:
+# Attach Traefik to mynetwork before relying on the HTTPS/domain routes above.
+# The provided compose files use Traefik labels, not nginx configuration.
 ./deploy.py list
 ```
 

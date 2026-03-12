@@ -475,12 +475,12 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
 
-def _ensure_external_network(name: str) -> None:
+def _ensure_external_network(name: str) -> bool:
     """Create an external Docker network when the stack expects it."""
     inspect_cmd = f"docker network inspect {shlex.quote(name)}"
     result = subprocess.run(inspect_cmd, shell=True, capture_output=True, text=True, check=False)
     if result.returncode == 0:
-        return
+        return False
 
     create_cmd = f"docker network create {shlex.quote(name)}"
     result = subprocess.run(create_cmd, shell=True, capture_output=True, text=True, check=False)
@@ -489,6 +489,78 @@ def _ensure_external_network(name: str) -> None:
         if result.stderr:
             console.print(f"[dim]{result.stderr}[/dim]")
         raise typer.Exit(1)
+    console.print(f"  [dim]Created external Docker network '{name}'[/dim]")
+    return True
+
+
+def _traefik_proxy_names(network_name: str) -> list[str]:
+    """Return running Traefik container names attached to the external network."""
+    cmd = f"docker ps --filter network={shlex.quote(network_name)} --format '{{{{.Image}}}}\t{{{{.Names}}}}'"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return []
+
+    proxies = set()
+    for line in result.stdout.strip().splitlines():
+        image, _, name = line.partition("\t")
+        if "traefik" in image.lower() or "traefik" in name.lower():
+            proxies.add(name or image)
+    return sorted(proxies)
+
+
+def _auth_url(instance: Instance) -> str:
+    """Return the external Authelia URL for an instance domain."""
+    domain_parts = instance.domain.split(".")
+    if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
+        root_domain = ".".join(domain_parts[-2:])
+        subdomain = domain_parts[0]
+        return f"https://auth-{subdomain}.{root_domain}"
+    return f"https://auth-{instance.domain}"
+
+
+def _print_missing_traefik_warning(instance: Instance, *, only_matrix: bool) -> None:
+    """Explain that only direct localhost access is available without Traefik."""
+    blocked_features = ["HTTPS domain routes"]
+    if not only_matrix and instance.auth_type is not None:
+        blocked_features.append("Authelia")
+    if instance.matrix_type is not None:
+        blocked_features.append("Matrix .well-known routes and domain-based federation")
+
+    console.print(f"[yellow]i[/yellow] No Traefik container detected on Docker network '{EXTERNAL_NETWORK}'.")
+    console.print("  [dim]Use the localhost ports above for direct access.[/dim]")
+    console.print(
+        f"  [dim]{', '.join(blocked_features)} remain unavailable until Traefik joins that network.[/dim]",
+    )
+    console.print(
+        f"  [dim]Attach Traefik with: docker network connect {EXTERNAL_NETWORK} <traefik-container>[/dim]",
+    )
+
+
+def _print_running_instance_access(
+    instance: Instance,
+    *,
+    only_matrix: bool,
+    traefik_proxies: list[str],
+) -> None:
+    """Print the endpoints that are actually usable for the running instance."""
+    if only_matrix:
+        console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
+    else:
+        console.print(f"  [dim]MindRoom local:[/dim] http://localhost:{instance.mindroom_port}")
+        if instance.matrix_type is not None:
+            console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
+
+    if not traefik_proxies:
+        _print_missing_traefik_warning(instance, only_matrix=only_matrix)
+        return
+
+    console.print(f"  [dim]Traefik:[/dim] {', '.join(traefik_proxies)} on {EXTERNAL_NETWORK}")
+    if not only_matrix:
+        console.print(f"  [dim]MindRoom domain:[/dim] https://{instance.domain}")
+    if instance.matrix_type is not None:
+        console.print(f"  [dim]Matrix domain:[/dim] https://m-{instance.domain}")
+    if not only_matrix and instance.auth_type is not None:
+        console.print(f"  [dim]Auth URL:[/dim] {_auth_url(instance)}")
 
 
 def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
@@ -704,18 +776,15 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+        console.print(
+            f"  [dim]Matrix domain:[/dim] https://m-{instance.domain} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
+        )
     if auth_type:
         console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
         console.print("    [yellow]Default login:[/yellow] admin / mindroom")
-        # Determine auth URL based on domain type
-        domain_parts = instance.domain.split(".")
-        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
-            root_domain = ".".join(domain_parts[-2:])
-            subdomain = domain_parts[0]
-            auth_url = f"https://auth-{subdomain}.{root_domain}"
-        else:
-            auth_url = f"https://auth-{instance.domain}"
-        console.print(f"    [dim]Auth URL:[/dim] {auth_url}")
+        console.print(
+            f"    [dim]Auth URL:[/dim] {_auth_url(instance)} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
+        )
 
 
 @app.command()
@@ -880,6 +949,7 @@ def start(  # noqa: PLR0912, PLR0915
         build_flag = "--build"
 
     _ensure_external_network(EXTERNAL_NETWORK)
+    traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
     cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
@@ -895,10 +965,13 @@ def start(  # noqa: PLR0912, PLR0915
 
         if only_matrix:
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' started successfully!")
-            matrix_url = f"https://m-{instance.domain}"
-            console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
+        _print_running_instance_access(
+            instance,
+            only_matrix=only_matrix,
+            traefik_proxies=traefik_proxies,
+        )
         if instance.matrix_type and previous_status == InstanceStatus.CREATED:
             _print_matrix_restart_hint(
                 _running_matrix_peer_names(registry.instances, exclude_name=name),
@@ -1043,6 +1116,7 @@ def _restart_instance(  # noqa: PLR0912
         build_flag = "--build"
 
     _ensure_external_network(EXTERNAL_NETWORK)
+    traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
     start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
@@ -1060,6 +1134,11 @@ def _restart_instance(  # noqa: PLR0912
             console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
         else:
             console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
+        _print_running_instance_access(
+            instance,
+            only_matrix=only_matrix,
+            traefik_proxies=traefik_proxies,
+        )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
         if result.stderr:

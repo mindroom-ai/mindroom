@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
@@ -77,6 +78,48 @@ def test_running_matrix_peer_names_excludes_current_instance(
     )
 
     assert deploy._running_matrix_peer_names(instances, exclude_name="alpha") == ["beta"]
+
+
+def test_traefik_proxy_names_only_returns_traefik_containers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Proxy detection should ignore app containers that merely carry Traefik labels."""
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        assert "docker ps --filter network=mynetwork" in cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "traefik:v3.1\ttraefik-main\n"
+                "ghcr.io/mindroom-ai/mindroom-synapse:develop\talpha-synapse\n"
+                "ghcr.io/mindroom-ai/deploy-mindroom:latest\talpha-mindroom\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    assert deploy._traefik_proxy_names("mynetwork") == ["traefik-main"]
+
+
+def test_print_running_instance_access_warns_without_traefik(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start output should explain when only localhost ports are currently usable."""
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    console = Console(record=True)
+    monkeypatch.setattr(deploy, "console", console)
+
+    deploy._print_running_instance_access(
+        instance,
+        only_matrix=False,
+        traefik_proxies=[],
+    )
+
+    text = console.export_text()
+    assert "MindRoom local:" in text
+    assert "Matrix local:" in text
+    assert "No Traefik container detected" in text
+    assert "domain-based federation" in text
 
 
 def test_stop_uses_project_down_without_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
