@@ -55,7 +55,7 @@ async def _set_room_avatar_if_available(
     avatar_name: str,
     context: str,
 ) -> None:
-    """Set a room avatar when a bundled asset exists.
+    """Set a room avatar when a managed asset exists.
 
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.

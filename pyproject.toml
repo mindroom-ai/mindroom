@@ -420,7 +420,6 @@ packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.hooks.custom]
 
 [tool.hatch.build.targets.wheel.force-include]
-"avatars" = "mindroom/_bundled_avatars"
 "skills" = "mindroom/_bundled_skills"
 
 [tool.ruff]

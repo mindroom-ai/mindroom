@@ -145,40 +145,30 @@ class TestResolveConfigRelativePath:
 class TestResolveAvatarPath:
     """Tests for resolve_avatar_path()."""
 
-    def test_prefers_workspace_avatar_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Workspace avatars should override bundled defaults."""
+    def test_returns_workspace_avatar_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Workspace avatars should resolve to their on-disk path."""
         workspace_dir = tmp_path / "workspace"
-        bundled_dir = tmp_path / "bundled"
         workspace_avatar = workspace_dir / "agents" / "general.png"
-        bundled_avatar = bundled_dir / "agents" / "general.png"
         workspace_avatar.parent.mkdir(parents=True)
-        bundled_avatar.parent.mkdir(parents=True)
         workspace_avatar.write_bytes(b"workspace")
-        bundled_avatar.write_bytes(b"bundled")
         monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("agents", "general")
 
         assert resolved == workspace_avatar
 
-    def test_falls_back_to_bundled_avatar_when_workspace_missing(
+    def test_returns_workspace_avatar_path_when_workspace_missing(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Bundled avatars should keep working when the config volume has no assets."""
+        """Missing avatars should still resolve to the workspace location that generation writes."""
         workspace_dir = tmp_path / "workspace"
-        bundled_dir = tmp_path / "bundled"
-        bundled_avatar = bundled_dir / "rooms" / "lobby.png"
-        bundled_avatar.parent.mkdir(parents=True)
-        bundled_avatar.write_bytes(b"bundled")
         monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
-        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "lobby")
 
-        assert resolved == bundled_avatar
+        assert resolved == workspace_dir / "rooms" / "lobby.png"
 
 
 class TestStoragePathResolution:

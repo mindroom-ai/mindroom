@@ -90,16 +90,11 @@ def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
         Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
     ],
 )
-def test_runtime_images_copy_avatars_before_installing_project(dockerfile_path: Path) -> None:
-    """Bundled avatars must exist before uv builds the project wheel in Docker."""
+def test_runtime_images_copy_workspace_avatars(dockerfile_path: Path) -> None:
+    """Runtime images should still ship workspace avatar assets under /app/avatars."""
     dockerfile = dockerfile_path.read_text(encoding="utf-8")
 
-    copy_avatars = "COPY avatars /app/avatars"
-    install_project = "uv sync --locked --no-dev"
-
-    assert copy_avatars in dockerfile
-    assert install_project in dockerfile
-    assert dockerfile.index(copy_avatars) < dockerfile.index(install_project)
+    assert "COPY avatars /app/avatars" in dockerfile
 
 
 def test_tools_requiring_config_metadata() -> None:

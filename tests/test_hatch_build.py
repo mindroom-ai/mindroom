@@ -127,11 +127,11 @@ def test_build_frontend_retries_bun_install_only(
     ]
 
 
-def test_wheel_force_include_bundles_avatar_assets() -> None:
-    """Wheel builds should ship the bundled avatar assets used outside source checkouts."""
+def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
+    """Wheel builds should not ship repo avatar assets inside the package."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text())
 
     force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
-    assert force_include["avatars"] == "mindroom/_bundled_avatars"
+    assert "avatars" not in force_include

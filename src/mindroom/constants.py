@@ -65,31 +65,14 @@ def avatars_dir(*, config_path: Path | None = None) -> Path:
     return _config_base_dir(config_path) / "avatars"
 
 
-def bundled_avatars_dir() -> Path:
-    """Return the bundled avatars directory shipped with the application image."""
-    package_dir = Path(__file__).resolve().parent
-    packaged_avatars = package_dir / "_bundled_avatars"
-    if packaged_avatars.exists():
-        return packaged_avatars
-    return Path(__file__).resolve().parents[2] / "avatars"
-
-
 def resolve_avatar_path(
     entity_type: str,
     entity_name: str,
     *,
     config_path: Path | None = None,
 ) -> Path:
-    """Return the existing avatar file path, preferring workspace assets over bundled ones."""
-    workspace_avatar = avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
-    if workspace_avatar.exists():
-        return workspace_avatar
-
-    bundled_avatar = bundled_avatars_dir() / entity_type / f"{entity_name}.png"
-    if bundled_avatar.exists():
-        return bundled_avatar
-
-    return workspace_avatar
+    """Return the workspace avatar path for a managed entity."""
+    return avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
 
 
 def find_config() -> Path:
