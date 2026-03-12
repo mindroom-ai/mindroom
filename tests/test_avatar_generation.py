@@ -1,4 +1,4 @@
-"""Tests for the avatar generation utility script."""
+"""Tests for the avatar generation module."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _workspace_avatar_path(
 
 
 def test_load_config_uses_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
-    """The script should read the active MindRoom config path, not scripts/config.yaml."""
+    """The avatar generation module should read the active MindRoom config path."""
     config_path = tmp_path / "custom-config.yaml"
     config_path.write_text("agents:\n  general:\n    role: helper\n", encoding="utf-8")
 
@@ -254,7 +254,7 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
-    """The script should save Gemini-generated image bytes to the expected avatar file."""
+    """The avatar generation module should save Gemini-generated image bytes to the expected avatar file."""
     avatar_path = tmp_path / "generated.png"
     image_response = types.GenerateContentResponse(
         candidates=[
