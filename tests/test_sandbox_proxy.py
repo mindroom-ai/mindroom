@@ -2529,6 +2529,134 @@ def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
     assert manager.failures[0][0] == worker_target.worker_key
 
 
+def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed tools should stay proxy-enabled when the Docker backend provides worker handles directly."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            runtime_paths=runtime_paths,
+            worker_tools_override=["shell"],
+            worker_scope="shared",
+        )
+        is True
+    )
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            runtime_paths=runtime_paths,
+            worker_tools_override=None,
+        )
+        is False
+    )
+
+
+def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped agents should still route through dedicated workers on the Docker backend."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+    )
+
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths, worker_scope=None)
+        is True
+    )
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "calculator",
+            runtime_paths=runtime_paths,
+            worker_scope=None,
+        )
+        is False
+    )
+
+
+def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker routing should stay enabled so misconfiguration fails closed at call time."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode=None,
+    )
+
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            runtime_paths=runtime_paths,
+            worker_tools_override=["shell"],
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_docker_backend_misconfiguration_raises_instead_of_running_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Misconfigured Docker worker routing should raise rather than executing in the primary runtime."""
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+    )
+    runtime_config = load_config(runtime_paths)
+
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        worker_tools_override=["shell"],
+        worker_target=_worker_target(runtime_paths, None, "code", None),
+    )
+    entrypoint = tool.async_functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        requester_id="@user:example.org",
+        client=object(),
+        config=runtime_config,
+        runtime_paths=runtime_paths,
+        event_cache=make_event_cache_mock(),
+        conversation_cache=make_conversation_cache_mock(),
+    )
+
+    with (
+        tool_runtime_context(runtime_context),
+        pytest.raises(
+            WorkerBackendError,
+            match="MINDROOM_DOCKER_WORKER_IMAGE",
+        ),
+    ):
+        await entrypoint("pwd")
+
+
 class TestWorkerToolsOverride:
     """Tests for per-agent worker_tools_override parameter."""
 
