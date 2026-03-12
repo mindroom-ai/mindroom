@@ -11,7 +11,7 @@ import shutil
 import threading
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
@@ -57,7 +57,7 @@ _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
-_DEFAULT_CONFIG_PATH = "/app/config.yaml"
+_DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
 _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 _DEFAULT_DOCKER_USER = "1000:1000"
@@ -185,6 +185,14 @@ def _workers_root(base_storage_path: Path) -> Path:
 def _resolved_storage_path(storage_path: Path | None = None) -> Path:
     base_storage_path = STORAGE_PATH_OBJ if storage_path is None else storage_path
     return base_storage_path.expanduser().resolve()
+
+
+def _container_config_dir(config_path: str) -> str:
+    return str(PurePosixPath(config_path).parent)
+
+
+def _container_config_dotenv_path(config_path: str) -> str:
+    return str(PurePosixPath(_container_config_dir(config_path)) / ".env")
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,20 +619,38 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) != self._launch_config_hash:
             return False
-        if not self._container_mount_matches(
-            container,
-            host_path=paths.root,
-            container_path=self.config.storage_mount_path,
-            read_only=False,
-        ):
-            return False
-        if self.config.host_config_path is None:
-            return True
-        return self._container_mount_matches(
-            container,
-            host_path=self.config.host_config_path,
-            container_path=self.config.config_path,
-            read_only=True,
+
+        mount_checks = [
+            (paths.root, self.config.storage_mount_path, False),
+        ]
+        if self.config.host_config_path is not None:
+            mount_checks.extend(
+                [
+                    (
+                        self.config.host_config_path.parent,
+                        _container_config_dir(self.config.config_path),
+                        True,
+                    ),
+                    (
+                        self.config.host_config_path,
+                        self.config.config_path,
+                        True,
+                    ),
+                    (
+                        self._masked_config_dotenv_host_path(paths),
+                        _container_config_dotenv_path(self.config.config_path),
+                        True,
+                    ),
+                ],
+            )
+        return all(
+            self._container_mount_matches(
+                container,
+                host_path=host_path,
+                container_path=container_path,
+                read_only=read_only,
+            )
+            for host_path, container_path, read_only in mount_checks
         )
 
     def _ensure_container(self, metadata: _DockerWorkerMetadata, paths: LocalWorkerStatePaths) -> _DockerContainer:
@@ -736,8 +762,22 @@ class DockerWorkerBackend:
             str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
         }
         if self.config.host_config_path is not None:
+            volumes[str(self.config.host_config_path.parent)] = {
+                "bind": _container_config_dir(self.config.config_path),
+                "mode": "ro",
+            }
             volumes[str(self.config.host_config_path)] = {"bind": self.config.config_path, "mode": "ro"}
+            volumes[str(self._masked_config_dotenv_host_path(paths))] = {
+                "bind": _container_config_dotenv_path(self.config.config_path),
+                "mode": "ro",
+            }
         return volumes
+
+    def _masked_config_dotenv_host_path(self, paths: LocalWorkerStatePaths) -> Path:
+        masked_dotenv = paths.metadata_dir / "config-dir.env"
+        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
+        masked_dotenv.write_text("", encoding="utf-8")
+        return masked_dotenv
 
     def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:
         labels = {
