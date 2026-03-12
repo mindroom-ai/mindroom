@@ -29,6 +29,28 @@ def _default_dimensions(model: str) -> int | None:
     return _OPENAI_EMBEDDING_DIMENSIONS.get(model)
 
 
+def effective_embedder_signature(
+    provider: str,
+    model: str,
+    *,
+    host: str | None = None,
+    dimensions: int | None = None,
+) -> tuple[str, str, str, str]:
+    """Return the embedder settings that actually affect embedding behavior."""
+    effective_host = host if provider in {"openai", "ollama"} else ""
+    effective_dimensions = dimensions
+    if provider == "openai" and effective_dimensions is None:
+        effective_dimensions = _default_dimensions(model)
+    elif provider in {"ollama", "sentence_transformers"}:
+        effective_dimensions = None
+    return (
+        provider,
+        model,
+        effective_host or "",
+        str(effective_dimensions) if effective_dimensions is not None else "",
+    )
+
+
 def ensure_sentence_transformers_dependencies() -> None:
     """Install the optional local sentence-transformers runtime when needed."""
     ensure_optional_deps(_SENTENCE_TRANSFORMERS_DEPENDENCIES, _SENTENCE_TRANSFORMERS_EXTRA)

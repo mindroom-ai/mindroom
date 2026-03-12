@@ -217,6 +217,54 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
     assert manager.needs_full_reindex(config_3072, storage_path)
 
 
+def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Equivalent OpenAI defaults should not trigger a full knowledge reindex."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    storage_path = tmp_path / "storage"
+    implicit_default = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "knowledge"), watch=False),
+        },
+        memory={
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+    )
+    explicit_default = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(tmp_path / "knowledge"), watch=False),
+        },
+        memory={
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                    "dimensions": 1536,
+                },
+            },
+        },
+    )
+
+    manager = KnowledgeManager(base_id="research", config=implicit_default, storage_path=storage_path)
+
+    assert manager.matches(explicit_default, storage_path)
+    assert not manager.needs_full_reindex(explicit_default, storage_path)
+
+
 def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Knowledge embedders should support the local sentence-transformers provider."""
     sentinel = object()

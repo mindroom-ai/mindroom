@@ -9,7 +9,7 @@ from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
 from mindroom.credentials import get_credentials_manager
-from mindroom.embeddings import ensure_sentence_transformers_dependencies
+from mindroom.embeddings import effective_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -21,11 +21,11 @@ def _memory_collection_name(config: Config) -> str:
     embedder = config.memory.embedder
     embedder_config = embedder.config
     signature = "|".join(
-        (
+        effective_embedder_signature(
             embedder.provider,
             embedder_config.model,
-            embedder_config.host or "",
-            str(embedder_config.dimensions) if embedder_config.dimensions is not None else "",
+            host=embedder_config.host,
+            dimensions=embedder_config.dimensions,
         ),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]

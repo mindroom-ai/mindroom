@@ -189,6 +189,7 @@ describe('MemoryConfig', () => {
           config: {
             model: 'text-embedding-3-small',
             host: 'http://localhost:9292/v1',
+            dimensions: 1536,
           },
         },
       },
@@ -211,17 +212,15 @@ describe('MemoryConfig', () => {
     fireEvent.click(sentenceTransformersOption);
 
     await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
-        expect.objectContaining({
-          embedder: expect.objectContaining({
-            provider: 'sentence_transformers',
-            config: expect.objectContaining({
-              model: 'sentence-transformers/all-MiniLM-L6-v2',
-              host: '',
-            }),
-          }),
-        })
-      );
+      const calls = mockUpdateMemoryConfig.mock.calls;
+      const nextConfig = calls[calls.length - 1]?.[0];
+      expect(nextConfig?.embedder).toEqual({
+        provider: 'sentence_transformers',
+        config: {
+          model: 'sentence-transformers/all-MiniLM-L6-v2',
+          host: '',
+        },
+      });
     });
   });
 

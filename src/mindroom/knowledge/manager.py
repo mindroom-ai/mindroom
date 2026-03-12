@@ -27,7 +27,11 @@ from watchfiles import Change, awatch
 from mindroom.constants import resolve_config_relative_path
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import MindRoomOpenAIEmbedder, create_sentence_transformers_embedder
+from mindroom.embeddings import (
+    MindRoomOpenAIEmbedder,
+    create_sentence_transformers_embedder,
+    effective_embedder_signature,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -82,10 +86,12 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> 
         base_id,
         str(storage_path.resolve()),
         str(knowledge_path),
-        config.memory.embedder.provider,
-        embedder_config.model,
-        embedder_config.host or "",
-        str(embedder_config.dimensions) if embedder_config.dimensions is not None else "",
+        *effective_embedder_signature(
+            config.memory.embedder.provider,
+            embedder_config.model,
+            host=embedder_config.host,
+            dimensions=embedder_config.dimensions,
+        ),
         str(base_config.chunk_size),
         str(base_config.chunk_overlap),
         git_config.repo_url if git_config is not None else "",

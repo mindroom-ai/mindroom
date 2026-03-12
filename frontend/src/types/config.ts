@@ -19,6 +19,7 @@ export interface MemoryConfig {
     config: {
       model: string;
       host?: string;
+      dimensions?: number;
     };
   };
   file?: {

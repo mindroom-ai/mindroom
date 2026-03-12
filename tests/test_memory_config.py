@@ -186,6 +186,27 @@ class TestMemoryConfig:
 
         assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
 
+    def test_memory_collection_name_ignores_equivalent_openai_default_dimensions(self) -> None:
+        """Equivalent OpenAI defaults should reuse the same memory collection."""
+        implicit_default = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model="text-embedding-3-small"),
+            ),
+            llm=None,
+        )
+        explicit_default = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model="text-embedding-3-small", dimensions=1536),
+            ),
+            llm=None,
+        )
+        implicit_config = Config(memory=implicit_default, router=RouterConfig(model="default"))
+        explicit_config = Config(memory=explicit_default, router=RouterConfig(model="default"))
+
+        assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
+
     @patch("mindroom.memory.config.get_credentials_manager")
     @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(

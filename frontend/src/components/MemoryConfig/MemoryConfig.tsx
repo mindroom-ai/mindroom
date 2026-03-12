@@ -151,6 +151,13 @@ function shouldShowHostField(provider: string): boolean {
   return provider !== 'sentence_transformers';
 }
 
+function defaultEmbedderConfig(provider: string): MemorySettings['embedder']['config'] {
+  return {
+    model: DEFAULT_MODELS[provider] || '',
+    host: DEFAULT_HOSTS[provider] || '',
+  };
+}
+
 export function MemoryConfig() {
   const { config, updateMemoryConfig, saveConfig, isDirty } = useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
@@ -176,11 +183,7 @@ export function MemoryConfig() {
       embedder: {
         ...localConfig.embedder,
         provider,
-        config: {
-          ...localConfig.embedder.config,
-          model: DEFAULT_MODELS[provider] || '',
-          host: DEFAULT_HOSTS[provider] || '',
-        },
+        config: defaultEmbedderConfig(provider),
       },
     });
   };
