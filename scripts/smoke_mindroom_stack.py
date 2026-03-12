@@ -116,7 +116,7 @@ def main() -> int:
                     "GOOGLE_API_KEY=",
                     "OPENROUTER_API_KEY=",
                     "OLLAMA_HOST=http://localhost:11434",
-                    f"ELEMENT_HOMESERVER_URL=http://localhost:{stack_synapse_port}",
+                    f"CLIENT_HOMESERVER_URL=http://localhost:{stack_synapse_port}",
                     "",
                 ],
             ),
@@ -126,7 +126,7 @@ def main() -> int:
         compose_text = compose_source.read_text(encoding="utf-8")
         compose_text = compose_text.replace('"8008:8008"', f'"127.0.0.1:{stack_synapse_port}:8008"')
         compose_text = compose_text.replace('"8765:8765"', f'"127.0.0.1:{stack_mindroom_port}:8765"')
-        compose_text = compose_text.replace('"8080:8080"', f'"127.0.0.1:{stack_element_port}:8080"')
+        compose_text = compose_text.replace('"8080:80"', f'"127.0.0.1:{stack_element_port}:80"')
         compose_file.write_text(compose_text, encoding="utf-8")
         exit_code = 0
 
@@ -146,6 +146,7 @@ def main() -> int:
                     str(compose_file),
                     "up",
                     "-d",
+                    "--build",
                 ],
                 capture_output=True,
             )
@@ -176,6 +177,13 @@ def main() -> int:
                 f"http://127.0.0.1:{stack_element_port}/",
                 200,
                 "Element",
+                attempts=20,
+                sleep_seconds=3,
+            )
+            wait_for_http_match(
+                f"http://127.0.0.1:{stack_element_port}/config.json",
+                f'"http://localhost:{stack_synapse_port}"',
+                "Element config",
                 attempts=20,
                 sleep_seconds=3,
             )

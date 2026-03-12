@@ -65,16 +65,17 @@ Send a message mentioning your agent in a room where it is configured.
 For a detailed architecture and credential model, see:
 [Hosted Matrix deployment guide](deployment/hosted-matrix.md).
 
-## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + Element)
+## Alternative: Full Stack Docker Compose (bundled dashboard + Matrix + MindRoom client)
 
 Use this when you want everything local: the bundled MindRoom dashboard, Matrix homeserver, and a Matrix client in one stack.
 
-**Prereqs:** Docker + Docker Compose.
+**Prereqs:** Docker, Docker Compose, and a sibling `mindroom-cinny` checkout.
 
-### 1. Clone the full stack repo
+### 1. Clone the full stack repos
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
+git clone https://github.com/mindroom-ai/mindroom-cinny
 cd mindroom-stack
 ```
 
@@ -88,14 +89,16 @@ $EDITOR .env  # add at least one AI provider key
 ### 3. Start everything
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 Open:
 
 - MindRoom UI: http://localhost:8765
-- Element: http://localhost:8080
-- Matrix homeserver: http://matrix.localhost:8008
+- MindRoom client: http://localhost:8080
+- Matrix homeserver: http://localhost:8008
+
+If you access the stack from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ## Manual Install (advanced)
 

@@ -11,7 +11,7 @@ MindRoom can be deployed in various ways depending on your needs.
 | Method | Best For |
 |--------|----------|
 | [Hosted Matrix + local MindRoom](hosted-matrix.md) | Simplest setup: run only `uvx mindroom run` locally |
-| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Synapse) + Element |
+| Full Stack (Docker Compose) | All-in-one: bundled dashboard + Matrix (Synapse) + MindRoom client |
 | [Docker (single container)](docker.md) | Single MindRoom runtime or when you already have Matrix |
 | [Kubernetes](kubernetes.md) | Multi-tenant SaaS, production |
 | Direct | Development, simple setups |
@@ -51,12 +51,16 @@ See [Hosted Matrix deployment](hosted-matrix.md) for the full walkthrough.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom-stack
+git clone https://github.com/mindroom-ai/mindroom-cinny
 cd mindroom-stack
 cp .env.example .env
 $EDITOR .env  # add at least one AI provider key
 
-docker compose up -d
+docker compose up -d --build
 ```
+
+The stack exposes MindRoom at `http://localhost:8765`, the MindRoom client at `http://localhost:8080`, and Matrix at `http://localhost:8008`.
+If you access it from another device, set `CLIENT_HOMESERVER_URL=http://<host-ip>:8008` in `.env` before starting it.
 
 ### Direct (Development)
 
