@@ -165,7 +165,8 @@ Generate and sync managed avatar assets.
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
 │ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync configured room and root-space avatars to Matrix.                      │
+│ sync       Sync configured room and root-space avatars to Matrix using the             │
+│            initialized router account.                                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -206,7 +207,7 @@ Generate missing managed avatar files in the workspace.
 
 ## avatars sync
 
-Sync configured room and root-space avatars to Matrix.
+Sync configured room and root-space avatars to Matrix using the initialized router account.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->
@@ -223,7 +224,8 @@ Sync configured room and root-space avatars to Matrix.
 
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix.
+ Sync configured room and root-space avatars to Matrix using the initialized
+ router account.
 
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮

@@ -36,7 +36,9 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 ./scripts/testing/benchmark_matrix_throughput.py
 ```
 
-### Generate agent avatars
+### Generate and sync managed avatars
+Run MindRoom at least once before syncing so the router account exists in Matrix state.
+
 ```bash
 GOOGLE_API_KEY=your-google-api-key uv run mindroom avatars generate
 uv run mindroom avatars sync

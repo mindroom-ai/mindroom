@@ -8,7 +8,11 @@ logger = get_logger(__name__)
 
 
 class AvatarGenerationError(RuntimeError):
-    """Raised when startup avatar generation cannot produce required assets."""
+    """Raised when managed avatar generation cannot produce required assets."""
+
+
+class AvatarSyncError(RuntimeError):
+    """Raised when managed avatar sync cannot complete."""
 
 
 def _extract_provider_from_error(error: Exception) -> str | None:

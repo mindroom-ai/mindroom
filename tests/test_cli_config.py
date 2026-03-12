@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
-from mindroom.error_handling import AvatarGenerationError
+from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -684,6 +684,30 @@ class TestAvatarsCommands:
 
         assert result.exit_code == 1
         assert "Could not sync room avatars: boom" in _strip_ansi(result.output)
+
+    def test_avatars_sync_requires_initialized_router_account(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Avatar sync should fail when the router account has not been initialized yet."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+
+        with patch(
+            "mindroom.avatar_generation.set_room_avatars_in_matrix",
+            AsyncMock(side_effect=AvatarSyncError("No router account found in Matrix state.")),
+        ):
+            result = runner.invoke(app, ["avatars", "sync"])
+
+        assert result.exit_code == 1
+        assert "No router account found in Matrix state." in _strip_ansi(result.output)
 
 
 # ---------------------------------------------------------------------------

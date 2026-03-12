@@ -24,7 +24,7 @@ from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
 )
-from mindroom.error_handling import AvatarGenerationError
+from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
@@ -212,13 +212,16 @@ def avatars_generate() -> None:
 
 @avatars_app.command("sync")
 def avatars_sync() -> None:
-    """Sync configured room and root-space avatars to Matrix."""
+    """Sync configured room and root-space avatars to Matrix using the initialized router account."""
     _load_active_config_or_exit()
 
     try:
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
 
         asyncio.run(set_room_avatars_in_matrix())
+    except AvatarSyncError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
     except ConnectionError as exc:
         _print_connection_error(exc)
         raise typer.Exit(1) from None

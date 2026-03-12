@@ -615,3 +615,18 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     synced_targets = {(call.kwargs.get("room_id"), call.args[1].name) for call in check_and_set_avatar.await_args_list}
     assert ("!space:localhost", "root_space.png") not in synced_targets
     client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone avatar sync should fail fast until MindRoom has initialized the router account."""
+    state = SimpleNamespace(get_account=lambda _key: None)
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+
+    with pytest.raises(
+        generate_avatars.AvatarSyncError,
+        match="No router account found in Matrix state",
+    ):
+        await generate_avatars.set_room_avatars_in_matrix()

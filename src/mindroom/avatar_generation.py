@@ -17,7 +17,7 @@ from rich.text import Text
 
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir, resolve_avatar_path
-from mindroom.error_handling import AvatarGenerationError
+from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
@@ -368,9 +368,8 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
         if suppress_missing_router:
             console.print("[dim]Skipping room avatar sync: router account not initialized yet[/dim]")
             return
-        console.print("[red]No router account found in Matrix state[/red]")
-        console.print("[dim]Make sure mindroom has been started at least once[/dim]")
-        return
+        msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
+        raise AvatarSyncError(msg)
 
     router_user = _build_router_user(router_account)
     client = await login_agent_user(MATRIX_HOMESERVER, router_user)
