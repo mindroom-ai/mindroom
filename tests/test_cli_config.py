@@ -519,6 +519,7 @@ class TestRunApiFlags:
         assert "--no-api" in output
         assert "--api-port" in output
         assert "--api-host" in output
+        assert "--generate-avatars" in output
 
     def test_run_passes_api_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
@@ -538,6 +539,7 @@ class TestRunApiFlags:
         assert kwargs.kwargs["api"] is True
         assert kwargs.kwargs["api_port"] == 8765
         assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
+        assert kwargs.kwargs["generate_avatars"] is False
 
     def test_run_no_api_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run --no-api passes api=False to bot main."""
@@ -569,6 +571,43 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+
+    def test_run_generate_avatars_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run --generate-avatars forwards the startup option to the orchestrator."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+        mock_main = AsyncMock()
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = runner.invoke(app, ["run", "--generate-avatars"])
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["generate_avatars"] is True
+
+    def test_run_generate_avatars_requires_google_api_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should fail fast when avatar generation is requested without a Google API key."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["run", "--generate-avatars"])
+
+        assert result.exit_code == 1
+        assert "--generate-avatars" in result.output
+        assert "GOOGLE_API_KEY" in result.output
 
 
 # ---------------------------------------------------------------------------

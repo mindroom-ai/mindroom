@@ -88,6 +88,7 @@ class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     storage_path: Path
+    generate_avatars: bool = False
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
@@ -135,6 +136,23 @@ class MultiAgentOrchestrator:
         )
         self._memory_auto_flush_worker = worker
         self._memory_auto_flush_task = asyncio.create_task(worker.run(), name="memory_auto_flush_worker")
+
+    async def _generate_avatars_if_enabled(self) -> None:
+        """Generate missing avatar image files when startup opted into it."""
+        if not self.generate_avatars:
+            return
+        set_runtime_starting("Generating missing avatars")
+        from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
+
+        await run_avatar_generation(sync_room_avatars=False)
+
+    async def _sync_room_avatars_if_enabled(self) -> None:
+        """Apply generated room avatars after room reconciliation completes."""
+        if not self.generate_avatars:
+            return
+        from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
+
+        await set_room_avatars_in_matrix(suppress_missing_router=True)
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.
@@ -461,6 +479,7 @@ class MultiAgentOrchestrator:
         await wait_for_matrix_homeserver()
         if not self.agent_bots:
             await self.initialize()
+        await self._generate_avatars_if_enabled()
 
         router_bot = await self._start_router_bot()
         set_runtime_starting("Starting remaining Matrix bot accounts")
@@ -481,6 +500,7 @@ class MultiAgentOrchestrator:
             "Setting up Matrix rooms and memberships",
             lambda: self._setup_rooms_and_memberships(started_bots),
         )
+        await self._sync_room_avatars_if_enabled()
 
         self.running = True
 
@@ -943,6 +963,7 @@ async def main(
     api: bool = True,
     api_port: int = 8765,
     api_host: str = "0.0.0.0",  # noqa: S104
+    generate_avatars: bool = False,
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     # Configure logging before any background tasks or account setup begin.
@@ -960,7 +981,7 @@ async def main(
     config_path = Path(CONFIG_PATH)
 
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, generate_avatars=generate_avatars)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
 
