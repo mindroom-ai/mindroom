@@ -91,6 +91,8 @@ class TestConfigInit:
         assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
+        assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
+        assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
@@ -299,6 +301,23 @@ class TestConfigInit:
         content = target.read_text()
         assert "provider: openrouter" in content
         assert "anthropic/claude-sonnet-4-5" in content
+
+    def test_init_anthropic_preset_uses_anthropic_models_and_local_embedder(self, tmp_path: Path) -> None:
+        """Config init --provider anthropic should only require the Anthropic API key."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "anthropic"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "anthropic"
+        assert config["models"]["default"]["id"] == "claude-sonnet-4-5-latest"
+        assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
+        assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "ANTHROPIC_API_KEY=your-anthropic-key-here" in env_content
+        assert "\n# OPENAI_API_KEY=your-openai-key-here" in env_content
+        assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in env_content
 
     def test_init_vertexai_claude_preset_uses_vertex_models(self, tmp_path: Path) -> None:
         """Config init --provider vertexai_claude uses Vertex AI Claude defaults."""

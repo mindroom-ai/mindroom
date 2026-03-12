@@ -45,6 +45,13 @@ matrix_space:
   enabled: true
   name: MindRoom
 
+# Default local embedder for knowledge indexing.
+memory:
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
+
 # Authorization defaults (recommended for public deployments)
 # Replace __MINDROOM_OWNER_USER_ID_FROM_PAIRING__ with your Matrix user ID,
 # e.g. @alice:mindroom.chat.
