@@ -233,6 +233,102 @@ models:
     )
 
 
+def _multi_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
+    alpha_knowledge_root = tmp_path / "knowledge_alpha"
+    alpha_knowledge_root.mkdir()
+    (alpha_knowledge_root / "a.txt").write_text("alpha knowledge\n", encoding="utf-8")
+    beta_knowledge_root = tmp_path / "knowledge_beta"
+    beta_knowledge_root.mkdir()
+    (beta_knowledge_root / "b.txt").write_text("beta knowledge\n", encoding="utf-8")
+    alpha_context = tmp_path / "alpha.md"
+    alpha_context.write_text("# Alpha\n", encoding="utf-8")
+    beta_context = tmp_path / "beta.md"
+    beta_context.write_text("# Beta\n", encoding="utf-8")
+    memory_root = tmp_path / "memory_files"
+    memory_root.mkdir()
+    alpha_memory_root = tmp_path / "agent_memory" / "alpha"
+    alpha_memory_root.mkdir(parents=True)
+    beta_memory_root = tmp_path / "agent_memory" / "beta"
+    beta_memory_root.mkdir(parents=True)
+    return (
+        """
+knowledge_bases:
+  a:
+    path: ./knowledge_alpha
+  b:
+    path: ./knowledge_beta
+memory:
+  backend: file
+  file:
+    path: ./memory_files
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [a]
+    context_files:
+      - ./alpha.md
+    memory_file_path: ./agent_memory/alpha
+  beta:
+    display_name: Beta
+    role: Beta test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [b]
+    context_files:
+      - ./beta.md
+    memory_file_path: ./agent_memory/beta
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+        {
+            "alpha_context": alpha_context,
+            "beta_context": beta_context,
+            "alpha_knowledge_root": alpha_knowledge_root,
+            "beta_knowledge_root": beta_knowledge_root,
+            "alpha_memory_root": alpha_memory_root,
+            "beta_memory_root": beta_memory_root,
+        },
+    )
+
+
+def _knowledge_base_collision_fixture(tmp_path: Path) -> str:
+    first_root = tmp_path / "knowledge_collision_a"
+    first_root.mkdir()
+    (first_root / "a.txt").write_text("first\n", encoding="utf-8")
+    second_root = tmp_path / "knowledge_collision_b"
+    second_root.mkdir()
+    (second_root / "b.txt").write_text("second\n", encoding="utf-8")
+    memory_root = tmp_path / "memory_files"
+    memory_root.mkdir()
+    return """
+knowledge_bases:
+  "docs/a":
+    path: ./knowledge_collision_a
+  "docs:a":
+    path: ./knowledge_collision_b
+memory:
+  backend: file
+  file:
+    path: ./memory_files
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: shared
+    knowledge_bases: ["docs/a", "docs:a"]
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip()
+
+
 def _projection_root(volumes: dict[str, dict[str, str]]) -> Path:
     return next(Path(source) for source, spec in volumes.items() if spec["bind"] == "/app/config-host")
 
@@ -806,6 +902,81 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
         second_projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
     )
     assert projected_knowledge_path.read_text(encoding="utf-8") == "# Guide v2\n"
+
+
+def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Agent-scoped workers should not snapshot unrelated agents' projected assets."""
+    config_text, projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = "v1:default:shared:alpha"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+
+    assert "- ./.mindroom-worker-assets/agents/alpha/context_files/00-alpha.md" in projected_config
+    assert ".mindroom-worker-assets/agents/beta/context_files/00-beta.md" not in projected_config
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/a" in projected_config
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/b" not in projected_config
+    assert (
+        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/alpha/memory_file_path"
+        in projected_config
+    )
+    assert f"/app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/beta/memory_file_path" not in projected_config
+
+    projected_alpha_context = (
+        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
+    )
+    assert projected_alpha_context.read_text(encoding="utf-8") == "# Alpha\n"
+    assert not (
+        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
+    ).exists()
+
+    projected_alpha_knowledge = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "a.txt"
+    assert projected_alpha_knowledge.read_text(encoding="utf-8") == "alpha knowledge\n"
+    assert not (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "b" / "b.txt").exists()
+
+    worker_config_state_root = worker_root_path(tmp_path, worker_key) / _WORKER_CONFIG_STATE_DIRNAME / "agents"
+    assert (worker_config_state_root / "alpha" / "memory_file_path").is_dir()
+    assert not (worker_config_state_root / "beta" / "memory_file_path").exists()
+
+    assert projected_paths["alpha_context"].resolve() not in projection_root.parents
+    assert projected_paths["beta_context"].resolve() not in projection_root.parents
+    assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
+    assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_backend_disambiguates_colliding_projected_knowledge_base_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected knowledge-base directories should stay unique when IDs sanitize the same way."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_knowledge_base_collision_fixture(tmp_path),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_knowledge_root = projection_root / ".mindroom-worker-assets" / "knowledge_bases"
+    projected_dirs = sorted(path.name for path in projected_knowledge_root.iterdir())
+
+    assert "docs-a" in projected_dirs
+    assert any(path_name.startswith("docs-a-") for path_name in projected_dirs)
+    assert len(projected_dirs) == 2
+    assert (projected_knowledge_root / "docs-a" / "a.txt").read_text(encoding="utf-8") == "first\n"
+    colliding_dir = next(path_name for path_name in projected_dirs if path_name != "docs-a")
+    assert (projected_knowledge_root / colliding_dir / "b.txt").read_text(encoding="utf-8") == "second\n"
 
 
 def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(

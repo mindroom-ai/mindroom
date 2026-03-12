@@ -234,6 +234,18 @@ def _projection_display_name(host_path: Path, *, fallback: str) -> str:
     return _safe_projection_name(host_path.name or fallback)
 
 
+def _projection_hash(raw_value: str, *, length: int = 8) -> str:
+    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:length]
+
+
+def _projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -> PurePosixPath:
+    if relative_path.suffix:
+        name = f"{relative_path.stem}-{suffix}{relative_path.suffix}"
+    else:
+        name = f"{relative_path.name}-{suffix}"
+    return relative_path.with_name(name)
+
+
 def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
     if plugin_path.startswith(("python:", "pkg:", "module:")):
         return False
@@ -760,7 +772,13 @@ class DockerWorkerBackend:
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
-        mount_checks.extend(self._config_mount_specs(paths, materialize_projection=False))
+        mount_checks.extend(
+            self._config_mount_specs(
+                paths,
+                worker_key=metadata.worker_key,
+                materialize_projection=False,
+            ),
+        )
         return all(
             self._container_mount_matches(
                 container,
@@ -785,7 +803,7 @@ class DockerWorkerBackend:
                 name=metadata.container_name,
                 detach=True,
                 environment=self._container_env(metadata.worker_key),
-                volumes=self._container_volumes(paths),
+                volumes=self._container_volumes(paths, worker_key=metadata.worker_key),
                 ports={f"{self.config.worker_port}/tcp": (self.config.publish_host, None)},
                 labels=self._container_labels(metadata),
                 user=self.config.user,
@@ -879,20 +897,33 @@ class DockerWorkerBackend:
         self,
         paths: LocalWorkerStatePaths,
         *,
+        worker_key: str | None = None,
         materialize_projection: bool = True,
     ) -> list[tuple[Path, str, bool]]:
         if self.config.host_config_path is None:
             return []
 
-        projection = self._projected_config(paths, materialize=materialize_projection)
+        projection = self._projected_config(
+            paths,
+            worker_key=worker_key,
+            materialize=materialize_projection,
+        )
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
         return [(projection.root, str(config_dir), True)]
 
-    def _container_volumes(self, paths: LocalWorkerStatePaths) -> dict[str, dict[str, str]]:
+    def _container_volumes(
+        self,
+        paths: LocalWorkerStatePaths,
+        *,
+        worker_key: str | None = None,
+    ) -> dict[str, dict[str, str]]:
         volumes = {
             str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
         }
-        for host_path, container_path, read_only in self._config_mount_specs(paths):
+        for host_path, container_path, read_only in self._config_mount_specs(
+            paths,
+            worker_key=worker_key,
+        ):
             volumes[str(host_path)] = {
                 "bind": container_path,
                 "mode": "ro" if read_only else "rw",
@@ -903,6 +934,7 @@ class DockerWorkerBackend:
         self,
         paths: LocalWorkerStatePaths,
         *,
+        worker_key: str | None = None,
         materialize: bool = True,
     ) -> _DockerProjectedConfig:
         host_config_path = self.config.host_config_path
@@ -912,12 +944,15 @@ class DockerWorkerBackend:
 
         config_data = self._load_host_config_data(host_config_path)
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
         self._rewrite_projected_config_paths(
             config_data,
             host_config_path,
+            worker_key,
             paths,
             asset_paths_by_host,
+            host_paths_by_relative_asset_path,
             assets,
         )
         projected_yaml = yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True)
@@ -962,20 +997,141 @@ class DockerWorkerBackend:
         self,
         config_data: dict[str, object],
         host_config_path: Path,
+        worker_key: str | None,
         paths: LocalWorkerStatePaths,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
-        self._rewrite_projected_plugin_paths(config_data, host_config_path, asset_paths_by_host, assets)
-        self._rewrite_projected_knowledge_paths(config_data, host_config_path, asset_paths_by_host, assets)
-        self._rewrite_projected_agent_paths(config_data, host_config_path, paths, asset_paths_by_host, assets)
+        projected_agent_names = self._projected_agent_names(config_data, worker_key=worker_key)
+        projected_knowledge_base_ids = self._projected_knowledge_base_ids(
+            config_data,
+            agent_names=projected_agent_names,
+        )
+        self._rewrite_projected_plugin_paths(
+            config_data,
+            host_config_path,
+            asset_paths_by_host,
+            host_paths_by_relative_asset_path,
+            assets,
+        )
+        self._rewrite_projected_knowledge_paths(
+            config_data,
+            host_config_path,
+            projected_knowledge_base_ids,
+            asset_paths_by_host,
+            host_paths_by_relative_asset_path,
+            assets,
+        )
+        self._rewrite_projected_agent_paths(
+            config_data,
+            host_config_path,
+            paths,
+            projected_agent_names,
+            asset_paths_by_host,
+            host_paths_by_relative_asset_path,
+            assets,
+        )
         self._rewrite_projected_memory_paths(config_data, paths)
+
+    def _projected_agent_names(
+        self,
+        config_data: dict[str, object],
+        *,
+        worker_key: str | None,
+    ) -> set[str] | None:
+        if worker_key is None:
+            return None
+
+        raw_agents = config_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return None
+
+        default_worker_scope = self._default_projected_worker_scope(config_data)
+        agents = cast("dict[object, object]", raw_agents)
+        for agent_name, raw_agent in agents.items():
+            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
+                continue
+            worker_scope = self._effective_projected_worker_scope(
+                cast("dict[str, object]", raw_agent),
+                default_worker_scope,
+            )
+            if self._worker_key_targets_agent(worker_key, agent_name=agent_name, worker_scope=worker_scope):
+                return {agent_name}
+        return None
+
+    def _projected_knowledge_base_ids(
+        self,
+        config_data: dict[str, object],
+        *,
+        agent_names: set[str] | None,
+    ) -> set[str] | None:
+        if agent_names is None:
+            return None
+
+        raw_agents = config_data.get("agents")
+        if not isinstance(raw_agents, dict):
+            return set()
+
+        agents = cast("dict[object, object]", raw_agents)
+        projected_knowledge_base_ids: set[str] = set()
+        for agent_name in agent_names:
+            raw_agent = agents.get(agent_name)
+            if not isinstance(raw_agent, dict):
+                continue
+            raw_knowledge_bases = cast("dict[str, object]", raw_agent).get("knowledge_bases")
+            if not isinstance(raw_knowledge_bases, list):
+                continue
+            projected_knowledge_base_ids.update(
+                base_id for base_id in raw_knowledge_bases if isinstance(base_id, str) and base_id.strip()
+            )
+        return projected_knowledge_base_ids
+
+    def _default_projected_worker_scope(self, config_data: dict[str, object]) -> str | None:
+        raw_defaults = config_data.get("defaults")
+        if not isinstance(raw_defaults, dict):
+            return None
+        raw_worker_scope = cast("dict[str, object]", raw_defaults).get("worker_scope")
+        if isinstance(raw_worker_scope, str) and raw_worker_scope in {
+            "shared",
+            "user",
+            "user_agent",
+            "room_thread",
+        }:
+            return raw_worker_scope
+        return None
+
+    def _effective_projected_worker_scope(
+        self,
+        raw_agent: dict[str, object],
+        default_worker_scope: str | None,
+    ) -> str | None:
+        raw_worker_scope = raw_agent.get("worker_scope")
+        if raw_worker_scope in {"shared", "user", "user_agent", "room_thread"}:
+            return cast("str", raw_worker_scope)
+        return default_worker_scope
+
+    def _worker_key_targets_agent(
+        self,
+        worker_key: str,
+        *,
+        agent_name: str,
+        worker_scope: str | None,
+    ) -> bool:
+        if worker_scope is None:
+            return worker_key.endswith(f":unscoped:{agent_name}")
+        if worker_scope == "shared":
+            return worker_key.endswith(f":shared:{agent_name}")
+        if worker_scope == "user_agent":
+            return ":user_agent:" in worker_key and worker_key.endswith(f":{agent_name}")
+        return False
 
     def _rewrite_projected_plugin_paths(
         self,
         config_data: dict[str, object],
         host_config_path: Path,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
         raw_plugins = config_data.get("plugins")
@@ -998,6 +1154,7 @@ class DockerWorkerBackend:
                     f"{index:02d}-{_projection_display_name(host_path, fallback=raw_plugin)}",
                 ),
                 asset_paths_by_host=asset_paths_by_host,
+                host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
 
@@ -1005,7 +1162,9 @@ class DockerWorkerBackend:
         self,
         config_data: dict[str, object],
         host_config_path: Path,
+        projected_knowledge_base_ids: set[str] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
         raw_knowledge_bases = config_data.get("knowledge_bases")
@@ -1016,6 +1175,8 @@ class DockerWorkerBackend:
         for base_id, raw_knowledge_base in knowledge_bases.items():
             if not isinstance(base_id, str) or not isinstance(raw_knowledge_base, dict):
                 continue
+            if projected_knowledge_base_ids is not None and base_id not in projected_knowledge_base_ids:
+                continue
             knowledge_base = cast("dict[str, object]", raw_knowledge_base)
             raw_path = knowledge_base.get("path")
             if not isinstance(raw_path, str) or not raw_path.strip():
@@ -1025,6 +1186,7 @@ class DockerWorkerBackend:
                 host_path,
                 PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
                 asset_paths_by_host=asset_paths_by_host,
+                host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
 
@@ -1033,7 +1195,9 @@ class DockerWorkerBackend:
         config_data: dict[str, object],
         host_config_path: Path,
         paths: LocalWorkerStatePaths,
+        projected_agent_names: set[str] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
         raw_agents = config_data.get("agents")
@@ -1044,6 +1208,8 @@ class DockerWorkerBackend:
         for agent_name, raw_agent in agents.items():
             if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
                 continue
+            if projected_agent_names is not None and agent_name not in projected_agent_names:
+                continue
             agent = cast("dict[str, object]", raw_agent)
             safe_agent_name = _safe_projection_name(agent_name)
             agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", safe_agent_name)
@@ -1052,6 +1218,7 @@ class DockerWorkerBackend:
                 host_config_path,
                 agent_dir,
                 asset_paths_by_host=asset_paths_by_host,
+                host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
             self._rewrite_projected_agent_memory_file_path(
@@ -1067,6 +1234,7 @@ class DockerWorkerBackend:
         agent_dir: PurePosixPath,
         *,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
         raw_context_files = raw_agent.get("context_files")
@@ -1084,6 +1252,7 @@ class DockerWorkerBackend:
                 / "context_files"
                 / f"{index:02d}-{_projection_display_name(host_path, fallback=raw_context_file)}",
                 asset_paths_by_host=asset_paths_by_host,
+                host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
             )
 
@@ -1132,12 +1301,14 @@ class DockerWorkerBackend:
         suggested_relative_path: PurePosixPath,
         *,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> str:
         relative_path = self._projected_asset_path(
             host_path,
             suggested_relative_path,
             asset_paths_by_host=asset_paths_by_host,
+            host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
             assets=assets,
         )
         return _projected_config_value(relative_path)
@@ -1148,6 +1319,7 @@ class DockerWorkerBackend:
         suggested_relative_path: PurePosixPath,
         *,
         asset_paths_by_host: dict[Path, PurePosixPath],
+        host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> PurePosixPath:
         resolved_host_path = host_path.expanduser().resolve()
@@ -1155,15 +1327,29 @@ class DockerWorkerBackend:
         if existing_relative_path is not None:
             return existing_relative_path
 
-        asset_paths_by_host[resolved_host_path] = suggested_relative_path
+        relative_path = suggested_relative_path
+        suffix_counter = 0
+        while True:
+            existing_host_path = host_paths_by_relative_asset_path.get(relative_path)
+            if existing_host_path is None or existing_host_path == resolved_host_path:
+                break
+            suffix_source = str(resolved_host_path) if suffix_counter == 0 else f"{resolved_host_path}:{suffix_counter}"
+            relative_path = _projection_path_with_suffix(
+                suggested_relative_path,
+                suffix=_projection_hash(suffix_source),
+            )
+            suffix_counter += 1
+
+        asset_paths_by_host[resolved_host_path] = relative_path
+        host_paths_by_relative_asset_path[relative_path] = resolved_host_path
         if resolved_host_path.exists():
             assets.append(
                 _DockerProjectedConfigAsset(
                     host_path=resolved_host_path,
-                    relative_path=suggested_relative_path,
+                    relative_path=relative_path,
                 ),
             )
-        return suggested_relative_path
+        return relative_path
 
     def _write_projected_config(self, projection: _DockerProjectedConfig) -> None:
         if projection.root.exists():

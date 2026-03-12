@@ -4,7 +4,8 @@ icon: lucide/user
 
 # Agent Configuration
 
-Agents are the core building blocks of MindRoom. Each agent is a specialized AI actor with specific capabilities.
+Agents are the core building blocks of MindRoom.
+Each agent is a specialized AI actor with specific capabilities.
 
 ## Basic Agent
 
@@ -163,7 +164,8 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 `worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process.
 When `worker_tools` is omitted, MindRoom currently routes `coding`, `file`, `python`, and `shell` by default and keeps other tools local.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Dedicated Docker workers receive a projected read-only config tree so config-relative plugins, knowledge paths, context files, and other worker-safe configured assets remain available without exposing unrelated primary-runtime state.
+Dedicated Docker workers receive a projected read-only config snapshot so config-relative plugins and other worker-safe configured assets remain available without exposing unrelated primary-runtime state.
+Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
 Config-adjacent `.env` files are intentionally masked inside those workers.
 `worker_scope` decides which proxied calls share the same worker-owned state directory.
@@ -218,9 +220,11 @@ This loading happens when the agent is created (and on config reload), not conti
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field.
+When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history.
+It executes the task and returns its response as the tool result.
 
 ```yaml
 agents:
@@ -263,7 +267,8 @@ When using these names, the built-in prompt replaces the `role` field and any cu
 
 ## Defaults
 
-The `defaults` section sets fallback values for all agents. Any agent that omits a setting inherits the value from here.
+The `defaults` section sets fallback values for all agents.
+Any agent that omits a setting inherits the value from here.
 
 ```yaml
 defaults:

@@ -74,7 +74,8 @@ volumes:
 ```
 
 > [!IMPORTANT]
-> The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume:
+> The `sandbox-workspace` Docker volume is created as root by default.
+> The runner runs as UID 1000, so you must fix ownership after first creating the volume:
 > ```bash
 > docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace
 > ```
@@ -185,7 +186,9 @@ Use this when you want the primary MindRoom runtime on the host, but you want wo
 That most commonly means `shell`, `file`, and `python`, but other worker-safe tools can also be routed through workers when they only need worker state or config-referenced filesystem assets.
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
-MindRoom builds a projected read-only config tree for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that tree, and mounts only the referenced host assets that the worker needs.
+MindRoom builds a projected read-only config snapshot for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that snapshot, copies only the referenced config-relative assets needed for that worker into the snapshot, and mounts only the snapshot root into the container.
+Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope: user_agent` snapshot only that agent's projected context files and assigned knowledge bases.
+Scopes that intentionally share one worker across multiple agents, such as `worker_scope: user` and `worker_scope: room_thread`, keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 MindRoom also masks config-adjacent `.env` inside the worker container, so primary-runtime secrets and unrelated runtime state stay local unless you pass worker-specific env vars explicitly.
 
@@ -273,7 +276,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `MINDROOM_DOCKER_WORKER_PORT` | Sandbox-runner port inside the worker container | `8766` |
 | `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH` | Worker root mount path inside the container | `/app/worker` |
 | `MINDROOM_DOCKER_WORKER_CONFIG_PATH` | Config path inside the worker container | `/app/config-host/config.yaml` |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config tree; only referenced config-relative assets are mounted and `.env` is masked inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` | Host path to `config.yaml` used to build the projected worker config snapshot; MindRoom mounts only the snapshot root, copies only the config-relative assets needed for that worker into it, and masks `.env` inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists |
 | `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` | Idle timeout before a worker container is eligible for cleanup | `1800` |
 | `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup | `60` |
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
@@ -305,7 +308,9 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 
 ## Credential leases
 
-Some proxied tools need credentials (e.g., a `shell` tool that runs `git push` and needs an SSH key). Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease** — a short-lived, single-use token that the runner exchanges for credentials during execution.
+Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
+Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
+That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
 
 Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
 
@@ -313,7 +318,9 @@ Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_J
 export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
 ```
 
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls. Credentials are never stored in the runner — each lease is consumed on use and expires after the configured TTL.
+This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
+Credentials are never stored in the runner.
+Each lease is consumed on use and expires after the configured TTL.
 
 ## Security considerations
 
@@ -327,7 +334,8 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 
 ## Per-agent configuration
 
-MindRoom owns the default local-versus-worker routing policy. You can override which tools are routed through the sandbox proxy per agent (or set a default for all agents) in `config.yaml`:
+MindRoom owns the default local-versus-worker routing policy.
+You can override which tools are routed through the sandbox proxy per agent, or set a default for all agents, in `config.yaml`:
 
 ```yaml
 defaults:
