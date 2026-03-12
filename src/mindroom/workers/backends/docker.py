@@ -249,6 +249,10 @@ class _DockerProjectedConfigAsset:
     host_path: Path
     relative_path: PurePosixPath
 
+    @property
+    def is_directory(self) -> bool:
+        return self.host_path.is_dir()
+
 
 @dataclass(frozen=True, slots=True)
 class _DockerProjectedConfig:
@@ -339,23 +343,45 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
         raise WorkerBackendError(msg) from exc
 
 
+def _asset_contents_hash(host_path: Path) -> str:
+    try:
+        return hashlib.sha256(host_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        msg = f"Failed to read Docker worker asset '{host_path}': {exc}"
+        raise WorkerBackendError(msg) from exc
+
+
+def _docker_image_identity_state(
+    image: str,
+    *,
+    client: _DockerClient,
+    docker_errors: _DockerErrors,
+) -> tuple[str, bool]:
+    try:
+        docker_image = client.images.get(image)
+    except docker_errors.NotFound:
+        return image, False
+    except docker_errors.DockerException:
+        return image, False
+
+    image_id = getattr(docker_image, "id", None)
+    if isinstance(image_id, str) and image_id.strip():
+        return image_id, True
+    return image, False
+
+
 def _resolved_docker_image_identity(
     image: str,
     *,
     client: _DockerClient,
     docker_errors: _DockerErrors,
 ) -> str:
-    try:
-        docker_image = client.images.get(image)
-    except docker_errors.NotFound:
-        return image
-    except docker_errors.DockerException:
-        return image
-
-    image_id = getattr(docker_image, "id", None)
-    if isinstance(image_id, str) and image_id.strip():
-        return image_id
-    return image
+    resolved_identity, _ = _docker_image_identity_state(
+        image,
+        client=client,
+        docker_errors=docker_errors,
+    )
+    return resolved_identity
 
 
 def ensure_docker_dependencies() -> None:
@@ -697,9 +723,10 @@ class DockerWorkerBackend:
         container: _DockerContainer | None,
         paths: LocalWorkerStatePaths,
     ) -> bool:
-        if metadata.launch_config_hash != self._launch_config_hash:
+        compatible_launch_config_hashes = self._compatible_launch_config_hashes(container)
+        if metadata.launch_config_hash not in compatible_launch_config_hashes:
             return False
-        if self._container_launch_config_hash(container) != self._launch_config_hash:
+        if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
 
         mount_checks = [
@@ -827,7 +854,11 @@ class DockerWorkerBackend:
         projection = self._projected_config(paths)
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
         mounts: list[tuple[Path, str, bool]] = [(projection.root, str(config_dir), True)]
-        mounts.extend((asset.host_path, str(config_dir / asset.relative_path), True) for asset in projection.assets)
+        mounts.extend(
+            (asset.host_path, str(config_dir / asset.relative_path), True)
+            for asset in projection.assets
+            if asset.is_directory
+        )
         return mounts
 
     def _container_volumes(self, paths: LocalWorkerStatePaths) -> dict[str, dict[str, str]]:
@@ -864,6 +895,8 @@ class DockerWorkerBackend:
                 {
                     "host_path": str(asset.host_path),
                     "relative_path": asset.relative_path.as_posix(),
+                    "kind": "dir" if asset.is_directory else "file",
+                    "content_hash": "" if asset.is_directory else _asset_contents_hash(asset.host_path),
                 }
                 for asset in assets
             ],
@@ -1105,11 +1138,11 @@ class DockerWorkerBackend:
         (projection_dir / ".env").write_text("", encoding="utf-8")
         for asset in assets:
             placeholder_path = projection_dir.joinpath(*asset.relative_path.parts)
-            if asset.host_path.is_dir():
+            if asset.is_directory:
                 placeholder_path.mkdir(parents=True, exist_ok=True)
                 continue
             placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-            placeholder_path.touch(exist_ok=True)
+            shutil.copyfile(asset.host_path, placeholder_path)
 
     def _worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
         return self._projected_configs_root / paths.root.name
@@ -1153,7 +1186,12 @@ class DockerWorkerBackend:
         labels.update(self.config.extra_labels)
         return labels
 
-    def _compute_launch_config_hash(self) -> str:
+    def _compute_launch_config_hash(self, *, image_identity: str | None = None) -> str:
+        resolved_image_identity = image_identity or _resolved_docker_image_identity(
+            self.config.image,
+            client=self._client,
+            docker_errors=self._docker_errors,
+        )
         config_payload = {
             "auth_token": self.auth_token or "",
             "config_path": self.config.config_path,
@@ -1162,11 +1200,7 @@ class DockerWorkerBackend:
             "extra_labels": self.config.extra_labels,
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
-            "resolved_image": _resolved_docker_image_identity(
-                self.config.image,
-                client=self._client,
-                docker_errors=self._docker_errors,
-            ),
+            "resolved_image": resolved_image_identity,
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
@@ -1187,6 +1221,40 @@ class DockerWorkerBackend:
         if isinstance(launch_config_hash, str) and launch_config_hash:
             return launch_config_hash
         return None
+
+    def _container_image_identity(self, container: _DockerContainer | None) -> str | None:
+        if container is None:
+            return None
+
+        attrs = getattr(container, "attrs", {})
+        raw_image = attrs.get("Image") if isinstance(attrs, dict) else None
+        if isinstance(raw_image, str) and raw_image.strip():
+            return raw_image
+
+        config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
+        config_image = config.get("Image") if isinstance(config, dict) else None
+        if isinstance(config_image, str) and config_image.strip():
+            return config_image
+        return None
+
+    def _compatible_launch_config_hashes(self, container: _DockerContainer | None) -> set[str]:
+        current_image_identity, image_resolved = _docker_image_identity_state(
+            self.config.image,
+            client=self._client,
+            docker_errors=self._docker_errors,
+        )
+        compatible_hashes = {self._compute_launch_config_hash(image_identity=current_image_identity)}
+        container_image_identity = self._container_image_identity(container)
+        if container_image_identity is None:
+            return compatible_hashes
+
+        if not image_resolved:
+            compatible_hashes.add(self._compute_launch_config_hash(image_identity=container_image_identity))
+            return compatible_hashes
+
+        if container_image_identity == current_image_identity:
+            compatible_hashes.add(self._compute_launch_config_hash(image_identity=self.config.image))
+        return compatible_hashes
 
     def _container_mount_matches(
         self,

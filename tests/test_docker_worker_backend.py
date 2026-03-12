@@ -41,6 +41,7 @@ class _FakeContainer:
         *,
         name: str,
         image: str,
+        image_identity: str,
         host_port: int,
         environment: dict[str, str],
         labels: dict[str, str],
@@ -52,6 +53,7 @@ class _FakeContainer:
         self.status = status
         self.id = f"{name}-id"
         self.attrs = {
+            "Image": image_identity,
             "State": {"Status": status},
             "Config": {
                 "Image": image,
@@ -91,10 +93,18 @@ class _FakeContainer:
 
 
 class _FakeContainersApi:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        images: _FakeImagesApi | None = None,
+        auto_pull_missing_image: bool = False,
+    ) -> None:
         self.by_name: dict[str, _FakeContainer] = {}
+        self.created_containers: list[_FakeContainer] = []
         self.run_calls: list[dict[str, object]] = []
         self.next_host_port = 43001
+        self.images = images
+        self.auto_pull_missing_image = auto_pull_missing_image
 
     def get(self, name: str) -> _FakeContainer:
         container = self.by_name.get(name)
@@ -103,6 +113,15 @@ class _FakeContainersApi:
         return container
 
     def run(self, image: str, **kwargs: object) -> _FakeContainer:
+        if self.auto_pull_missing_image and self.images is not None and image not in self.images.by_name:
+            self.images.by_name[image] = _FakeImage("sha256:auto-pulled-image")
+
+        image_identity = image
+        if self.images is not None:
+            docker_image = self.images.by_name.get(image)
+            if docker_image is not None:
+                image_identity = docker_image.id
+
         host_port = self.next_host_port
         self.next_host_port += 1
         environment = kwargs.get("environment")
@@ -111,6 +130,7 @@ class _FakeContainersApi:
         container = _FakeContainer(
             name=str(kwargs["name"]),
             image=image,
+            image_identity=image_identity,
             host_port=host_port,
             environment=dict(environment) if isinstance(environment, dict) else {},
             labels=dict(labels) if isinstance(labels, dict) else {},
@@ -129,6 +149,7 @@ class _FakeContainersApi:
                 if isinstance(source, str) and isinstance(spec, dict)
             ]
         self.by_name[container.name] = container
+        self.created_containers.append(container)
         self.run_calls.append({"image": image, **kwargs})
         return container
 
@@ -150,9 +171,12 @@ class _FakeImagesApi:
 
 
 class _FakeDockerClient:
-    def __init__(self) -> None:
-        self.containers = _FakeContainersApi()
+    def __init__(self, *, auto_pull_missing_image: bool = False) -> None:
         self.images = _FakeImagesApi()
+        self.containers = _FakeContainersApi(
+            images=self.images,
+            auto_pull_missing_image=auto_pull_missing_image,
+        )
 
 
 def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
@@ -237,10 +261,7 @@ def _assert_projected_worker_mounts(
         volumes[str(projected_paths["knowledge_root"].resolve())]["bind"]
         == "/app/config-host/.mindroom-worker-assets/knowledge_bases/docs"
     )
-    assert (
-        volumes[str(projected_paths["context_file"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/agents/code/context_files/00-context.md"
-    )
+    assert str(projected_paths["context_file"].resolve()) not in volumes
     assert str(projected_paths["memory_root"].resolve()) not in volumes
     assert str(projected_paths["agent_memory_root"].resolve()) not in volumes
     return projection_root
@@ -342,6 +363,10 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
     assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
     assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    projected_context_path = (
+        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
+    )
+    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
     assert (
         f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
     )
@@ -692,6 +717,96 @@ def test_docker_backend_recreates_container_when_host_config_contents_change(
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_backend_recreates_container_when_projected_file_asset_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing a projected single-file asset should rotate the worker."""
+    config_text, projected_paths = _projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+    first_volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(first_volumes, dict)
+    first_projection_root = _projection_root(first_volumes)
+
+    updated_context_file = projected_paths["context_file"].with_suffix(".updated.md")
+    updated_context_file.write_text("# Updated Context\n", encoding="utf-8")
+    updated_context_file.replace(projected_paths["context_file"])
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    assert isinstance(second_volumes, dict)
+    second_projection_root = _projection_root(second_volumes)
+    assert second_projection_root != first_projection_root
+    projected_context_path = (
+        second_projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
+    )
+    assert projected_context_path.read_text(encoding="utf-8") == "# Updated Context\n"
+
+
+def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The first auto-pull should not force a second worker recreation on the next ensure."""
+    config = _DockerWorkerBackendConfig(
+        image="ghcr.io/mindroom-ai/mindroom:latest",
+        worker_port=8766,
+        storage_mount_path="/app/worker",
+        config_path="/app/config-host/config.yaml",
+        host_config_path=None,
+        idle_timeout_seconds=60.0,
+        ready_timeout_seconds=5.0,
+        name_prefix="mindroom-worker",
+        publish_host="127.0.0.1",
+        endpoint_host="127.0.0.1",
+        user="1000:1000",
+        extra_env={},
+        extra_labels={},
+    )
+    fake_client = _FakeDockerClient(auto_pull_missing_image=True)
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker._load_docker_client_and_errors",
+        lambda: (
+            fake_client,
+            SimpleNamespace(
+                DockerException=_FakeDockerError,
+                NotFound=_FakeNotFoundError,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _noop_sync_shared_credentials,
+    )
+
+    backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
+    monkeypatch.setattr(
+        backend,
+        "_wait_for_ready",
+        lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
+    )
+
+    first_handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_handle = backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    assert second_handle.worker_id == first_handle.worker_id
+    assert fake_client.containers.by_name[second_handle.worker_id] is first_container
+    assert len(fake_client.containers.run_calls) == 1
+    assert first_container.removed == 0
 
 
 def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_id(
