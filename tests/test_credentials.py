@@ -20,6 +20,7 @@ from mindroom.credentials import (
     load_scoped_credentials,
     merge_scoped_credentials,
     save_scoped_credentials,
+    set_primary_credentials_storage_path,
     sync_shared_credentials_to_worker,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -554,6 +555,7 @@ class TestGlobalCredentialsManager:
     @pytest.fixture(autouse=True)
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
+        set_primary_credentials_storage_path(None)
         mindroom.credentials._credentials_manager = None
 
     def test_get_credentials_manager_singleton(self) -> None:
@@ -582,6 +584,16 @@ class TestGlobalCredentialsManager:
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
+
+    def test_global_manager_uses_runtime_storage_override(self, tmp_path: Path) -> None:
+        """The primary runtime should be able to override the default credentials root."""
+        runtime_storage = (tmp_path / "runtime-storage").resolve()
+
+        set_primary_credentials_storage_path(runtime_storage)
+        manager = get_credentials_manager()
+
+        assert manager.base_path == runtime_storage / "credentials"
+        assert manager.storage_root == runtime_storage
 
     def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
         self,

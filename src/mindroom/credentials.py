@@ -199,6 +199,8 @@ class CredentialsManager:
 
 
 def _default_credentials_base_path() -> Path:
+    if _PRIMARY_CREDENTIALS_STORAGE_PATH is not None:
+        return _PRIMARY_CREDENTIALS_STORAGE_PATH / "credentials"
     storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
     if storage_path:
         return Path(storage_path).expanduser().resolve() / "credentials"
@@ -226,6 +228,19 @@ def _current_dedicated_worker_root() -> Path | None:
 
 # Global instance for convenience (lazy initialization)
 _credentials_manager: CredentialsManager | None = None
+_PRIMARY_CREDENTIALS_STORAGE_PATH: Path | None = None
+
+
+def set_primary_credentials_storage_path(storage_path: Path | None) -> None:
+    """Set the primary runtime storage root used for default credentials access."""
+    global _credentials_manager, _PRIMARY_CREDENTIALS_STORAGE_PATH
+
+    normalized_storage_path = None if storage_path is None else storage_path.expanduser().resolve()
+    if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
+        return
+
+    _PRIMARY_CREDENTIALS_STORAGE_PATH = normalized_storage_path
+    _credentials_manager = None
 
 
 def get_credentials_manager() -> CredentialsManager:

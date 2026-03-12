@@ -186,12 +186,13 @@ That most commonly means `shell`, `file`, and `python`, but other tools can also
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 
-If you are testing unreleased code from a source checkout, start MindRoom from that checkout instead of the published PyPI build.
-Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`.
-Use plain `uvx mindroom run` only after the version you want is published on PyPI.
+If you are testing unreleased code from a source checkout, install the Docker extra in that checkout and start MindRoom from the checkout instead of the published PyPI build.
+Use plain `uvx mindroom run` only after the version you want is published and your installed package includes the `docker` extra.
+The base package does not include the Python `docker` dependency required by this backend.
 When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
 
 ```bash
+uv sync --extra docker
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 
@@ -206,6 +207,12 @@ export MINDROOM_SANDBOX_PROXY_TOKEN=replace-me-with-a-long-random-token
 export MINDROOM_DOCKER_WORKER_NAME_PREFIX=mindroom-worker
 export MINDROOM_DOCKER_WORKER_PUBLISH_HOST=127.0.0.1
 export MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=60
+```
+
+Then start MindRoom from the same checkout:
+
+```bash
+uv run mindroom run
 ```
 
 For released versions, you can point `MINDROOM_DOCKER_WORKER_IMAGE` at the matching published image tag instead.

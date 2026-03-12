@@ -15,6 +15,7 @@ import uvicorn
 from mindroom.agents import get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.credentials import set_primary_credentials_storage_path
 from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
@@ -951,6 +952,7 @@ async def main(
 
     # Canonicalize once at startup so downstream storage paths are cwd-stable.
     storage_path = storage_path.expanduser().resolve()
+    set_primary_credentials_storage_path(storage_path)
     set_primary_worker_storage_path(storage_path)
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
@@ -1003,4 +1005,5 @@ async def main(
                 await task
         await orchestrator.stop()
         reset_runtime_state()
+        set_primary_credentials_storage_path(None)
         set_primary_worker_storage_path(None)
