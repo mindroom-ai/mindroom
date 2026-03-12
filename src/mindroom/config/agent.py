@@ -49,6 +49,14 @@ class AgentConfig(BaseModel):
         default_factory=list,
         description="File paths read at agent init and prepended to role context",
     )
+    boot_file: str | None = Field(
+        default=None,
+        description="Optional file path loaded on every agent startup",
+    )
+    bootstrap_file: str | None = Field(
+        default=None,
+        description="Optional first-run file path loaded only while the file exists",
+    )
     thread_mode: Literal["thread", "room"] = Field(
         default="thread",
         description="Conversation threading mode: 'thread' creates Matrix threads per conversation, 'room' uses a single continuous conversation per room (ideal for bridges/mobile)",
