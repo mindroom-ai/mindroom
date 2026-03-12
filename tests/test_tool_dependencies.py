@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
-    _install_tool_extras,
+    _install_optional_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
     auto_install_optional_extra,
@@ -276,8 +276,8 @@ def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytes
     assert auto_install_optional_extra("sentence_transformers")
 
 
-def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Outside virtualenvs, tool extras should install via pip/uv pip instead of uv sync."""
+def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outside virtualenvs, optional extras should install via pip/uv pip instead of uv sync."""
     calls = {"sync": 0, "env": 0}
 
     def fake_install_via_uv_sync(_extras: list[str], *, quiet: bool) -> bool:  # noqa: ARG001
@@ -295,6 +295,6 @@ def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytes
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_via_uv_sync", fake_install_via_uv_sync)
     monkeypatch.setattr("mindroom.tool_system.dependencies._install_in_environment", fake_install_in_environment)
 
-    assert _install_tool_extras(["wikipedia"], quiet=True)
+    assert _install_optional_extras(["wikipedia"], quiet=True)
     assert calls["sync"] == 0
     assert calls["env"] == 1

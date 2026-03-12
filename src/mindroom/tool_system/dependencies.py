@@ -90,11 +90,6 @@ def _available_optional_extras() -> set[str]:
     return set(metadata.get_all("Provides-Extra") or [])
 
 
-def _available_tool_extras() -> set[str]:
-    """Backward-compatible alias for tool-oriented callers."""
-    return _available_optional_extras()
-
-
 def _is_uv_tool_install() -> bool:
     """Check if running from a uv tool environment."""
     return (Path(sys.prefix) / _RECEIPT_NAME).exists()
@@ -180,11 +175,6 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
     if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
         return _install_via_uv_sync(extras, quiet=quiet)
     return _install_in_environment(extras, quiet=quiet)
-
-
-def _install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
-    """Backward-compatible alias for tool-oriented callers."""
-    return _install_optional_extras(extras, quiet=quiet)
 
 
 def auto_install_optional_extra(extra_name: str) -> bool:
