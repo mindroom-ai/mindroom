@@ -46,8 +46,15 @@ if TYPE_CHECKING:
 
         def run(self, image: str, **kwargs: object) -> _DockerContainer: ...
 
+    class _DockerImage(Protocol):
+        id: str
+
+    class _DockerImagesApi(Protocol):
+        def get(self, name: str) -> _DockerImage: ...
+
     class _DockerClient(Protocol):
         containers: _DockerContainersApi
+        images: _DockerImagesApi
 
     class _DockerErrors(Protocol):
         DockerException: type[Exception]
@@ -63,6 +70,8 @@ _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_PUBLISH_HOST = "127.0.0.1"
 _READY_POLL_INTERVAL_SECONDS = 1.0
 _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
+_PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
+_WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
 
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
@@ -193,6 +202,10 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
 
 def _workers_root(base_storage_path: Path) -> Path:
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
+
+
+def _projected_configs_root(workers_root: Path) -> Path:
+    return workers_root / _PROJECTED_CONFIGS_DIRNAME
 
 
 def _resolved_storage_path(storage_path: Path | None = None) -> Path:
@@ -326,6 +339,25 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
         raise WorkerBackendError(msg) from exc
 
 
+def _resolved_docker_image_identity(
+    image: str,
+    *,
+    client: _DockerClient,
+    docker_errors: _DockerErrors,
+) -> str:
+    try:
+        docker_image = client.images.get(image)
+    except docker_errors.NotFound:
+        return image
+    except docker_errors.DockerException:
+        return image
+
+    image_id = getattr(docker_image, "id", None)
+    if isinstance(image_id, str) and image_id.strip():
+        return image_id
+    return image
+
+
 def ensure_docker_dependencies() -> None:
     """Install the optional Docker SDK runtime when needed."""
     try:
@@ -399,6 +431,7 @@ class DockerWorkerBackend:
         self._metadata_lock = threading.Lock()
         self._storage_path = _resolved_storage_path(storage_path)
         self._workers_root = _workers_root(self._storage_path)
+        self._projected_configs_root = _projected_configs_root(self._workers_root)
         self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
@@ -527,6 +560,7 @@ class DockerWorkerBackend:
                 return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
             self._remove_container(container)
+            self._remove_projected_configs(paths)
             if paths.root.exists():
                 shutil.rmtree(paths.root)
             return None
@@ -816,7 +850,13 @@ class DockerWorkerBackend:
         config_data = self._load_host_config_data(host_config_path)
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         assets: list[_DockerProjectedConfigAsset] = []
-        self._rewrite_projected_config_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        self._rewrite_projected_config_paths(
+            config_data,
+            host_config_path,
+            paths,
+            asset_paths_by_host,
+            assets,
+        )
         projected_yaml = yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True)
         projection_manifest = {
             "config_yaml": projected_yaml,
@@ -831,8 +871,9 @@ class DockerWorkerBackend:
         projection_hash = hashlib.sha256(
             json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         ).hexdigest()[:12]
-        projection_dir = paths.metadata_dir / f"config-projection-{projection_hash}"
+        projection_dir = self._worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
         self._write_projected_config(projection_dir, projected_yaml, assets)
+        self._prune_projected_configs(paths, keep=projection_dir)
         return _DockerProjectedConfig(root=projection_dir, assets=tuple(assets))
 
     def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
@@ -850,13 +891,14 @@ class DockerWorkerBackend:
         self,
         config_data: dict[str, object],
         host_config_path: Path,
+        paths: LocalWorkerStatePaths,
         asset_paths_by_host: dict[Path, PurePosixPath],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
         self._rewrite_projected_plugin_paths(config_data, host_config_path, asset_paths_by_host, assets)
         self._rewrite_projected_knowledge_paths(config_data, host_config_path, asset_paths_by_host, assets)
-        self._rewrite_projected_agent_paths(config_data, host_config_path, asset_paths_by_host, assets)
-        self._rewrite_projected_memory_paths(config_data, host_config_path, asset_paths_by_host, assets)
+        self._rewrite_projected_agent_paths(config_data, host_config_path, paths, asset_paths_by_host, assets)
+        self._rewrite_projected_memory_paths(config_data, paths)
 
     def _rewrite_projected_plugin_paths(
         self,
@@ -919,6 +961,7 @@ class DockerWorkerBackend:
         self,
         config_data: dict[str, object],
         host_config_path: Path,
+        paths: LocalWorkerStatePaths,
         asset_paths_by_host: dict[Path, PurePosixPath],
         assets: list[_DockerProjectedConfigAsset],
     ) -> None:
@@ -931,7 +974,8 @@ class DockerWorkerBackend:
             if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
                 continue
             agent = cast("dict[str, object]", raw_agent)
-            agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", _safe_projection_name(agent_name))
+            safe_agent_name = _safe_projection_name(agent_name)
+            agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", safe_agent_name)
             self._rewrite_projected_context_files(
                 agent,
                 host_config_path,
@@ -941,10 +985,8 @@ class DockerWorkerBackend:
             )
             self._rewrite_projected_agent_memory_file_path(
                 agent,
-                host_config_path,
-                agent_dir,
-                asset_paths_by_host=asset_paths_by_host,
-                assets=assets,
+                paths,
+                PurePosixPath("agents", safe_agent_name, "memory_file_path"),
             )
 
     def _rewrite_projected_context_files(
@@ -977,30 +1019,22 @@ class DockerWorkerBackend:
     def _rewrite_projected_agent_memory_file_path(
         self,
         raw_agent: dict[str, object],
-        host_config_path: Path,
-        agent_dir: PurePosixPath,
-        *,
-        asset_paths_by_host: dict[Path, PurePosixPath],
-        assets: list[_DockerProjectedConfigAsset],
+        paths: LocalWorkerStatePaths,
+        relative_worker_path: PurePosixPath,
     ) -> None:
         raw_memory_file_path = raw_agent.get("memory_file_path")
         if not isinstance(raw_memory_file_path, str) or not raw_memory_file_path.strip():
             return
 
-        host_path = resolve_config_relative_path(raw_memory_file_path, config_path=host_config_path)
-        raw_agent["memory_file_path"] = self._projected_path_value(
-            host_path,
-            agent_dir / "memory_file_path",
-            asset_paths_by_host=asset_paths_by_host,
-            assets=assets,
+        raw_agent["memory_file_path"] = self._worker_config_state_path_value(
+            paths,
+            relative_worker_path,
         )
 
     def _rewrite_projected_memory_paths(
         self,
         config_data: dict[str, object],
-        host_config_path: Path,
-        asset_paths_by_host: dict[Path, PurePosixPath],
-        assets: list[_DockerProjectedConfigAsset],
+        paths: LocalWorkerStatePaths,
     ) -> None:
         raw_memory = config_data.get("memory")
         if not isinstance(raw_memory, dict):
@@ -1016,12 +1050,9 @@ class DockerWorkerBackend:
         if not isinstance(raw_path, str) or not raw_path.strip():
             return
 
-        host_path = resolve_config_relative_path(raw_path, config_path=host_config_path)
-        file_memory["path"] = self._projected_path_value(
-            host_path,
-            PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "memory", "file"),
-            asset_paths_by_host=asset_paths_by_host,
-            assets=assets,
+        file_memory["path"] = self._worker_config_state_path_value(
+            paths,
+            PurePosixPath("memory", "file"),
         )
 
     def _projected_path_value(
@@ -1080,6 +1111,35 @@ class DockerWorkerBackend:
             placeholder_path.parent.mkdir(parents=True, exist_ok=True)
             placeholder_path.touch(exist_ok=True)
 
+    def _worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
+        return self._projected_configs_root / paths.root.name
+
+    def _remove_projected_configs(self, paths: LocalWorkerStatePaths) -> None:
+        projection_root = self._worker_projected_configs_root(paths)
+        if projection_root.exists():
+            shutil.rmtree(projection_root)
+
+    def _prune_projected_configs(self, paths: LocalWorkerStatePaths, *, keep: Path) -> None:
+        projection_root = self._worker_projected_configs_root(paths)
+        projection_root.mkdir(parents=True, exist_ok=True)
+        for sibling in projection_root.iterdir():
+            if sibling == keep:
+                continue
+            if sibling.is_dir():
+                shutil.rmtree(sibling)
+            else:
+                sibling.unlink(missing_ok=True)
+
+    def _worker_config_state_path_value(
+        self,
+        paths: LocalWorkerStatePaths,
+        relative_path: PurePosixPath,
+    ) -> str:
+        host_path = (paths.root / _WORKER_CONFIG_STATE_DIRNAME).joinpath(*relative_path.parts)
+        host_path.mkdir(parents=True, exist_ok=True)
+        container_path = PurePosixPath(self.config.storage_mount_path) / _WORKER_CONFIG_STATE_DIRNAME / relative_path
+        return str(container_path)
+
     def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:
         labels = {
             _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -1102,6 +1162,11 @@ class DockerWorkerBackend:
             "extra_labels": self.config.extra_labels,
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
+            "resolved_image": _resolved_docker_image_identity(
+                self.config.image,
+                client=self._client,
+                docker_errors=self._docker_errors,
+            ),
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,

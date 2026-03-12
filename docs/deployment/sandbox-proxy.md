@@ -186,6 +186,7 @@ That most commonly means `shell`, `file`, and `python`, but other worker-safe to
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 MindRoom builds a projected read-only config tree for each worker from `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`, rewrites config-relative paths into that tree, and mounts only the referenced host assets that the worker needs.
+Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 MindRoom also masks config-adjacent `.env` inside the worker container, so primary-runtime secrets and unrelated runtime state stay local unless you pass worker-specific env vars explicitly.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
@@ -355,7 +356,7 @@ The `worker_tools` field has three states:
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
-Any tool can be listed in `worker_tools`, and MindRoom will attempt to route it through the worker runtime.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
@@ -365,6 +366,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 `worker_scope` chooses which proxied calls share the same worker-owned storage root.
 Some tools still stay local even if they are listed in `worker_tools`.
 Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 `google` and `spotify` may be worker-routed, but only for unscoped agents or agents with `worker_scope=shared`.
 
 You can set `worker_scope` per agent or in `defaults`:

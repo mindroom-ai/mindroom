@@ -162,12 +162,14 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 
 `worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process.
 When `worker_tools` is omitted, MindRoom currently routes `coding`, `file`, `python`, and `shell` by default and keeps other tools local.
-Any tool can be listed in `worker_tools`, and MindRoom will attempt to route it through the worker runtime.
+Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Dedicated Docker workers receive a projected read-only config tree so config-relative plugins, knowledge paths, context files, and other worker-safe configured assets remain available without exposing unrelated primary-runtime state.
+Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
 Config-adjacent `.env` files are intentionally masked inside those workers.
 `worker_scope` decides which proxied calls share the same worker-owned state directory.
 Some tools still stay local even if they are listed in `worker_tools`.
 Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 `google` and `spotify` may be worker-routed, but only for unscoped agents or agents with `worker_scope=shared`.
 
 The supported `worker_scope` values are:
