@@ -5220,21 +5220,21 @@ When `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, t
 
 ### Dedicated Docker worker backend
 
-| Variable                                       | Description                                                                                                                  | Default                                             |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `MINDROOM_DOCKER_WORKER_IMAGE`                 | Container image used for dedicated Docker workers                                                                            | *(required when `MINDROOM_WORKER_BACKEND=docker`)*  |
-| `MINDROOM_DOCKER_WORKER_PORT`                  | Sandbox-runner port inside the worker container                                                                              | `8766`                                              |
-| `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH`    | Worker root mount path inside the container                                                                                  | `/app/worker`                                       |
-| `MINDROOM_DOCKER_WORKER_CONFIG_PATH`           | Config path inside the worker container                                                                                      | `/app/config-host/config.yaml`                      |
-| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`      | Host path to `config.yaml`; its parent directory is mounted read-only into workers and `.env` is masked inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists      |
-| `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`  | Idle timeout before a worker container is eligible for cleanup                                                               | `1800`                                              |
-| `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup                                                                             | `60`                                                |
-| `MINDROOM_DOCKER_WORKER_NAME_PREFIX`           | Prefix used for generated worker container names                                                                             | `mindroom-worker`                                   |
-| `MINDROOM_DOCKER_WORKER_PUBLISH_HOST`          | Host interface used when publishing worker ports                                                                             | `127.0.0.1`                                         |
-| `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST`         | Hostname the primary runtime uses to call published worker ports                                                             | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
-| `MINDROOM_DOCKER_WORKER_USER`                  | Container user for workers, or empty to use the image default                                                                | `1000:1000`                                         |
-| `MINDROOM_DOCKER_WORKER_ENV_JSON`              | JSON object of extra env vars injected into each worker container                                                            | `{}`                                                |
-| `MINDROOM_DOCKER_WORKER_LABELS_JSON`           | JSON object of extra Docker labels applied to each worker container                                                          | `{}`                                                |
+| Variable                                       | Description                                                                                                                  | Default                                                |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `MINDROOM_DOCKER_WORKER_IMAGE`                 | Container image used for dedicated Docker workers                                                                            | *(required when `MINDROOM_WORKER_BACKEND=docker`)*     |
+| `MINDROOM_DOCKER_WORKER_PORT`                  | Sandbox-runner port inside the worker container                                                                              | `8766`                                                 |
+| `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH`    | Worker root mount path inside the container                                                                                  | `/app/worker`                                          |
+| `MINDROOM_DOCKER_WORKER_CONFIG_PATH`           | Config path inside the worker container                                                                                      | `/app/config-host/config.yaml`                         |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`      | Host path to `config.yaml`; its parent directory is mounted read-only into workers and `.env` is masked inside the container | Resolved `MINDROOM_CONFIG_PATH` when it exists         |
+| `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`  | Idle timeout before a worker container is eligible for cleanup                                                               | `1800`                                                 |
+| `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup                                                                             | `60`                                                   |
+| `MINDROOM_DOCKER_WORKER_NAME_PREFIX`           | Prefix used for generated worker container names                                                                             | `mindroom-worker`                                      |
+| `MINDROOM_DOCKER_WORKER_PUBLISH_HOST`          | Host interface used when publishing worker ports                                                                             | `127.0.0.1`                                            |
+| `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST`         | Hostname the primary runtime uses to call published worker ports                                                             | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST`    |
+| `MINDROOM_DOCKER_WORKER_USER`                  | Container user for workers, or empty to use the image default                                                                | Current host uid:gid on POSIX, image default otherwise |
+| `MINDROOM_DOCKER_WORKER_ENV_JSON`              | JSON object of extra env vars injected into each worker container                                                            | `{}`                                                   |
+| `MINDROOM_DOCKER_WORKER_LABELS_JSON`           | JSON object of extra Docker labels applied to each worker container                                                          | `{}`                                                   |
 
 ### Sandbox runner
 

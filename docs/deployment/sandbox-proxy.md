@@ -278,7 +278,7 @@ If you deploy that mode without Helm, see [Kubernetes Deployment](kubernetes.md)
 | `MINDROOM_DOCKER_WORKER_NAME_PREFIX` | Prefix used for generated worker container names | `mindroom-worker` |
 | `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` | Host interface used when publishing worker ports | `127.0.0.1` |
 | `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST` | Hostname the primary runtime uses to call published worker ports | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
-| `MINDROOM_DOCKER_WORKER_USER` | Container user for workers, or empty to use the image default | `1000:1000` |
+| `MINDROOM_DOCKER_WORKER_USER` | Container user for workers, or empty to use the image default | Current host uid:gid on POSIX, image default otherwise |
 | `MINDROOM_DOCKER_WORKER_ENV_JSON` | JSON object of extra env vars injected into each worker container | `{}` |
 | `MINDROOM_DOCKER_WORKER_LABELS_JSON` | JSON object of extra Docker labels applied to each worker container | `{}` |
 
