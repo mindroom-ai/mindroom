@@ -54,6 +54,16 @@ class TestConfigInit:
         assert "matrix_space:\n  enabled: true\n  name: MindRoom" in content
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in content
 
+    def test_init_prompt_defaults_to_openai(self, tmp_path: Path) -> None:
+        """Pressing enter at the provider prompt should keep OpenAI as the starter default."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target)], input="\n")
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"]["default"]["provider"] == "openai"
+        assert config["models"]["default"]["id"] == "gpt-5.4"
+
     def test_init_full_profile_adds_mindroom_style_mind(self, tmp_path: Path) -> None:
         """Full template should include MindRoom-style Mind memory/context setup."""
         target = tmp_path / "config.yaml"

@@ -523,7 +523,7 @@ def _prompt_provider_preset() -> _ProviderPreset:
     while True:
         raw_value = typer.prompt(
             "Choose provider preset [anthropic/openai/openrouter/vertexai_claude]",
-            default="anthropic",
+            default="openai",
             show_default=True,
         )
         provider_preset = _normalize_provider_preset(raw_value)
