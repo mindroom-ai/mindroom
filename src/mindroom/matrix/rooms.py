@@ -161,16 +161,11 @@ def _get_room_aliases() -> dict[str, str]:
     return state.get_room_aliases()
 
 
-def _get_room_id(room_key: str) -> str | None:
+def get_room_id(room_key: str) -> str | None:
     """Get room ID for a given room key/alias."""
     state = MatrixState.load()
     room = state.get_room(room_key)
     return room.room_id if room else None
-
-
-def get_room_id(room_key: str) -> str | None:
-    """Get room ID for a given room key/alias."""
-    return _get_room_id(room_key)
 
 
 def _add_room(room_key: str, room_id: str, alias: str, name: str) -> None:

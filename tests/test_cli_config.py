@@ -546,7 +546,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -566,7 +567,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -581,7 +583,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -595,9 +598,10 @@ class TestRunApiFlags:
         """Run --generate-avatars forwards the startup option to the orchestrator."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
@@ -615,7 +619,7 @@ class TestRunApiFlags:
         """Run should fail fast when avatar generation is requested without a Google API key."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n",
         )
@@ -627,6 +631,32 @@ class TestRunApiFlags:
         assert result.exit_code == 1
         assert "--generate-avatars" in result.output
         assert "GOOGLE_API_KEY" in result.output
+
+    def test_run_generate_avatars_allows_sync_with_existing_avatars_without_google_api_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should allow avatar sync when every managed avatar asset already exists."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        (tmp_path / "avatars" / "agents").mkdir(parents=True)
+        (tmp_path / "avatars" / "agents" / "a.png").write_bytes(b"avatar")
+        (tmp_path / "avatars" / "agents" / "router.png").write_bytes(b"avatar")
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = runner.invoke(app, ["run", "--generate-avatars"])
+
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["generate_avatars"] is True
 
 
 # ---------------------------------------------------------------------------

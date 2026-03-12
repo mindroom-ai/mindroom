@@ -153,8 +153,11 @@ async def _run(  # noqa: C901
     # Check for missing API keys
     _check_env_keys(config)
     if generate_avatars and not os.getenv("GOOGLE_API_KEY"):
-        console.print("[red]Error:[/red] `--generate-avatars` requires `GOOGLE_API_KEY`.")
-        raise typer.Exit(1)
+        from mindroom.avatar_generation import has_missing_managed_avatars  # noqa: PLC0415
+
+        if has_missing_managed_avatars(config, config_path=config_path):
+            console.print("[red]Error:[/red] `--generate-avatars` requires `GOOGLE_API_KEY` when avatars are missing.")
+            raise typer.Exit(1)
 
     console.print(make_banner())
     console.print()

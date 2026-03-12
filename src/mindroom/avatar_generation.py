@@ -39,8 +39,8 @@ console = Console()
 
 load_dotenv()
 
-PROMPT_MODEL = "gemini-3.1-flash-lite"
-# "Nano Banana 2" is the current Gemini 3.1 Flash image model.
+PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
+# Gemini 3.1 Flash Image Preview is the current Google image-generation model.
 IMAGE_MODEL = "gemini-3.1-flash-image-preview"
 ROOT_SPACE_AVATAR_NAME = "root_space"
 
@@ -98,6 +98,24 @@ Examples:
 Avoid childish, sticker-like, or overly decorative designs.
 Make each room instantly recognizable at small sizes."""
 
+ROOM_PURPOSES = {
+    "lobby": "Central meeting space, entrance and welcome area",
+    "research": "Scientific investigation and data analysis",
+    "docs": "Documentation and writing center",
+    "ops": "Operations and system management",
+    "automation": "Workflow automation and bot control",
+    "analysis": "Data analysis and insights",
+    "business": "Business strategy and planning",
+    "communication": "Messages and team communication",
+    "dev": "Software development and coding",
+    "finance": "Financial analysis and trading",
+    "help": "Support and assistance center",
+    "home": "Personal home base and dashboard",
+    "news": "News updates and current events",
+    "productivity": "Task management and efficiency",
+    "science": "Scientific research and experiments",
+}
+
 
 def load_config() -> dict:
     """Load the active configuration from config.yaml."""
@@ -116,6 +134,36 @@ def get_avatar_path(entity_type: str, entity_name: str) -> Path:
     output_dir = avatars_dir() / entity_type
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / f"{entity_name}.png"
+
+
+def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
+    """Return every managed avatar target for the active config."""
+    targets = [("agents", agent_name) for agent_name in config.agents]
+    targets.append(("agents", "router"))
+    targets.extend(("teams", team_name) for team_name in config.teams)
+    targets.extend(("rooms", room_name) for room_name in config.get_all_configured_rooms())
+    if config.matrix_space.enabled:
+        targets.append(("spaces", ROOT_SPACE_AVATAR_NAME))
+    return targets
+
+
+def _missing_avatar_targets(
+    config: Config,
+    *,
+    config_path: Path | None = None,
+) -> set[tuple[str, str]]:
+    """Return the managed avatar targets whose files do not exist yet."""
+    avatar_root = avatars_dir(config_path=config_path)
+    return {
+        (entity_type, entity_name)
+        for entity_type, entity_name in _managed_avatar_targets(config)
+        if not (avatar_root / entity_type / f"{entity_name}.png").exists()
+    }
+
+
+def has_missing_managed_avatars(config: Config, *, config_path: Path | None = None) -> bool:
+    """Return whether any managed avatar file is missing from the workspace."""
+    return bool(_missing_avatar_targets(config, config_path=config_path))
 
 
 async def generate_prompt(
@@ -283,9 +331,13 @@ async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config)
     return success_count, skip_count
 
 
-async def _sync_root_space_avatar(client: nio.AsyncClient, state: MatrixState) -> int:
+async def _sync_root_space_avatar(
+    client: nio.AsyncClient,
+    config: Config,
+    state: MatrixState,
+) -> int:
     """Apply the managed root-space avatar when both the asset and room exist."""
-    if not state.space_room_id:
+    if not config.matrix_space.enabled or not state.space_room_id:
         return 0
 
     root_space_avatar_path = avatars_dir() / "spaces" / f"{ROOT_SPACE_AVATAR_NAME}.png"
@@ -323,7 +375,7 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
     config = load_validated_config()
     try:
         success_count, skip_count = await _sync_configured_room_avatars(client, config)
-        success_count += await _sync_root_space_avatar(client, state)
+        success_count += await _sync_root_space_avatar(client, config, state)
     finally:
         await client.close()
 
@@ -331,6 +383,102 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
         console.print(f"\n[green]✓ Set {success_count} room avatars[/green]")
     if skip_count > 0:
         console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file)[/dim]")
+
+
+def _build_avatar_generation_tasks(
+    client: genai.Client,
+    raw_config: dict,
+    config: Config,
+    missing_targets: set[tuple[str, str]],
+) -> list[Awaitable[None]]:
+    """Build generation tasks for every missing managed avatar."""
+    agents = raw_config.get("agents", {})
+    teams = raw_config.get("teams", {})
+    tasks: list[Awaitable[None]] = []
+
+    for agent_name, agent_data in agents.items():
+        if ("agents", agent_name) in missing_targets:
+            tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
+
+    if ("agents", "router") in missing_targets:
+        tasks.append(
+            generate_avatar(
+                client,
+                "agents",
+                "router",
+                {"role": "Intelligent routing and agent selection"},
+            ),
+        )
+
+    for team_name, team_data in teams.items():
+        if ("teams", team_name) in missing_targets:
+            tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
+
+    for room_name in config.get_all_configured_rooms():
+        if ("rooms", room_name) in missing_targets:
+            room_data = {
+                "role": ROOM_PURPOSES.get(room_name, f"Collaboration space for {room_name} activities"),
+            }
+            tasks.append(generate_avatar(client, "rooms", room_name, room_data))
+
+    if ("spaces", ROOT_SPACE_AVATAR_NAME) in missing_targets:
+        tasks.append(
+            generate_avatar(
+                client,
+                "spaces",
+                ROOT_SPACE_AVATAR_NAME,
+                {"role": f"Workspace space named {config.matrix_space.name} that organizes all managed rooms"},
+            ),
+        )
+
+    return tasks
+
+
+def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None:
+    """Print the number of missing avatars that will be generated."""
+    space_count = int(("spaces", ROOT_SPACE_AVATAR_NAME) in missing_targets)
+    room_count = sum(1 for entity_type, _ in missing_targets if entity_type == "rooms")
+    team_count = sum(1 for entity_type, _ in missing_targets if entity_type == "teams")
+    agent_count = sum(1 for entity_type, _ in missing_targets if entity_type == "agents")
+    console.print(
+        f"\n[bold cyan]🚀 Generating {agent_count} agents, {team_count} teams, {room_count} rooms, and {space_count} spaces...[/bold cyan]\n",
+    )
+
+
+async def _generate_missing_avatars(
+    raw_config: dict,
+    config: Config,
+    missing_targets: set[tuple[str, str]],
+) -> bool:
+    """Generate every missing managed avatar and report whether startup may continue."""
+    if not missing_targets:
+        console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
+        return True
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        console.print("[red]Error: GOOGLE_API_KEY environment variable not set[/red]")
+        console.print("Please set it in your .env file or environment")
+        return False
+
+    client = genai.Client(api_key=api_key)
+    tasks = _build_avatar_generation_tasks(client, raw_config, config, missing_targets)
+    _print_avatar_generation_plan(missing_targets)
+
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task_id = progress.add_task("Processing avatars...", total=None)
+            await asyncio.gather(*tasks)
+            progress.update(task_id, completed=True)
+    finally:
+        await client.aio.aclose()
+
+    console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
+    return True
 
 
 async def run_avatar_generation(
@@ -342,78 +490,10 @@ async def run_avatar_generation(
     """Generate missing avatars and optionally sync room avatars to Matrix."""
     raw_config = load_config()
     config = Config.model_validate(raw_config)
+    missing_targets = _missing_avatar_targets(config)
 
-    if not set_only:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            console.print("[red]Error: GOOGLE_API_KEY environment variable not set[/red]")
-            console.print("Please set it in your .env file or environment")
-            return
-        client = genai.Client(api_key=api_key)
-        agents = raw_config.get("agents", {})
-        teams = raw_config.get("teams", {})
-        tasks: list[Awaitable[None]] = []
-
-        for agent_name, agent_data in agents.items():
-            tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
-
-        tasks.append(generate_avatar(client, "agents", "router", {"role": "Intelligent routing and agent selection"}))
-
-        for team_name, team_data in teams.items():
-            tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
-
-        all_rooms = config.get_all_configured_rooms()
-
-        room_purposes = {
-            "lobby": "Central meeting space, entrance and welcome area",
-            "research": "Scientific investigation and data analysis",
-            "docs": "Documentation and writing center",
-            "ops": "Operations and system management",
-            "automation": "Workflow automation and bot control",
-            "analysis": "Data analysis and insights",
-            "business": "Business strategy and planning",
-            "communication": "Messages and team communication",
-            "dev": "Software development and coding",
-            "finance": "Financial analysis and trading",
-            "help": "Support and assistance center",
-            "home": "Personal home base and dashboard",
-            "news": "News updates and current events",
-            "productivity": "Task management and efficiency",
-            "science": "Scientific research and experiments",
-        }
-        for room_name in all_rooms:
-            room_data = {"role": room_purposes.get(room_name, f"Collaboration space for {room_name} activities")}
-            tasks.append(generate_avatar(client, "rooms", room_name, room_data))
-
-        if config.matrix_space.enabled:
-            tasks.append(
-                generate_avatar(
-                    client,
-                    "spaces",
-                    ROOT_SPACE_AVATAR_NAME,
-                    {"role": f"Workspace space named {config.matrix_space.name} that organizes all managed rooms"},
-                ),
-            )
-
-        space_count = 1 if config.matrix_space.enabled else 0
-
-        console.print(
-            f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, {len(all_rooms)} rooms, and {space_count} spaces...[/bold cyan]\n",
-        )
-
-        try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task_id = progress.add_task("Processing avatars...", total=None)
-                await asyncio.gather(*tasks)
-                progress.update(task_id, completed=True)
-        finally:
-            await client.aio.aclose()
-
-        console.print("\n[bold green]✨ Avatar generation complete![/bold green]")
+    if not set_only and not await _generate_missing_avatars(raw_config, config, missing_targets):
+        return
 
     if sync_room_avatars:
         try:

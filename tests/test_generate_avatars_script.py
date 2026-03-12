@@ -27,7 +27,11 @@ def test_load_config_uses_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path)
 
 def test_get_avatar_path_uses_workspace_avatars_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
     """Generated avatars should land in the workspace avatars directory."""
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+
+    def _avatars_dir(**_kwargs: object) -> Path:
+        return tmp_path / "avatars"
+
+    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
 
     avatar_path = generate_avatars.get_avatar_path("agents", "general")
 
@@ -49,6 +53,70 @@ def test_extract_image_bytes_returns_first_inline_image() -> None:
     )
 
     assert generate_avatars.extract_image_bytes(response) == b"png-bytes"
+
+
+def test_has_missing_managed_avatars_detects_complete_avatar_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing managed avatars should not require a Google key just for sync."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    config = generate_avatars.Config.model_validate(raw_config)
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"avatar")
+
+    def _avatars_dir(**_kwargs: object) -> Path:
+        return tmp_path / "avatars"
+
+    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
+
+    assert not generate_avatars.has_missing_managed_avatars(config)
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_exist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Existing managed avatars should allow sync-only startup without generation credentials."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"avatar")
+
+    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
+    sync_room_avatars = AsyncMock()
+    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", sync_room_avatars)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    await generate_avatars.run_avatar_generation(sync_room_avatars=True)
+
+    sync_room_avatars.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -124,10 +192,13 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_run_avatar_generation_includes_team_rooms_and_root_space(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_avatar_generation_includes_team_rooms_and_root_space(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Generation should cover team-only rooms and the managed root space."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-5-latest"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -155,6 +226,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(monkeypa
         return client
 
     monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
     monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", AsyncMock())
@@ -176,7 +248,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 ) -> None:
     """Matrix avatar sync should cover team-only rooms and the managed root space."""
     raw_config = {
-        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-5-latest"}},
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "router": {"model": "default"},
         "agents": {
             "general": {
@@ -231,4 +303,52 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     synced_targets = {(call.kwargs.get("room_id"), call.args[1].name) for call in check_and_set_avatar.await_args_list}
     assert ("!war:localhost", "war_room.png") in synced_targets
     assert ("!space:localhost", "root_space.png") in synced_targets
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Matrix avatar sync must not mutate a stale root Space when the feature is disabled."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": False, "name": "Workspace"},
+    }
+    space_avatar_path = tmp_path / "avatars" / "spaces" / "root_space.png"
+    space_avatar_path.parent.mkdir(parents=True)
+    space_avatar_path.write_bytes(b"space-bytes")
+
+    router_account = SimpleNamespace(username="router")
+    router_account.password = b"pw".decode()
+
+    def _get_account(key: str) -> object | None:
+        return router_account if key == "agent_router" else None
+
+    state = SimpleNamespace(
+        space_room_id="!space:localhost",
+        get_account=_get_account,
+    )
+    client = SimpleNamespace(close=AsyncMock())
+    check_and_set_avatar = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "check_and_set_avatar", check_and_set_avatar)
+    monkeypatch.setattr(generate_avatars, "MATRIX_HOMESERVER", "http://localhost:8008")
+
+    await generate_avatars.set_room_avatars_in_matrix()
+
+    synced_targets = {(call.kwargs.get("room_id"), call.args[1].name) for call in check_and_set_avatar.await_args_list}
+    assert ("!space:localhost", "root_space.png") not in synced_targets
     client.close.assert_awaited_once()
