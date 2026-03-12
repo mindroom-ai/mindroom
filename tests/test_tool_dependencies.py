@@ -276,6 +276,23 @@ def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytes
     assert auto_install_optional_extra("sentence_transformers")
 
 
+def test_auto_install_optional_extra_matches_installed_metadata_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normalized extra names should resolve when installed metadata uses hyphens."""
+    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda: True)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._available_optional_extras",
+        lambda: {"sentence-transformers"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._install_optional_extras",
+        lambda extras, *, quiet=False: extras == ["sentence-transformers"] and quiet,
+    )
+
+    assert auto_install_optional_extra("sentence_transformers")
+
+
 def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:
     """Outside virtualenvs, optional extras should install via pip/uv pip instead of uv sync."""
     calls = {"sync": 0, "env": 0}

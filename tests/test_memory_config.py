@@ -165,6 +165,31 @@ class TestMemoryConfig:
         assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert result["embedder"]["config"]["embedding_dims"] == 384
 
+    @patch("mindroom.memory.config.get_credentials_manager")
+    def test_get_memory_config_keeps_existing_huggingface_provider_support(
+        self,
+        mock_get_creds_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Existing Mem0 providers should remain valid after adding sentence-transformers."""
+        mock_get_creds_manager.return_value = MagicMock()
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "huggingface",
+                    "config": {
+                        "model": "sentence-transformers/all-MiniLM-L6-v2",
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config)
+
+        assert result["embedder"]["provider"] == "huggingface"
+        assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+
     def test_memory_collection_name_changes_when_embedder_changes(self) -> None:
         """Different embedder settings should isolate memories into different collections."""
         openai_memory = MemoryConfig(

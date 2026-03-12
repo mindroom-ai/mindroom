@@ -9,15 +9,14 @@ from pydantic import BaseModel, Field
 from mindroom.config.models import EmbedderConfig
 
 MemoryBackend = Literal["mem0", "file"]
-MemoryEmbedderProvider = Literal["openai", "ollama", "sentence_transformers"]
 
 
 class _MemoryEmbedderConfig(BaseModel):
     """Memory embedder configuration."""
 
-    provider: MemoryEmbedderProvider = Field(
+    provider: str = Field(
         default="openai",
-        description="Embedder provider (openai, ollama, sentence_transformers)",
+        description="Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
     )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 

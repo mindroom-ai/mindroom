@@ -55,6 +55,11 @@ def _pip_name_to_import(pip_name: str) -> str:
     return normalized.replace("-", "_")
 
 
+def _normalize_extra_name(extra_name: str) -> str:
+    """Normalize extra names across pyproject and installed metadata conventions."""
+    return extra_name.strip().lower().replace("_", "-")
+
+
 def check_deps_installed(dependencies: list[str]) -> bool:
     """Check if all dependencies are importable using find_spec (no side effects)."""
     for dep in dependencies:
@@ -88,6 +93,19 @@ def _available_optional_extras() -> set[str]:
     except importlib_metadata.PackageNotFoundError:
         return set()
     return set(metadata.get_all("Provides-Extra") or [])
+
+
+def _resolve_optional_extra_name(extra_name: str) -> str | None:
+    """Resolve an extra name against available extras with normalized matching."""
+    available = _available_optional_extras()
+    if extra_name in available:
+        return extra_name
+
+    normalized_name = _normalize_extra_name(extra_name)
+    for available_name in sorted(available):
+        if _normalize_extra_name(available_name) == normalized_name:
+            return available_name
+    return None
 
 
 def _is_uv_tool_install() -> bool:
@@ -170,7 +188,9 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
         return False
     if _is_uv_tool_install():
         current_extras = _get_current_uv_tool_extras()
-        merged = sorted(set(current_extras) | set(extras))
+        merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
+        merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
+        merged = sorted(merged_by_name.values())
         return _install_via_uv_tool(merged, quiet=quiet)
     if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
         return _install_via_uv_sync(extras, quiet=quiet)
@@ -181,9 +201,10 @@ def auto_install_optional_extra(extra_name: str) -> bool:
     """Auto-install an optional extra when supported and enabled."""
     if not auto_install_enabled():
         return False
-    if extra_name not in _available_optional_extras():
+    resolved_extra_name = _resolve_optional_extra_name(extra_name)
+    if resolved_extra_name is None:
         return False
-    return _install_optional_extras([extra_name], quiet=True)
+    return _install_optional_extras([resolved_extra_name], quiet=True)
 
 
 def auto_install_tool_extra(tool_name: str) -> bool:
