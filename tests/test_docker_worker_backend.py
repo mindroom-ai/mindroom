@@ -8,8 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import worker_root_path
+from mindroom.tool_system.worker_routing import worker_dir_name, worker_root_path
 from mindroom.workers.backends.docker import (
+    _PROJECTED_CONFIGS_DIRNAME,
+    _WORKER_CONFIG_STATE_DIRNAME,
     DockerWorkerBackend,
     _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
@@ -131,9 +133,26 @@ class _FakeContainersApi:
         return container
 
 
+class _FakeImage:
+    def __init__(self, image_id: str) -> None:
+        self.id = image_id
+
+
+class _FakeImagesApi:
+    def __init__(self) -> None:
+        self.by_name: dict[str, _FakeImage] = {}
+
+    def get(self, name: str) -> _FakeImage:
+        image = self.by_name.get(name)
+        if image is None:
+            raise _FakeNotFoundError(name)
+        return image
+
+
 class _FakeDockerClient:
     def __init__(self) -> None:
         self.containers = _FakeContainersApi()
+        self.images = _FakeImagesApi()
 
 
 def _noop_sync_shared_credentials(*_args: object, **_kwargs: object) -> None:
@@ -197,11 +216,17 @@ def _assert_projected_worker_mounts(
     volumes: dict[str, dict[str, str]],
     projected_paths: dict[str, Path],
 ) -> Path:
-    state_root = str(worker_root_path(tmp_path, "worker-a"))
+    worker_root = worker_root_path(tmp_path, "worker-a")
+    state_root = str(worker_root)
     assert volumes[state_root]["bind"] == "/app/worker"
 
     projection_root = _projection_root(volumes)
-    assert projection_root.parent == worker_root_path(tmp_path, "worker-a") / "metadata"
+    assert projection_root.parent == (
+        worker_root_path(tmp_path, "__mindroom_root__").parent
+        / _PROJECTED_CONFIGS_DIRNAME
+        / worker_dir_name("worker-a")
+    )
+    assert worker_root not in projection_root.parents
     assert str(tmp_path) not in volumes
     assert str(tmp_path / "mindroom_data") not in volumes
     assert (
@@ -216,14 +241,8 @@ def _assert_projected_worker_mounts(
         volumes[str(projected_paths["context_file"].resolve())]["bind"]
         == "/app/config-host/.mindroom-worker-assets/agents/code/context_files/00-context.md"
     )
-    assert (
-        volumes[str(projected_paths["memory_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/memory/file"
-    )
-    assert (
-        volumes[str(projected_paths["agent_memory_root"].resolve())]["bind"]
-        == "/app/config-host/.mindroom-worker-assets/agents/code/memory_file_path"
-    )
+    assert str(projected_paths["memory_root"].resolve()) not in volumes
+    assert str(projected_paths["agent_memory_root"].resolve()) not in volumes
     return projection_root
 
 
@@ -251,6 +270,7 @@ def _backend(
     )
     config.host_config_path.write_text(config_text, encoding="utf-8")
     fake_client = _FakeDockerClient()
+    fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
     sync_calls: list[tuple[str, bool]] = []
 
     monkeypatch.setattr(
@@ -320,10 +340,16 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert "path: ./.mindroom-worker-assets/memory/file" in projected_config
+    assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
     assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
-    assert "memory_file_path: ./.mindroom-worker-assets/agents/code/memory_file_path" in projected_config
+    assert (
+        f"memory_file_path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/agents/code/memory_file_path" in projected_config
+    )
     assert (projection_root / ".env").read_text(encoding="utf-8") == ""
+    assert (worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "memory" / "file").is_dir()
+    assert (
+        worker_root_path(tmp_path, "worker-a") / _WORKER_CONFIG_STATE_DIRNAME / "agents" / "code" / "memory_file_path"
+    ).is_dir()
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
 
@@ -464,11 +490,15 @@ def test_docker_backend_evict_without_preserving_state_removes_container_and_roo
 
     backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
     worker_root = worker_root_path(tmp_path, "worker-a")
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
 
     result = backend.evict_worker("worker-a", preserve_state=False, now=20.0)
 
     assert result is None
     assert not worker_root.exists()
+    assert not projection_root.exists()
     container = next(iter(fake_client.containers.by_name.values()))
     assert container.removed == 1
 
@@ -655,6 +685,26 @@ def test_docker_backend_recreates_container_when_host_config_contents_change(
     existing_container = fake_client.containers.by_name[handle.worker_id]
 
     (tmp_path / "config.yaml").write_text("agents:\n  code:\n    tools: [shell]\n", encoding="utf-8")
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[handle.worker_id]
+    assert replacement_container is not existing_container
+    assert existing_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Rebuilding the same image tag locally should rotate the worker on the next ensure."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    existing_container = fake_client.containers.by_name[handle.worker_id]
+
+    fake_client.images.by_name[backend.config.image] = _FakeImage("sha256:image-v2")
 
     backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
 
