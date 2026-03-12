@@ -148,27 +148,49 @@ class TestResolveAvatarPath:
     def test_returns_workspace_avatar_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Workspace avatars should resolve to their on-disk path."""
         workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
         workspace_avatar = workspace_dir / "agents" / "general.png"
         workspace_avatar.parent.mkdir(parents=True)
         workspace_avatar.write_bytes(b"workspace")
         monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("agents", "general")
 
         assert resolved == workspace_avatar
 
-    def test_returns_workspace_avatar_path_when_workspace_missing(
+    def test_returns_bundled_avatar_when_workspace_missing(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Missing avatars should still resolve to the workspace location that generation writes."""
+        """Runtime lookup should fall back to bundled avatars when no workspace override exists."""
         workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
+        bundled_avatar = bundled_dir / "rooms" / "lobby.png"
+        bundled_avatar.parent.mkdir(parents=True)
+        bundled_avatar.write_bytes(b"bundled")
         monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "lobby")
 
-        assert resolved == workspace_dir / "rooms" / "lobby.png"
+        assert resolved == bundled_avatar
+
+    def test_returns_workspace_avatar_path_when_no_avatar_exists(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing avatars should resolve to the workspace location generation writes to."""
+        workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+
+        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")
+
+        assert resolved == workspace_dir / "rooms" / "nonexistent.png"
 
 
 class TestStoragePathResolution:

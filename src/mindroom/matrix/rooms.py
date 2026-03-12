@@ -33,18 +33,11 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
-
-
-def _managed_avatar_path(category: str, avatar_name: str) -> Path:
-    """Return the managed avatar path for a room-like entity."""
-    return resolve_avatar_path(category, avatar_name)
 
 
 async def _set_room_avatar_if_available(
@@ -60,7 +53,7 @@ async def _set_room_avatar_if_available(
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.
     """
-    avatar_path = _managed_avatar_path(avatar_category, avatar_name)
+    avatar_path = resolve_avatar_path(avatar_category, avatar_name)
     if not avatar_path.exists():
         return
 

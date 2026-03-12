@@ -30,7 +30,16 @@ def _workspace_avatar_path(
 def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Patch avatar path helpers to use a temporary workspace."""
     avatars_path = tmp_path / "avatars"
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda **_kwargs: avatars_path)
+    monkeypatch.setattr(
+        generate_avatars,
+        "workspace_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
     monkeypatch.setattr(
         generate_avatars,
         "resolve_avatar_path",
@@ -71,7 +80,7 @@ def test_extract_image_bytes_returns_first_inline_image() -> None:
 def test_has_missing_managed_avatars_detects_complete_avatar_set(
     workspace_avatar_dir: Path,
 ) -> None:
-    """Existing managed avatars should not require a Google key just for sync."""
+    """Existing managed workspace avatars should not be reported as missing."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "router": {"model": "default"},
@@ -147,7 +156,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """Existing managed avatars should allow sync-only startup without generation credentials."""
+    """Existing managed avatars should skip generation even without Google credentials."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "router": {"model": "default"},
@@ -170,13 +179,10 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
         lambda: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
-    sync_room_avatars = AsyncMock()
-    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", sync_room_avatars)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
 
-    await generate_avatars.run_avatar_generation(sync_room_avatars=True)
-
-    sync_room_avatars.assert_awaited_once()
+    await generate_avatars.run_avatar_generation()
 
 
 @pytest.mark.asyncio
@@ -211,14 +217,11 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
         lambda **_kwargs: SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock())),
     )
     monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(side_effect=RuntimeError("boom")))
-    sync_room_avatars = AsyncMock()
-    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", sync_room_avatars)
     monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
 
     with pytest.raises(generate_avatars.AvatarGenerationError, match="Avatar generation failed"):
-        await generate_avatars.run_avatar_generation(sync_room_avatars=True)
+        await generate_avatars.run_avatar_generation()
 
-    sync_room_avatars.assert_not_awaited()
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
 
 
@@ -247,7 +250,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
         avatar_path.write_bytes(b"avatar")
     monkeypatch.setattr(generate_avatars, "CONFIG_PATH", config_path)
 
-    await generate_avatars.run_avatar_generation(sync_room_avatars=False)
+    await generate_avatars.run_avatar_generation()
 
 
 @pytest.mark.asyncio
@@ -258,9 +261,11 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
 
     prompt = await generate_avatars.generate_prompt(
         client,
-        entity_type="agents",
-        entity_name="research",
-        role="Finds information",
+        generate_avatars.AvatarTarget(
+            entity_type="agents",
+            entity_name="research",
+            role="Finds information",
+        ),
     )
 
     assert prompt == f"{generate_avatars.CHARACTER_STYLE}, teal and copper, visor eyes"
@@ -278,9 +283,11 @@ async def test_generate_prompt_uses_room_style_for_spaces() -> None:
 
     prompt = await generate_avatars.generate_prompt(
         client,
-        entity_type="spaces",
-        entity_name="root_space",
-        role="Workspace space that organizes rooms",
+        generate_avatars.AvatarTarget(
+            entity_type="spaces",
+            entity_name="root_space",
+            role="Workspace space that organizes rooms",
+        ),
     )
 
     assert prompt == f"{generate_avatars.ROOM_STYLE}, deep blue, doorway outline"
@@ -310,9 +317,11 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
 
     await generate_avatars.generate_avatar(
         client,
-        entity_type="agents",
-        entity_name="general",
-        entity_data={"role": "Helpful assistant"},
+        generate_avatars.AvatarTarget(
+            entity_type="agents",
+            entity_name="general",
+            role="Helpful assistant",
+        ),
     )
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
@@ -352,12 +361,9 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 
     async def _generate_avatar(
         _client: object,
-        entity_type: str,
-        entity_name: str,
-        _entity_data: dict,
-        _all_agents: dict | None = None,
+        target: generate_avatars.AvatarTarget,
     ) -> None:
-        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / target.entity_type / f"{target.entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"generated")
 
@@ -375,12 +381,15 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
-    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", AsyncMock())
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    workspace_avatar_dir.mkdir(parents=True, exist_ok=True)
+    api_key_file = workspace_avatar_dir / "google-key.txt"
+    api_key_file.write_text("test-google-key", encoding="utf-8")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY_FILE", str(api_key_file))
 
-    await generate_avatars.run_avatar_generation(sync_room_avatars=False)
+    await generate_avatars.run_avatar_generation()
 
-    generated_entities = {(call.args[1], call.args[2]) for call in generated.await_args_list}
+    generated_entities = {(call.args[1].entity_type, call.args[1].entity_name) for call in generated.await_args_list}
     assert ("rooms", "lobby") in generated_entities
     assert ("rooms", "war_room") in generated_entities
     assert ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME) in generated_entities

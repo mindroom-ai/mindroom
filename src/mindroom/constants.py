@@ -65,14 +65,43 @@ def avatars_dir(*, config_path: Path | None = None) -> Path:
     return _config_base_dir(config_path) / "avatars"
 
 
+def bundled_avatars_dir() -> Path:
+    """Return the bundled avatar directory shipped with a source checkout or runtime image."""
+    return Path(__file__).resolve().parents[2] / "avatars"
+
+
+def workspace_avatar_path(
+    entity_type: str,
+    entity_name: str,
+    *,
+    config_path: Path | None = None,
+) -> Path:
+    """Return the writable workspace avatar path for a managed entity."""
+    return avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
+
+
 def resolve_avatar_path(
     entity_type: str,
     entity_name: str,
     *,
     config_path: Path | None = None,
 ) -> Path:
-    """Return the workspace avatar path for a managed entity."""
-    return avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
+    """Return the best available avatar path for a managed entity.
+
+    Prefer a workspace override next to the active config file.
+    Fall back to the bundled runtime assets when no workspace file exists yet.
+    If neither exists, return the intended workspace path so callers that write
+    new avatars know where to place them.
+    """
+    workspace_path = workspace_avatar_path(entity_type, entity_name, config_path=config_path)
+    if workspace_path.exists():
+        return workspace_path
+
+    bundled_path = bundled_avatars_dir() / entity_type / f"{entity_name}.png"
+    if bundled_path.exists():
+        return bundled_path
+
+    return workspace_path
 
 
 def find_config() -> Path:

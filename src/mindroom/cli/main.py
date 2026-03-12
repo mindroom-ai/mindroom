@@ -204,7 +204,7 @@ def avatars_generate() -> None:
     try:
         from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
 
-        asyncio.run(run_avatar_generation(sync_room_avatars=False))
+        asyncio.run(run_avatar_generation())
     except AvatarGenerationError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None

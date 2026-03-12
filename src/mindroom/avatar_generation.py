@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from google import genai
 from google.genai import types
@@ -14,8 +14,16 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir, resolve_avatar_path
+from mindroom.constants import (
+    CONFIG_PATH,
+    MATRIX_HOMESERVER,
+    ROUTER_AGENT_NAME,
+    resolve_avatar_path,
+    workspace_avatar_path,
+)
+from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
@@ -23,7 +31,6 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
     from pathlib import Path
 
     import nio
@@ -32,6 +39,7 @@ if TYPE_CHECKING:
 
 
 console = Console()
+logger = get_logger(__name__)
 
 PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
 # Gemini 3.1 Flash Image Preview is the current Google image-generation model.
@@ -110,6 +118,26 @@ ROOM_PURPOSES = {
     "science": "Scientific research and experiments",
 }
 
+AvatarEntityType = Literal["agents", "teams", "rooms", "spaces"]
+
+
+@dataclass(frozen=True)
+class AvatarTeamMember:
+    """A typed team member descriptor used for prompt generation."""
+
+    name: str
+    role: str
+
+
+@dataclass(frozen=True)
+class AvatarTarget:
+    """A typed avatar generation target."""
+
+    entity_type: AvatarEntityType
+    entity_name: str
+    role: str
+    team_members: tuple[AvatarTeamMember, ...] = ()
+
 
 def load_validated_config() -> Config:
     """Load and validate the active MindRoom configuration."""
@@ -118,9 +146,9 @@ def load_validated_config() -> Config:
 
 def get_avatar_path(entity_type: str, entity_name: str) -> Path:
     """Get the output path for an avatar file."""
-    output_dir = avatars_dir() / entity_type
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / f"{entity_name}.png"
+    avatar_path = workspace_avatar_path(entity_type, entity_name)
+    avatar_path.parent.mkdir(parents=True, exist_ok=True)
+    return avatar_path
 
 
 def _managed_room_avatar_keys(config: Config) -> set[str]:
@@ -148,7 +176,7 @@ def _missing_avatar_targets(
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in _managed_avatar_targets(config)
-        if not resolve_avatar_path(entity_type, entity_name, config_path=config_path).exists()
+        if not workspace_avatar_path(entity_type, entity_name, config_path=config_path).exists()
     }
 
 
@@ -159,22 +187,21 @@ def has_missing_managed_avatars(config: Config, *, config_path: Path | None = No
 
 async def generate_prompt(
     client: genai.Client,
-    entity_type: str,
-    entity_name: str,
-    role: str,
-    team_members: list[dict] | None = None,
+    target: AvatarTarget,
 ) -> str:
     """Generate an image prompt based on the entity's role using AI."""
-    if entity_type in {"rooms", "spaces"}:
+    if target.entity_type in {"rooms", "spaces"}:
         system_prompt = ROOM_SYSTEM_PROMPT
-        user_prompt = f"Room name: {entity_name}\nPurpose: {role}"
-    elif entity_type == "teams" and team_members:
+        user_prompt = f"Room name: {target.entity_name}\nPurpose: {target.role}"
+    elif target.entity_type == "teams":
         system_prompt = TEAM_SYSTEM_PROMPT
-        members_info = "\n".join([f"- {m['name']}: {m['role']}" for m in team_members])
-        user_prompt = f"Team name: {entity_name}\nTeam role: {role}\nTeam members:\n{members_info}"
+        user_prompt = f"Team name: {target.entity_name}\nTeam role: {target.role}"
+        if target.team_members:
+            members_info = "\n".join(f"- {member.name}: {member.role}" for member in target.team_members)
+            user_prompt = f"{user_prompt}\nTeam members:\n{members_info}"
     else:
         system_prompt = AGENT_SYSTEM_PROMPT
-        user_prompt = f"Agent name: {entity_name}\nRole: {role}\nType: {entity_type}"
+        user_prompt = f"Agent name: {target.entity_name}\nRole: {target.role}\nType: {target.entity_type}"
 
     response = await client.aio.models.generate_content(
         model=PROMPT_MODEL,
@@ -186,17 +213,17 @@ async def generate_prompt(
         ),
     )
     if not response.text:
-        msg = f"Gemini returned no text prompt for {entity_type}/{entity_name}"
+        msg = f"Gemini returned no text prompt for {target.entity_type}/{target.entity_name}"
         raise ValueError(msg)
 
     visual_elements = response.text.strip()
-    base_style = ROOM_STYLE if entity_type in {"rooms", "spaces"} else CHARACTER_STYLE
+    base_style = ROOM_STYLE if target.entity_type in {"rooms", "spaces"} else CHARACTER_STYLE
     final_prompt = f"{base_style}, {visual_elements}"
 
     console.print(
         Panel(
             Text(final_prompt, style="cyan"),
-            title=f"[bold yellow]{entity_type}/{entity_name}[/bold yellow]",
+            title=f"[bold yellow]{target.entity_type}/{target.entity_name}[/bold yellow]",
             border_style="green",
         ),
     )
@@ -213,59 +240,41 @@ def extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None
 
 async def generate_avatar(
     client: genai.Client,
-    entity_type: str,
-    entity_name: str,
-    entity_data: dict,
-    all_agents: dict | None = None,
+    target: AvatarTarget,
 ) -> None:
     """Generate an avatar for a single entity if it does not exist."""
-    avatar_path = get_avatar_path(entity_type, entity_name)
+    avatar_path = get_avatar_path(target.entity_type, target.entity_name)
     if avatar_path.exists():
-        console.print(f"[green]✓[/green] Avatar already exists for [bold]{entity_type}/{entity_name}[/bold]")
-        return
-
-    role = entity_data.get("role", "AI assistant")
-    console.print(f"\n[yellow]🎨 Generating avatar for {entity_type}/{entity_name}...[/yellow]")
-    console.print(f"   [dim]Role: {role}[/dim]")
-
-    team_members = None
-    if entity_type == "teams" and all_agents:
-        team_members = []
-        for agent_name in entity_data.get("agents", []):
-            if agent_name in all_agents:
-                agent_role = all_agents[agent_name].get("role", "Team member")
-                team_members.append({"name": agent_name, "role": agent_role})
-        console.print(f"   [dim]Team members: {', '.join(member['name'] for member in team_members)}[/dim]")
-
-    try:
-        prompt = await generate_prompt(client, entity_type, entity_name, role, team_members)
-    except Exception as e:
-        console.print(f"[red]✗ Failed to generate prompt for {entity_type}/{entity_name}: {e}[/red]")
-        return
-
-    try:
-        response = await client.aio.models.generate_content(
-            model=IMAGE_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["IMAGE"],
-                image_config=types.ImageConfig(
-                    aspect_ratio="1:1",
-                    image_size="1K",
-                ),
-            ),
+        console.print(
+            f"[green]✓[/green] Avatar already exists for [bold]{target.entity_type}/{target.entity_name}[/bold]",
         )
-    except Exception as e:
-        console.print(f"[red]✗ Failed to generate image for {entity_type}/{entity_name}: {e}[/red]")
         return
+
+    console.print(f"\n[yellow]🎨 Generating avatar for {target.entity_type}/{target.entity_name}...[/yellow]")
+    console.print(f"   [dim]Role: {target.role}[/dim]")
+    if target.team_members:
+        console.print(f"   [dim]Team members: {', '.join(member.name for member in target.team_members)}[/dim]")
+
+    prompt = await generate_prompt(client, target)
+    response = await client.aio.models.generate_content(
+        model=IMAGE_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=types.ImageConfig(
+                aspect_ratio="1:1",
+                image_size="1K",
+            ),
+        ),
+    )
 
     image_bytes = extract_image_bytes(response)
     if not image_bytes:
-        console.print(f"[red]✗ No image data found for {entity_type}/{entity_name}[/red]")
-        return
+        msg = f"No image data found for {target.entity_type}/{target.entity_name}"
+        raise ValueError(msg)
 
     avatar_path.write_bytes(image_bytes)
-    console.print(f"[green]✓ Generated avatar for {entity_type}/{entity_name}[/green]")
+    console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
 
 
 def _build_router_user(router_account: _MatrixAccount) -> AgentMatrixUser:
@@ -344,16 +353,13 @@ async def _sync_root_space_avatar(
     )
 
 
-async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -> None:
+async def set_room_avatars_in_matrix() -> None:
     """Set avatars for all rooms in Matrix."""
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
 
     state = MatrixState.load()
     router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
     if not router_account:
-        if suppress_missing_router:
-            console.print("[dim]Skipping room avatar sync: router account not initialized yet[/dim]")
-            return
         msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
         raise AvatarSyncError(msg)
 
@@ -374,52 +380,71 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
         console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file)[/dim]")
 
 
-def _build_avatar_generation_tasks(
-    client: genai.Client,
+def _build_avatar_generation_targets(
     config: Config,
     missing_targets: set[tuple[str, str]],
-) -> list[Awaitable[None]]:
-    """Build generation tasks for every missing managed avatar."""
-    agents = {agent_name: agent_config.model_dump(mode="python") for agent_name, agent_config in config.agents.items()}
-    teams = {team_name: team_config.model_dump(mode="python") for team_name, team_config in config.teams.items()}
-    tasks: list[Awaitable[None]] = []
+) -> list[AvatarTarget]:
+    """Build typed avatar targets for every missing managed avatar."""
+    targets: list[AvatarTarget] = []
 
-    for agent_name, agent_data in agents.items():
+    for agent_name, agent_config in config.agents.items():
         if ("agents", agent_name) in missing_targets:
-            tasks.append(generate_avatar(client, "agents", agent_name, agent_data))
+            targets.append(
+                AvatarTarget(
+                    entity_type="agents",
+                    entity_name=agent_name,
+                    role=agent_config.role or "AI assistant",
+                ),
+            )
 
     if ("agents", "router") in missing_targets:
-        tasks.append(
-            generate_avatar(
-                client,
-                "agents",
-                "router",
-                {"role": "Intelligent routing and agent selection"},
+        targets.append(
+            AvatarTarget(
+                entity_type="agents",
+                entity_name="router",
+                role="Intelligent routing and agent selection",
             ),
         )
 
-    for team_name, team_data in teams.items():
+    for team_name, team_config in config.teams.items():
         if ("teams", team_name) in missing_targets:
-            tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
+            team_members = tuple(
+                AvatarTeamMember(
+                    name=agent_name,
+                    role=config.agents[agent_name].role or "Team member",
+                )
+                for agent_name in team_config.agents
+                if agent_name in config.agents
+            )
+            targets.append(
+                AvatarTarget(
+                    entity_type="teams",
+                    entity_name=team_name,
+                    role=team_config.role,
+                    team_members=team_members,
+                ),
+            )
 
-    for room_name in _managed_room_avatar_keys(config):
-        if ("rooms", room_name) in missing_targets:
-            room_data = {
-                "role": ROOM_PURPOSES.get(room_name, f"Collaboration space for {room_name} activities"),
-            }
-            tasks.append(generate_avatar(client, "rooms", room_name, room_data))
+    targets.extend(
+        AvatarTarget(
+            entity_type="rooms",
+            entity_name=room_name,
+            role=ROOM_PURPOSES.get(room_name, f"Collaboration space for {room_name} activities"),
+        )
+        for room_name in _managed_room_avatar_keys(config)
+        if ("rooms", room_name) in missing_targets
+    )
 
     if ("spaces", ROOT_SPACE_AVATAR_NAME) in missing_targets:
-        tasks.append(
-            generate_avatar(
-                client,
-                "spaces",
-                ROOT_SPACE_AVATAR_NAME,
-                {"role": f"Workspace space named {config.matrix_space.name} that organizes all managed rooms"},
+        targets.append(
+            AvatarTarget(
+                entity_type="spaces",
+                entity_name=ROOT_SPACE_AVATAR_NAME,
+                role=f"Workspace space named {config.matrix_space.name} that organizes all managed rooms",
             ),
         )
 
-    return tasks
+    return targets
 
 
 def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None:
@@ -438,7 +463,7 @@ def _remaining_missing_avatar_targets(missing_targets: set[tuple[str, str]]) -> 
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in missing_targets
-        if not resolve_avatar_path(entity_type, entity_name).exists()
+        if not workspace_avatar_path(entity_type, entity_name).exists()
     }
 
 
@@ -451,14 +476,14 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = get_secret_from_env("GOOGLE_API_KEY")
     if not api_key:
-        console.print("[red]Error: GOOGLE_API_KEY environment variable not set[/red]")
-        console.print("Please set it in your .env file or environment")
+        console.print("[red]Error: GOOGLE_API_KEY or GOOGLE_API_KEY_FILE environment variable not set[/red]")
+        console.print("Please set it in your .env file, secrets mount, or environment")
         return False
 
     client = genai.Client(api_key=api_key)
-    tasks = _build_avatar_generation_tasks(client, config, missing_targets)
+    targets = _build_avatar_generation_targets(config, missing_targets)
     _print_avatar_generation_plan(missing_targets)
 
     try:
@@ -468,15 +493,33 @@ async def _generate_missing_avatars(
             console=console,
         ) as progress:
             task_id = progress.add_task("Processing avatars...", total=None)
-            await asyncio.gather(*tasks)
+            results = await asyncio.gather(
+                *(generate_avatar(client, target) for target in targets),
+                return_exceptions=True,
+            )
             progress.update(task_id, completed=True)
     finally:
         await client.aio.aclose()
 
+    failed_targets: list[tuple[AvatarTarget, Exception]] = []
+    for target, result in zip(targets, results, strict=False):
+        if isinstance(result, Exception):
+            failed_targets.append((target, result))
+            logger.error(
+                "Avatar generation failed",
+                entity_type=target.entity_type,
+                entity_name=target.entity_name,
+                error=repr(result),
+                exc_info=(type(result), result, result.__traceback__),
+            )
+            console.print(f"[red]✗ Failed to generate {target.entity_type}/{target.entity_name}: {result}[/red]")
+
     remaining_targets = _remaining_missing_avatar_targets(missing_targets)
-    if remaining_targets:
+    if failed_targets or remaining_targets:
+        failed_target_keys = {(target.entity_type, target.entity_name) for target, _error in failed_targets}
         formatted_targets = ", ".join(
-            f"{entity_type}/{entity_name}" for entity_type, entity_name in sorted(remaining_targets)
+            f"{entity_type}/{entity_name}"
+            for entity_type, entity_name in sorted(remaining_targets | failed_target_keys)
         )
         console.print(f"\n[red]✗ Avatar generation failed for: {formatted_targets}[/red]")
         return False
@@ -485,22 +528,11 @@ async def _generate_missing_avatars(
     return True
 
 
-async def run_avatar_generation(
-    *,
-    sync_room_avatars: bool = False,
-    suppress_missing_router: bool = False,
-) -> None:
-    """Generate missing avatars and optionally sync room avatars to Matrix."""
+async def run_avatar_generation() -> None:
+    """Generate missing managed avatars in the workspace."""
     config = load_validated_config()
     missing_targets = _missing_avatar_targets(config)
 
     if not await _generate_missing_avatars(config, missing_targets):
         msg = "Avatar generation failed. See errors above."
         raise AvatarGenerationError(msg)
-
-    if sync_room_avatars:
-        try:
-            await set_room_avatars_in_matrix(suppress_missing_router=suppress_missing_router)
-        except Exception as e:
-            console.print(f"\n[yellow]Warning: Could not set Matrix avatars: {e}[/yellow]")
-            console.print("[dim]This is normal if Matrix server is not running[/dim]")

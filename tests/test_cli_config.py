@@ -645,7 +645,7 @@ class TestAvatarsCommands:
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
             result = runner.invoke(app, ["avatars", "generate"])
         assert result.exit_code == 0
-        run_avatar_generation.assert_awaited_once_with(sync_room_avatars=False)
+        run_avatar_generation.assert_awaited_once_with()
 
     def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Avatar sync command should invoke the Matrix sync workflow."""
