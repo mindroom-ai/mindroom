@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from mindroom.matrix.state import _MatrixAccount
 
 
-console = Console()
 logger = get_logger(__name__)
 
 PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
@@ -139,6 +138,11 @@ class AvatarTarget:
     team_members: tuple[AvatarTeamMember, ...] = ()
 
 
+def get_console() -> Console:
+    """Create a Rich console when CLI output is needed."""
+    return Console()
+
+
 def load_validated_config() -> Config:
     """Load and validate the active MindRoom configuration."""
     return Config.from_yaml(CONFIG_PATH.expanduser().resolve())
@@ -220,7 +224,7 @@ async def generate_prompt(
     base_style = ROOM_STYLE if target.entity_type in {"rooms", "spaces"} else CHARACTER_STYLE
     final_prompt = f"{base_style}, {visual_elements}"
 
-    console.print(
+    get_console().print(
         Panel(
             Text(final_prompt, style="cyan"),
             title=f"[bold yellow]{target.entity_type}/{target.entity_name}[/bold yellow]",
@@ -245,11 +249,12 @@ async def generate_avatar(
     """Generate an avatar for a single entity if it does not exist."""
     avatar_path = get_avatar_path(target.entity_type, target.entity_name)
     if avatar_path.exists():
-        console.print(
+        get_console().print(
             f"[green]✓[/green] Avatar already exists for [bold]{target.entity_type}/{target.entity_name}[/bold]",
         )
         return
 
+    console = get_console()
     console.print(f"\n[yellow]🎨 Generating avatar for {target.entity_type}/{target.entity_name}...[/yellow]")
     console.print(f"   [dim]Role: {target.role}[/dim]")
     if target.team_members:
@@ -298,9 +303,9 @@ async def _sync_avatar_target(
 ) -> bool:
     """Apply one managed avatar target and report whether it changed."""
     if await check_and_set_avatar(client, avatar_path, room_id=room_id):
-        console.print(f"[green]✓ Set avatar for {label}[/green]")
+        get_console().print(f"[green]✓ Set avatar for {label}[/green]")
         return True
-    console.print(f"[yellow]⊘ Avatar already set or failed for {label}[/yellow]")
+    get_console().print(f"[yellow]⊘ Avatar already set or failed for {label}[/yellow]")
     return False
 
 
@@ -316,7 +321,7 @@ async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config)
 
         room_id = get_room_id(room_name)
         if not room_id:
-            console.print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
+            get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
             continue
 
         success_count += int(
@@ -355,6 +360,7 @@ async def _sync_root_space_avatar(
 
 async def set_room_avatars_in_matrix() -> None:
     """Set avatars for all rooms in Matrix."""
+    console = get_console()
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
 
     state = MatrixState.load()
@@ -453,7 +459,7 @@ def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None
     room_count = sum(1 for entity_type, _ in missing_targets if entity_type == "rooms")
     team_count = sum(1 for entity_type, _ in missing_targets if entity_type == "teams")
     agent_count = sum(1 for entity_type, _ in missing_targets if entity_type == "agents")
-    console.print(
+    get_console().print(
         f"\n[bold cyan]🚀 Generating {agent_count} agents, {team_count} teams, {room_count} rooms, and {space_count} spaces...[/bold cyan]\n",
     )
 
@@ -472,6 +478,7 @@ async def _generate_missing_avatars(
     missing_targets: set[tuple[str, str]],
 ) -> bool:
     """Generate every missing managed avatar and report whether startup may continue."""
+    console = get_console()
     if not missing_targets:
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
