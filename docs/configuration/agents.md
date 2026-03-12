@@ -168,8 +168,8 @@ Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, an
 
 The supported `worker_scope` values are:
 
-- `shared`: one shared worker state per agent.
-- `user`: one worker state per requester.
+- `shared`: one shared worker state per agent, which is the setting to use when you want one persistent Docker container per agent.
+- `user`: one worker state per requester, shared across agents.
 - `user_agent`: one worker state per requester and agent.
 - `room_thread`: one worker state per room thread, or per room when no thread ID exists.
 

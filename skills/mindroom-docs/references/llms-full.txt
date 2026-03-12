@@ -1053,8 +1053,8 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 
 The supported `worker_scope` values are:
 
-- `shared`: one shared worker state per agent.
-- `user`: one worker state per requester.
+- `shared`: one shared worker state per agent, which is the setting to use when you want one persistent Docker container per agent.
+- `user`: one worker state per requester, shared across agents.
 - `user_agent`: one worker state per requester and agent.
 - `room_thread`: one worker state per room thread, or per room when no thread ID exists.
 
@@ -4049,13 +4049,14 @@ MindRoom can be deployed in various ways depending on your needs.
 
 ## Deployment Options
 
-| Method                                                                                         | Best For                                                           |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally                |
-| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client |
-| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix            |
-| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                                      |
-| Direct                                                                                         | Development, simple setups                                         |
+| Method                                                                                         | Best For                                                                                    |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [Hosted Matrix + local MindRoom](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) | Simplest setup: run only `uvx mindroom run` locally                                         |
+| [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md)        | Run MindRoom locally while `shell`, `file`, and `python` execute in isolated Docker workers |
+| Full Stack (Docker Compose)                                                                    | All-in-one: bundled dashboard + Matrix (Tuwunel) + MindRoom client                          |
+| [Docker (single container)](https://docs.mindroom.chat/deployment/docker/index.md)             | Single MindRoom runtime or when you already have Matrix                                     |
+| [Kubernetes](https://docs.mindroom.chat/deployment/kubernetes/index.md)                        | Multi-tenant SaaS, production                                                               |
+| Direct                                                                                         | Development, simple setups                                                                  |
 
 ## Bridges
 
@@ -4085,7 +4086,7 @@ uvx mindroom run
 
 Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
 
-See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough.
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough. If you want `shell`, `file`, or `python` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
 ### Full Stack (recommended)
 
@@ -4223,6 +4224,10 @@ MindRoom then:
 1. Creates/updates configured agent Matrix users
 1. Joins/creates configured rooms
 1. Starts processing messages
+
+## Optional: Docker worker isolation
+
+If you want `shell`, `file`, or `python` tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Use `worker_scope: shared` when you want one persistent container per agent. Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
 
 ## Credential Model (Important)
 
@@ -4997,9 +5002,10 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 
 The worker runtime authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once. Credentials never become part of the normal tool arguments or the model prompt.
 
-MindRoom currently ships two worker backend shapes:
+MindRoom currently ships three worker backend shapes:
 
 - `static_runner`: one shared sandbox-runner process, usually a sidecar container or a local HTTP service.
+- `docker`: dedicated worker containers created on demand from the primary runtime, with one logical worker per worker key.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
 
 ## Deployment modes
@@ -5122,22 +5128,90 @@ This gives you the convenience of running MindRoom natively while keeping code-e
 
 > [!TIP] If you use plugin tools that also need proxying, mount your `config.yaml` into the runner container so it can register them: `bash docker run -d \ --name mindroom-sandbox-runner \ -p 8766:8766 \ -v ./config.yaml:/app/config.yaml:ro \ -e MINDROOM_CONFIG_PATH=/app/config.yaml \ -e MINDROOM_SANDBOX_RUNNER_MODE=true \ -e MINDROOM_SANDBOX_PROXY_TOKEN=your-secret-token \ -e MINDROOM_STORAGE_PATH=/app/workspace/.mindroom \ ghcr.io/mindroom-ai/mindroom:latest \ /app/run-sandbox-runner.sh`
 
+### Host machine + dedicated Docker workers (`MINDROOM_WORKER_BACKEND=docker`)
+
+Use this when you want the primary MindRoom runtime on the host, but you want `shell`, `file`, or `python` tools to execute in dedicated Docker workers. The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes. This is the simplest way to get one persistent container per agent without running Kubernetes.
+
+If you are testing unreleased code from a source checkout, start MindRoom from that checkout instead of the published PyPI build. Use `uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`. Use plain `uvx mindroom run` only after the version you want is published on PyPI. When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
+
+```
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
+```
+
+Set the backend environment in your shell or `.env`:
+
+```
+export MINDROOM_WORKER_BACKEND=docker
+export MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+export MINDROOM_SANDBOX_PROXY_TOKEN=replace-me-with-a-long-random-token
+
+# Optional but useful for local debugging.
+export MINDROOM_DOCKER_WORKER_NAME_PREFIX=mindroom-worker
+export MINDROOM_DOCKER_WORKER_PUBLISH_HOST=127.0.0.1
+export MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS=60
+```
+
+For released versions, you can point `MINDROOM_DOCKER_WORKER_IMAGE` at the matching published image tag instead.
+
+Then route the tools you want into workers and choose a worker scope:
+
+```
+defaults:
+  worker_tools: [shell, file, python]
+  worker_scope: shared
+
+agents:
+  code:
+    tools: [shell, file, python]
+
+  research:
+    tools: [shell, file, python]
+```
+
+`worker_scope: shared` is the setting to use when you want one persistent Docker container per agent. `worker_scope: user_agent` creates one container per requester and agent. `worker_scope: user` does not give you per-agent isolation, because all agents for one requester share the same worker state.
+
+You can verify the setup by asking two different agents to run `hostname` and then checking Docker:
+
+```
+docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
+```
+
+In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
+
 ## Environment variable reference
 
 ### Primary MindRoom runtime (proxy client)
 
-| Variable                                        | Description                                                 | Default                                       |
-| ----------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------- |
-| `MINDROOM_WORKER_BACKEND`                       | Worker backend name: `static_runner` or `kubernetes`        | `static_runner`                               |
-| `MINDROOM_SANDBOX_PROXY_URL`                    | URL of the shared sandbox runner when using `static_runner` | *(none — proxy disabled for `static_runner`)* |
-| `MINDROOM_SANDBOX_PROXY_TOKEN`                  | Shared auth token used by the worker runtime                | *(required for worker-routed execution)*      |
-| `MINDROOM_SANDBOX_EXECUTION_MODE`               | `selective`, `all`, `off`                                   | *(unset — uses proxy tools list)*             |
-| `MINDROOM_SANDBOX_PROXY_TOOLS`                  | Comma-separated tool names to proxy                         | `*` (all, unless mode is `selective`)         |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS`        | HTTP timeout for proxy calls                                | `120`                                         |
-| `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime                                   | `60`                                          |
-| `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`       | JSON mapping tool selectors to credential services          | `{}`                                          |
+| Variable                                        | Description                                                     | Default                                       |
+| ----------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------- |
+| `MINDROOM_WORKER_BACKEND`                       | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner`                               |
+| `MINDROOM_SANDBOX_PROXY_URL`                    | URL of the shared sandbox runner when using `static_runner`     | *(none — proxy disabled for `static_runner`)* |
+| `MINDROOM_SANDBOX_PROXY_TOKEN`                  | Shared auth token used by the worker runtime                    | *(required for worker-routed execution)*      |
+| `MINDROOM_SANDBOX_EXECUTION_MODE`               | `selective`, `all`, `off`                                       | *(unset — uses proxy tools list)*             |
+| `MINDROOM_SANDBOX_PROXY_TOOLS`                  | Comma-separated tool names to proxy                             | `*` (all, unless mode is `selective`)         |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS`        | HTTP timeout for proxy calls                                    | `120`                                         |
+| `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime                                       | `60`                                          |
+| `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`       | JSON mapping tool selectors to credential services              | `{}`                                          |
 
-When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints through the Kubernetes backend and does not use `MINDROOM_SANDBOX_PROXY_URL`. The Helm chart sets the Kubernetes backend environment variables automatically. If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/index.md) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
+When `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker endpoints dynamically and does not use `MINDROOM_SANDBOX_PROXY_URL`. The Helm chart sets the Kubernetes backend environment variables automatically. If you deploy that mode without Helm, see [Kubernetes Deployment](https://docs.mindroom.chat/deployment/kubernetes/index.md) and `src/mindroom/workers/backends/kubernetes_config.py` for the required environment surface.
+
+### Dedicated Docker worker backend
+
+| Variable                                       | Description                                                         | Default                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------- |
+| `MINDROOM_DOCKER_WORKER_IMAGE`                 | Container image used for dedicated Docker workers                   | *(required when `MINDROOM_WORKER_BACKEND=docker`)*  |
+| `MINDROOM_DOCKER_WORKER_PORT`                  | Sandbox-runner port inside the worker container                     | `8766`                                              |
+| `MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH`    | Worker root mount path inside the container                         | `/app/worker`                                       |
+| `MINDROOM_DOCKER_WORKER_CONFIG_PATH`           | Config path inside the worker container                             | `/app/config.yaml`                                  |
+| `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH`      | Host path to `config.yaml` bind-mounted into workers                | Resolved `MINDROOM_CONFIG_PATH` when it exists      |
+| `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`  | Idle timeout before a worker container is eligible for cleanup      | `1800`                                              |
+| `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS` | Maximum wait for worker `/healthz` after startup                    | `60`                                                |
+| `MINDROOM_DOCKER_WORKER_NAME_PREFIX`           | Prefix used for generated worker container names                    | `mindroom-worker`                                   |
+| `MINDROOM_DOCKER_WORKER_PUBLISH_HOST`          | Host interface used when publishing worker ports                    | `127.0.0.1`                                         |
+| `MINDROOM_DOCKER_WORKER_ENDPOINT_HOST`         | Hostname the primary runtime uses to call published worker ports    | Same value as `MINDROOM_DOCKER_WORKER_PUBLISH_HOST` |
+| `MINDROOM_DOCKER_WORKER_USER`                  | Container user for workers, or empty to use the image default       | `1000:1000`                                         |
+| `MINDROOM_DOCKER_WORKER_ENV_JSON`              | JSON object of extra env vars injected into each worker container   | `{}`                                                |
+| `MINDROOM_DOCKER_WORKER_LABELS_JSON`           | JSON object of extra Docker labels applied to each worker container | `{}`                                                |
 
 ### Sandbox runner
 
@@ -5211,7 +5285,7 @@ The `worker_tools` field has three states:
 | `[]` (empty list)   | Explicitly disable sandbox proxying for this agent                                                                                                        |
 | `["shell", "file"]` | Proxy exactly these tools for this agent                                                                                                                  |
 
-Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect. With `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must still be configured for proxying to take effect. With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
 ## Worker Scope
 
@@ -5240,18 +5314,18 @@ agents:
 
 The supported values are:
 
-| Value         | Behavior                                                       |
-| ------------- | -------------------------------------------------------------- |
-| `shared`      | One shared worker state per agent                              |
-| `user`        | One worker state per requester                                 |
-| `user_agent`  | One worker state per requester and agent                       |
-| `room_thread` | One worker state per thread, or per room when no thread exists |
+| Value         | Behavior                                                                                                               |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `shared`      | One shared worker state per agent, which is the setting to use when you want one persistent Docker container per agent |
+| `user`        | One worker state per requester, shared across agents                                                                   |
+| `user_agent`  | One worker state per requester and agent                                                                               |
+| `room_thread` | One worker state per thread, or per room when no thread exists                                                         |
 
 If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
 
 ## Without configured worker routing
 
-With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process. This is fine for development but not recommended for production deployments where agents run untrusted code. With `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
+With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process. This is fine for development but not recommended for production deployments where agents run untrusted code. With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.
 
 # Kubernetes Deployment
 
