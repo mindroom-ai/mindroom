@@ -28,7 +28,7 @@ models:
 
   anthropic:
     provider: "anthropic"
-    id: "claude-3-5-haiku-latest"
+    id: "claude-haiku-4-5"
 
   ollama:
     provider: "ollama"
@@ -38,7 +38,7 @@ models:
 
   openrouter:
     provider: "openrouter"
-    id: "z-ai/glm-4.5-air:free"
+    id: "anthropic/claude-sonnet-4.6"
 ```
 
 ### Supported Providers
@@ -418,7 +418,7 @@ models:
 
   smart:
     provider: "anthropic"
-    id: "claude-3-5-sonnet-latest"
+    id: "claude-sonnet-4-6"
 
 # Agent configurations
 agents:

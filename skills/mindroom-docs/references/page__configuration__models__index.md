@@ -34,12 +34,12 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-6-latest
+    id: claude-sonnet-4-6
     context_window: 200000
 
   haiku:
     provider: anthropic
-    id: claude-haiku-4-5-latest
+    id: claude-haiku-4-5
     context_window: 200000
 
   # OpenAI
@@ -50,12 +50,12 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-2.0-flash
+    id: gemini-3.1-pro-preview
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
-    id: claude-sonnet-4@20250514
+    id: claude-sonnet-4-6
     extra_kwargs:
       project_id: your-gcp-project
       region: us-central1
@@ -69,7 +69,7 @@ models:
   # OpenRouter (access to many model providers)
   openrouter:
     provider: openrouter
-    id: anthropic/claude-3-opus
+    id: anthropic/claude-sonnet-4.6
 
   # Groq (fast inference)
   groq:
@@ -104,7 +104,7 @@ A warning is logged whenever history is trimmed, including the original and redu
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-6-latest
+    id: claude-sonnet-4-6
     context_window: 200000  # 200K tokens
 ```
 
