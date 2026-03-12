@@ -21,7 +21,7 @@ logging.getLogger("mindroom").setLevel(logging.WARNING)
 logging.getLogger("mindroom.matrix").setLevel(logging.WARNING)
 logging.getLogger("mindroom.matrix.client").setLevel(logging.WARNING)
 
-from mindroom.matrix import MATRIX_HOMESERVER  # noqa: E402
+from mindroom.constants import MATRIX_HOMESERVER  # noqa: E402
 from mindroom.matrix.client import send_message  # noqa: E402
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user  # noqa: E402
 

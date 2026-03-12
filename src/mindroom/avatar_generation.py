@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
-import yaml
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from rich.console import Console
@@ -30,15 +28,10 @@ if TYPE_CHECKING:
 
     import nio
 
-
-class _RouterAccountLike(Protocol):
-    username: str
-    password: str
+    from mindroom.matrix.state import _MatrixAccount
 
 
 console = Console()
-
-load_dotenv()
 
 PROMPT_MODEL = "gemini-3.1-flash-lite-preview"
 # Gemini 3.1 Flash Image Preview is the current Google image-generation model.
@@ -116,13 +109,6 @@ ROOM_PURPOSES = {
     "productivity": "Task management and efficiency",
     "science": "Scientific research and experiments",
 }
-
-
-def load_config() -> dict:
-    """Load the active configuration from config.yaml."""
-    config_path = CONFIG_PATH.expanduser().resolve()
-    with config_path.open() as f:
-        return yaml.safe_load(f)
 
 
 def load_validated_config() -> Config:
@@ -282,7 +268,7 @@ async def generate_avatar(
     console.print(f"[green]✓ Generated avatar for {entity_type}/{entity_name}[/green]")
 
 
-def _build_router_user(router_account: _RouterAccountLike) -> AgentMatrixUser:
+def _build_router_user(router_account: _MatrixAccount) -> AgentMatrixUser:
     """Create the router user object from persisted Matrix state."""
     server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
     return AgentMatrixUser(

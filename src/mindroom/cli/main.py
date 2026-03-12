@@ -228,12 +228,8 @@ def avatars_sync() -> None:
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
             _print_connection_error(exc)
-        else:
-            console.print(f"[red]Error:[/red] Could not sync room avatars: {exc}")
-        raise typer.Exit(1) from None
-    except Exception as exc:
-        console.print(f"[red]Error:[/red] Could not sync room avatars: {exc}")
-        raise typer.Exit(1) from None
+            raise typer.Exit(1) from None
+        raise
 
 
 @app.command()

@@ -26,27 +26,29 @@ def _workspace_avatar_path(
     return tmp_path / "avatars" / entity_type / f"{entity_name}.png"
 
 
-def test_load_config_uses_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
-    """The avatar generation module should read the active MindRoom config path."""
-    config_path = tmp_path / "custom-config.yaml"
-    config_path.write_text("agents:\n  general:\n    role: helper\n", encoding="utf-8")
+@pytest.fixture
+def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Patch avatar path helpers to use a temporary workspace."""
+    avatars_path = tmp_path / "avatars"
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda **_kwargs: avatars_path)
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
+    return avatars_path
 
-    monkeypatch.setattr(generate_avatars, "CONFIG_PATH", config_path)
 
-    assert generate_avatars.load_config() == {"agents": {"general": {"role": "helper"}}}
-
-
-def test_get_avatar_path_uses_workspace_avatars_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
+def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) -> None:
     """Generated avatars should land in the workspace avatars directory."""
-
-    def _avatars_dir(**_kwargs: object) -> Path:
-        return tmp_path / "avatars"
-
-    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
-
     avatar_path = generate_avatars.get_avatar_path("agents", "general")
 
-    assert avatar_path == tmp_path / "avatars" / "agents" / "general.png"
+    assert avatar_path == workspace_avatar_dir / "agents" / "general.png"
     assert avatar_path.parent.is_dir()
 
 
@@ -67,8 +69,7 @@ def test_extract_image_bytes_returns_first_inline_image() -> None:
 
 
 def test_has_missing_managed_avatars_detects_complete_avatar_set(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Existing managed avatars should not require a Google key just for sync."""
     raw_config = {
@@ -84,31 +85,15 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
     }
     config = generate_avatars.Config.model_validate(raw_config)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
-
-    def _avatars_dir(**_kwargs: object) -> Path:
-        return tmp_path / "avatars"
-
-    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
-    )
 
     assert not generate_avatars.has_missing_managed_avatars(config)
 
 
 def test_has_missing_managed_avatars_ignores_direct_room_ids(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """External room IDs should not be treated as managed avatar targets."""
     raw_config = {
@@ -125,31 +110,15 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
     }
     config = generate_avatars.Config.model_validate(raw_config)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
-
-    def _avatars_dir(**_kwargs: object) -> Path:
-        return tmp_path / "avatars"
-
-    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
-    )
 
     assert not generate_avatars.has_missing_managed_avatars(config)
 
 
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """External room aliases should not be treated as managed avatar targets."""
     raw_config = {
@@ -166,24 +135,9 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
     }
     config = generate_avatars.Config.model_validate(raw_config)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
-
-    def _avatars_dir(**_kwargs: object) -> Path:
-        return tmp_path / "avatars"
-
-    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
-    )
 
     assert not generate_avatars.has_missing_managed_avatars(config)
 
@@ -191,7 +145,7 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
 @pytest.mark.asyncio
 async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_exist(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Existing managed avatars should allow sync-only startup without generation credentials."""
     raw_config = {
@@ -206,7 +160,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
         "matrix_space": {"enabled": False},
     }
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
@@ -214,17 +168,6 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
         generate_avatars,
         "load_validated_config",
         lambda: generate_avatars.Config.model_validate(raw_config),
-    )
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
     sync_room_avatars = AsyncMock()
@@ -239,7 +182,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
 @pytest.mark.asyncio
 async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_generation(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Startup avatar generation should fail when required assets remain missing."""
     raw_config = {
@@ -253,7 +196,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
         },
         "matrix_space": {"enabled": False},
     }
-    router_avatar = tmp_path / "avatars" / "agents" / "router.png"
+    router_avatar = workspace_avatar_dir / "agents" / "router.png"
     router_avatar.parent.mkdir(parents=True, exist_ok=True)
     router_avatar.write_bytes(b"avatar")
 
@@ -261,17 +204,6 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
         generate_avatars,
         "load_validated_config",
         lambda: generate_avatars.Config.model_validate(raw_config),
-    )
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
     )
     monkeypatch.setattr(
         generate_avatars.genai,
@@ -287,13 +219,14 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
         await generate_avatars.run_avatar_generation(sync_room_avatars=True)
 
     sync_room_avatars.assert_not_awaited()
-    assert not (tmp_path / "avatars" / "agents" / "general.png").exists()
+    assert not (workspace_avatar_dir / "agents" / "general.png").exists()
 
 
 @pytest.mark.asyncio
 async def test_run_avatar_generation_accepts_null_optional_sections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Avatar generation should accept legacy configs normalized by Config.from_yaml()."""
     config_path = tmp_path / "config.yaml"
@@ -309,21 +242,10 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
         ("agents", "router"),
         ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME),
     ):
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
     monkeypatch.setattr(generate_avatars, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
-    )
 
     await generate_avatars.run_avatar_generation(sync_room_avatars=False)
 
@@ -403,7 +325,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
 @pytest.mark.asyncio
 async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Generation should cover team-only rooms and the managed root space."""
     raw_config = {
@@ -435,7 +357,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         _entity_data: dict,
         _all_agents: dict | None = None,
     ) -> None:
-        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"generated")
 
@@ -450,17 +372,6 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         generate_avatars,
         "load_validated_config",
         lambda: generate_avatars.Config.model_validate(raw_config),
-    )
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
@@ -479,7 +390,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 @pytest.mark.asyncio
 async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Matrix avatar sync should cover team-only rooms and the managed root space."""
     raw_config = {
@@ -502,10 +413,10 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
         },
         "matrix_space": {"enabled": True, "name": "Workspace"},
     }
-    room_avatar_path = tmp_path / "avatars" / "rooms" / "war_room.png"
+    room_avatar_path = workspace_avatar_dir / "rooms" / "war_room.png"
     room_avatar_path.parent.mkdir(parents=True)
     room_avatar_path.write_bytes(b"room-bytes")
-    space_avatar_path = tmp_path / "avatars" / "spaces" / "root_space.png"
+    space_avatar_path = workspace_avatar_dir / "spaces" / "root_space.png"
     space_avatar_path.parent.mkdir(parents=True)
     space_avatar_path.write_bytes(b"space-bytes")
 
@@ -530,17 +441,6 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
         "load_validated_config",
         lambda: generate_avatars.Config.model_validate(raw_config),
     )
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
-    )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "check_and_set_avatar", check_and_set_avatar)
@@ -558,7 +458,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 @pytest.mark.asyncio
 async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    workspace_avatar_dir: Path,
 ) -> None:
     """Matrix avatar sync must not mutate a stale root Space when the feature is disabled."""
     raw_config = {
@@ -572,7 +472,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
         },
         "matrix_space": {"enabled": False, "name": "Workspace"},
     }
-    space_avatar_path = tmp_path / "avatars" / "spaces" / "root_space.png"
+    space_avatar_path = workspace_avatar_dir / "spaces" / "root_space.png"
     space_avatar_path.parent.mkdir(parents=True)
     space_avatar_path.write_bytes(b"space-bytes")
 
@@ -593,17 +493,6 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
         generate_avatars,
         "load_validated_config",
         lambda: generate_avatars.Config.model_validate(raw_config),
-    )
-    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
-    monkeypatch.setattr(
-        generate_avatars,
-        "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
-            tmp_path,
-            entity_type,
-            entity_name,
-            config_path=config_path,
-        ),
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))

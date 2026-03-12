@@ -666,7 +666,7 @@ class TestAvatarsCommands:
         set_room_avatars_in_matrix.assert_awaited_once_with()
 
     def test_avatars_sync_reports_sync_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Avatar sync should surface sync failures cleanly."""
+        """Unexpected avatar sync failures should propagate for debugging."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
@@ -683,7 +683,8 @@ class TestAvatarsCommands:
             result = runner.invoke(app, ["avatars", "sync"])
 
         assert result.exit_code == 1
-        assert "Could not sync room avatars: boom" in _strip_ansi(result.output)
+        assert isinstance(result.exception, RuntimeError)
+        assert str(result.exception) == "boom"
 
     def test_avatars_sync_requires_initialized_router_account(
         self,
