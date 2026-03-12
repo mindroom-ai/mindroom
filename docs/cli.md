@@ -115,21 +115,25 @@ Start MindRoom with your configuration.
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
-│                                          ERROR)                                        │
-│                                          [env var: LOG_LEVEL]                          │
-│                                          [default: INFO]                               │
-│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
-│                                          (state, sessions, tracking)                   │
-│                                          [default: mindroom_data]                      │
-│ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          alongside the bot                             │
-│                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
-│                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
-│                                          [default: 0.0.0.0]                            │
-│ --help          -h                       Show this message and exit.                   │
+│ --log-level         -l              TEXT     Set the logging level (DEBUG, INFO,       │
+│                                              WARNING, ERROR)                           │
+│                                              [env var: LOG_LEVEL]                      │
+│                                              [default: INFO]                           │
+│ --storage-path      -s              PATH     Base directory for persistent MindRoom    │
+│                                              data (state, sessions, tracking)          │
+│                                              [default: mindroom_data]                  │
+│ --api                   --no-api             Start the bundled dashboard/API server    │
+│                                              alongside the bot                         │
+│                                              [default: api]                            │
+│ --api-port                          INTEGER  Port for the bundled dashboard/API server │
+│                                              [default: 8765]                           │
+│ --api-host                          TEXT     Host for the bundled dashboard/API server │
+│                                              [default: 0.0.0.0]                        │
+│ --generate-avatars                           Generate missing avatars before startup   │
+│                                              and sync room avatars after rooms are     │
+│                                              ready                                     │
+│                                              [env var: MINDROOM_GENERATE_AVATARS]      │
+│ --help              -h                       Show this message and exit.               │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
