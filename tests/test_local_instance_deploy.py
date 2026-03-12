@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -177,3 +178,42 @@ def test_remove_instance_preserves_state_when_teardown_fails(
     assert "alpha" in registry.instances
     assert data_dir.exists()
     assert env_file.exists()
+
+
+def test_remove_all_persists_progress_when_later_instance_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch removal should keep the registry file aligned with completed deletions."""
+    reg_file = tmp_path / "instances.json"
+    monkeypatch.setattr(deploy, "REGISTRY_FILE", reg_file)
+
+    alpha = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    beta = _instance("beta", matrix_type=deploy.MatrixType.SYNAPSE, data_root=tmp_path)
+    beta.mindroom_port = 8766
+    beta.matrix_port = 8449
+    registry = deploy.Registry(
+        instances={"alpha": alpha, "beta": beta},
+        allocated_ports=deploy.AllocatedPorts(
+            mindroom=[alpha.mindroom_port, beta.mindroom_port],
+            matrix=[alpha.matrix_port or 8448, beta.matrix_port or 8449],
+        ),
+    )
+    deploy.save_registry(registry)
+    monkeypatch.setattr(deploy, "load_registry", lambda: registry)
+
+    def _remove_instance(name: str, registry: deploy.Registry, _console: Console) -> None:
+        if name == "alpha":
+            del registry.instances[name]
+            registry.allocated_ports.mindroom.remove(alpha.mindroom_port)
+            registry.allocated_ports.matrix.remove(alpha.matrix_port or 8448)
+            return
+        raise deploy.typer.Exit(1)
+
+    monkeypatch.setattr(deploy, "_remove_instance", _remove_instance)
+
+    with pytest.raises(deploy.typer.Exit):
+        deploy.remove(all=True, force=True)
+
+    saved_registry = json.loads(reg_file.read_text())
+    assert sorted(saved_registry["instances"]) == ["beta"]

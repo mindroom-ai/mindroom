@@ -1176,6 +1176,8 @@ def remove(
         # Remove each instance
         for instance_name in list(instances.keys()):
             _remove_instance(instance_name, registry, console)
+            if registry.instances:
+                save_registry(registry)
 
         # Clear the registry completely
         REGISTRY_FILE.unlink(missing_ok=True)
