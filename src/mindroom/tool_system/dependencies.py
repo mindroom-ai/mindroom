@@ -141,7 +141,8 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     return result.returncode == 0
 
 
-def _install_cmd() -> list[str]:
+def install_command_for_current_python() -> list[str]:
+    """Build the pip/uv install command for the current interpreter."""
     in_venv = _in_virtualenv()
     if shutil.which("uv"):
         cmd = ["uv", "pip", "install", "--python", sys.executable]
@@ -173,7 +174,7 @@ def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
 def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
-    cmd = [*_install_cmd(), package_spec]
+    cmd = [*install_command_for_current_python(), package_spec]
     result = subprocess.run(cmd, check=False, capture_output=quiet)
     return result.returncode == 0
 
