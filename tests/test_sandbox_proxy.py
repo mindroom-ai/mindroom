@@ -532,6 +532,74 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
         entrypoint("pwd")
 
 
+def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed tools should stay proxy-enabled when the Docker backend provides worker handles directly."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            worker_tools_override=["shell"],
+            worker_scope="shared",
+        )
+        is True
+    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=None) is False
+
+
+def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped agents should still route through dedicated workers on the Docker backend."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"shell"})
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_scope=None) is True
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", worker_scope=None) is False
+
+
+def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker routing should stay enabled so misconfiguration fails closed at call time."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
+
+
+def test_docker_backend_misconfiguration_raises_instead_of_running_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Misconfigured Docker worker routing should raise rather than executing in the primary runtime."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+
+    tool = get_tool_by_name("shell", worker_tools_override=["shell"], worker_scope=None, routing_agent_name="code")
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_IMAGE"):
+        entrypoint("pwd")
+
+
 class TestWorkerToolsOverride:
     """Tests for per-agent worker_tools_override parameter."""
 
