@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import httpx
 
 from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, sync_shared_credentials_to_worker
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, sync_shared_credentials_to_worker
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
@@ -318,7 +318,9 @@ class DockerWorkerBackend:
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
-        self._workers_root = _workers_root(_resolved_storage_path(storage_path))
+        self._storage_path = _resolved_storage_path(storage_path)
+        self._workers_root = _workers_root(self._storage_path)
+        self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
@@ -353,6 +355,7 @@ class DockerWorkerBackend:
             sync_shared_credentials_to_worker(
                 spec.worker_key,
                 include_ui_credentials=is_unscoped_worker_key(spec.worker_key),
+                credentials_manager=self._credentials_manager,
             )
 
             try:

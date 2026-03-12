@@ -340,7 +340,7 @@ The supported values are:
 | `user_agent`  | One worker state per requester and agent                                                                               |
 | `room_thread` | One worker state per thread, or per room when no thread exists                                                         |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
+If `worker_scope` is unset, proxied tools still use the sandbox runner and the request stays unscoped. With `MINDROOM_WORKER_BACKEND=static_runner`, no worker-specific storage root is selected. With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, MindRoom still provisions one unscoped worker per agent and tenant/account. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
 
 ## Without configured worker routing
 
