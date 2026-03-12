@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import subprocess
+from typing import TYPE_CHECKING, Any, Protocol
 
+from mindroom.tool_system.dependencies import install_command_for_current_python
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -14,7 +16,43 @@ from mindroom.tool_system.metadata import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agno.tools.python import PythonTools
+
+
+class _ExceptionLogger(Protocol):
+    def exception(self, message: str) -> None: ...
+
+
+def _install_package_with_current_python(package_name: str) -> None:
+    """Install one package into the current interpreter environment."""
+    subprocess.check_call([*install_command_for_current_python(), package_name])
+
+
+def _install_package_with_status(
+    package_name: str,
+    *,
+    warn: Callable[[], None],
+    log_debug: Callable[[str], None],
+    logger: _ExceptionLogger,
+) -> str:
+    """Install a package and format the tool response."""
+    try:
+        warn()
+        log_debug(f"Installing package {package_name}")
+        _install_package_with_current_python(package_name)
+    except Exception as exc:
+        logger.exception(f"Error installing package {package_name}")
+        return f"Error installing package {package_name}: {exc}"
+    return f"successfully installed package {package_name}"
+
+
+def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
+    """Load Agno's Python tool runtime pieces lazily."""
+    from agno.tools.python import PythonTools, log_debug, logger, warn
+
+    return PythonTools, warn, log_debug, logger
 
 
 @register_tool_with_metadata(
@@ -62,6 +100,17 @@ if TYPE_CHECKING:
 )
 def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution and file management."""
-    from agno.tools.python import PythonTools
+    python_tools_class, warn, log_debug, logger = _python_tools_runtime()
 
-    return PythonTools
+    class MindRoomPythonTools(python_tools_class):
+        """MindRoom wrapper around Agno's Python tool implementation."""
+
+        def pip_install_package(self, package_name: str) -> str:
+            """Install a package into the current interpreter environment."""
+            return _install_package_with_status(package_name, warn=warn, log_debug=log_debug, logger=logger)
+
+        def uv_pip_install_package(self, package_name: str) -> str:
+            """Backward-compatible alias for the shared installer path."""
+            return _install_package_with_status(package_name, warn=warn, log_debug=log_debug, logger=logger)
+
+    return MindRoomPythonTools
