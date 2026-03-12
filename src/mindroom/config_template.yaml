@@ -6,7 +6,7 @@
 models:
   default:
     provider: anthropic  # Options: anthropic, openai, google, vertexai_claude, openrouter, ollama
-    id: claude-sonnet-4-6-latest
+    id: claude-sonnet-4-6
 
 # Define your agents
 agents:

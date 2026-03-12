@@ -733,10 +733,10 @@ agents:
 models:
   default:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6-latest     # Required: Model ID for the provider
+    id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6-latest     # Required: Model ID for the provider
+    id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
@@ -1201,12 +1201,12 @@ models:
   # Anthropic Claude
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-6-latest
+    id: claude-sonnet-4-6
     context_window: 200000
 
   haiku:
     provider: anthropic
-    id: claude-haiku-4-5-latest
+    id: claude-haiku-4-5
     context_window: 200000
 
   # OpenAI
@@ -1217,12 +1217,12 @@ models:
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-2.0-flash
+    id: gemini-3.1-pro-preview
 
   # Anthropic Claude on Vertex AI
   vertex_claude:
     provider: vertexai_claude
-    id: claude-sonnet-4@20250514
+    id: claude-sonnet-4-6
     extra_kwargs:
       project_id: your-gcp-project
       region: us-central1
@@ -1236,7 +1236,7 @@ models:
   # OpenRouter (access to many model providers)
   openrouter:
     provider: openrouter
-    id: anthropic/claude-3-opus
+    id: anthropic/claude-sonnet-4.6
 
   # Groq (fast inference)
   groq:
@@ -1271,7 +1271,7 @@ A warning is logged whenever history is trimmed, including the original and redu
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-6-latest
+    id: claude-sonnet-4-6
     context_window: 200000  # 200K tokens
 ```
 
@@ -1936,7 +1936,7 @@ Configure credentials via the dashboard or by writing `mindroom_data/credentials
 ```
 {
   "api_key": "sk-ant-or-proxy-key",
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "permission_mode": "default",
   "continue_conversation": true,
   "session_ttl_minutes": 60,
@@ -3883,7 +3883,7 @@ Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-6-latest | 💼 Code assistant | 🔧 5 tools available").
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-6 | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
 

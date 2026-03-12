@@ -50,10 +50,10 @@ _ConfigInitProfile = Literal["full", "minimal", "public"]
 _ProviderPreset = Literal["anthropic", "openai", "openrouter", "vertexai_claude"]
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
-    "anthropic": ("anthropic", "claude-sonnet-4-6-latest"),
+    "anthropic": ("anthropic", "claude-sonnet-4-6"),
     "openai": ("openai", "gpt-5.4"),
-    "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
-    "vertexai_claude": ("vertexai_claude", "claude-opus-4-6@default"),
+    "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6"),
+    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {

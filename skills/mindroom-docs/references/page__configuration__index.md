@@ -106,10 +106,10 @@ agents:
 models:
   default:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6-latest     # Required: Model ID for the provider
+    id: claude-sonnet-4-6            # Required: Model ID for the provider
   sonnet:
     provider: anthropic            # Required: openai, anthropic, ollama, google, gemini, vertexai_claude, groq, cerebras, openrouter, deepseek
-    id: claude-sonnet-4-6-latest     # Required: Model ID for the provider
+    id: claude-sonnet-4-6            # Required: Model ID for the provider
     host: null                     # Optional: Host URL (e.g., for Ollama)
     api_key: null                  # Optional: API key (usually from env vars)
     extra_kwargs: null             # Optional: Provider-specific parameters
