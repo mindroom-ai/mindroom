@@ -257,6 +257,7 @@ class _DockerProjectedConfigAsset:
 @dataclass(frozen=True, slots=True)
 class _DockerProjectedConfig:
     root: Path
+    projected_yaml: str
     assets: tuple[_DockerProjectedConfigAsset, ...]
 
 
@@ -759,7 +760,7 @@ class DockerWorkerBackend:
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
-        mount_checks.extend(self._config_mount_specs(paths))
+        mount_checks.extend(self._config_mount_specs(paths, materialize_projection=False))
         return all(
             self._container_mount_matches(
                 container,
@@ -874,11 +875,16 @@ class DockerWorkerBackend:
         env.update(self.config.extra_env)
         return env
 
-    def _config_mount_specs(self, paths: LocalWorkerStatePaths) -> list[tuple[Path, str, bool]]:
+    def _config_mount_specs(
+        self,
+        paths: LocalWorkerStatePaths,
+        *,
+        materialize_projection: bool = True,
+    ) -> list[tuple[Path, str, bool]]:
         if self.config.host_config_path is None:
             return []
 
-        projection = self._projected_config(paths)
+        projection = self._projected_config(paths, materialize=materialize_projection)
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
         return [(projection.root, str(config_dir), True)]
 
@@ -893,7 +899,12 @@ class DockerWorkerBackend:
             }
         return volumes
 
-    def _projected_config(self, paths: LocalWorkerStatePaths) -> _DockerProjectedConfig:
+    def _projected_config(
+        self,
+        paths: LocalWorkerStatePaths,
+        *,
+        materialize: bool = True,
+    ) -> _DockerProjectedConfig:
         host_config_path = self.config.host_config_path
         if host_config_path is None:
             msg = "Projected Docker worker config requires a host config path."
@@ -926,9 +937,15 @@ class DockerWorkerBackend:
             json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
         ).hexdigest()[:12]
         projection_dir = self._worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
-        self._write_projected_config(projection_dir, projected_yaml, assets)
-        self._prune_projected_configs(paths, keep=projection_dir)
-        return _DockerProjectedConfig(root=projection_dir, assets=tuple(assets))
+        projection = _DockerProjectedConfig(
+            root=projection_dir,
+            projected_yaml=projected_yaml,
+            assets=tuple(assets),
+        )
+        if materialize:
+            self._write_projected_config(projection)
+            self._prune_projected_configs(paths, keep=projection.root)
+        return projection
 
     def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
         try:
@@ -1148,20 +1165,18 @@ class DockerWorkerBackend:
             )
         return suggested_relative_path
 
-    def _write_projected_config(
-        self,
-        projection_dir: Path,
-        projected_yaml: str,
-        assets: list[_DockerProjectedConfigAsset],
-    ) -> None:
-        if projection_dir.exists():
+    def _write_projected_config(self, projection: _DockerProjectedConfig) -> None:
+        if projection.root.exists():
             return
 
-        projection_dir.mkdir(parents=True, exist_ok=True)
-        (projection_dir / PurePosixPath(self.config.config_path).name).write_text(projected_yaml, encoding="utf-8")
-        (projection_dir / ".env").write_text("", encoding="utf-8")
-        for asset in assets:
-            placeholder_path = projection_dir.joinpath(*asset.relative_path.parts)
+        projection.root.mkdir(parents=True, exist_ok=True)
+        (projection.root / PurePosixPath(self.config.config_path).name).write_text(
+            projection.projected_yaml,
+            encoding="utf-8",
+        )
+        (projection.root / ".env").write_text("", encoding="utf-8")
+        for asset in projection.assets:
+            placeholder_path = projection.root.joinpath(*asset.relative_path.parts)
             if asset.is_directory:
                 placeholder_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(asset.host_path, placeholder_path)

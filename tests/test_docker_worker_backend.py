@@ -779,17 +779,29 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
     projected_paths["knowledge_root"].replace(archived_knowledge_root)
     replacement_knowledge_root.replace(projected_paths["knowledge_root"])
 
+    removal_checks: list[bool] = []
+    original_remove_container = backend._remove_container
+
+    def _assert_old_projection_survives_until_removal(container: object) -> None:
+        assert container is existing_container
+        removal_checks.append(first_projection_root.exists())
+        original_remove_container(container)
+
+    monkeypatch.setattr(backend, "_remove_container", _assert_old_projection_survives_until_removal)
+
     backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
 
     replacement_container = fake_client.containers.by_name[handle.worker_id]
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
+    assert removal_checks == [True]
     assert len(fake_client.containers.run_calls) == 2
 
     second_volumes = fake_client.containers.run_calls[-1]["volumes"]
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
+    assert not first_projection_root.exists()
     projected_knowledge_path = (
         second_projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
     )
