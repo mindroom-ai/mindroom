@@ -149,7 +149,7 @@ def _backend(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
-        config_path="/app/config.yaml",
+        config_path="/app/config-host/config.yaml",
         host_config_path=tmp_path / "config.yaml",
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
@@ -220,13 +220,18 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
     assert env["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
+    assert env["MINDROOM_CONFIG_PATH"] == "/app/config-host/config.yaml"
     assert env["EXTRA_ENV"] == "present"
 
     volumes = run_call["volumes"]
     assert isinstance(volumes, dict)
     state_root = str(worker_root_path(tmp_path, "worker-a"))
     assert volumes[state_root]["bind"] == "/app/worker"
-    assert volumes[str(tmp_path / "config.yaml")]["bind"] == "/app/config.yaml"
+    assert volumes[str(tmp_path)]["bind"] == "/app/config-host"
+    assert volumes[str(tmp_path / "config.yaml")]["bind"] == "/app/config-host/config.yaml"
+    masked_dotenv = worker_root_path(tmp_path, "worker-a") / "metadata" / "config-dir.env"
+    assert volumes[str(masked_dotenv)]["bind"] == "/app/config-host/.env"
+    assert masked_dotenv.read_text(encoding="utf-8") == ""
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
 
@@ -443,7 +448,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
-        config_path="/app/config.yaml",
+        config_path="/app/config-host/config.yaml",
         host_config_path=None,
         idle_timeout_seconds=60.0,
         ready_timeout_seconds=5.0,
