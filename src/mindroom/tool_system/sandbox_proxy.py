@@ -399,6 +399,22 @@ def _get_worker_manager(
     )
 
 
+def _resolve_worker_handle(
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+    worker_key: str,
+    *,
+    private_agent_names: frozenset[str] | None = None,
+) -> WorkerHandle:
+    worker_manager = _get_worker_manager(runtime_paths, proxy_config)
+    existing_handle = worker_manager.get_worker(worker_key)
+    if existing_handle is not None and existing_handle.status == "ready":
+        return existing_handle
+    return worker_manager.ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=private_agent_names),
+    )
+
+
 def _execution_env_payload(
     tool_name: str,
     *,
