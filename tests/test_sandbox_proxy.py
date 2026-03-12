@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import pytest
 
@@ -19,6 +19,9 @@ from mindroom.workers.models import WorkerSpec
 from tests.conftest import FakeCredentialsManager
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -428,6 +431,49 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     assert init_count == 1
     assert len(managers) == 2
     assert managers[0] is managers[1]
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing the runtime storage path should rebuild the Docker worker manager with the new root."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    built_storage_paths: list[Path] = []
+
+    class _FakeDockerBackend:
+        backend_name = "docker"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_env(cls, *, auth_token: str | None, storage_path: Path | None = None) -> _FakeDockerBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_path is not None
+            built_storage_paths.append(storage_path)
+            return cls()
+
+    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "docker_backend_config_signature",
+        lambda *, auth_token, storage_path=None: ("docker", auth_token or "", str(storage_path)),
+    )
+
+    first_storage_path = (tmp_path / "runtime-a").resolve()
+    second_storage_path = (tmp_path / "runtime-b").resolve()
+
+    workers_runtime_module.set_primary_worker_storage_path(first_storage_path)
+    first_manager = workers_runtime_module.get_primary_worker_manager(proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
+
+    workers_runtime_module.set_primary_worker_storage_path(second_storage_path)
+    second_manager = workers_runtime_module.get_primary_worker_manager(proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
+
+    assert built_storage_paths == [first_storage_path, second_storage_path]
+    assert first_manager is not second_manager
     workers_runtime_module._reset_primary_worker_manager()
 
 

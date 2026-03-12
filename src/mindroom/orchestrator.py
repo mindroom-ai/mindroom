@@ -41,6 +41,7 @@ from mindroom.runtime_state import (
 )
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.runtime import set_primary_worker_storage_path
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
@@ -950,6 +951,7 @@ async def main(
 
     # Canonicalize once at startup so downstream storage paths are cwd-stable.
     storage_path = storage_path.expanduser().resolve()
+    set_primary_worker_storage_path(storage_path)
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials()
@@ -1001,3 +1003,4 @@ async def main(
                 await task
         await orchestrator.stop()
         reset_runtime_state()
+        set_primary_worker_storage_path(None)

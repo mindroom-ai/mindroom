@@ -548,6 +548,38 @@ class TestAgentBot:
         assert state.detail is None
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_sets_and_resets_primary_worker_storage_path(self, tmp_path: Path) -> None:
+        """The orchestrator should scope dedicated workers to the active runtime storage root."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=KeyboardInterrupt())
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+        storage_path_calls: list[Path | None] = []
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator.set_primary_worker_storage_path",
+                side_effect=lambda storage_path: storage_path_calls.append(storage_path),
+            ),
+        ):
+            await main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
+            )
+
+        assert storage_path_calls == [tmp_path.resolve(), None]
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = Config.from_yaml()
