@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from scripts.smoke_helpers import (
     error,
@@ -77,7 +78,12 @@ def cleanup(stack_dir: Path, project_name: str, env_file: Path, compose_file: Pa
         capture_output=True,
     )
     env_file.unlink(missing_ok=True)
-    compose_file.unlink(missing_ok=True)
+
+
+def room_alias_url(homeserver_port: int, matrix_server_name: str, room_name: str) -> str:
+    """Return the room-alias directory lookup URL for a managed room."""
+    room_alias = quote(f"#{room_name}:{matrix_server_name}", safe="")
+    return f"http://127.0.0.1:{homeserver_port}/_matrix/client/v3/directory/room/{room_alias}"
 
 
 def main() -> int:
@@ -91,6 +97,7 @@ def main() -> int:
     stack_synapse_port = getenv_int("STACK_SYNAPSE_PORT", 18008)
     stack_mindroom_port = getenv_int("STACK_MINDROOM_PORT", 18765)
     stack_client_port = getenv_int("STACK_CLIENT_PORT", 18080)
+    matrix_server_name = os.getenv("STACK_MATRIX_SERVER_NAME", "matrix.localhost")
 
     validate_port("STACK_SYNAPSE_PORT", stack_synapse_port)
     validate_port("STACK_MINDROOM_PORT", stack_mindroom_port)
@@ -104,30 +111,29 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir_name:
         tmp_dir = Path(tmp_dir_name)
         env_file = tmp_dir / "mindroom-stack-smoke.env"
-        compose_file = tmp_dir / "mindroom-stack-compose.yaml"
+        compose_file = compose_source
 
         env_file.write_text(
             "\n".join(
                 [
                     "POSTGRES_PASSWORD=synapse_password",
-                    "MATRIX_SERVER_NAME=matrix.localhost",
+                    f"MATRIX_SERVER_NAME={matrix_server_name}",
                     "OPENAI_API_KEY=test-openai",
                     "ANTHROPIC_API_KEY=test-anthropic",
                     "GOOGLE_API_KEY=",
                     "OPENROUTER_API_KEY=",
                     "OLLAMA_HOST=http://localhost:11434",
+                    f"HOST_HOMESERVER_PORT={stack_synapse_port}",
+                    f"HOST_DASHBOARD_PORT={stack_mindroom_port}",
+                    f"HOST_CLIENT_PORT={stack_client_port}",
                     f"CLIENT_HOMESERVER_URL=http://localhost:{stack_synapse_port}",
+                    f"CLIENT_MINDROOM_URL=http://localhost:{stack_mindroom_port}",
                     "",
                 ],
             ),
             encoding="utf-8",
         )
 
-        compose_text = compose_source.read_text(encoding="utf-8")
-        compose_text = compose_text.replace('"8008:8008"', f'"127.0.0.1:{stack_synapse_port}:8008"')
-        compose_text = compose_text.replace('"8765:8765"', f'"127.0.0.1:{stack_mindroom_port}:8765"')
-        compose_text = compose_text.replace('"8080:80"', f'"127.0.0.1:{stack_client_port}:80"')
-        compose_file.write_text(compose_text, encoding="utf-8")
         exit_code = 0
 
         try:
@@ -151,9 +157,9 @@ def main() -> int:
             )
 
             wait_for_http_match(
-                f"http://127.0.0.1:{stack_mindroom_port}/api/ready",
-                '"ready"',
-                "MindRoom readiness",
+                f"http://127.0.0.1:{stack_synapse_port}/_matrix/client/versions",
+                '"versions"',
+                "Matrix homeserver",
                 attempts=40,
                 sleep_seconds=3,
             )
@@ -164,14 +170,6 @@ def main() -> int:
                 attempts=40,
                 sleep_seconds=3,
             )
-            wait_for_http_match(
-                f"http://127.0.0.1:{stack_synapse_port}/_matrix/client/versions",
-                '"versions"',
-                "Matrix homeserver",
-                attempts=40,
-                sleep_seconds=3,
-            )
-
             wait_for_http_status(
                 f"http://127.0.0.1:{stack_client_port}/",
                 200,
@@ -186,6 +184,14 @@ def main() -> int:
                 attempts=20,
                 sleep_seconds=3,
             )
+            for room_name in ("lobby", "personal"):
+                wait_for_http_match(
+                    room_alias_url(stack_synapse_port, matrix_server_name, room_name),
+                    '"room_id"',
+                    f"Managed room alias #{room_name}:{matrix_server_name}",
+                    attempts=40,
+                    sleep_seconds=3,
+                )
             log("[smoke] mindroom-stack checks passed")
         except Exception as exc:
             error(str(exc))
