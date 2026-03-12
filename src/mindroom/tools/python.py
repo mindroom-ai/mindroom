@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.metadata import (
@@ -15,6 +18,15 @@ from mindroom.tool_system.metadata import (
 
 if TYPE_CHECKING:
     from agno.tools.python import PythonTools
+
+
+def _install_package_with_current_python(package_name: str) -> None:
+    """Install one package into the current interpreter environment."""
+    uv_path = shutil.which("uv")
+    if uv_path is not None:
+        subprocess.check_call([uv_path, "pip", "install", "--python", sys.executable, package_name])
+        return
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
 
 
 @register_tool_with_metadata(
@@ -64,4 +76,15 @@ def python_tools() -> type[PythonTools]:
     """Return Python tools for code execution and file management."""
     from agno.tools.python import PythonTools
 
-    return PythonTools
+    class MindRoomPythonTools(PythonTools):
+        """MindRoom wrapper around Agno's Python tool implementation."""
+
+        def uv_pip_install_package(self, package_name: str) -> str:
+            """Install a package into the current interpreter environment."""
+            try:
+                _install_package_with_current_python(package_name)
+            except Exception as exc:
+                return f"Error installing package {package_name}: {exc}"
+            return f"successfully installed package {package_name}"
+
+    return MindRoomPythonTools
