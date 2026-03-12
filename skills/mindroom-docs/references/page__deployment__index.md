@@ -41,7 +41,7 @@ uvx mindroom run
 
 Generate the pair code in `https://chat.mindroom.chat` under: `Settings -> Local MindRoom`.
 
-See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough. If you want `shell`, `file`, or `python` to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
+See [Hosted Matrix deployment](https://docs.mindroom.chat/deployment/hosted-matrix/index.md) for the full walkthrough. If you want worker-routed tools, especially `shell`, `file`, and `python`, to run in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
 ### Full Stack (recommended)
 
