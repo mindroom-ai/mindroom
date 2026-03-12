@@ -170,9 +170,17 @@ def _backend(
             ),
         ),
     )
+
+    def _record_sync_call(
+        worker_key: str,
+        include_ui_credentials: bool = False,
+        **_kwargs: object,
+    ) -> None:
+        sync_calls.append((worker_key, include_ui_credentials))
+
     monkeypatch.setattr(
         "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
-        lambda worker_key, include_ui_credentials=False: sync_calls.append((worker_key, include_ui_credentials)),
+        _record_sync_call,
     )
     backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
     monkeypatch.setattr(
@@ -229,6 +237,33 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared-credential mirroring should use the active runtime storage root."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    synced_storage_roots: list[Path | None] = []
+
+    def _capture_runtime_storage_root(
+        _worker_key: str,
+        **kwargs: object,
+    ) -> None:
+        credentials_manager = kwargs.get("credentials_manager")
+        synced_storage_roots.append(
+            None if credentials_manager is None else credentials_manager.storage_root,
+        )
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _capture_runtime_storage_root,
+    )
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    assert synced_storage_roots == [tmp_path.resolve()]
 
 
 def test_docker_backend_cleanup_stops_idle_workers(
