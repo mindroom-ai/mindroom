@@ -477,6 +477,19 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     workers_runtime_module._reset_primary_worker_manager()
 
 
+def test_set_primary_worker_storage_path_none_resets_default_runtime_manager() -> None:
+    """Resetting to the default storage path should still clear the cached manager."""
+    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module._PRIMARY_WORKER_MANAGER = object()
+    workers_runtime_module._PRIMARY_WORKER_MANAGER_CONFIG = ("docker", "cached")
+
+    workers_runtime_module.set_primary_worker_storage_path(None)
+
+    assert workers_runtime_module._PRIMARY_WORKER_MANAGER is None
+    assert workers_runtime_module._PRIMARY_WORKER_MANAGER_CONFIG is None
+    workers_runtime_module._reset_primary_worker_manager()
+
+
 def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tools should stay proxy-enabled when the Kubernetes backend provides worker handles directly."""
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)

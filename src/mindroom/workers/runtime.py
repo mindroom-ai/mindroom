@@ -48,6 +48,13 @@ def _normalize_storage_path(storage_path: Path | None) -> Path:
 def set_primary_worker_storage_path(storage_path: Path | None) -> None:
     """Set the storage root used by dedicated worker backends in this runtime."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG, _PRIMARY_WORKER_STORAGE_PATH
+    if storage_path is None:
+        with _PRIMARY_WORKER_MANAGER_LOCK:
+            _PRIMARY_WORKER_STORAGE_PATH = STORAGE_PATH_OBJ.expanduser().resolve()
+            _PRIMARY_WORKER_MANAGER = None
+            _PRIMARY_WORKER_MANAGER_CONFIG = None
+        return
+
     normalized_storage_path = _normalize_storage_path(storage_path)
     with _PRIMARY_WORKER_MANAGER_LOCK:
         if normalized_storage_path == _PRIMARY_WORKER_STORAGE_PATH:
