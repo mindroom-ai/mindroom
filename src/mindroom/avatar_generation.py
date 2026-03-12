@@ -502,15 +502,14 @@ async def _generate_missing_avatars(
 
 async def run_avatar_generation(
     *,
-    set_only: bool = False,
-    sync_room_avatars: bool = True,
+    sync_room_avatars: bool = False,
     suppress_missing_router: bool = False,
 ) -> None:
     """Generate missing avatars and optionally sync room avatars to Matrix."""
     config = load_validated_config()
     missing_targets = _missing_avatar_targets(config)
 
-    if not set_only and not await _generate_missing_avatars(config, missing_targets):
+    if not await _generate_missing_avatars(config, missing_targets):
         msg = "Avatar generation failed. See errors above."
         raise AvatarGenerationError(msg)
 

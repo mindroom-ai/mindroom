@@ -83,6 +83,25 @@ def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
     assert "--all-extras --no-extra sentence_transformers" in dockerfile
 
 
+@pytest.mark.parametrize(
+    "dockerfile_path",
+    [
+        Path("local/instances/deploy/Dockerfile.mindroom"),
+        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
+    ],
+)
+def test_runtime_images_copy_avatars_before_installing_project(dockerfile_path: Path) -> None:
+    """Bundled avatars must exist before uv builds the project wheel in Docker."""
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+
+    copy_avatars = "COPY avatars /app/avatars"
+    install_project = "uv sync --locked --no-dev"
+
+    assert copy_avatars in dockerfile
+    assert install_project in dockerfile
+    assert dockerfile.index(copy_avatars) < dockerfile.index(install_project)
+
+
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []

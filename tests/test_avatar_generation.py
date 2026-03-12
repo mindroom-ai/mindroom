@@ -291,7 +291,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
 
 
 @pytest.mark.asyncio
-async def test_run_avatar_generation_set_only_accepts_null_optional_sections(
+async def test_run_avatar_generation_accepts_null_optional_sections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -304,9 +304,28 @@ async def test_run_avatar_generation_set_only_accepts_null_optional_sections(
         "teams: null\n"
         "matrix_space: null\n",
     )
+    for entity_type, entity_name in (
+        ("agents", "a"),
+        ("agents", "router"),
+        ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME),
+    ):
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"avatar")
     monkeypatch.setattr(generate_avatars, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
 
-    await generate_avatars.run_avatar_generation(set_only=True, sync_room_avatars=False)
+    await generate_avatars.run_avatar_generation(sync_room_avatars=False)
 
 
 @pytest.mark.asyncio

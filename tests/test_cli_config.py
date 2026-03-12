@@ -500,27 +500,27 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
 
-    def test_run_reports_avatar_generation_failure(
+    def test_avatars_generate_reports_avatar_generation_failure(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Run should exit cleanly when startup avatar generation fails."""
+        """Avatar generation should exit cleanly when generation fails."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
+            "matrix_space:\n  enabled: false\n"
+            "authorization:\n  global_users: []\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
 
         with patch(
-            "mindroom.orchestrator.main",
+            "mindroom.avatar_generation.run_avatar_generation",
             AsyncMock(side_effect=AvatarGenerationError("Avatar generation failed. See errors above.")),
         ):
-            result = runner.invoke(app, ["run", "--generate-avatars"])
+            result = runner.invoke(app, ["avatars", "generate"])
 
         assert result.exit_code == 1
         assert "Avatar generation failed" in _strip_ansi(result.output)
@@ -541,10 +541,11 @@ class TestVersionAndHelp:
         assert "Mindroom version" in result.output
 
     def test_help_mentions_config(self) -> None:
-        """Top-level help includes the config subcommand."""
+        """Top-level help includes key subcommands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "config" in result.output
+        assert "avatars" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -564,7 +565,6 @@ class TestRunApiFlags:
         assert "--no-api" in output
         assert "--api-port" in output
         assert "--api-host" in output
-        assert "--generate-avatars" in output
 
     def test_run_passes_api_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
@@ -585,7 +585,6 @@ class TestRunApiFlags:
         assert kwargs.kwargs["api"] is True
         assert kwargs.kwargs["api_port"] == 8765
         assert kwargs.kwargs["api_host"] == "0.0.0.0"  # noqa: S104
-        assert kwargs.kwargs["generate_avatars"] is False
 
     def test_run_no_api_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run --no-api passes api=False to bot main."""
@@ -620,8 +619,20 @@ class TestRunApiFlags:
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
 
-    def test_run_generate_avatars_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Run --generate-avatars forwards the startup option to the orchestrator."""
+
+class TestAvatarsCommands:
+    """Tests for `mindroom avatars`."""
+
+    def test_avatars_help_lists_subcommands(self) -> None:
+        """The avatars command should expose generate and sync subcommands."""
+        result = runner.invoke(app, ["avatars", "--help"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "generate" in output
+        assert "sync" in output
+
+    def test_avatars_generate_runs_generation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Avatar generation command should invoke the generation workflow."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
@@ -630,111 +641,49 @@ class TestRunApiFlags:
             "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
-        mock_main = AsyncMock()
-        with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--generate-avatars"])
+        run_avatar_generation = AsyncMock()
+        with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
+            result = runner.invoke(app, ["avatars", "generate"])
         assert result.exit_code == 0
-        assert mock_main.call_args.kwargs["generate_avatars"] is True
+        run_avatar_generation.assert_awaited_once_with(sync_room_avatars=False)
 
-    def test_run_generate_avatars_requires_google_api_key(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Run should fail fast when avatar generation is requested without a Google API key."""
+    def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Avatar sync command should invoke the Matrix sync workflow."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        set_room_avatars_in_matrix = AsyncMock()
 
-        result = runner.invoke(app, ["run", "--generate-avatars"])
+        with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
+            result = runner.invoke(app, ["avatars", "sync"])
+
+        assert result.exit_code == 0
+        set_room_avatars_in_matrix.assert_awaited_once_with()
+
+    def test_avatars_sync_reports_sync_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Avatar sync should surface sync failures cleanly."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+
+        with patch(
+            "mindroom.avatar_generation.set_room_avatars_in_matrix",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            result = runner.invoke(app, ["avatars", "sync"])
 
         assert result.exit_code == 1
-        assert "--generate-avatars" in result.output
-        assert "GOOGLE_API_KEY" in result.output
-
-    def test_run_generate_avatars_allows_sync_with_existing_avatars_without_google_api_key(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Run should allow avatar sync when every managed avatar asset already exists."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
-        (tmp_path / "avatars" / "agents").mkdir(parents=True)
-        (tmp_path / "avatars" / "agents" / "a.png").write_bytes(b"avatar")
-        (tmp_path / "avatars" / "agents" / "router.png").write_bytes(b"avatar")
-        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        mock_main = AsyncMock()
-
-        with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--generate-avatars"])
-
-        assert result.exit_code == 0
-        assert mock_main.call_args.kwargs["generate_avatars"] is True
-
-    def test_run_generate_avatars_ignores_direct_room_ids_without_google_api_key(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Run should not require Google credentials for external room IDs."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n    rooms:\n      - '!external:localhost'\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
-        (tmp_path / "avatars" / "agents").mkdir(parents=True)
-        (tmp_path / "avatars" / "agents" / "a.png").write_bytes(b"avatar")
-        (tmp_path / "avatars" / "agents" / "router.png").write_bytes(b"avatar")
-        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        mock_main = AsyncMock()
-
-        with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--generate-avatars"])
-
-        assert result.exit_code == 0
-        assert mock_main.call_args.kwargs["generate_avatars"] is True
-
-    def test_run_generate_avatars_ignores_full_room_aliases_without_google_api_key(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Run should not require Google credentials for external room aliases."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n    rooms:\n      - '#external:localhost'\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
-        (tmp_path / "avatars" / "agents").mkdir(parents=True)
-        (tmp_path / "avatars" / "agents" / "a.png").write_bytes(b"avatar")
-        (tmp_path / "avatars" / "agents" / "router.png").write_bytes(b"avatar")
-        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        mock_main = AsyncMock()
-
-        with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--generate-avatars"])
-
-        assert result.exit_code == 0
-        assert mock_main.call_args.kwargs["generate_avatars"] is True
+        assert "Could not sync room avatars: boom" in _strip_ansi(result.output)
 
 
 # ---------------------------------------------------------------------------

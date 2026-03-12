@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import typer
@@ -37,6 +38,9 @@ from .config import (
 from .doctor import doctor
 from .local_stack import local_stack_setup
 
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
+
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
 
@@ -54,7 +58,9 @@ app = typer.Typer(
     # Disable showing locals which can be very large (also see `setup_logging`)
     pretty_exceptions_show_locals=False,
 )
+avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 app.add_typer(config_app, name="config")
+app.add_typer(avatars_app, name="avatars")
 
 
 @app.command()
@@ -95,12 +101,6 @@ def run(
         "--api-host",
         help="Host for the bundled dashboard/API server",
     ),
-    generate_avatars: bool = typer.Option(
-        False,
-        "--generate-avatars",
-        help="Generate missing avatars before startup and sync room avatars after rooms are ready",
-        envvar="MINDROOM_GENERATE_AVATARS",
-    ),
 ) -> None:
     """Run the mindroom multi-agent system.
 
@@ -117,30 +117,19 @@ def run(
             api=api,
             api_port=api_port,
             api_host=api_host,
-            generate_avatars=generate_avatars,
         ),
     )
 
 
-async def _run(  # noqa: C901, PLR0912, PLR0915
-    log_level: str,
-    storage_path: Path,
-    *,
-    api: bool,
-    api_port: int,
-    api_host: str,
-    generate_avatars: bool,
-) -> None:
-    """Run the multi-agent system with friendly error handling."""
+def _load_active_config_or_exit() -> tuple[Path, Config]:
+    """Load the active config file or exit with friendly validation errors."""
     ensure_writable_config_path()
 
-    # Check config exists before starting
     config_path = Path(CONFIG_PATH)
     if not config_path.exists():
         _print_missing_config_error()
         raise typer.Exit(1)
 
-    # Validate config early so users get a clear message instead of a traceback
     try:
         config = _load_config_quiet(config_path)
     except ValidationError as exc:
@@ -151,14 +140,22 @@ async def _run(  # noqa: C901, PLR0912, PLR0915
         console.print("\n  [cyan]mindroom config validate[/cyan]  Check your config")
         raise typer.Exit(1) from None
 
+    return config_path, config
+
+
+async def _run(
+    log_level: str,
+    storage_path: Path,
+    *,
+    api: bool,
+    api_port: int,
+    api_host: str,
+) -> None:
+    """Run the multi-agent system with friendly error handling."""
+    _config_path, config = _load_active_config_or_exit()
+
     # Check for missing API keys
     _check_env_keys(config)
-    if generate_avatars and not os.getenv("GOOGLE_API_KEY"):
-        from mindroom.avatar_generation import has_missing_managed_avatars  # noqa: PLC0415
-
-        if has_missing_managed_avatars(config, config_path=config_path):
-            console.print("[red]Error:[/red] `--generate-avatars` requires `GOOGLE_API_KEY` when avatars are missing.")
-            raise typer.Exit(1)
 
     console.print(make_banner())
     console.print()
@@ -183,15 +180,11 @@ async def _run(  # noqa: C901, PLR0912, PLR0915
             api=api,
             api_port=api_port,
             api_host=api_host,
-            generate_avatars=generate_avatars,
         )
     except KeyboardInterrupt:
         console.print("\nStopped")
     except ConnectionError as exc:
         _print_connection_error(exc)
-        raise typer.Exit(1) from None
-    except AvatarGenerationError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
@@ -201,6 +194,43 @@ async def _run(  # noqa: C901, PLR0912, PLR0915
 
 
 app.command()(doctor)
+
+
+@avatars_app.command("generate")
+def avatars_generate() -> None:
+    """Generate missing managed avatar files in the workspace."""
+    _load_active_config_or_exit()
+
+    try:
+        from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
+
+        asyncio.run(run_avatar_generation(sync_room_avatars=False))
+    except AvatarGenerationError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+
+@avatars_app.command("sync")
+def avatars_sync() -> None:
+    """Sync configured room and root-space avatars to Matrix."""
+    _load_active_config_or_exit()
+
+    try:
+        from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
+
+        asyncio.run(set_room_avatars_in_matrix())
+    except ConnectionError as exc:
+        _print_connection_error(exc)
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
+            _print_connection_error(exc)
+        else:
+            console.print(f"[red]Error:[/red] Could not sync room avatars: {exc}")
+        raise typer.Exit(1) from None
+    except Exception as exc:
+        console.print(f"[red]Error:[/red] Could not sync room avatars: {exc}")
+        raise typer.Exit(1) from None
 
 
 @app.command()
