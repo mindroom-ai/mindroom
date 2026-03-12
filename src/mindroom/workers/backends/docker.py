@@ -18,6 +18,7 @@ import httpx
 
 from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, sync_shared_credentials_to_worker
+from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
@@ -92,6 +93,9 @@ _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _LABEL_WORKER_KEY = "mindroom.ai/worker-key"
 _LABEL_LAUNCH_CONFIG_HASH = "mindroom.ai/launch-config-hash"
 _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
+
+_DOCKER_DEPENDENCIES = ["docker"]
+_DOCKER_EXTRA = "docker"
 
 
 def _read_float_env(name: str, default: float) -> float:
@@ -256,12 +260,21 @@ def docker_backend_config_signature(
     )
 
 
+def ensure_docker_dependencies() -> None:
+    """Install the optional Docker SDK runtime when needed."""
+    try:
+        ensure_optional_deps(_DOCKER_DEPENDENCIES, _DOCKER_EXTRA)
+    except ImportError as exc:
+        raise WorkerBackendError(str(exc)) from exc
+
+
 def _load_docker_client_and_errors() -> tuple[_DockerClient, _DockerErrors]:
+    ensure_docker_dependencies()
     try:
         docker_module = importlib.import_module("docker")
         docker_errors = cast("_DockerErrors", importlib.import_module("docker.errors"))
     except ModuleNotFoundError as exc:
-        msg = "The 'docker' package is required for the Docker worker backend."
+        msg = "The Docker worker backend could not import the Docker SDK after ensuring the optional 'docker' extra."
         raise WorkerBackendError(msg) from exc
 
     docker_from_env = cast("Callable[[], _DockerClient]", docker_module.from_env)

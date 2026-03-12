@@ -186,13 +186,12 @@ That most commonly means `shell`, `file`, and `python`, but other tools can also
 The Docker backend starts one worker container per worker key and reuses it until the container goes idle or the Docker launch configuration changes.
 This is the simplest way to get one persistent container per agent without running Kubernetes.
 
-If you are testing unreleased code from a source checkout, install the Docker extra in that checkout and start MindRoom from the checkout instead of the published PyPI build.
-Use plain `uvx mindroom run` only after the version you want is published and your installed package includes the `docker` extra.
-The base package does not include the Python `docker` dependency required by this backend.
+MindRoom auto-installs the optional `docker` extra the first time this backend is used.
+If you disable auto-install with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1`, install it yourself with `uv sync --extra docker` in a source checkout or `pip install 'mindroom[docker]'`.
+If you are testing unreleased code from a source checkout, start MindRoom from that checkout instead of the published PyPI build.
 When you test unreleased code, build a worker image from the same checkout so the primary runtime and worker containers run the same revision.
 
 ```bash
-uv sync --extra docker
 docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
 ```
 

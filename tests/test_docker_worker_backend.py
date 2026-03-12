@@ -8,7 +8,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.worker_routing import worker_root_path
-from mindroom.workers.backends.docker import DockerWorkerBackend, _DockerWorkerBackendConfig
+from mindroom.workers.backends.docker import (
+    DockerWorkerBackend,
+    _DockerWorkerBackendConfig,
+    _load_docker_client_and_errors,
+)
 from mindroom.workers.models import WorkerSpec
 
 if TYPE_CHECKING:
@@ -264,6 +268,35 @@ def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
     assert synced_storage_roots == [tmp_path.resolve()]
+
+
+def test_load_docker_client_auto_installs_optional_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker backend startup should ensure the optional Docker SDK before importing it."""
+    captured: dict[str, object] = {}
+    fake_client = object()
+    fake_errors = SimpleNamespace(DockerException=_FakeDockerError, NotFound=_FakeNotFoundError)
+
+    def _ensure() -> None:
+        captured["installed"] = True
+
+    def _import_module(name: str) -> object:
+        if name == "docker":
+            return SimpleNamespace(from_env=lambda: fake_client)
+        if name == "docker.errors":
+            return fake_errors
+        msg = f"Unexpected import: {name}"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.ensure_docker_dependencies", _ensure)
+    monkeypatch.setattr("mindroom.workers.backends.docker.importlib.import_module", _import_module)
+
+    client, errors = _load_docker_client_and_errors()
+
+    assert captured["installed"] is True
+    assert client is fake_client
+    assert errors is fake_errors
 
 
 def test_docker_backend_cleanup_stops_idle_workers(
