@@ -6,22 +6,48 @@ import hashlib
 import importlib
 import json
 import os
-import re
 import shutil
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 import yaml
 
-from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ, resolve_config_relative_path
+from mindroom.constants import resolve_config_relative_path
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, sync_shared_credentials_to_worker
 from mindroom.tool_system.dependencies import ensure_optional_deps
-from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name, worker_root_path
+from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._metadata_store import (
+    list_worker_state_paths,
+    load_worker_metadata,
+    save_worker_metadata,
+)
+from mindroom.workers.backends.docker_config import (
+    _DEFAULT_WORKER_PORT,
+    _DockerWorkerBackendConfig,
+    docker_backend_config_signature,
+    docker_workers_root,
+    normalize_docker_name_prefix,
+    resolve_docker_storage_path,
+)
+from mindroom.workers.backends.docker_projection import (
+    _DockerProjectedConfig,
+    _DockerProjectedConfigAsset,
+    _PROJECTED_ASSETS_DIRNAME,
+    _PROJECTED_CONFIGS_DIRNAME,
+    _WORKER_CONFIG_STATE_DIRNAME,
+    DockerProjectionManager,
+    _plugin_uses_filesystem_path,
+    _projected_config_value,
+    _projection_display_name,
+    _projection_hash,
+    _projection_path_with_suffix,
+    _safe_projection_name,
+)
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -61,32 +87,7 @@ if TYPE_CHECKING:
         NotFound: type[Exception]
 
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
-_DEFAULT_READY_TIMEOUT_SECONDS = 60.0
-_DEFAULT_WORKER_PORT = 8766
-_DEFAULT_STORAGE_MOUNT_PATH = "/app/worker"
-_DEFAULT_CONFIG_PATH = "/app/config-host/config.yaml"
-_DEFAULT_NAME_PREFIX = "mindroom-worker"
-_DEFAULT_PUBLISH_HOST = "127.0.0.1"
 _READY_POLL_INTERVAL_SECONDS = 1.0
-_PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
-_PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
-_WORKER_CONFIG_STATE_DIRNAME = ".mindroom-worker-config-state"
-
-_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
-_IMAGE_ENV = "MINDROOM_DOCKER_WORKER_IMAGE"
-_PORT_ENV = "MINDROOM_DOCKER_WORKER_PORT"
-_STORAGE_MOUNT_PATH_ENV = "MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH"
-_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_CONFIG_PATH"
-_HOST_CONFIG_PATH_ENV = "MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH"
-_IDLE_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS"
-_READY_TIMEOUT_ENV = "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS"
-_NAME_PREFIX_ENV = "MINDROOM_DOCKER_WORKER_NAME_PREFIX"
-_PUBLISH_HOST_ENV = "MINDROOM_DOCKER_WORKER_PUBLISH_HOST"
-_ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
-_USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
-_EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
-_EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
 
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
@@ -107,57 +108,31 @@ _LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
 
-
-def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        value = default
-    return max(1.0, value)
-
-
-def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        value = default
-    return max(1, value)
+__all__ = [
+    "_PROJECTED_CONFIGS_DIRNAME",
+    "_WORKER_CONFIG_STATE_DIRNAME",
+    "DockerWorkerBackend",
+    "_DockerWorkerBackendConfig",
+    "_default_docker_user_for_os",
+    "_load_docker_client_and_errors",
+    "_read_docker_user",
+    "docker_backend_config_signature",
+]
 
 
-def _read_json_mapping_env(name: str) -> dict[str, str]:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    cleaned: dict[str, str] = {}
-    for key, value in parsed.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(value, str):
-            cleaned[key] = value
-        elif value is not None:
-            cleaned[key] = str(value)
-    return cleaned
+def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
+    resolved_workers_root = workers_root.expanduser().resolve()
+    return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
 
 
-def _read_host_config_path() -> Path | None:
-    configured = os.getenv(_HOST_CONFIG_PATH_ENV, "").strip()
-    if configured:
-        resolved = Path(configured).expanduser().resolve()
-        if not resolved.exists():
-            msg = f"{_HOST_CONFIG_PATH_ENV} points to a missing file: {resolved}"
-            raise WorkerBackendError(msg)
-        return resolved
-    if CONFIG_PATH.exists():
-        return CONFIG_PATH.expanduser().resolve()
-    return None
+def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespace: str) -> str:
+    digest = hashlib.sha256(f"{runtime_namespace}:{worker_key}".encode()).hexdigest()[:24]
+    normalized_prefix = normalize_docker_name_prefix(prefix)
+    max_prefix_length = 63 - len(digest) - 1
+    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
+    if not safe_prefix:
+        safe_prefix = normalize_docker_name_prefix("mindroom-worker")[:max_prefix_length].rstrip("-") or "worker"
+    return f"{safe_prefix}-{digest}"
 
 
 def _default_docker_user_for_os(os_name: str) -> str | None:
@@ -168,182 +143,12 @@ def _default_docker_user_for_os(os_name: str) -> str | None:
     return None
 
 
-def _default_docker_user() -> str | None:
-    return _default_docker_user_for_os(os.name)
-
-
 def _read_docker_user() -> str | None:
-    raw_value = os.getenv(_USER_ENV)
+    raw_value = os.getenv("MINDROOM_DOCKER_WORKER_USER")
     if raw_value is None:
-        return _default_docker_user()
+        return _default_docker_user_for_os(os.name)
     normalized = raw_value.strip()
     return normalized or None
-
-
-def _normalize_name_prefix(raw_value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9-]+", "-", raw_value.strip().lower()).strip("-")
-    return normalized or _DEFAULT_NAME_PREFIX
-
-
-def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
-    resolved_workers_root = workers_root.expanduser().resolve()
-    return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
-
-
-def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespace: str) -> str:
-    digest = hashlib.sha256(f"{runtime_namespace}:{worker_key}".encode()).hexdigest()[:24]
-    normalized_prefix = _normalize_name_prefix(prefix)
-    max_prefix_length = 63 - len(digest) - 1
-    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
-    if not safe_prefix:
-        safe_prefix = _DEFAULT_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
-    return f"{safe_prefix}-{digest}"
-
-
-def _workers_root(base_storage_path: Path) -> Path:
-    return worker_root_path(base_storage_path, "__mindroom_root__").parent
-
-
-def _projected_configs_root(workers_root: Path) -> Path:
-    return workers_root / _PROJECTED_CONFIGS_DIRNAME
-
-
-def _resolved_storage_path(storage_path: Path | None = None) -> Path:
-    base_storage_path = STORAGE_PATH_OBJ if storage_path is None else storage_path
-    return base_storage_path.expanduser().resolve()
-
-
-def _container_config_dir(config_path: str) -> str:
-    return str(PurePosixPath(config_path).parent)
-
-
-def _container_config_dotenv_path(config_path: str) -> str:
-    return str(PurePosixPath(_container_config_dir(config_path)) / ".env")
-
-
-def _projected_config_value(relative_path: PurePosixPath) -> str:
-    return f"./{relative_path.as_posix()}"
-
-
-def _safe_projection_name(raw_value: str) -> str:
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_value).strip(".-")
-    return normalized or "item"
-
-
-def _projection_display_name(host_path: Path, *, fallback: str) -> str:
-    return _safe_projection_name(host_path.name or fallback)
-
-
-def _projection_hash(raw_value: str, *, length: int = 8) -> str:
-    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()[:length]
-
-
-def _projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -> PurePosixPath:
-    if relative_path.suffix:
-        name = f"{relative_path.stem}-{suffix}{relative_path.suffix}"
-    else:
-        name = f"{relative_path.name}-{suffix}"
-    return relative_path.with_name(name)
-
-
-def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
-    if plugin_path.startswith(("python:", "pkg:", "module:")):
-        return False
-    candidate = resolve_config_relative_path(plugin_path, config_path=config_path)
-    if candidate.exists():
-        return True
-    unresolved = Path(plugin_path).expanduser()
-    return unresolved.is_absolute() or plugin_path.startswith((".", "~")) or "/" in plugin_path or "\\" in plugin_path
-
-
-@dataclass(frozen=True, slots=True)
-class _DockerProjectedConfigAsset:
-    host_path: Path
-    relative_path: PurePosixPath
-
-    @property
-    def is_directory(self) -> bool:
-        return self.host_path.is_dir()
-
-
-@dataclass(frozen=True, slots=True)
-class _DockerProjectedConfig:
-    root: Path
-    projected_yaml: str
-    assets: tuple[_DockerProjectedConfigAsset, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _DockerWorkerBackendConfig:
-    image: str
-    worker_port: int
-    storage_mount_path: str
-    config_path: str
-    host_config_path: Path | None
-    idle_timeout_seconds: float
-    ready_timeout_seconds: float
-    name_prefix: str
-    publish_host: str
-    endpoint_host: str
-    user: str | None
-    extra_env: dict[str, str]
-    extra_labels: dict[str, str]
-
-    @classmethod
-    def from_env(cls) -> _DockerWorkerBackendConfig:
-        image = os.getenv(_IMAGE_ENV, "").strip()
-        if not image:
-            msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=docker."
-            raise WorkerBackendError(msg)
-
-        publish_host = os.getenv(_PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST).strip() or _DEFAULT_PUBLISH_HOST
-        endpoint_host = os.getenv(_ENDPOINT_HOST_ENV, publish_host).strip() or publish_host
-        return cls(
-            image=image,
-            worker_port=_read_int_env(_PORT_ENV, _DEFAULT_WORKER_PORT),
-            storage_mount_path=os.getenv(_STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH).strip()
-            or _DEFAULT_STORAGE_MOUNT_PATH,
-            config_path=os.getenv(_CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH).strip() or _DEFAULT_CONFIG_PATH,
-            host_config_path=_read_host_config_path(),
-            idle_timeout_seconds=_read_float_env(_IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(_READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=os.getenv(_NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX).strip() or _DEFAULT_NAME_PREFIX,
-            publish_host=publish_host,
-            endpoint_host=endpoint_host,
-            user=_read_docker_user(),
-            extra_env=_read_json_mapping_env(_EXTRA_ENV_JSON_ENV),
-            extra_labels=_read_json_mapping_env(_EXTRA_LABELS_JSON_ENV),
-        )
-
-
-def docker_backend_config_signature(
-    *,
-    auth_token: str | None,
-    storage_path: Path | None = None,
-) -> tuple[str, ...]:
-    """Return a cache signature for one concrete Docker backend config."""
-    config = _DockerWorkerBackendConfig.from_env()
-    workers_root = _workers_root(_resolved_storage_path(storage_path))
-    extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
-    extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
-    return (
-        "docker",
-        config.image,
-        str(config.worker_port),
-        config.storage_mount_path,
-        config.config_path,
-        str(config.host_config_path or ""),
-        str(config.idle_timeout_seconds),
-        str(config.ready_timeout_seconds),
-        config.name_prefix,
-        config.publish_host,
-        config.endpoint_host,
-        config.user or "",
-        str(workers_root),
-        extra_env_json,
-        extra_labels_json,
-        auth_token or "",
-    )
 
 
 def _host_config_contents_hash(host_config_path: Path | None) -> str:
@@ -362,8 +167,6 @@ def _asset_contents_hash(host_path: Path) -> str:
     except OSError as exc:
         msg = f"Failed to read Docker worker asset '{host_path}': {exc}"
         raise WorkerBackendError(msg) from exc
-
-
 def _docker_image_identity_state(
     image: str,
     *,
@@ -468,9 +271,12 @@ class DockerWorkerBackend:
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
-        self._storage_path = _resolved_storage_path(storage_path)
-        self._workers_root = _workers_root(self._storage_path)
-        self._projected_configs_root = _projected_configs_root(self._workers_root)
+        self._storage_path = resolve_docker_storage_path(storage_path)
+        self._workers_root = docker_workers_root(self._storage_path)
+        self._projection_manager = DockerProjectionManager(
+            config=config,
+            projected_configs_root=self._workers_root / _PROJECTED_CONFIGS_DIRNAME,
+        )
         self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
@@ -599,7 +405,7 @@ class DockerWorkerBackend:
                 return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
             self._remove_container(container)
-            self._remove_projected_configs(paths)
+            self._projection_manager.remove_projected_configs(paths)
             if paths.root.exists():
                 shutil.rmtree(paths.root)
             return None
@@ -685,31 +491,21 @@ class DockerWorkerBackend:
         return True
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
-        if not self._workers_root.exists():
-            return []
-        return [
-            local_worker_state_paths_for_root(metadata_file.parents[1])
-            for metadata_file in sorted(self._workers_root.glob("*/metadata/worker.json"))
-        ]
+        return list_worker_state_paths(
+            self._workers_root,
+            state_paths_from_root=local_worker_state_paths_for_root,
+        )
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _DockerWorkerMetadata | None:
-        if not paths.metadata_file.exists():
-            return None
-        try:
-            with paths.metadata_file.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return None
-        try:
-            return _DockerWorkerMetadata(**data)
-        except TypeError:
-            return None
+        return load_worker_metadata(paths, metadata_type=_DockerWorkerMetadata)
 
     def _save_metadata(self, paths: LocalWorkerStatePaths, metadata: _DockerWorkerMetadata) -> None:
-        paths.root.mkdir(parents=True, exist_ok=True)
-        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
-        with self._metadata_lock, paths.metadata_file.open("w", encoding="utf-8") as f:
-            json.dump(asdict(metadata), f, sort_keys=True)
+        save_worker_metadata(
+            paths,
+            metadata,
+            ensure_root=True,
+            lock=self._metadata_lock,
+        )
 
     def _read_container(self, container_name: str) -> _DockerContainer | None:
         try:
@@ -742,16 +538,18 @@ class DockerWorkerBackend:
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
 
+        config_mount_specs, projection = self._projection_manager.config_mount_specs(
+            paths,
+            worker_key=metadata.worker_key,
+            materialize_projection=False,
+        )
+        if projection is not None and not projection.ready:
+            return False
+
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
-        mount_checks.extend(
-            self._config_mount_specs(
-                paths,
-                worker_key=metadata.worker_key,
-                materialize_projection=False,
-            ),
-        )
+        mount_checks.extend(config_mount_specs)
         return all(
             self._container_mount_matches(
                 container,
@@ -873,16 +671,12 @@ class DockerWorkerBackend:
         worker_key: str | None = None,
         materialize_projection: bool = True,
     ) -> list[tuple[Path, str, bool]]:
-        if self.config.host_config_path is None:
-            return []
-
-        projection = self._projected_config(
+        mount_specs, _projection = self._projection_manager.config_mount_specs(
             paths,
             worker_key=worker_key,
-            materialize=materialize_projection,
+            materialize_projection=materialize_projection,
         )
-        config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
-        return [(projection.root, str(config_dir), True)]
+        return mount_specs
 
     def _container_volumes(
         self,
@@ -1370,7 +1164,6 @@ class DockerWorkerBackend:
         host_path.mkdir(parents=True, exist_ok=True)
         container_path = PurePosixPath(self.config.storage_mount_path) / _WORKER_CONFIG_STATE_DIRNAME / relative_path
         return str(container_path)
-
     def _container_labels(self, metadata: _DockerWorkerMetadata) -> dict[str, str]:
         labels = {
             _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
