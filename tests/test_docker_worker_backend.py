@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
+    _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
     _load_docker_client_and_errors,
+    _read_docker_user,
 )
 from mindroom.workers.models import WorkerSpec
 
@@ -302,6 +304,35 @@ def test_load_docker_client_auto_installs_optional_runtime(
     assert captured["installed"] is True
     assert client is fake_client
     assert errors is fake_errors
+
+
+def test_read_docker_user_defaults_to_current_posix_uid_gid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset Docker worker user should follow the current POSIX runtime user."""
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_USER", raising=False)
+    monkeypatch.setattr("mindroom.workers.backends.docker.os.getuid", lambda: 501)
+    monkeypatch.setattr("mindroom.workers.backends.docker.os.getgid", lambda: 20)
+
+    assert _default_docker_user_for_os("posix") == "501:20"
+
+
+def test_read_docker_user_defaults_to_image_user_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows should leave the container user unset and use the image default."""
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_USER", raising=False)
+
+    assert _default_docker_user_for_os("nt") is None
+
+
+def test_read_docker_user_env_override_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit Docker worker user config should override platform defaults."""
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_USER", "2001:3001")
+
+    assert _read_docker_user() == "2001:3001"
 
 
 def test_docker_backend_cleanup_stops_idle_workers(
