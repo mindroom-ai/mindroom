@@ -3402,6 +3402,22 @@ class TestMultiAgentOrchestrator:
         assert events[-1] == "sync_rooms"
 
     @pytest.mark.asyncio
+    async def test_sync_room_avatars_failures_do_not_abort_startup(self, tmp_path: Path) -> None:
+        """Managed avatar sync is cosmetic and should never abort startup."""
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, generate_avatars=True)
+
+        with (
+            patch(
+                "mindroom.avatar_generation.set_room_avatars_in_matrix",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+        ):
+            await orchestrator._sync_room_avatars_if_enabled()
+
+        mock_exception.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_restarts_after_failure(self) -> None:
         """Auxiliary supervisors should restart tasks that crash."""
         started = asyncio.Event()

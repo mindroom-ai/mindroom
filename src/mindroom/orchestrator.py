@@ -152,7 +152,10 @@ class MultiAgentOrchestrator:
             return
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
 
-        await set_room_avatars_in_matrix(suppress_missing_router=True)
+        try:
+            await set_room_avatars_in_matrix(suppress_missing_router=True)
+        except Exception:
+            logger.exception("Failed to sync managed avatars during startup")
 
     async def _ensure_user_account(self, config: Config) -> None:
         """Ensure a user account exists, creating one if necessary.

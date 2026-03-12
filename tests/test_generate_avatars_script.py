@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 from google.genai import types
 
 from mindroom import avatar_generation as generate_avatars
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_load_config_uses_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
@@ -68,6 +72,24 @@ async def test_generate_prompt_uses_gemini_prompt_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_generate_prompt_uses_room_style_for_spaces() -> None:
+    """Space avatars should use the same icon-style prompt path as rooms."""
+    generate_content = AsyncMock(return_value=SimpleNamespace(text="deep blue, doorway outline"))
+    client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+
+    prompt = await generate_avatars.generate_prompt(
+        client,
+        entity_type="spaces",
+        entity_name="root_space",
+        role="Workspace space that organizes rooms",
+    )
+
+    assert prompt == f"{generate_avatars.ROOM_STYLE}, deep blue, doorway outline"
+    kwargs = generate_content.await_args.kwargs
+    assert kwargs["config"].system_instruction == generate_avatars.ROOM_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
 async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
     """The script should save Gemini-generated image bytes to the expected avatar file."""
     avatar_path = tmp_path / "generated.png"
@@ -99,3 +121,114 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
     assert kwargs["model"] == generate_avatars.IMAGE_MODEL
     assert kwargs["contents"] == "avatar prompt"
     assert kwargs["config"].response_modalities == ["IMAGE"]
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_generation_includes_team_rooms_and_root_space(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generation should cover team-only rooms and the managed root space."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-5-latest"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["lobby"],
+            },
+        },
+        "teams": {
+            "ops_team": {
+                "display_name": "Ops Team",
+                "role": "Coordinates operations",
+                "agents": ["general"],
+                "rooms": ["war_room"],
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": True, "name": "Workspace"},
+    }
+    generated = AsyncMock()
+    client = SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock()))
+
+    def _make_client(*, api_key: str) -> object:
+        assert api_key == "test-google-key"
+        return client
+
+    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
+    monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
+    monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", AsyncMock())
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+
+    await generate_avatars.run_avatar_generation(sync_room_avatars=False)
+
+    generated_entities = {(call.args[1], call.args[2]) for call in generated.await_args_list}
+    assert ("rooms", "lobby") in generated_entities
+    assert ("rooms", "war_room") in generated_entities
+    assert ("spaces", generate_avatars.ROOT_SPACE_AVATAR_NAME) in generated_entities
+    client.aio.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Matrix avatar sync should cover team-only rooms and the managed root space."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-5-latest"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+            },
+        },
+        "teams": {
+            "ops_team": {
+                "display_name": "Ops Team",
+                "role": "Coordinates operations",
+                "agents": ["general"],
+                "rooms": ["war_room"],
+                "model": "default",
+            },
+        },
+        "matrix_space": {"enabled": True, "name": "Workspace"},
+    }
+    room_avatar_path = tmp_path / "avatars" / "rooms" / "war_room.png"
+    room_avatar_path.parent.mkdir(parents=True)
+    room_avatar_path.write_bytes(b"room-bytes")
+    space_avatar_path = tmp_path / "avatars" / "spaces" / "root_space.png"
+    space_avatar_path.parent.mkdir(parents=True)
+    space_avatar_path.write_bytes(b"space-bytes")
+
+    router_account = SimpleNamespace(username="router")
+    router_account.password = b"pw".decode()
+
+    def _get_account(key: str) -> object | None:
+        return router_account if key == "agent_router" else None
+
+    state = SimpleNamespace(
+        space_room_id="!space:localhost",
+        get_account=_get_account,
+    )
+    client = SimpleNamespace(close=AsyncMock())
+    check_and_set_avatar = AsyncMock(return_value=True)
+
+    def _get_room_id(room_name: str) -> str | None:
+        return "!war:localhost" if room_name == "war_room" else None
+
+    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "check_and_set_avatar", check_and_set_avatar)
+    monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
+    monkeypatch.setattr(generate_avatars, "MATRIX_HOMESERVER", "http://localhost:8008")
+
+    await generate_avatars.set_room_avatars_in_matrix()
+
+    synced_targets = {(call.kwargs.get("room_id"), call.args[1].name) for call in check_and_set_avatar.await_args_list}
+    assert ("!war:localhost", "war_room.png") in synced_targets
+    assert ("!space:localhost", "root_space.png") in synced_targets
+    client.close.assert_awaited_once()

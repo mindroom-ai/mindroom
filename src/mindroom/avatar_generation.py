@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import yaml
 from dotenv import load_dotenv
@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
+from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
@@ -26,6 +27,14 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable
     from pathlib import Path
 
+    import nio
+
+
+class _RouterAccountLike(Protocol):
+    username: str
+    password: str
+
+
 console = Console()
 
 load_dotenv()
@@ -33,6 +42,7 @@ load_dotenv()
 PROMPT_MODEL = "gemini-3.1-flash-lite"
 # "Nano Banana 2" is the current Gemini 3.1 Flash image model.
 IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+ROOT_SPACE_AVATAR_NAME = "root_space"
 
 CHARACTER_STYLE = "professional AI avatar portrait, abstract geometric silhouette, premium product-render aesthetic, refined materials, subtle depth, precise lighting, centered composition, restrained but distinctive color palette, modern enterprise technology brand language, calm intelligent presence, abstract interface motifs, no text, not cartoonish, not childish"
 
@@ -96,6 +106,11 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def load_validated_config() -> Config:
+    """Load and validate the active MindRoom configuration."""
+    return Config.model_validate(load_config())
+
+
 def get_avatar_path(entity_type: str, entity_name: str) -> Path:
     """Get the output path for an avatar file."""
     output_dir = avatars_dir() / entity_type
@@ -111,7 +126,7 @@ async def generate_prompt(
     team_members: list[dict] | None = None,
 ) -> str:
     """Generate an image prompt based on the entity's role using AI."""
-    if entity_type == "rooms":
+    if entity_type in {"rooms", "spaces"}:
         system_prompt = ROOM_SYSTEM_PROMPT
         user_prompt = f"Room name: {entity_name}\nPurpose: {role}"
     elif entity_type == "teams" and team_members:
@@ -136,7 +151,7 @@ async def generate_prompt(
         raise ValueError(msg)
 
     visual_elements = response.text.strip()
-    base_style = ROOM_STYLE if entity_type == "rooms" else CHARACTER_STYLE
+    base_style = ROOM_STYLE if entity_type in {"rooms", "spaces"} else CHARACTER_STYLE
     final_prompt = f"{base_style}, {visual_elements}"
 
     console.print(
@@ -214,6 +229,79 @@ async def generate_avatar(
     console.print(f"[green]✓ Generated avatar for {entity_type}/{entity_name}[/green]")
 
 
+def _build_router_user(router_account: _RouterAccountLike) -> AgentMatrixUser:
+    """Create the router user object from persisted Matrix state."""
+    server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+    return AgentMatrixUser(
+        agent_name=ROUTER_AGENT_NAME,
+        user_id=MatrixID.from_username(router_account.username, server_name).full_id,
+        display_name="Router",
+        password=router_account.password,
+        access_token=None,
+    )
+
+
+async def _sync_avatar_target(
+    client: nio.AsyncClient,
+    *,
+    avatar_path: Path,
+    room_id: str,
+    label: str,
+) -> bool:
+    """Apply one managed avatar target and report whether it changed."""
+    if await check_and_set_avatar(client, avatar_path, room_id=room_id):
+        console.print(f"[green]✓ Set avatar for {label}[/green]")
+        return True
+    console.print(f"[yellow]⊘ Avatar already set or failed for {label}[/yellow]")
+    return False
+
+
+async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int]:
+    """Apply configured room avatars and return success/skip counts."""
+    room_avatars_dir = avatars_dir() / "rooms"
+    success_count = 0
+    skip_count = 0
+    for room_name in sorted(config.get_all_configured_rooms()):
+        avatar_path = room_avatars_dir / f"{room_name}.png"
+        if not avatar_path.exists():
+            skip_count += 1
+            continue
+
+        room_id = get_room_id(room_name)
+        if not room_id:
+            console.print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
+            continue
+
+        success_count += int(
+            await _sync_avatar_target(
+                client,
+                avatar_path=avatar_path,
+                room_id=room_id,
+                label=f"room '{room_name}'",
+            ),
+        )
+    return success_count, skip_count
+
+
+async def _sync_root_space_avatar(client: nio.AsyncClient, state: MatrixState) -> int:
+    """Apply the managed root-space avatar when both the asset and room exist."""
+    if not state.space_room_id:
+        return 0
+
+    root_space_avatar_path = avatars_dir() / "spaces" / f"{ROOT_SPACE_AVATAR_NAME}.png"
+    if not root_space_avatar_path.exists():
+        return 0
+
+    return int(
+        await _sync_avatar_target(
+            client,
+            avatar_path=root_space_avatar_path,
+            room_id=state.space_room_id,
+            label="root space",
+        ),
+    )
+
+
 async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -> None:
     """Set avatars for all rooms in Matrix."""
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
@@ -228,44 +316,16 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
         console.print("[dim]Make sure mindroom has been started at least once[/dim]")
         return
 
-    server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
-    router_user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id=MatrixID.from_username(router_account.username, server_name).full_id,
-        display_name="Router",
-        password=router_account.password,
-        access_token=None,
-    )
-
+    router_user = _build_router_user(router_account)
     client = await login_agent_user(MATRIX_HOMESERVER, router_user)
     console.print("[green]✓ Logged in to Matrix as router[/green]")
 
-    config = load_config()
-    all_rooms = set()
-    for agent_data in config.get("agents", {}).values():
-        all_rooms.update(agent_data.get("rooms", []))
-
-    room_avatars_dir = avatars_dir() / "rooms"
-    success_count = 0
-    skip_count = 0
-    for room_name in sorted(all_rooms):
-        avatar_path = room_avatars_dir / f"{room_name}.png"
-        if not avatar_path.exists():
-            skip_count += 1
-            continue
-
-        room_id = get_room_id(room_name)
-        if not room_id:
-            console.print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
-            continue
-
-        if await check_and_set_avatar(client, avatar_path, room_id=room_id):
-            console.print(f"[green]✓ Set avatar for room '{room_name}'[/green]")
-            success_count += 1
-        else:
-            console.print(f"[yellow]⊘ Avatar already set or failed for room '{room_name}'[/yellow]")
-
-    await client.close()
+    config = load_validated_config()
+    try:
+        success_count, skip_count = await _sync_configured_room_avatars(client, config)
+        success_count += await _sync_root_space_avatar(client, state)
+    finally:
+        await client.close()
 
     if success_count > 0:
         console.print(f"\n[green]✓ Set {success_count} room avatars[/green]")
@@ -280,7 +340,8 @@ async def run_avatar_generation(
     suppress_missing_router: bool = False,
 ) -> None:
     """Generate missing avatars and optionally sync room avatars to Matrix."""
-    config = load_config()
+    raw_config = load_config()
+    config = Config.model_validate(raw_config)
 
     if not set_only:
         api_key = os.getenv("GOOGLE_API_KEY")
@@ -289,8 +350,8 @@ async def run_avatar_generation(
             console.print("Please set it in your .env file or environment")
             return
         client = genai.Client(api_key=api_key)
-        agents = config.get("agents", {})
-        teams = config.get("teams", {})
+        agents = raw_config.get("agents", {})
+        teams = raw_config.get("teams", {})
         tasks: list[Awaitable[None]] = []
 
         for agent_name, agent_data in agents.items():
@@ -301,9 +362,7 @@ async def run_avatar_generation(
         for team_name, team_data in teams.items():
             tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
 
-        all_rooms = set()
-        for agent_data in agents.values():
-            all_rooms.update(agent_data.get("rooms", []))
+        all_rooms = config.get_all_configured_rooms()
 
         room_purposes = {
             "lobby": "Central meeting space, entrance and welcome area",
@@ -326,8 +385,20 @@ async def run_avatar_generation(
             room_data = {"role": room_purposes.get(room_name, f"Collaboration space for {room_name} activities")}
             tasks.append(generate_avatar(client, "rooms", room_name, room_data))
 
+        if config.matrix_space.enabled:
+            tasks.append(
+                generate_avatar(
+                    client,
+                    "spaces",
+                    ROOT_SPACE_AVATAR_NAME,
+                    {"role": f"Workspace space named {config.matrix_space.name} that organizes all managed rooms"},
+                ),
+            )
+
+        space_count = 1 if config.matrix_space.enabled else 0
+
         console.print(
-            f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, and {len(all_rooms)} rooms...[/bold cyan]\n",
+            f"\n[bold cyan]🚀 Generating avatars for {len(agents) + 1} agents, {len(teams)} teams, {len(all_rooms)} rooms, and {space_count} spaces...[/bold cyan]\n",
         )
 
         try:
