@@ -24,6 +24,7 @@ from mindroom.constants import (
     STORAGE_PATH,
     env_key_for_provider,
 )
+from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
 from .config import _load_config_quiet, console
@@ -523,6 +524,16 @@ def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
             f"Memory embedder: could not reach ollama ({host})",
         )
 
+    if emb.provider == "sentence_transformers":
+        valid, detail = _validate_sentence_transformers_embedder(emb.config.model)
+        return _print_validation(
+            valid,
+            detail,
+            f"Memory embedder: sentence_transformers/{emb.config.model} local model loaded",
+            f"Memory embedder: sentence_transformers/{emb.config.model} local model failed",
+            f"Memory embedder: sentence_transformers/{emb.config.model} could not validate",
+        )
+
     env_key = env_key_for_provider(emb.provider)
     api_key = os.getenv(env_key) if env_key else None
     if env_key and not api_key:
@@ -550,6 +561,19 @@ def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
         f"Memory embedder: {emb.provider}/{emb.config.model} API key invalid",
         f"Memory embedder: {emb.provider}/{emb.config.model} could not validate",
     )
+
+
+def _validate_sentence_transformers_embedder(model: str) -> tuple[bool, str]:
+    """Validate a local sentence-transformers model with a tiny embedding request."""
+    try:
+        embedder = create_sentence_transformers_embedder(model)
+        embedding = embedder.get_embedding("mindroom doctor embedder check")
+    except Exception as exc:
+        return False, str(exc)
+
+    if not isinstance(embedding, list) or not embedding:
+        return False, "empty embedding vector"
+    return True, ""
 
 
 def _check_matrix_homeserver() -> tuple[int, int, int]:

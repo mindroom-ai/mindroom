@@ -27,7 +27,7 @@ from watchfiles import Change, awatch
 from mindroom.constants import resolve_config_relative_path
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
-from mindroom.embeddings import MindRoomOpenAIEmbedder
+from mindroom.embeddings import MindRoomOpenAIEmbedder, create_sentence_transformers_embedder
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -123,7 +123,16 @@ def _create_embedder(config: Config) -> Embedder:
         host = get_ollama_host() or embedder_config.host or "http://localhost:11434"
         return OllamaEmbedder(id=embedder_config.model, host=host)
 
-    msg = f"Unsupported knowledge embedder provider: {provider}. Supported providers: openai, ollama"
+    if provider == "sentence_transformers":
+        return create_sentence_transformers_embedder(
+            embedder_config.model,
+            dimensions=embedder_config.dimensions,
+        )
+
+    msg = (
+        f"Unsupported knowledge embedder provider: {provider}. "
+        "Supported providers: openai, ollama, sentence_transformers"
+    )
     raise ValueError(msg)
 
 

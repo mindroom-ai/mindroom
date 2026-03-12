@@ -45,6 +45,19 @@ memory:
       model: text-embedding-3-small
 ```
 
+Fully local embedder example:
+
+```
+memory:
+  backend: mem0
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
+```
+
+MindRoom auto-installs the optional `sentence_transformers` extra the first time this provider is used. Preinstall it with `uv sync --extra sentence_transformers` or `pip install 'mindroom[sentence_transformers]'` if you want to avoid the cold-start install step.
+
 ## Backend: `file`
 
 `file` keeps memory in markdown files and treats files as source-of-truth.

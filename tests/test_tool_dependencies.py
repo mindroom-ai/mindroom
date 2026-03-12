@@ -14,6 +14,7 @@ from mindroom.tool_system.dependencies import (
     _install_tool_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
+    auto_install_optional_extra,
     check_deps_installed,
 )
 from mindroom.tool_system.metadata import (
@@ -258,6 +259,21 @@ def test_install_via_uv_sync_targets_active_virtualenv(monkeypatch: pytest.Monke
     env = captured["env"]
     assert isinstance(env, dict)
     assert env["VIRTUAL_ENV"] == sys.prefix
+
+
+def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-tool optional extras should use the same runtime install path."""
+    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda: True)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._available_optional_extras",
+        lambda: {"sentence_transformers"},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._install_optional_extras",
+        lambda extras, *, quiet=False: extras == ["sentence_transformers"] and quiet,
+    )
+
+    assert auto_install_optional_extra("sentence_transformers")
 
 
 def test_install_tool_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:

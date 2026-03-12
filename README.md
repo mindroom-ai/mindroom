@@ -190,6 +190,9 @@ cd mindroom
 uv sync --all-extras
 ```
 
+To preinstall the fully local sentence-transformers embedder runtime, run `uv sync --extra sentence_transformers`.
+If you skip that, MindRoom auto-installs it on first use when `memory.embedder.provider: sentence_transformers` is configured.
+
 ```bash
 # Start MindRoom (agents + API + web dashboard)
 uv run mindroom run
@@ -313,6 +316,13 @@ voice:
   stt:
     provider: openai
     model: whisper-1
+
+memory:
+  backend: mem0
+  embedder:
+    provider: sentence_transformers
+    config:
+      model: sentence-transformers/all-MiniLM-L6-v2
 
 mindroom_user:
   username: mindroom_user  # Set this before first run; username is immutable after bootstrap

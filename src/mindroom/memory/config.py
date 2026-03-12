@@ -1,5 +1,6 @@
 """Memory configuration and setup."""
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,27 @@ from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
 from mindroom.credentials import get_credentials_manager
+from mindroom.embeddings import ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
+_MEMORY_COLLECTION_PREFIX = "mindroom_memories"
+
+
+def _memory_collection_name(config: Config) -> str:
+    """Return a stable Chroma collection name for the active embedder settings."""
+    embedder = config.memory.embedder
+    embedder_config = embedder.config
+    signature = "|".join(
+        (
+            embedder.provider,
+            embedder_config.model,
+            embedder_config.host or "",
+            str(embedder_config.dimensions) if embedder_config.dimensions is not None else "",
+        ),
+    )
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]
+    return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
 def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912
@@ -33,17 +52,18 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
+    embedder_provider = app_config.memory.embedder.provider
 
     # Build embedder config from config.yaml
     embedder_config: dict[str, Any] = {
-        "provider": app_config.memory.embedder.provider,
+        "provider": "huggingface" if embedder_provider == "sentence_transformers" else embedder_provider,
         "config": {
             "model": app_config.memory.embedder.config.model,
         },
     }
 
     # Add provider-specific configuration
-    if app_config.memory.embedder.provider == "openai":
+    if embedder_provider == "openai":
         # Set environment variable from CredentialsManager for Mem0 to use
         api_key = creds_manager.get_api_key("openai")
         if api_key:
@@ -53,7 +73,7 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
             embedder_config["config"]["openai_base_url"] = app_config.memory.embedder.config.host
         if app_config.memory.embedder.config.dimensions is not None:
             embedder_config["config"]["embedding_dims"] = app_config.memory.embedder.config.dimensions
-    elif app_config.memory.embedder.provider == "ollama":
+    elif embedder_provider == "ollama":
         # Check CredentialsManager for Ollama host
         ollama_creds = creds_manager.load_credentials("ollama")
         if ollama_creds and "host" in ollama_creds:
@@ -61,6 +81,8 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
         else:
             host = app_config.memory.embedder.config.host or "http://localhost:11434"
         embedder_config["config"]["ollama_base_url"] = host
+    elif embedder_provider == "sentence_transformers" and app_config.memory.embedder.config.dimensions is not None:
+        embedder_config["config"]["embedding_dims"] = app_config.memory.embedder.config.dimensions
 
     # Build LLM config from memory configuration
     if app_config.memory.llm:
@@ -117,7 +139,7 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
         "vector_store": {
             "provider": "chroma",
             "config": {
-                "collection_name": "mindroom_memories",
+                "collection_name": _memory_collection_name(app_config),
                 "path": str(chroma_path),
             },
         },
@@ -136,6 +158,8 @@ async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMem
 
     """
     config_dict = _get_memory_config(storage_path, config)
+    if config.memory.embedder.provider == "sentence_transformers":
+        ensure_sentence_transformers_dependencies()
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects

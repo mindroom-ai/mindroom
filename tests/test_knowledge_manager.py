@@ -14,6 +14,7 @@ from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
+    _create_embedder,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
@@ -214,6 +215,39 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
 
     assert not manager.matches(config_3072, storage_path)
     assert manager.needs_full_reindex(config_3072, storage_path)
+
+
+def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Knowledge embedders should support the local sentence-transformers provider."""
+    sentinel = object()
+    captured: dict[str, object] = {}
+
+    def _fake_create(model: str, *, dimensions: int | None = None) -> object:
+        captured["model"] = model
+        captured["dimensions"] = dimensions
+        return sentinel
+
+    monkeypatch.setattr("mindroom.knowledge.manager.create_sentence_transformers_embedder", _fake_create)
+
+    config = Config(
+        agents={},
+        models={},
+        memory={
+            "embedder": {
+                "provider": "sentence_transformers",
+                "config": {
+                    "model": "sentence-transformers/all-MiniLM-L6-v2",
+                    "dimensions": 384,
+                },
+            },
+        },
+    )
+
+    assert _create_embedder(config) is sentinel
+    assert captured == {
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "dimensions": 384,
+    }
 
 
 def test_resolve_file_path_rejects_traversal(dummy_manager: KnowledgeManager) -> None:

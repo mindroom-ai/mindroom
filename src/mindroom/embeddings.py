@@ -1,25 +1,51 @@
-"""Embedding helpers for OpenAI-compatible providers."""
+"""Embedding helpers for OpenAI-compatible and local providers."""
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from agno.knowledge.embedder.openai import OpenAIEmbedder
 from agno.utils.log import log_info, log_warning
 
+from mindroom.tool_system.dependencies import ensure_optional_deps
+
 if TYPE_CHECKING:
+    from agno.knowledge.embedder.base import Embedder
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
 _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
 }
+DEFAULT_SENTENCE_TRANSFORMERS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_SENTENCE_TRANSFORMERS_DEPENDENCIES = ["sentence-transformers"]
+_SENTENCE_TRANSFORMERS_EXTRA = "sentence_transformers"
 
 
 def _default_dimensions(model: str) -> int | None:
     """Return the default dimensions for models that support the parameter."""
     return _OPENAI_EMBEDDING_DIMENSIONS.get(model)
+
+
+def ensure_sentence_transformers_dependencies() -> None:
+    """Install the optional local sentence-transformers runtime when needed."""
+    ensure_optional_deps(_SENTENCE_TRANSFORMERS_DEPENDENCIES, _SENTENCE_TRANSFORMERS_EXTRA)
+
+
+def create_sentence_transformers_embedder(
+    model: str = DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
+    *,
+    dimensions: int | None = None,
+) -> Embedder:
+    """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
+    ensure_sentence_transformers_dependencies()
+    module = importlib.import_module("agno.knowledge.embedder.sentence_transformer")
+    embedder_class = cast("Any", module.SentenceTransformerEmbedder)
+    if dimensions is None:
+        return cast("Embedder", embedder_class(id=model))
+    return cast("Embedder", embedder_class(id=model, dimensions=dimensions))
 
 
 @dataclass

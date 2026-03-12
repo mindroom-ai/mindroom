@@ -164,7 +164,7 @@ defaults:
 memory:
   backend: mem0                    # Global default backend (mem0 or file); agents can override with memory_backend
   embedder:
-    provider: openai               # Default: openai
+    provider: openai               # Default: openai (openai, ollama, or sentence_transformers)
     config:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
@@ -172,6 +172,10 @@ memory:
   llm:                             # Optional: LLM for memory operations
     provider: ollama
     config: {}
+#
+# Set memory.embedder.provider: sentence_transformers to run embeddings in-process.
+# MindRoom auto-installs that optional extra on first use, or preinstall it with:
+# uv sync --extra sentence_transformers
 
 # Knowledge base configuration (optional)
 knowledge_bases:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.metadata as importlib_metadata
 import importlib.util
 import os
@@ -74,8 +75,8 @@ def _has_lockfile() -> bool:
 
 
 @cache
-def _available_tool_extras() -> set[str]:
-    """Discover available tool extras from pyproject or installed metadata."""
+def _available_optional_extras() -> set[str]:
+    """Discover available optional extras from pyproject or installed metadata."""
     pyproject_path = _PROJECT_ROOT / "pyproject.toml"
     if pyproject_path.exists():
         data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
@@ -87,6 +88,11 @@ def _available_tool_extras() -> set[str]:
     except importlib_metadata.PackageNotFoundError:
         return set()
     return set(metadata.get_all("Provides-Extra") or [])
+
+
+def _available_tool_extras() -> set[str]:
+    """Backward-compatible alias for tool-oriented callers."""
+    return _available_optional_extras()
 
 
 def _is_uv_tool_install() -> bool:
@@ -159,8 +165,8 @@ def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
     return result.returncode == 0
 
 
-def _install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
-    """Install one or more tool extras into the current environment.
+def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
+    """Install one or more optional extras into the current environment.
 
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
     Falls back to ``uv pip install`` or ``pip install`` otherwise.
@@ -176,13 +182,34 @@ def _install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
     return _install_in_environment(extras, quiet=quiet)
 
 
-def auto_install_tool_extra(tool_name: str) -> bool:
-    """Auto-install a tool extra when supported and enabled."""
+def _install_tool_extras(extras: list[str], *, quiet: bool = False) -> bool:
+    """Backward-compatible alias for tool-oriented callers."""
+    return _install_optional_extras(extras, quiet=quiet)
+
+
+def auto_install_optional_extra(extra_name: str) -> bool:
+    """Auto-install an optional extra when supported and enabled."""
     if not auto_install_enabled():
         return False
-    if tool_name not in _available_tool_extras():
+    if extra_name not in _available_optional_extras():
         return False
-    return _install_tool_extras([tool_name], quiet=True)
+    return _install_optional_extras([extra_name], quiet=True)
+
+
+def auto_install_tool_extra(tool_name: str) -> bool:
+    """Auto-install a tool extra when supported and enabled."""
+    return auto_install_optional_extra(tool_name)
+
+
+def ensure_optional_deps(dependencies: list[str], extra_name: str) -> None:
+    """Ensure dependencies are installed, auto-installing via optional extra if needed."""
+    if check_deps_installed(dependencies):
+        return
+    if not auto_install_optional_extra(extra_name):
+        missing = ", ".join(dependencies)
+        msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
+        raise ImportError(msg)
+    importlib.invalidate_caches()
 
 
 def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:
@@ -193,10 +220,4 @@ def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:
 
     Raises ImportError if dependencies cannot be satisfied.
     """
-    if check_deps_installed(dependencies):
-        return
-    if not auto_install_tool_extra(tool_extra):
-        missing = ", ".join(dependencies)
-        msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{tool_extra}]'"
-        raise ImportError(msg)
-    importlib.invalidate_caches()
+    ensure_optional_deps(dependencies, tool_extra)
