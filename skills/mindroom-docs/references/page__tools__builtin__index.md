@@ -211,7 +211,7 @@ Configure credentials via the dashboard or by writing `mindroom_data/credentials
 ```
 {
   "api_key": "sk-ant-or-proxy-key",
-  "model": "claude-sonnet-4-5",
+  "model": "claude-sonnet-4-6",
   "permission_mode": "default",
   "continue_conversation": true,
   "session_ttl_minutes": 60,

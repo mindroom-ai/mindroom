@@ -28,8 +28,10 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
 | Google | Embeddings for `google` / `vertexai` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
 
-For `anthropic` and `vertexai_claude`, prefer `claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
-Vertex AI Model Garden cards can also show dated snapshot IDs such as `claude-haiku-4.5@20251001`, but the Vertex AI request guide currently uses the undated request names above.
+For `anthropic`, prefer `claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
+Current docs list bare Vertex IDs for Claude 4.6 such as `claude-sonnet-4-6` and `claude-opus-4-6`, while some other Vertex models are still documented as dated snapshot IDs such as `claude-haiku-4-5@20251001`.
+Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
 For Google image work, use the official product name from the docs even if older prompts use a different nickname.
 
 ## Architecture
