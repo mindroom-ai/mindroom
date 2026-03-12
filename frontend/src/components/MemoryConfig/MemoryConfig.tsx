@@ -17,6 +17,7 @@ import { useConfigStore } from '@/store/configStore';
 const EMBEDDER_PROVIDERS = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'ollama', label: 'Ollama' },
+  { value: 'sentence_transformers', label: 'Sentence Transformers' },
 ];
 
 const MEMORY_BACKENDS = [
@@ -27,16 +28,19 @@ const MEMORY_BACKENDS = [
 const DEFAULT_MODELS: Record<string, string> = {
   openai: 'text-embedding-3-small',
   ollama: 'nomic-embed-text',
+  sentence_transformers: 'sentence-transformers/all-MiniLM-L6-v2',
 };
 
 const DEFAULT_HOSTS: Record<string, string> = {
   openai: '',
   ollama: 'http://localhost:11434',
+  sentence_transformers: '',
 };
 
 const MODEL_PLACEHOLDERS: Record<string, string> = {
   openai: 'e.g. text-embedding-3-small',
   ollama: 'e.g. nomic-embed-text',
+  sentence_transformers: 'e.g. sentence-transformers/all-MiniLM-L6-v2',
 };
 
 type MemorySettings = MindRoomConfig['memory'];
@@ -130,6 +134,30 @@ function parseBoolean(value: string): boolean {
   return value === 'true';
 }
 
+function providerHelperText(provider: string): string {
+  if (provider === 'ollama') {
+    return 'Local embeddings using Ollama';
+  }
+  if (provider === 'openai') {
+    return 'OpenAI or any OpenAI-compatible API (set Base URL below)';
+  }
+  if (provider === 'sentence_transformers') {
+    return 'Fully local embeddings using the sentence-transformers Python runtime';
+  }
+  return 'Choose your embedding provider';
+}
+
+function shouldShowHostField(provider: string): boolean {
+  return provider !== 'sentence_transformers';
+}
+
+function defaultEmbedderConfig(provider: string): MemorySettings['embedder']['config'] {
+  return {
+    model: DEFAULT_MODELS[provider] || '',
+    host: DEFAULT_HOSTS[provider] || '',
+  };
+}
+
 export function MemoryConfig() {
   const { config, updateMemoryConfig, saveConfig, isDirty } = useConfigStore();
   const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
@@ -155,11 +183,7 @@ export function MemoryConfig() {
       embedder: {
         ...localConfig.embedder,
         provider,
-        config: {
-          ...localConfig.embedder.config,
-          model: DEFAULT_MODELS[provider] || '',
-          host: DEFAULT_HOSTS[provider] || '',
-        },
+        config: defaultEmbedderConfig(provider),
       },
     });
   };
@@ -335,13 +359,7 @@ export function MemoryConfig() {
 
           <FieldGroup
             label="Embedder Provider"
-            helperText={
-              localConfig.embedder.provider === 'ollama'
-                ? 'Local embeddings using Ollama'
-                : localConfig.embedder.provider === 'openai'
-                  ? 'OpenAI or any OpenAI-compatible API (set Base URL below)'
-                  : 'Choose your embedding provider'
-            }
+            helperText={providerHelperText(localConfig.embedder.provider)}
             required
             htmlFor="provider"
           >
@@ -375,29 +393,31 @@ export function MemoryConfig() {
             />
           </FieldGroup>
 
-          <FieldGroup
-            label={localConfig.embedder.provider === 'ollama' ? 'Ollama Host URL' : 'Base URL'}
-            helperText={
-              localConfig.embedder.provider === 'ollama'
-                ? 'The URL where your Ollama server is running'
-                : 'Leave empty for official OpenAI API, or set for OpenAI-compatible servers'
-            }
-            required={localConfig.embedder.provider === 'ollama'}
-            htmlFor="host"
-          >
-            <Input
-              id="host"
-              type="url"
-              value={localConfig.embedder.config.host || ''}
-              onChange={e => handleHostChange(e.target.value)}
-              placeholder={
+          {shouldShowHostField(localConfig.embedder.provider) && (
+            <FieldGroup
+              label={localConfig.embedder.provider === 'ollama' ? 'Ollama Host URL' : 'Base URL'}
+              helperText={
                 localConfig.embedder.provider === 'ollama'
-                  ? 'http://localhost:11434'
-                  : 'https://api.openai.com/v1'
+                  ? 'The URL where your Ollama server is running'
+                  : 'Leave empty for official OpenAI API, or set for OpenAI-compatible servers'
               }
-              className="transition-colors hover:border-ring focus:border-ring"
-            />
-          </FieldGroup>
+              required={localConfig.embedder.provider === 'ollama'}
+              htmlFor="host"
+            >
+              <Input
+                id="host"
+                type="url"
+                value={localConfig.embedder.config.host || ''}
+                onChange={e => handleHostChange(e.target.value)}
+                placeholder={
+                  localConfig.embedder.provider === 'ollama'
+                    ? 'http://localhost:11434'
+                    : 'https://api.openai.com/v1'
+                }
+                className="transition-colors hover:border-ring focus:border-ring"
+              />
+            </FieldGroup>
+          )}
 
           {localConfig.backend === 'file' && (
             <>

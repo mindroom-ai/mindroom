@@ -1182,6 +1182,44 @@ class TestDoctor:
         assert "reachable LAN" in result.output
         assert "instead of .local" in result.output
 
+    def test_memory_sentence_transformers_embedder_runs_local_smoke_test(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor validates sentence-transformers embedders by loading the local model."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-5-latest\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "memory:\n"
+            "  embedder:\n"
+            "    provider: sentence_transformers\n"
+            "    config:\n"
+            "      model: sentence-transformers/all-MiniLM-L6-v2\n",
+        )
+        storage = tmp_path / "storage"
+        monkeypatch.setattr("mindroom.cli.doctor.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mindroom.cli.doctor.STORAGE_PATH", str(storage))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        class _FakeEmbedder:
+            def get_embedding(self, text: str) -> list[float]:
+                assert text == "mindroom doctor embedder check"
+                return [0.1, 0.2, 0.3]
+
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.create_sentence_transformers_embedder",
+            lambda _model: _FakeEmbedder(),
+        )
+
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+        assert "sentence_transformers/sentence-transformers/all-MiniLM-L6-v2" in result.output
+        assert "local model loaded" in result.output
+
 
 # ---------------------------------------------------------------------------
 # mindroom connect

@@ -17,7 +17,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 TOOLS_DIR = REPO_ROOT / "src" / "mindroom" / "tools"
 
 # Groups that are not tool registrations (meta-groups, aggregates, etc.)
-IGNORED_GROUPS: set[str] = {"supabase"}
+IGNORED_GROUPS: set[str] = {"sentence_transformers", "supabase"}
 
 
 def _normalize_dep(spec: str) -> str:

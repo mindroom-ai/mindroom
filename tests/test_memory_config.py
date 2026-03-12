@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from mindroom.orchestrator import MultiAgentOrchestrator
+import pytest
 
-if TYPE_CHECKING:
-    import pytest
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
-from mindroom.memory.config import _get_memory_config
+from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
+from mindroom.orchestrator import MultiAgentOrchestrator
 
 
 class TestMemoryConfig:
@@ -68,7 +66,7 @@ class TestMemoryConfig:
 
         # Verify vector store config
         assert result["vector_store"]["provider"] == "chroma"
-        assert result["vector_store"]["config"]["collection_name"] == "mindroom_memories"
+        assert result["vector_store"]["config"]["collection_name"] == _memory_collection_name(config)
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
     @patch("mindroom.memory.config.get_credentials_manager")
@@ -139,6 +137,111 @@ class TestMemoryConfig:
         result = _get_memory_config(tmp_path / "memory", config)
 
         assert result["embedder"]["config"]["embedding_dims"] == 3072
+
+    @patch("mindroom.memory.config.get_credentials_manager")
+    def test_get_memory_config_with_sentence_transformers(
+        self,
+        mock_get_creds_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Sentence-transformers should map to Mem0's local huggingface embedder."""
+        mock_creds_manager = MagicMock()
+        mock_creds_manager.load_credentials.return_value = None
+        mock_get_creds_manager.return_value = mock_creds_manager
+
+        embedder_config = _MemoryEmbedderConfig(
+            provider="sentence_transformers",
+            config=EmbedderConfig(
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                dimensions=384,
+            ),
+        )
+        memory = MemoryConfig(embedder=embedder_config, llm=None)
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+
+        result = _get_memory_config(tmp_path / "memory", config)
+
+        assert result["embedder"]["provider"] == "huggingface"
+        assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+        assert result["embedder"]["config"]["embedding_dims"] == 384
+
+    @patch("mindroom.memory.config.get_credentials_manager")
+    def test_get_memory_config_keeps_existing_huggingface_provider_support(
+        self,
+        mock_get_creds_manager: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Existing Mem0 providers should remain valid after adding sentence-transformers."""
+        mock_get_creds_manager.return_value = MagicMock()
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "huggingface",
+                    "config": {
+                        "model": "sentence-transformers/all-MiniLM-L6-v2",
+                    },
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config)
+
+        assert result["embedder"]["provider"] == "huggingface"
+        assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
+
+    def test_memory_collection_name_changes_when_embedder_changes(self) -> None:
+        """Different embedder settings should isolate memories into different collections."""
+        openai_memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model="text-embedding-3-small"),
+            ),
+            llm=None,
+        )
+        local_memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        openai_config = Config(memory=openai_memory, router=RouterConfig(model="default"))
+        local_config = Config(memory=local_memory, router=RouterConfig(model="default"))
+
+        assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
+
+    @pytest.mark.parametrize(
+        ("model", "effective_dimensions"),
+        [
+            ("text-embedding-3-small", 1536),
+            ("text-embedding-3-large", 1536),
+        ],
+    )
+    def test_memory_collection_name_ignores_equivalent_mem0_openai_default_dimensions(
+        self,
+        model: str,
+        effective_dimensions: int,
+    ) -> None:
+        """Equivalent Mem0 OpenAI defaults should reuse the same memory collection."""
+        implicit_default = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model=model),
+            ),
+            llm=None,
+        )
+        explicit_default = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="openai",
+                config=EmbedderConfig(model=model, dimensions=effective_dimensions),
+            ),
+            llm=None,
+        )
+        implicit_config = Config(memory=implicit_default, router=RouterConfig(model="default"))
+        explicit_config = Config(memory=explicit_default, router=RouterConfig(model="default"))
+
+        assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
 
     @patch("mindroom.memory.config.get_credentials_manager")
     @patch.dict("os.environ", {}, clear=True)
@@ -237,6 +340,33 @@ class TestMemoryConfig:
         expected_chroma = (expected_storage / "chroma").resolve()
         assert orchestrator.storage_path == expected_storage
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
+
+    @pytest.mark.asyncio
+    @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
+    @patch("mindroom.memory.config.AsyncMemory.from_config", new_callable=AsyncMock)
+    async def test_create_memory_instance_auto_installs_sentence_transformers(
+        self,
+        mock_from_config: AsyncMock,
+        mock_ensure_sentence_transformers_dependencies: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Creating a local-embedder Mem0 instance should trigger optional runtime install."""
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="sentence_transformers",
+                config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
+            ),
+            llm=None,
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        expected_memory = object()
+        mock_from_config.return_value = expected_memory
+
+        result = await create_memory_instance(tmp_path / "memory", config)
+
+        assert result is expected_memory
+        mock_ensure_sentence_transformers_dependencies.assert_called_once_with()
+        mock_from_config.assert_awaited_once()
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""

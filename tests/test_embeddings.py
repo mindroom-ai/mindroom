@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from mindroom.embeddings import MindRoomOpenAIEmbedder
+from mindroom.embeddings import (
+    MindRoomOpenAIEmbedder,
+    create_sentence_transformers_embedder,
+    effective_knowledge_embedder_signature,
+    effective_mem0_embedder_signature,
+)
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def _mock_openai_client() -> MagicMock:
@@ -75,3 +85,51 @@ def test_custom_host_explicit_dimensions_override_is_preserved() -> None:
 
     _, kwargs = client.embeddings.create.call_args
     assert kwargs["dimensions"] == 3072
+
+
+def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local embedder creation should ensure the optional runtime and pass through config."""
+    captured: dict[str, object] = {}
+
+    class DummyEmbedder:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    def _ensure() -> None:
+        captured["installed"] = True
+
+    monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
+    monkeypatch.setattr(
+        "mindroom.embeddings.importlib.import_module",
+        lambda name: SimpleNamespace(SentenceTransformerEmbedder=DummyEmbedder) if name else None,
+    )
+
+    embedder = create_sentence_transformers_embedder(
+        "sentence-transformers/all-MiniLM-L6-v2",
+        dimensions=384,
+    )
+
+    assert captured["installed"] is True
+    assert isinstance(embedder, DummyEmbedder)
+    assert embedder.kwargs == {
+        "id": "sentence-transformers/all-MiniLM-L6-v2",
+        "dimensions": 384,
+    }
+
+
+def test_mem0_and_knowledge_signatures_keep_their_own_openai_defaults() -> None:
+    """Memory and knowledge signatures should not conflate different OpenAI defaults."""
+    assert effective_mem0_embedder_signature("openai", "text-embedding-3-large") == (
+        "openai",
+        "text-embedding-3-large",
+        "",
+        "1536",
+    )
+    assert effective_knowledge_embedder_signature("openai", "text-embedding-3-large") == (
+        "openai",
+        "text-embedding-3-large",
+        "",
+        "3072",
+    )

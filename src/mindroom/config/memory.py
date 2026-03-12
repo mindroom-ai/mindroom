@@ -14,7 +14,10 @@ MemoryBackend = Literal["mem0", "file"]
 class _MemoryEmbedderConfig(BaseModel):
     """Memory embedder configuration."""
 
-    provider: str = Field(default="openai", description="Embedder provider (openai, huggingface, etc)")
+    provider: str = Field(
+        default="openai",
+        description="Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
+    )
     config: EmbedderConfig = Field(default_factory=EmbedderConfig, description="Provider-specific config")
 
 
