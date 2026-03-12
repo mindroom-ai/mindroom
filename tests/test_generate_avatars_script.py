@@ -15,6 +15,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _workspace_avatar_path(
+    tmp_path: Path,
+    entity_type: str,
+    entity_name: str,
+    *,
+    config_path: Path | None = None,
+) -> Path:
+    del config_path
+    return tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+
+
 def test_load_config_uses_config_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
     """The script should read the active MindRoom config path, not scripts/config.yaml."""
     config_path = tmp_path / "custom-config.yaml"
@@ -81,6 +92,16 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
         return tmp_path / "avatars"
 
     monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
 
     assert not generate_avatars.has_missing_managed_avatars(config)
 
@@ -109,6 +130,16 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
 
     monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
     sync_room_avatars = AsyncMock()
     monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", sync_room_avatars)
@@ -227,6 +258,16 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
 
     monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
     monkeypatch.setattr(generate_avatars, "set_room_avatars_in_matrix", AsyncMock())
@@ -292,6 +333,16 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 
     monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "check_and_set_avatar", check_and_set_avatar)
@@ -342,6 +393,16 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
 
     monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "check_and_set_avatar", check_and_set_avatar)

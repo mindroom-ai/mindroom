@@ -16,7 +16,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir
+from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, avatars_dir, resolve_avatar_path
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
@@ -153,11 +153,10 @@ def _missing_avatar_targets(
     config_path: Path | None = None,
 ) -> set[tuple[str, str]]:
     """Return the managed avatar targets whose files do not exist yet."""
-    avatar_root = avatars_dir(config_path=config_path)
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in _managed_avatar_targets(config)
-        if not (avatar_root / entity_type / f"{entity_name}.png").exists()
+        if not resolve_avatar_path(entity_type, entity_name, config_path=config_path).exists()
     }
 
 
@@ -306,11 +305,10 @@ async def _sync_avatar_target(
 
 async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int]:
     """Apply configured room avatars and return success/skip counts."""
-    room_avatars_dir = avatars_dir() / "rooms"
     success_count = 0
     skip_count = 0
     for room_name in sorted(config.get_all_configured_rooms()):
-        avatar_path = room_avatars_dir / f"{room_name}.png"
+        avatar_path = resolve_avatar_path("rooms", room_name)
         if not avatar_path.exists():
             skip_count += 1
             continue
@@ -340,7 +338,7 @@ async def _sync_root_space_avatar(
     if not config.matrix_space.enabled or not state.space_room_id:
         return 0
 
-    root_space_avatar_path = avatars_dir() / "spaces" / f"{ROOT_SPACE_AVATAR_NAME}.png"
+    root_space_avatar_path = resolve_avatar_path("spaces", ROOT_SPACE_AVATAR_NAME)
     if not root_space_avatar_path.exists():
         return 0
 

@@ -104,7 +104,7 @@ from .constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
-    avatars_dir,
+    resolve_avatar_path,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
@@ -527,7 +527,7 @@ class AgentBot:
             return
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        avatar_path = avatars_dir() / entity_type / f"{self.agent_name}.png"
+        avatar_path = resolve_avatar_path(entity_type, self.agent_name)
 
         if avatar_path.exists():
             try:

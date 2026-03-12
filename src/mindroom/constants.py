@@ -61,8 +61,31 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
 
 
 def avatars_dir(*, config_path: Path | None = None) -> Path:
-    """Return the managed avatars directory for the active workspace."""
+    """Return the writable avatars directory for the active workspace."""
     return _config_base_dir(config_path) / "avatars"
+
+
+def bundled_avatars_dir() -> Path:
+    """Return the bundled avatars directory shipped with the application image."""
+    return Path(__file__).resolve().parents[2] / "avatars"
+
+
+def resolve_avatar_path(
+    entity_type: str,
+    entity_name: str,
+    *,
+    config_path: Path | None = None,
+) -> Path:
+    """Return the existing avatar file path, preferring workspace assets over bundled ones."""
+    workspace_avatar = avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
+    if workspace_avatar.exists():
+        return workspace_avatar
+
+    bundled_avatar = bundled_avatars_dir() / entity_type / f"{entity_name}.png"
+    if bundled_avatar.exists():
+        return bundled_avatar
+
+    return workspace_avatar
 
 
 def find_config() -> Path:

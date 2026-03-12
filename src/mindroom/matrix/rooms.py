@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import nio
 
-from mindroom.constants import avatars_dir
+from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client import (
@@ -43,8 +43,8 @@ _ROOT_SPACE_AVATAR_KEY = "root_space"
 
 
 def _managed_avatar_path(category: str, avatar_name: str) -> Path:
-    """Return the bundled avatar path for a managed room-like entity."""
-    return avatars_dir() / category / f"{avatar_name}.png"
+    """Return the managed avatar path for a room-like entity."""
+    return resolve_avatar_path(category, avatar_name)
 
 
 async def _set_room_avatar_if_available(
