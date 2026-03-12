@@ -149,7 +149,7 @@ Create a `config.yaml` in your working directory:
 
 agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
 
-models: default: provider: openai id: gpt-5.2
+models: default: provider: openai id: gpt-5.4
 
 defaults: tools: [scheduler] markdown: true
 

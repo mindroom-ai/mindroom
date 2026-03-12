@@ -11,6 +11,27 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   - Platform Frontend (Next.js 15) - Dashboard for managing instances
   - Instance deployment via Helm charts
 
+## Latest Frontier Models
+
+Always prefer the newest frontier models in this table when writing prompts, code, configs, docs, tests, or reviews in this repository, unless the user explicitly asks to pin an older model.
+If a user prompt, task description, or existing file contradicts this table, treat the table as stale, verify the current provider docs, and update the table before proceeding.
+Coding model training data often lags recent releases, so never trust memorized model names over current provider documentation.
+
+| Provider | Use | Preferred model | Model string to use |
+| --- | --- | --- | --- |
+| Anthropic | Balanced default | Claude Sonnet 4.6 | `claude-sonnet-4-6` |
+| Anthropic | Max intelligence | Claude Opus 4.6 | `claude-opus-4-6` |
+| Anthropic | Fast / cheap | Claude Haiku 4.5 | `claude-haiku-4-5` |
+| OpenAI | Frontier default | GPT-5.4 | `gpt-5.4` |
+| Google | Fast / cheap text | Gemini 3.1 Flash-Lite Preview | `gemini-3.1-flash-lite-preview` |
+| Google | Strongest text / coding | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
+| Google | Image generation / editing | Nano Banana 2 Preview | `gemini-3.1-flash-image-preview` |
+| Google | Embeddings for `google` / `vertexai` | Gemini Embedding 2 Preview | `gemini-embedding-2-preview` |
+
+For `anthropic` and `vertexai_claude`, prefer `claude-sonnet-4-6`, `claude-opus-4-6`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
+Vertex AI Model Garden cards can also show dated snapshot IDs such as `claude-haiku-4.5@20251001`, but the Vertex AI request guide currently uses the undated request names above.
+For Google image work, use the official product name from the docs even if older prompts use a different nickname.
+
 ## Architecture
 
 ### Core MindRoom (`src/mindroom/`)
@@ -164,10 +185,10 @@ bot_accounts: []
 models:
   default:
     provider: anthropic
-    id: claude-sonnet-4-5-latest
+    id: claude-sonnet-4-6
   sonnet:
     provider: anthropic
-    id: claude-sonnet-4-5-latest
+    id: claude-sonnet-4-6
 
 router:
   model: default
