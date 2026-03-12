@@ -97,7 +97,7 @@ Where `N` is 1-indexed per message and maps to `io.mindroom.tool_trace.events[N-
 
 ## Presence
 
-Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-5-latest | 💼 Code assistant | 🔧 5 tools available").
+Agents set their Matrix presence with status messages containing model and role information (e.g., "🤖 Model: anthropic/claude-sonnet-4-6 | 💼 Code assistant | 🔧 5 tools available").
 
 **Presence States:**
 - **online** - Agent running and ready
