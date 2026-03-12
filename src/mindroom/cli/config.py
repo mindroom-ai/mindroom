@@ -50,10 +50,10 @@ _ConfigInitProfile = Literal["full", "minimal", "public"]
 _ProviderPreset = Literal["anthropic", "openai", "openrouter", "vertexai_claude"]
 
 _DEFAULT_MODEL_PRESETS: dict[_ProviderPreset, tuple[str, str]] = {
-    "anthropic": ("anthropic", "claude-sonnet-4-5-latest"),
-    "openai": ("openai", "gpt-5.2"),
-    "openrouter": ("openrouter", "anthropic/claude-sonnet-4-5"),
-    "vertexai_claude": ("vertexai_claude", "claude-opus-4-6@default"),
+    "anthropic": ("anthropic", "claude-sonnet-4-6"),
+    "openai": ("openai", "gpt-5.4"),
+    "openrouter": ("openrouter", "anthropic/claude-sonnet-4.6"),
+    "vertexai_claude": ("vertexai_claude", "claude-sonnet-4-6"),
 }
 
 _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
@@ -457,7 +457,9 @@ def _resolve_config_init_selection(
 
     provider_preset = _normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
-        console.print("[red]Invalid --provider value.[/red] Use: anthropic, openai, openrouter, or vertexai_claude.")
+        console.print(
+            "[red]Invalid --provider value.[/red] Use: anthropic, openai, openrouter, or vertexai_claude.",
+        )
         raise typer.Exit(1)
 
     if selected_profile == "minimal":
