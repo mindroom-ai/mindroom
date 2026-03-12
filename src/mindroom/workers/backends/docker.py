@@ -178,6 +178,11 @@ def _workers_root(base_storage_path: Path) -> Path:
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
 
 
+def _resolved_storage_path(storage_path: Path | None = None) -> Path:
+    base_storage_path = STORAGE_PATH_OBJ if storage_path is None else storage_path
+    return base_storage_path.expanduser().resolve()
+
+
 @dataclass(frozen=True, slots=True)
 class _DockerWorkerBackendConfig:
     image: str
@@ -221,10 +226,14 @@ class _DockerWorkerBackendConfig:
         )
 
 
-def docker_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
+def docker_backend_config_signature(
+    *,
+    auth_token: str | None,
+    storage_path: Path | None = None,
+) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
     config = _DockerWorkerBackendConfig.from_env()
-    workers_root = _workers_root(STORAGE_PATH_OBJ)
+    workers_root = _workers_root(_resolved_storage_path(storage_path))
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (
@@ -291,7 +300,13 @@ class DockerWorkerBackend:
 
     backend_name = "docker"
 
-    def __init__(self, *, config: _DockerWorkerBackendConfig, auth_token: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        config: _DockerWorkerBackendConfig,
+        auth_token: str | None,
+        storage_path: Path | None = None,
+    ) -> None:
         if auth_token is None:
             msg = "A worker auth token is required for Docker workers."
             raise WorkerBackendError(msg)
@@ -303,15 +318,20 @@ class DockerWorkerBackend:
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
-        self._workers_root = _workers_root(STORAGE_PATH_OBJ)
+        self._workers_root = _workers_root(_resolved_storage_path(storage_path))
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def from_env(cls, *, auth_token: str | None) -> DockerWorkerBackend:
+    def from_env(
+        cls,
+        *,
+        auth_token: str | None,
+        storage_path: Path | None = None,
+    ) -> DockerWorkerBackend:
         """Construct a backend instance from environment-backed configuration."""
-        return cls(config=_DockerWorkerBackendConfig.from_env(), auth_token=auth_token)
+        return cls(config=_DockerWorkerBackendConfig.from_env(), auth_token=auth_token, storage_path=storage_path)
 
     def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
         """Resolve or start the dedicated worker container for the given worker key."""
@@ -319,10 +339,11 @@ class DockerWorkerBackend:
         with self._worker_lock(spec.worker_key):
             paths = self._state_paths(spec.worker_key)
             metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
+            identity_changed = self._sync_metadata_identity(metadata)
             metadata.last_used_at = timestamp
             metadata.failure_reason = None
 
-            should_restart = self._should_restart(metadata, paths)
+            should_restart = identity_changed or self._should_restart(metadata, paths)
             if should_restart:
                 metadata.status = "starting"
                 metadata.last_started_at = timestamp
@@ -469,11 +490,7 @@ class DockerWorkerBackend:
         return local_worker_state_paths_for_root(self._workers_root / worker_dir_name(worker_key))
 
     def _default_metadata(self, worker_key: str, now: float) -> _DockerWorkerMetadata:
-        worker_id = _container_name_for_worker(
-            worker_key,
-            prefix=self.config.name_prefix,
-            runtime_namespace=self._runtime_namespace,
-        )
+        worker_id = self._container_name_for_worker(worker_key)
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
@@ -488,6 +505,28 @@ class DockerWorkerBackend:
             worker_port=self.config.worker_port,
             launch_config_hash=self._launch_config_hash,
         )
+
+    def _container_name_for_worker(self, worker_key: str) -> str:
+        return _container_name_for_worker(
+            worker_key,
+            prefix=self.config.name_prefix,
+            runtime_namespace=self._runtime_namespace,
+        )
+
+    def _sync_metadata_identity(self, metadata: _DockerWorkerMetadata) -> bool:
+        expected_container_name = self._container_name_for_worker(metadata.worker_key)
+        if metadata.container_name == expected_container_name and metadata.worker_id == expected_container_name:
+            return False
+
+        if metadata.container_name != expected_container_name:
+            self._remove_container(self._read_container(metadata.container_name))
+        metadata.worker_id = expected_container_name
+        metadata.container_name = expected_container_name
+        metadata.endpoint = self._endpoint_for_host_port(None)
+        metadata.host_port = None
+        metadata.container_id = None
+        metadata.launch_config_hash = None
+        return True
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         if not self._workers_root.exists():
@@ -694,6 +733,7 @@ class DockerWorkerBackend:
             "extra_labels": self.config.extra_labels,
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
+            "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
             "workers_root": str(self._workers_root),

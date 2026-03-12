@@ -170,12 +170,11 @@ def _backend(
             ),
         ),
     )
-    monkeypatch.setattr("mindroom.workers.backends.docker.STORAGE_PATH_OBJ", tmp_path)
     monkeypatch.setattr(
         "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
         lambda worker_key, include_ui_credentials=False: sync_calls.append((worker_key, include_ui_credentials)),
     )
-    backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
     monkeypatch.setattr(
         backend,
         "_wait_for_ready",
@@ -315,7 +314,7 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
         user="2000:2000",
         extra_env={"EXTRA_ENV": "updated"},
     )
-    updated_backend = DockerWorkerBackend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN)
+    updated_backend = DockerWorkerBackend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN, storage_path=tmp_path)
     monkeypatch.setattr(
         updated_backend,
         "_wait_for_ready",
@@ -337,6 +336,34 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _ROTATED_AUTH_TOKEN
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
+
+
+def test_docker_backend_recreates_container_when_name_prefix_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing the configured name prefix should recreate the worker with a new identity."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+
+    first_handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    updated_config = replace(backend.config, name_prefix="other-prefix")
+    updated_backend = DockerWorkerBackend(config=updated_config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
+    monkeypatch.setattr(
+        updated_backend,
+        "_wait_for_ready",
+        lambda container: (
+            f"http://127.0.0.1:{updated_backend._container_host_port(container)}/api/sandbox-runner/execute"
+        ),
+    )
+
+    second_handle = updated_backend.ensure_worker(WorkerSpec("worker-a"), now=20.0)
+
+    assert second_handle.worker_id != first_handle.worker_id
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+    assert fake_client.containers.run_calls[0]["name"] != fake_client.containers.run_calls[1]["name"]
 
 
 def test_docker_backend_uses_distinct_container_names_for_different_storage_roots(
@@ -378,8 +405,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
 
     first_storage_root = tmp_path / "runtime-a"
     second_storage_root = tmp_path / "runtime-b"
-    monkeypatch.setattr("mindroom.workers.backends.docker.STORAGE_PATH_OBJ", first_storage_root)
-    first_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    first_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=first_storage_root)
     monkeypatch.setattr(
         first_backend,
         "_wait_for_ready",
@@ -388,8 +414,7 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
         ),
     )
 
-    monkeypatch.setattr("mindroom.workers.backends.docker.STORAGE_PATH_OBJ", second_storage_root)
-    second_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    second_backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=second_storage_root)
     monkeypatch.setattr(
         second_backend,
         "_wait_for_ready",
