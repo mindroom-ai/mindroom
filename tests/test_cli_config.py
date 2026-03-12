@@ -658,6 +658,32 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["generate_avatars"] is True
 
+    def test_run_generate_avatars_ignores_direct_room_ids_without_google_api_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should not require Google credentials for external room IDs."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n    rooms:\n      - '!external:localhost'\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        (tmp_path / "avatars" / "agents").mkdir(parents=True)
+        (tmp_path / "avatars" / "agents" / "a.png").write_bytes(b"avatar")
+        (tmp_path / "avatars" / "agents" / "router.png").write_bytes(b"avatar")
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = runner.invoke(app, ["run", "--generate-avatars"])
+
+        assert result.exit_code == 0
+        assert mock_main.call_args.kwargs["generate_avatars"] is True
+
 
 # ---------------------------------------------------------------------------
 # mindroom doctor

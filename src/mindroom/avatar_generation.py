@@ -126,7 +126,7 @@ def load_config() -> dict:
 
 def load_validated_config() -> Config:
     """Load and validate the active MindRoom configuration."""
-    return Config.model_validate(load_config())
+    return Config.from_yaml(CONFIG_PATH.expanduser().resolve())
 
 
 def get_avatar_path(entity_type: str, entity_name: str) -> Path:
@@ -136,12 +136,17 @@ def get_avatar_path(entity_type: str, entity_name: str) -> Path:
     return output_dir / f"{entity_name}.png"
 
 
+def _managed_room_avatar_keys(config: Config) -> set[str]:
+    """Return room keys that participate in managed avatar generation and sync."""
+    return {room_name for room_name in config.get_all_configured_rooms() if not room_name.startswith("!")}
+
+
 def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
     """Return every managed avatar target for the active config."""
     targets = [("agents", agent_name) for agent_name in config.agents]
     targets.append(("agents", "router"))
     targets.extend(("teams", team_name) for team_name in config.teams)
-    targets.extend(("rooms", room_name) for room_name in config.get_all_configured_rooms())
+    targets.extend(("rooms", room_name) for room_name in _managed_room_avatar_keys(config))
     if config.matrix_space.enabled:
         targets.append(("spaces", ROOT_SPACE_AVATAR_NAME))
     return targets
@@ -307,7 +312,7 @@ async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config)
     """Apply configured room avatars and return success/skip counts."""
     success_count = 0
     skip_count = 0
-    for room_name in sorted(config.get_all_configured_rooms()):
+    for room_name in sorted(_managed_room_avatar_keys(config)):
         avatar_path = resolve_avatar_path("rooms", room_name)
         if not avatar_path.exists():
             skip_count += 1
@@ -385,13 +390,12 @@ async def set_room_avatars_in_matrix(*, suppress_missing_router: bool = False) -
 
 def _build_avatar_generation_tasks(
     client: genai.Client,
-    raw_config: dict,
     config: Config,
     missing_targets: set[tuple[str, str]],
 ) -> list[Awaitable[None]]:
     """Build generation tasks for every missing managed avatar."""
-    agents = raw_config.get("agents", {})
-    teams = raw_config.get("teams", {})
+    agents = {agent_name: agent_config.model_dump(mode="python") for agent_name, agent_config in config.agents.items()}
+    teams = {team_name: team_config.model_dump(mode="python") for team_name, team_config in config.teams.items()}
     tasks: list[Awaitable[None]] = []
 
     for agent_name, agent_data in agents.items():
@@ -412,7 +416,7 @@ def _build_avatar_generation_tasks(
         if ("teams", team_name) in missing_targets:
             tasks.append(generate_avatar(client, "teams", team_name, team_data, agents))
 
-    for room_name in config.get_all_configured_rooms():
+    for room_name in _managed_room_avatar_keys(config):
         if ("rooms", room_name) in missing_targets:
             room_data = {
                 "role": ROOM_PURPOSES.get(room_name, f"Collaboration space for {room_name} activities"),
@@ -444,7 +448,6 @@ def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None
 
 
 async def _generate_missing_avatars(
-    raw_config: dict,
     config: Config,
     missing_targets: set[tuple[str, str]],
 ) -> bool:
@@ -460,7 +463,7 @@ async def _generate_missing_avatars(
         return False
 
     client = genai.Client(api_key=api_key)
-    tasks = _build_avatar_generation_tasks(client, raw_config, config, missing_targets)
+    tasks = _build_avatar_generation_tasks(client, config, missing_targets)
     _print_avatar_generation_plan(missing_targets)
 
     try:
@@ -486,11 +489,10 @@ async def run_avatar_generation(
     suppress_missing_router: bool = False,
 ) -> None:
     """Generate missing avatars and optionally sync room avatars to Matrix."""
-    raw_config = load_config()
-    config = Config.model_validate(raw_config)
+    config = load_validated_config()
     missing_targets = _missing_avatar_targets(config)
 
-    if not set_only and not await _generate_missing_avatars(raw_config, config, missing_targets):
+    if not set_only and not await _generate_missing_avatars(config, missing_targets):
         return
 
     if sync_room_avatars:

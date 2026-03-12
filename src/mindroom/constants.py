@@ -67,6 +67,10 @@ def avatars_dir(*, config_path: Path | None = None) -> Path:
 
 def bundled_avatars_dir() -> Path:
     """Return the bundled avatars directory shipped with the application image."""
+    package_dir = Path(__file__).resolve().parent
+    packaged_avatars = package_dir / "_bundled_avatars"
+    if packaged_avatars.exists():
+        return packaged_avatars
     return Path(__file__).resolve().parents[2] / "avatars"
 
 

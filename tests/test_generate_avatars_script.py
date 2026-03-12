@@ -106,6 +106,47 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
     assert not generate_avatars.has_missing_managed_avatars(config)
 
 
+def test_has_missing_managed_avatars_ignores_direct_room_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """External room IDs should not be treated as managed avatar targets."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["!external:localhost"],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    config = generate_avatars.Config.model_validate(raw_config)
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+        avatar_path = tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+        avatar_path.parent.mkdir(parents=True, exist_ok=True)
+        avatar_path.write_bytes(b"avatar")
+
+    def _avatars_dir(**_kwargs: object) -> Path:
+        return tmp_path / "avatars"
+
+    monkeypatch.setattr(generate_avatars, "avatars_dir", _avatars_dir)
+    monkeypatch.setattr(
+        generate_avatars,
+        "resolve_avatar_path",
+        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+            tmp_path,
+            entity_type,
+            entity_name,
+            config_path=config_path,
+        ),
+    )
+
+    assert not generate_avatars.has_missing_managed_avatars(config)
+
+
 @pytest.mark.asyncio
 async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_exist(
     monkeypatch: pytest.MonkeyPatch,
@@ -128,7 +169,11 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
     monkeypatch.setattr(
         generate_avatars,
@@ -148,6 +193,25 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
     await generate_avatars.run_avatar_generation(sync_room_avatars=True)
 
     sync_room_avatars.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_generation_set_only_accepts_null_optional_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Avatar generation should accept legacy configs normalized by Config.from_yaml()."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+        "agents:\n  a:\n    display_name: A\n    model: default\n"
+        "router:\n  model: default\n"
+        "teams: null\n"
+        "matrix_space: null\n",
+    )
+    monkeypatch.setattr(generate_avatars, "CONFIG_PATH", config_path)
+
+    await generate_avatars.run_avatar_generation(set_only=True, sync_room_avatars=False)
 
 
 @pytest.mark.asyncio
@@ -256,7 +320,11 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
         assert api_key == "test-google-key"
         return client
 
-    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
     monkeypatch.setattr(
         generate_avatars,
@@ -331,7 +399,11 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     def _get_room_id(room_name: str) -> str | None:
         return "!war:localhost" if room_name == "war_room" else None
 
-    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
     monkeypatch.setattr(
         generate_avatars,
@@ -391,7 +463,11 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     client = SimpleNamespace(close=AsyncMock())
     check_and_set_avatar = AsyncMock(return_value=True)
 
-    monkeypatch.setattr(generate_avatars, "load_config", lambda: raw_config)
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
     monkeypatch.setattr(generate_avatars, "avatars_dir", lambda: tmp_path / "avatars")
     monkeypatch.setattr(
         generate_avatars,
