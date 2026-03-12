@@ -24,12 +24,14 @@ COPY src /app/src
 COPY skills /app/skills
 COPY frontend /app/frontend
 
-# Install the project itself
+# Install the project itself.
+# Keep the sentence_transformers extra runtime-only so the full image doesn't
+# pull torch and CUDA wheels into the smoke-stack build.
 # Set pretend version for setuptools-scm (no .git in container)
 ARG VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --all-extras
+    uv sync --locked --no-dev --all-extras --no-extra sentence_transformers
 
 # Final production stage
 FROM public.ecr.aws/docker/library/python:3.12-slim AS final
