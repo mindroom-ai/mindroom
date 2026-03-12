@@ -19,6 +19,19 @@ class _FakeLogger:
         self.exceptions.append(message)
 
 
+class _DummyPythonTools:
+    def __init__(self, **kwargs: object) -> None:
+        self.init_kwargs = kwargs
+
+
+def test_python_tools_excludes_plain_pip_install_but_keeps_uv() -> None:
+    """MindRoom should only expose the uv-based package installer."""
+    tool = python_tools_module.python_tools()()
+
+    assert "pip_install_package" not in tool.functions
+    assert "uv_pip_install_package" in tool.functions
+
+
 def test_uv_pip_install_package_uses_shared_install_command_and_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -37,7 +50,7 @@ def test_uv_pip_install_package_uses_shared_install_command_and_warns(
         python_tools_module,
         "_python_tools_runtime",
         lambda: (
-            type("DummyPythonTools", (), {}),
+            _DummyPythonTools,
             lambda: calls.append("warn"),
             lambda message: calls.append(f"debug:{message}"),
             logger,
@@ -67,7 +80,7 @@ def test_uv_pip_install_package_logs_errors(monkeypatch: pytest.MonkeyPatch) -> 
         python_tools_module,
         "_python_tools_runtime",
         lambda: (
-            type("DummyPythonTools", (), {}),
+            _DummyPythonTools,
             lambda: calls.append("warn"),
             lambda message: calls.append(f"debug:{message}"),
             logger,

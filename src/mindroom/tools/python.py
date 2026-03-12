@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.dependencies import install_command_for_current_python
 from mindroom.tool_system.metadata import (
@@ -16,6 +16,8 @@ from mindroom.tool_system.metadata import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.tools.python import PythonTools
 
 
@@ -80,6 +82,28 @@ def python_tools() -> type[PythonTools]:
 
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
+
+        def __init__(
+            self,
+            base_dir: Path | None = None,
+            safe_globals: dict[str, Any] | None = None,
+            safe_locals: dict[str, Any] | None = None,
+            restrict_to_base_dir: bool = True,
+            **kwargs: object,
+        ) -> None:
+            """Hide Agno's direct pip installer and keep the uv-based installer."""
+            exclude_tools = kwargs.pop("exclude_tools", None)
+            existing_excludes = [] if exclude_tools is None else list(cast("list[str]", exclude_tools))
+            if "pip_install_package" not in existing_excludes:
+                existing_excludes.append("pip_install_package")
+            super().__init__(
+                base_dir=base_dir,
+                safe_globals=safe_globals,
+                safe_locals=safe_locals,
+                restrict_to_base_dir=restrict_to_base_dir,
+                exclude_tools=existing_excludes,
+                **kwargs,
+            )
 
         def uv_pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""
