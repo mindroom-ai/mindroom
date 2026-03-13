@@ -159,10 +159,16 @@ def file_memory_resolution_from_paths(
 
     return FileMemoryResolution(
         storage_path=resolved_storage_path,
-        use_configured_path=(
-            original_storage_path.expanduser().resolve() == resolved_storage_path.expanduser().resolve()
+        use_configured_path=storage_paths_match(
+            original_storage_path,
+            resolved_storage_path,
         ),
     )
+
+
+def storage_paths_match(original_storage_path: Path, resolved_storage_path: Path) -> bool:
+    """Return whether two storage roots resolve to the same canonical path."""
+    return original_storage_path.expanduser().resolve() == resolved_storage_path.expanduser().resolve()
 
 
 def resolve_file_memory_resolution(

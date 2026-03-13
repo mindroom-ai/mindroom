@@ -21,6 +21,7 @@ from ._policy import (
     mutation_target_storage_paths,
     resolve_file_memory_resolution,
     room_scope_user_id,
+    storage_paths_match,
 )
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
@@ -65,8 +66,9 @@ def _resolution_for_scope_user_id(
     resolved_storage_path: Path,
     config: Config,
 ) -> FileMemoryResolution:
-    preserve_resolved_storage_path = (
-        original_storage_path.expanduser().resolve() != resolved_storage_path.expanduser().resolve()
+    preserve_resolved_storage_path = not storage_paths_match(
+        original_storage_path,
+        resolved_storage_path,
     )
     if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None and agent_name in config.agents:
         return resolve_file_memory_resolution(

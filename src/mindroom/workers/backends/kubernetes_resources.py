@@ -640,13 +640,11 @@ class KubernetesResourceManager:
             }
             for agent_root in visible_agent_roots
         ]
-        mounts.extend(
-            [
-                {
-                    "name": "worker-storage",
-                    "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
-                    "subPath": state_subpath,
-                },
-            ],
+        mounts.append(
+            {
+                "name": "worker-storage",
+                "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
+                "subPath": state_subpath,
+            },
         )
         return mounts

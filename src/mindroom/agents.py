@@ -317,9 +317,9 @@ def build_agent_toolkit(
     *,
     agent_name: str,
     config: Config,
-    storage_path: Path | None = None,
-    worker_tools: list[str] | None = None,
-    tool_init_context: AgentToolInitContext | None = None,
+    storage_path: Path,
+    worker_tools: list[str],
+    tool_init_context: AgentToolInitContext,
     memory_storage_path: Path | None = None,
     delegation_depth: int = 0,
     config_path: Path | None = None,
@@ -329,16 +329,9 @@ def build_agent_toolkit(
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
     """
-    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
-    resolved_tool_init_context = tool_init_context or build_agent_tool_init_context(
-        config,
-        agent_name,
-        storage_path=resolved_storage_path,
-    )
-    resolved_worker_tools = worker_tools if worker_tools is not None else config.get_agent_worker_tools(agent_name)
     resolved_memory_storage_path = memory_storage_path or resolve_agent_state_storage_path(
         agent_name=agent_name,
-        base_storage_path=resolved_storage_path,
+        base_storage_path=storage_path,
     )
     agent_config = config.get_agent(agent_name)
 
@@ -369,7 +362,7 @@ def build_agent_toolkit(
         return DelegateTools(
             agent_name=agent_name,
             delegate_to=agent_config.delegate_to,
-            storage_path=resolved_storage_path,
+            storage_path=storage_path,
             config=config,
             delegation_depth=delegation_depth,
         )
@@ -383,10 +376,10 @@ def build_agent_toolkit(
         tool_name,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
-            workspace_path=resolved_tool_init_context.workspace_path,
+            workspace_path=tool_init_context.workspace_path,
         ),
-        worker_tools_override=resolved_worker_tools,
-        worker_scope=resolved_tool_init_context.worker_scope,
+        worker_tools_override=worker_tools,
+        worker_scope=tool_init_context.worker_scope,
         routing_agent_name=agent_name,
     )
 

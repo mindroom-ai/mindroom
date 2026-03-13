@@ -12,7 +12,7 @@ from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
@@ -214,8 +214,9 @@ def _collect_agent_toolkits(
     *,
     storage_path: Path | None = None,
 ) -> list[tuple[str, Toolkit]]:
+    resolved_storage_path = storage_path or STORAGE_PATH_OBJ
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=storage_path)
+    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
@@ -223,7 +224,7 @@ def _collect_agent_toolkits(
                 tool_name,
                 agent_name=agent_name,
                 config=config,
-                storage_path=storage_path,
+                storage_path=resolved_storage_path,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
             )

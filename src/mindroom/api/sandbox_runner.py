@@ -333,9 +333,7 @@ def _runner_storage_root() -> Path:
         return Path(storage_root).expanduser().resolve()
 
     if dedicated_root := _runner_dedicated_worker_root():
-        if dedicated_root.parent.name == "workers":
-            return dedicated_root.parent.parent
-        return dedicated_root
+        return shared_storage_root(dedicated_root)
 
     return Path.cwd().resolve()
 
