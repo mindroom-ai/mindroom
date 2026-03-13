@@ -28,12 +28,8 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _ensure_base_supported_by_api(config: Config, base_id: str) -> None:
-    _ensure_base_exists(config, base_id)
-
-
 def _knowledge_root(config: Config, base_id: str, *, create: bool = False) -> Path:
-    _ensure_base_supported_by_api(config, base_id)
+    _ensure_base_exists(config, base_id)
     root = resolve_config_relative_path(config.knowledge_bases[base_id].path)
     if create:
         root.mkdir(parents=True, exist_ok=True)
@@ -285,7 +281,7 @@ async def knowledge_status(base_id: str) -> dict[str, Any]:
 async def reindex_knowledge(base_id: str) -> dict[str, Any]:
     """Force reindexing of all files in one knowledge base folder."""
     config = Config.from_yaml()
-    _ensure_base_supported_by_api(config, base_id)
+    _ensure_base_exists(config, base_id)
 
     manager = await _ensure_manager(config, base_id)
     if manager is None:
