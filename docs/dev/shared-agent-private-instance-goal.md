@@ -68,7 +68,9 @@ The common case should be easy to configure and easy to understand.
 
 The public config should describe intent, not implementation plumbing.
 
-Scaffold defaults should imply the common private context, memory, and local-knowledge behavior.
+Private template source files should be explicit local files, not hidden built-in content.
+
+Template defaults should imply the common private context, memory, and local-knowledge behavior.
 
 Shared/global knowledge should remain distinct from requester-local knowledge.
 

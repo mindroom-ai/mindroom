@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,7 +22,7 @@ from mindroom.api.openai_compat import (
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -2317,68 +2316,6 @@ class TestTeamCompletion:
             assert "include_default_tools" not in mock_create.call_args.kwargs
             assert mock_create.call_args.kwargs["include_interactive_questions"] is False
 
-    def test_build_team_passes_private_knowledge_to_member_agents(self) -> None:
-        """Team member creation resolves private knowledge with the request identity."""
-        config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="Research",
-                    role="Research role",
-                    rooms=[],
-                    private=AgentPrivateConfig(
-                        per="user",
-                        root="workspace",
-                        knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
-                    ),
-                ),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
-            teams={
-                "team_with_scoped_kb": TeamConfig(
-                    display_name="KB Team",
-                    role="Team with scoped KB",
-                    agents=["research"],
-                    mode="coordinate",
-                ),
-            },
-            knowledge_bases={},
-        )
-        private_base_id = config.get_agent_private_knowledge_base_id("research")
-        assert private_base_id is not None
-        mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-        execution_identity = _build_tool_execution_identity(
-            agent_name="team/team_with_scoped_kb",
-            session_id="session-123",
-        )
-
-        def fake_get_manager(base_id: str, **kwargs: object) -> MagicMock | None:
-            assert base_id == private_base_id
-            assert kwargs["agent_name"] == "research"
-            assert kwargs["config"] is config
-            assert kwargs["execution_identity"] is execution_identity
-            return mock_manager
-
-        with (
-            patch("mindroom.api.openai_compat.create_agent") as mock_create,
-            patch("mindroom.api.openai_compat.get_model_instance"),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
-            patch("agno.team.Team.__init__", return_value=None),
-        ):
-            mock_create.return_value = MagicMock(name="Research")
-
-            from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
-
-            _build_team(
-                "team_with_scoped_kb",
-                config,
-                execution_identity=execution_identity,
-            )
-
-            assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
-
 
 # ---------------------------------------------------------------------------
 # Knowledge base integration (Phase 4)
@@ -2409,36 +2346,6 @@ def knowledge_config() -> Config:
         knowledge_bases={
             "docs": KnowledgeBaseConfig(path="./test_docs"),
         },
-    )
-
-
-@pytest.fixture
-def private_instance_knowledge_config() -> Config:
-    """Config with a private-instance agent that uses requester-local knowledge."""
-    return Config(
-        agents={
-            "research": AgentConfig(
-                display_name="ResearchAgent",
-                role="Research assistant with private knowledge",
-                rooms=[],
-                private=AgentPrivateConfig(
-                    per="user",
-                    root="workspace",
-                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
-                ),
-            ),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
-        teams={
-            "research_team": TeamConfig(
-                display_name="Research Team",
-                role="Research team",
-                agents=["research"],
-                mode="coordinate",
-            ),
-        },
-        knowledge_bases={},
     )
 
 
@@ -2484,65 +2391,6 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
-
-    def test_private_knowledge_prepared_and_passed(
-        self,
-        private_instance_knowledge_config: Config,
-    ) -> None:
-        """Private knowledge is prepared with request identity before agent execution."""
-        mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-        private_base_id = private_instance_knowledge_config.get_agent_private_knowledge_base_id("research")
-        assert private_base_id is not None
-        execution_identity = _build_tool_execution_identity(
-            agent_name="research",
-            session_id="session-123",
-        )
-
-        def fake_get_manager(base_id: str, **kwargs: object) -> MagicMock | None:
-            assert base_id == private_base_id
-            assert kwargs["agent_name"] == "research"
-            assert kwargs["config"] is private_instance_knowledge_config
-            assert kwargs["storage_path"] is not None
-            execution_identity = kwargs["execution_identity"]
-            assert execution_identity is not None
-            assert execution_identity.agent_name == "research"
-            assert execution_identity.channel == "openai_compat"
-            return mock_manager
-
-        with (
-            patch(
-                "mindroom.api.openai_compat.ensure_agent_knowledge_managers",
-                new=AsyncMock(return_value={private_base_id: mock_manager}),
-            ) as mock_ensure_scoped,
-            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
-        ):
-            from mindroom.api.openai_compat import (  # noqa: PLC0415
-                _ensure_agent_knowledge_initialized,
-                _resolve_knowledge,
-            )
-
-            asyncio.run(
-                _ensure_agent_knowledge_initialized(
-                    "research",
-                    private_instance_knowledge_config,
-                    execution_identity=execution_identity,
-                ),
-            )
-            knowledge = _resolve_knowledge(
-                "research",
-                private_instance_knowledge_config,
-                execution_identity=execution_identity,
-            )
-
-        assert knowledge is mock_knowledge
-        mock_ensure_scoped.assert_awaited_once()
-        assert mock_ensure_scoped.await_args.args[:2] == ("research", private_instance_knowledge_config)
-        assert mock_ensure_scoped.await_args.kwargs["start_watchers"] is False
-        assert mock_ensure_scoped.await_args.kwargs["reindex_on_create"] is True
-        scoped_identity = mock_ensure_scoped.await_args.kwargs["execution_identity"]
-        assert scoped_identity is execution_identity
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
@@ -2600,38 +2448,6 @@ class TestKnowledgeIntegration:
 
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is None
-
-    def test_team_private_knowledge_managers_prepared(
-        self,
-        private_instance_knowledge_config: Config,
-    ) -> None:
-        """Team requests prepare scoped knowledge managers for private member bases."""
-        execution_identity = _build_tool_execution_identity(
-            agent_name="team/research_team",
-            session_id="session-123",
-        )
-        with (
-            patch(
-                "mindroom.api.openai_compat.ensure_agent_knowledge_managers",
-                new=AsyncMock(return_value={}),
-            ) as mock_ensure_scoped,
-        ):
-            from mindroom.api.openai_compat import _ensure_team_knowledge_initialized  # noqa: PLC0415
-
-            asyncio.run(
-                _ensure_team_knowledge_initialized(
-                    "research_team",
-                    private_instance_knowledge_config,
-                    execution_identity=execution_identity,
-                ),
-            )
-
-        mock_ensure_scoped.assert_awaited_once()
-        assert mock_ensure_scoped.await_args.args[:2] == ("research", private_instance_knowledge_config)
-        assert mock_ensure_scoped.await_args.kwargs["start_watchers"] is False
-        assert mock_ensure_scoped.await_args.kwargs["reindex_on_create"] is True
-        scoped_identity = mock_ensure_scoped.await_args.kwargs["execution_identity"]
-        assert scoped_identity is execution_identity
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""

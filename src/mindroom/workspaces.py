@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,20 +12,10 @@ from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
 if TYPE_CHECKING:
-    from mindroom.config.agent import WorkspaceTemplate
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
-_MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
-_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
 @dataclass(frozen=True)
@@ -39,35 +30,48 @@ class ResolvedAgentWorkspace:
 @dataclass(frozen=True)
 class _EffectiveAgentWorkspace:
     root_path: str
-    template: WorkspaceTemplate | None
+    template_dir: Path | None
     context_files: tuple[str, ...]
     file_memory_path: str | None
+
+
+def copy_workspace_template(
+    workspace_path: Path,
+    *,
+    template_dir: Path,
+    force: bool = False,
+) -> None:
+    """Copy a local template directory into a workspace root."""
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    resolved_template_dir = template_dir.expanduser().resolve()
+    if not resolved_template_dir.is_dir():
+        msg = f"Workspace template directory does not exist: {resolved_template_dir}"
+        raise ValueError(msg)
+
+    for source_path in sorted(resolved_template_dir.rglob("*")):
+        relative_path = source_path.relative_to(resolved_template_dir)
+        destination_path = workspace_path / relative_path
+        if source_path.is_dir():
+            destination_path.mkdir(parents=True, exist_ok=True)
+            continue
+        if destination_path.exists() and not force:
+            continue
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, destination_path)
 
 
 def ensure_workspace_template(
     workspace_path: Path,
     *,
-    template: WorkspaceTemplate,
+    template: str,
     force: bool = False,
 ) -> None:
-    """Scaffold a built-in workspace template when requested."""
-    workspace_path.mkdir(parents=True, exist_ok=True)
+    """Create the built-in Mind workspace template used by config init."""
     if template != "mind":
         msg = f"Unsupported workspace template: {template}"
         raise ValueError(msg)
-
+    copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
     (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
-
-    for filename in _MIND_WORKSPACE_TEMPLATE_FILES:
-        source_path = _MIND_TEMPLATE_DIR / filename
-        file_path = workspace_path / filename
-        if file_path.exists() and not force:
-            continue
-        file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    memory_path = workspace_path / "MEMORY.md"
-    if not memory_path.exists() or force:
-        memory_path.write_text(_MIND_MEMORY_TEMPLATE, encoding="utf-8")
 
 
 def _private_root_name(agent_name: str, config: Config) -> str:
@@ -85,11 +89,15 @@ def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWork
     context_files = (
         tuple(private_config.context_files)
         if private_config.context_files is not None
-        else default_private_context_files(private_config.scaffold)
+        else default_private_context_files(private_config.template_dir)
     )
     return _EffectiveAgentWorkspace(
         root_path=_private_root_name(agent_name, config),
-        template=private_config.scaffold,
+        template_dir=(
+            resolve_config_relative_path(private_config.template_dir)
+            if private_config.template_dir is not None
+            else None
+        ),
         context_files=context_files,
         file_memory_path=".",
     )
@@ -138,8 +146,8 @@ def _resolve_workspace(
     )
     if create:
         root.mkdir(parents=True, exist_ok=True)
-        if workspace.template is not None:
-            ensure_workspace_template(root, template=workspace.template)
+        if workspace.template_dir is not None:
+            copy_workspace_template(root, template_dir=workspace.template_dir)
 
     context_files = tuple((root / relative_path).resolve() for relative_path in workspace.context_files)
     file_memory_path = (root / workspace.file_memory_path).resolve() if workspace.file_memory_path is not None else None

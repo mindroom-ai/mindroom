@@ -32,6 +32,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -183,13 +184,21 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(storage
 async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_root(
     storage_path: Path,
     config: Config,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
+    template_dir = build_private_template_dir(
+        files={
+            "SOUL.md": "Template soul.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
-        scaffold="mind",
+        template_dir=str(template_dir),
         context_files=["SOUL.md"],
     )
 

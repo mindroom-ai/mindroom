@@ -68,7 +68,6 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
-| `path_relative_to_agent_workspace` | bool | `false` | Advanced option that resolves `path` relative to each assigned agent's effective private root instead of `config.yaml`. `path` must stay relative when this is enabled |
 | `watch` | bool | `true` | Watch for filesystem changes and reindex automatically |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
@@ -94,25 +93,18 @@ agents:
     model: sonnet
     private:
       per: user
-      scaffold: mind
+      template_dir: ./mind_template
       knowledge:
         watch: true
     knowledge_bases: [company_docs]
 ```
 
 With this configuration, each requester's private knowledge path becomes `<their private root>/memory`.
-For the `mind` scaffold, `memory/` is the default local knowledge path, so you usually do not need to set `private.knowledge.path`.
+The template source is explicit, so you can see and edit the files being copied into each requester's private root.
+When `private.template_dir` is set, `memory/` is the default local knowledge path, so you usually do not need to set `private.knowledge.path`.
 MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
 For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
-
-### Advanced Workspace-Relative Knowledge
-
-`path_relative_to_agent_workspace: true` remains available for advanced cases where a top-level knowledge base should resolve relative to an assigned agent's private root.
-This requires every agent that uses the base to define `private`.
-MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
-For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the scoped index on access instead of keeping a background watcher alive for every requester root.
-Workspace-relative knowledge bases are initialized on first agent use instead of during the global startup pass.
 
 ### Multiple Knowledge Bases
 
@@ -271,7 +263,7 @@ memory:
 ## Storage
 
 Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
-When `path_relative_to_agent_workspace` is enabled, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
+For requester-private agent knowledge, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 

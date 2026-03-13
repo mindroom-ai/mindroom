@@ -28,6 +28,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -728,14 +730,25 @@ def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) ->
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Private per-user roots should scaffold per requester and isolate private context files."""
+    """Private per-user roots should copy their configured template and isolate private context files."""
     config = Config.from_yaml()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    template_dir = build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
     config.agents["general"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(
         per="user",
         root="mind_data",
-        scaffold="mind",
+        template_dir="./mind_template",
         context_files=["USER.md"],
     )
 
@@ -758,21 +771,24 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         session_id="session-bob",
     )
 
-    with tool_execution_identity(alice_identity):
-        create_agent("general", config=config, storage_path=tmp_path)
-        alice_worker_key = resolve_worker_key("user", alice_identity)
-        assert alice_worker_key is not None
-        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
-        assert (alice_workspace / "USER.md").exists()
-        assert (alice_workspace / "MEMORY.md").exists()
-        (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
-        alice_agent = create_agent("general", config=config, storage_path=tmp_path)
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+        assert template_dir == (config_dir / "mind_template").resolve()
 
-    with tool_execution_identity(bob_identity):
-        bob_agent = create_agent("general", config=config, storage_path=tmp_path)
-        bob_worker_key = resolve_worker_key("user", bob_identity)
-        assert bob_worker_key is not None
-        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+        with tool_execution_identity(alice_identity):
+            create_agent("general", config=config, storage_path=tmp_path)
+            alice_worker_key = resolve_worker_key("user", alice_identity)
+            assert alice_worker_key is not None
+            alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+            assert (alice_workspace / "USER.md").exists()
+            assert (alice_workspace / "MEMORY.md").exists()
+            (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
+            alice_agent = create_agent("general", config=config, storage_path=tmp_path)
+
+        with tool_execution_identity(bob_identity):
+            bob_agent = create_agent("general", config=config, storage_path=tmp_path)
+            bob_worker_key = resolve_worker_key("user", bob_identity)
+            assert bob_worker_key is not None
+            bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
 
     assert alice_workspace != bob_workspace
     assert "Alice private root context." in alice_agent.role
@@ -791,31 +807,6 @@ def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
                 ),
             },
             knowledge_bases={},
-        )
-
-
-def test_config_rejects_workspace_relative_knowledge_base_without_private_root() -> None:
-    """Workspace-relative knowledge bases require an agent private root definition."""
-    with pytest.raises(
-        ValidationError,
-        match=re.escape(
-            "Workspace-relative knowledge bases require agents.<name>.private; "
-            "invalid assignments: general -> research",
-        ),
-    ):
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    knowledge_bases=["research"],
-                ),
-            },
-            knowledge_bases={
-                "research": KnowledgeBaseConfig(
-                    path="memory",
-                    path_relative_to_agent_workspace=True,
-                ),
-            },
         )
 
 
@@ -990,13 +981,13 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     assert config.agents["calculator"].knowledge_bases == ["research"]
 
 
-def test_config_private_knowledge_requires_path_without_scaffold_default() -> None:
-    """Private knowledge needs an explicit path when the scaffold does not imply one."""
+def test_config_private_knowledge_requires_path_without_template_default() -> None:
+    """Private knowledge needs an explicit path when no template default exists."""
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "agents.<name>.private.knowledge.path is required when the selected scaffold does not define a "
-            "default private knowledge path; invalid agents: mind",
+            "agents.<name>.private.knowledge.path is required when private.template_dir is not configured "
+            "and no default private knowledge path is available; invalid agents: mind",
         ),
     ):
         Config(
@@ -1020,7 +1011,7 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
                 display_name="Mind",
                 private=AgentPrivateConfig(
                     per="user",
-                    scaffold="mind",
+                    template_dir="./mind_template",
                 ),
                 knowledge_bases=["company_docs"],
             ),
@@ -1035,7 +1026,6 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
     assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
-    assert private_config.path_relative_to_agent_workspace is True
 
 
 def test_config_rejects_duplicate_default_tools() -> None:

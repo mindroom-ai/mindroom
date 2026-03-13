@@ -28,17 +28,8 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _workspace_relative_base_error(base_id: str) -> str:
-    return (
-        f"Knowledge base '{base_id}' uses path_relative_to_agent_workspace=true and is not supported by "
-        "/api/knowledge because the API cannot infer which agent workspace to target"
-    )
-
-
 def _ensure_base_supported_by_api(config: Config, base_id: str) -> None:
     _ensure_base_exists(config, base_id)
-    if config.knowledge_bases[base_id].path_relative_to_agent_workspace:
-        raise HTTPException(status_code=400, detail=_workspace_relative_base_error(base_id))
 
 
 def _knowledge_root(config: Config, base_id: str, *, create: bool = False) -> Path:
@@ -156,18 +147,6 @@ async def list_knowledge_bases() -> dict[str, Any]:
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
         base_config = config.knowledge_bases[base_id]
-        if base_config.path_relative_to_agent_workspace:
-            bases.append(
-                {
-                    "name": base_id,
-                    "path": None,
-                    "watch": base_config.watch,
-                    "file_count": None,
-                    "indexed_count": None,
-                    "unsupported_reason": _workspace_relative_base_error(base_id),
-                },
-            )
-            continue
 
         root = _knowledge_root(config, base_id)
         manager = manager_map.get(base_id)

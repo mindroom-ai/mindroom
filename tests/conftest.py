@@ -1,7 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import os
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +16,7 @@ __all__ = [
     "TEST_PASSWORD",
     "FakeCredentialsManager",
     "aioresponse",
+    "build_private_template_dir",
     "bypass_authorization",
     "create_mock_room",
 ]
@@ -87,6 +88,32 @@ def create_mock_room(
     else:
         room.users = {}
     return room
+
+
+@pytest.fixture
+def build_private_template_dir(tmp_path: Path) -> Callable[..., Path]:
+    """Return a helper that creates a local private-instance template directory."""
+
+    def _build(
+        name: str = "private_template",
+        *,
+        files: dict[str, str] | None = None,
+    ) -> Path:
+        template_dir = tmp_path / name
+        template_dir.mkdir(parents=True, exist_ok=True)
+        template_files = files or {
+            "SOUL.md": "Template soul.\n",
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        }
+        for relative_path, content in template_files.items():
+            destination = template_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(content, encoding="utf-8")
+        return template_dir
+
+    return _build
 
 
 @pytest_asyncio.fixture

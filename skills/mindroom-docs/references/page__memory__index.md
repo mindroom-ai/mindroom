@@ -98,10 +98,10 @@ agents:
     memory_backend: file
     private:
       per: user
-      scaffold: mind
+      template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root with its own `MEMORY.md` and `memory/` notes directory.
+In this setup, each requester gets their own private `mind_data/` root with its own copied `MEMORY.md` and `memory/` notes directory from `./mind_template/`.
 
 ### File layout
 

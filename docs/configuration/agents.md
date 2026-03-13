@@ -133,7 +133,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
 | `memory_file_path` | string | `null` | Custom shared directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an unscoped agent at an existing workspace. Resolved relative to the config file directory |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.scaffold: mind` scaffolds the standard Mind files, and `private.knowledge` adds requester-local knowledge indexed from that private root |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, and `private.knowledge` adds requester-local knowledge indexed from that private root |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -201,7 +201,7 @@ agents:
     memory_backend: file
     private:
       per: user
-      scaffold: mind
+      template_dir: ./mind_template
       knowledge:
         watch: true
     knowledge_bases: [company_docs]
@@ -209,11 +209,15 @@ agents:
 
 `private.per` says which requester boundary gets its own private instance.
 `private.root` is optional and defaults to `<agent_name>_data`, so the example above materializes `mind_data/` for each requester.
-`private.scaffold: mind` scaffolds `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/` on first use.
-Those scaffolded files are private copies inside the requester's own root, not shared files next to `config.yaml`.
+`private.template_dir` points at a local directory, relative to `config.yaml` unless you use an absolute path.
+On first use, MindRoom copies that directory into the requester's own private root without overwriting existing files.
+Those copied files are private per-requester state, not shared files next to `config.yaml`.
+For a Mind-style template, create a directory such as `./mind_template/` containing files like `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/`.
 When `memory_backend: file` is enabled, the private root is also the file-memory root for that requester, so `MEMORY.md` and `memory/` stay inside the same private tree.
 `private.knowledge` configures requester-local knowledge indexed from that private root.
-With the `mind` scaffold, omitting `private.knowledge.path` uses `memory/` automatically.
+When `private.template_dir` is set, omitting `private.knowledge.path` uses `memory/` automatically.
+When `private.context_files` is omitted, MindRoom looks for the conventional private context files `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, and `HEARTBEAT.md` inside the copied private root.
+If your template uses different filenames, set `private.context_files` explicitly.
 Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both private local knowledge and shared knowledge in the same run.
 Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 
