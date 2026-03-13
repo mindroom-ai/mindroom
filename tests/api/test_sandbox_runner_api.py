@@ -300,6 +300,31 @@ def test_sandbox_runner_subprocess_rejects_invalid_base_dir_override_type(
     assert "base_dir" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should reject base_dir overrides that escape the worker root."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": str(tmp_path / "outside-worker-root")},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "worker root" in response.json()["detail"]
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)
@@ -493,6 +518,38 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
 
     worker_file = worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should honor a forwarded canonical base_dir inside the worker root."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from canonical workspace", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": "workspace/general/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = worker_root / worker_dir_name("worker-a") / "workspace" / "general" / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from canonical workspace"
+    assert not (worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt").exists()
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

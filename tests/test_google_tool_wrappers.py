@@ -12,7 +12,7 @@ from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 
 
-@pytest.mark.parametrize("worker_scope", ["user", "user_agent", "room_thread"])
+@pytest.mark.parametrize("worker_scope", ["user", "user_agent"])
 @pytest.mark.parametrize("tool_class", [GmailTools, GoogleCalendarTools, GoogleSheetsTools])
 def test_google_wrappers_reject_isolating_worker_scopes(
     worker_scope: str,

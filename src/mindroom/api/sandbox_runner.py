@@ -438,6 +438,54 @@ def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> Sandb
     return request
 
 
+def _resolve_worker_base_dir(
+    paths: LocalWorkerStatePaths,
+    requested_base_dir: object | None,
+) -> Path:
+    """Resolve the effective base_dir inside one worker root."""
+    if requested_base_dir is None:
+        return paths.workspace.resolve()
+    if not isinstance(requested_base_dir, str):
+        msg = "base_dir must be a string path."
+        raise TypeError(msg)
+
+    raw_path = Path(requested_base_dir).expanduser()
+    candidate = (paths.root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+    try:
+        candidate.relative_to(paths.root.resolve())
+    except ValueError as exc:
+        msg = f"base_dir must stay inside the worker root: {requested_base_dir}"
+        raise ValueError(msg) from exc
+
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+def _normalize_request_worker_base_dir(
+    request: SandboxRunnerExecuteRequest,
+) -> SandboxRunnerExecuteResponse | None:
+    """Normalize worker-scoped base_dir overrides before execution starts."""
+    if request.worker_key is None:
+        return None
+
+    try:
+        worker_handle = _prepare_worker(request.worker_key)
+    except WorkerBackendError as exc:
+        return _worker_initialization_failure_response(request.worker_key, exc)
+
+    try:
+        resolved_base_dir = _resolve_worker_base_dir(
+            local_worker_state_paths_from_handle(worker_handle),
+            request.tool_init_overrides.get("base_dir"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    request.tool_init_overrides = dict(request.tool_init_overrides)
+    request.tool_init_overrides["base_dir"] = str(resolved_base_dir)
+    return None
+
+
 async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
@@ -445,7 +493,13 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
             worker_handle = _prepare_worker(request.worker_key)
         except WorkerBackendError as exc:
             return _worker_initialization_failure_response(request.worker_key, exc)
-        runtime_overrides = {"base_dir": local_worker_state_paths_from_handle(worker_handle).workspace}
+        paths = local_worker_state_paths_from_handle(worker_handle)
+        try:
+            runtime_overrides = {
+                "base_dir": _resolve_worker_base_dir(paths, request.tool_init_overrides.get("base_dir")),
+            }
+        except ValueError as exc:
+            return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -504,6 +558,10 @@ def _resolve_subprocess_worker_context(
 
     worker_handle = _prepare_worker(request.worker_key)
     paths = local_worker_state_paths_from_handle(worker_handle)
+    request.tool_init_overrides = dict(request.tool_init_overrides)
+    request.tool_init_overrides["base_dir"] = str(
+        _resolve_worker_base_dir(paths, request.tool_init_overrides.get("base_dir")),
+    )
     return (
         str(paths.venv_dir / "bin" / "python"),
         _worker_subprocess_env(paths),
@@ -672,6 +730,8 @@ async def execute_tool_call(
         )
 
     request.credential_overrides = credential_overrides
+    if (normalized_worker_response := _normalize_request_worker_base_dir(request)) is not None:
+        return normalized_worker_response
     if _runner_uses_subprocess():
         return await _execute_request_subprocess(request)
     # Worker-routed execution stays on the subprocess path so the per-worker

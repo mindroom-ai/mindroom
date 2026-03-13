@@ -109,8 +109,6 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
     message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
     if invalid_scopes & {"user", "user_agent"}:
         message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
-    if "room_thread" in invalid_scopes:
-        message += " worker_scope=room_thread is not supported on /v1."
 
     return _error_response(
         400,

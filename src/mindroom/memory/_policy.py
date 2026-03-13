@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
+    resolve_agent_owned_path,
     resolve_agent_state_storage_path,
 )
 
@@ -34,15 +35,6 @@ def caller_uses_file_memory_backend(config: Config, caller_context: str | list[s
 def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
     """Return whether all team members resolve to file-backed memory."""
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
-
-
-def agent_uses_worker_scoped_memory(agent_name: str, config: Config) -> bool:
-    """Return whether the agent should store memory under its worker root."""
-    return (
-        agent_name in config.agents
-        and get_tool_execution_identity() is not None
-        and config.get_agent_worker_scope(agent_name) is not None
-    )
 
 
 def _effective_storage_path_for_agent(agent_name: str, storage_path: Path, config: Config) -> Path:
@@ -193,8 +185,34 @@ def resolve_file_memory_resolution(
 ) -> FileMemoryResolution:
     """Resolve file-memory storage settings for one caller context."""
     resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
-    return file_memory_resolution_from_paths(
+    resolution = file_memory_resolution_from_paths(
         original_storage_path=storage_path,
         resolved_storage_path=resolved_storage_path,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
+    )
+    if agent_name is None:
+        return resolution
+
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_config.memory_file_path is None:
+        return resolution
+
+    state_root_override = None
+    if preserve_resolved_storage_path and config.get_agent_worker_scope(agent_name) is not None:
+        state_root_override = resolved_storage_path
+
+    agent_memory_scope_path = resolve_agent_owned_path(
+        agent_config.memory_file_path,
+        field_name="memory_file_path",
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+        config=config,
+        execution_identity=get_tool_execution_identity(),
+        state_root=state_root_override,
+    ).resolved_path
+    return FileMemoryResolution(
+        storage_path=resolution.storage_path,
+        use_configured_path=resolution.use_configured_path,
+        allow_agent_memory_file_path_override=resolution.allow_agent_memory_file_path_override,
+        agent_memory_scope_path=agent_memory_scope_path,
     )

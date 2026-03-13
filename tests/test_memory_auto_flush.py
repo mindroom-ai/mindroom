@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -192,7 +193,7 @@ async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
 ) -> None:
     """Worker-scoped flushes should keep daily file memory inside the worker root."""
     config.agents["general"].worker_scope = "user"
-    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.file.path = str(tmp_path / "shared-memory")
 
     alice_identity = ToolExecutionIdentity(
@@ -205,7 +206,10 @@ async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
         session_id="session-alice",
     )
 
-    with tool_execution_identity(alice_identity):
+    with (
+        patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"),
+        tool_execution_identity(alice_identity),
+    ):
         mark_auto_flush_dirty_session(
             tmp_path,
             config,
@@ -228,12 +232,17 @@ async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
         _fake_extract_memory_summary,
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
-    await worker._run_cycle(config)
+    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
+        worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+        await worker._run_cycle(config)
 
     worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
     assert worker_key is not None
-    worker_daily_files = list((worker_root_path(tmp_path, worker_key) / "memory_files").rglob("*.md"))
+    worker_daily_files = list(
+        (worker_root_path(tmp_path, worker_key) / "workspace" / "general" / "custom-agent-memory" / "memory").rglob(
+            "*.md",
+        ),
+    )
     assert len(worker_daily_files) == 1
     assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
 
@@ -248,7 +257,7 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unscoped flushes should still honor per-agent custom file-memory paths."""
-    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.file.path = str(tmp_path / "shared-memory")
 
     fake_session = _FakeSession(
@@ -264,13 +273,14 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
         _fake_extract_memory_summary,
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
-    wrote_memory = await worker._flush_session(
-        config,
-        agent_name="general",
-        session_id="session-general",
-        worker_key=None,
-    )
+    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
+        worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+        wrote_memory = await worker._flush_session(
+            config,
+            agent_name="general",
+            session_id="session-general",
+            worker_key=None,
+        )
 
     assert wrote_memory is True
     custom_daily_files = list((tmp_path / "custom-agent-memory" / "memory").rglob("*.md"))
@@ -287,7 +297,7 @@ async def test_existing_memory_context_reads_worker_root_instead_of_shared_custo
 ) -> None:
     """Duplicate-avoidance context should read worker-local file memory, not shared custom-path memory."""
     config.agents["general"].worker_scope = "user"
-    config.agents["general"].memory_file_path = str(tmp_path / "custom-agent-memory")
+    config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 5
     config.memory.auto_flush.extractor.include_memory_context.snippet_max_chars = 200
 
@@ -303,17 +313,18 @@ async def test_existing_memory_context_reads_worker_root_instead_of_shared_custo
     worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
     assert worker_key is not None
 
-    with tool_execution_identity(alice_identity):
-        await add_agent_memory("Alice isolated memory", "general", tmp_path, config)
+    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
+        with tool_execution_identity(alice_identity):
+            await add_agent_memory("Alice isolated memory", "general", tmp_path, config)
 
-    append_agent_daily_memory("Shared leaked memory", "general", tmp_path, config)
+        append_agent_daily_memory("Shared leaked memory", "general", tmp_path, config)
 
-    worker_context = await _build_existing_memory_context(
-        agent_name="general",
-        storage_path=worker_root_path(tmp_path, worker_key),
-        config=config,
-        preserve_resolved_storage_path=True,
-    )
+        worker_context = await _build_existing_memory_context(
+            agent_name="general",
+            storage_path=worker_root_path(tmp_path, worker_key),
+            config=config,
+            preserve_resolved_storage_path=True,
+        )
 
     assert "Alice isolated memory" in worker_context
     assert "Shared leaked memory" not in worker_context

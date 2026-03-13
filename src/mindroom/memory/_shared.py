@@ -82,6 +82,7 @@ class FileMemoryResolution:
     storage_path: Path
     use_configured_path: bool
     allow_agent_memory_file_path_override: bool = True
+    agent_memory_scope_path: Path | None = None
 
 
 FILE_MEMORY_DEFAULT_DIRNAME = "memory_files"

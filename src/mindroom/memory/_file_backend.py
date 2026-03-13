@@ -13,7 +13,6 @@ from mindroom.logging_config import get_logger
 from ._policy import (
     agent_name_from_scope_user_id,
     agent_scope_user_id,
-    agent_uses_worker_scoped_memory,
     build_team_user_id,
     effective_storage_paths_for_context,
     file_memory_resolution_from_paths,
@@ -79,15 +78,23 @@ def _scope_dir(
     create: bool,
 ) -> Path:
     agent_name = agent_name_from_scope_user_id(scope_user_id)
+    if resolution.agent_memory_scope_path is not None and agent_name is not None:
+        scope_path = resolution.agent_memory_scope_path
+        if create:
+            scope_path.mkdir(parents=True, exist_ok=True)
+        return scope_path
+
     if agent_name is not None:
         agent_config = config.agents.get(agent_name)
         if (
             resolution.allow_agent_memory_file_path_override
             and agent_config is not None
             and agent_config.memory_file_path is not None
-            and not agent_uses_worker_scoped_memory(agent_name, config)
         ):
-            scope_path = resolve_config_relative_path(agent_config.memory_file_path)
+            scope_path = resolution.agent_memory_scope_path
+            if scope_path is None:
+                msg = f"Missing resolved memory path for agent '{agent_name}'."
+                raise ValueError(msg)
             if create:
                 scope_path.mkdir(parents=True, exist_ok=True)
             return scope_path

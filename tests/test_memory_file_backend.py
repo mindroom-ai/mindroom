@@ -498,6 +498,46 @@ async def test_memory_file_path_uses_custom_scope_dir(storage_path: Path, config
 
 
 @pytest.mark.asyncio
+async def test_worker_scoped_memory_file_path_uses_canonical_worker_owned_scope(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].worker_scope = "user"
+    config.agents["general"].memory_file_path = "./mind_data"
+
+    config_dir = storage_path / "cfg"
+    source_workspace = config_dir / "mind_data"
+    source_workspace.mkdir(parents=True, exist_ok=True)
+    (source_workspace / "MEMORY.md").write_text("# Memory\n\nExisting worker memory.\n", encoding="utf-8")
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"), tool_execution_identity(alice_identity):
+        await add_agent_memory("New worker memory", "general", storage_path, config)
+        prompt = await build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
+
+    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    assert worker_key is not None
+    canonical_workspace = worker_root_path(storage_path, worker_key) / "workspace" / "general" / "mind_data"
+    content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
+
+    assert "Existing worker memory." in content
+    assert "New worker memory" in content
+    assert "Existing worker memory." in prompt
+    assert not (storage_path / "memory_files" / "agent_general").exists()
+
+
+@pytest.mark.asyncio
 async def test_memory_file_path_entrypoint_loaded_in_prompt(storage_path: Path, config: Config) -> None:
     workspace = storage_path / "my-workspace"
     workspace.mkdir(parents=True)

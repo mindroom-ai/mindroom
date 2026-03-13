@@ -88,7 +88,7 @@ class AgentConfig(BaseModel):
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
-        description="Worker scope for routed tools: user, user_agent, room_thread, or shared",
+        description="Worker scope for routed tools: user, user_agent, or shared",
     )
     allow_self_config: bool | None = Field(
         default=None,

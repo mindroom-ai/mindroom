@@ -355,7 +355,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     assert workspace.is_dir()
     assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
-    assert overrides_by_tool["coding"] is None
+    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 

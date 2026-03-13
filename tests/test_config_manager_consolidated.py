@@ -671,9 +671,9 @@ class TestGetAgentWorkerTools:
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
         config = Config(
-            defaults=DefaultsConfig(worker_scope="room_thread"),
+            defaults=DefaultsConfig(worker_scope="user"),
             agents={
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_scope("code") == "room_thread"
+        assert config.get_agent_worker_scope("code") == "user"

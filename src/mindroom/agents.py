@@ -17,12 +17,16 @@ from agno.session.agent import AgentSession
 
 from mindroom import agent_prompts
 from mindroom import tools as _tools_module  # noqa: F401
-from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
+from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import (
+    resolve_agent_owned_path,
+    resolve_agent_state_storage_path,
+    worker_owned_tool_paths_use_relative_overrides,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -73,6 +77,7 @@ class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
+    worker_routed_workspace_path: str | None
     worker_routed_tools: frozenset[str]
     worker_scope: WorkerScope | None
 
@@ -104,11 +109,23 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
-def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChunk]:
+def _load_context_files(
+    context_files: list[str],
+    *,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
-        resolved_path = resolve_config_relative_path(raw_path)
+        resolved_path = resolve_agent_owned_path(
+            raw_path,
+            field_name="context_files",
+            agent_name=agent_name,
+            base_storage_path=storage_path,
+            config=config,
+        ).resolved_path
         if resolved_path.is_file():
             loaded_parts.append(
                 _AdditionalContextChunk(
@@ -209,8 +226,12 @@ def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_pr
 
 
 def _build_additional_context(
+    agent_name: str,
     agent_config: AgentConfig,
     max_preload_chars: int,
+    *,
+    storage_path: Path,
+    config: Config,
 ) -> str:
     """Build additional role context from configured files/directories.
 
@@ -219,7 +240,12 @@ def _build_additional_context(
     """
     personality_chunks: list[_AdditionalContextChunk] = []
     if agent_config.context_files:
-        personality_chunks = _load_context_files(agent_config.context_files)
+        personality_chunks = _load_context_files(
+            agent_config.context_files,
+            agent_name=agent_name,
+            storage_path=storage_path,
+            config=config,
+        )
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
     if omitted_chars > 0:
@@ -231,14 +257,30 @@ def _build_additional_context(
     return additional_context
 
 
-def _resolve_agent_workspace_path(agent_config: AgentConfig) -> Path | None:
-    """Return the agent workspace directory when one is explicitly configured."""
+def _resolve_agent_workspace_paths(
+    agent_name: str,
+    agent_config: AgentConfig,
+    config: Config,
+    *,
+    storage_path: Path,
+) -> tuple[Path | None, str | None]:
+    """Return the host and worker-visible workspace paths when explicitly configured."""
     if agent_config.memory_file_path is None:
-        return None
+        return None, None
 
-    workspace_path = resolve_config_relative_path(agent_config.memory_file_path)
+    resolved = resolve_agent_owned_path(
+        agent_config.memory_file_path,
+        field_name="memory_file_path",
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+        config=config,
+    )
+    workspace_path = resolved.resolved_path
     workspace_path.mkdir(parents=True, exist_ok=True)
-    return workspace_path
+    worker_routed_workspace_path = str(workspace_path)
+    if resolved.worker_relative_path is not None and worker_owned_tool_paths_use_relative_overrides():
+        worker_routed_workspace_path = resolved.worker_relative_path
+    return workspace_path, worker_routed_workspace_path
 
 
 def _tool_supports_base_dir(tool_name: str) -> bool:
@@ -253,22 +295,35 @@ def _tool_init_overrides(
     tool_name: str,
     *,
     workspace_path: Path | None,
+    worker_routed_workspace_path: str | None,
     worker_routed_tools: frozenset[str],
-    worker_scope: str | None,
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
     if workspace_path is None or not _tool_supports_base_dir(tool_name):
         return None
-    if worker_scope is not None and tool_name in worker_routed_tools:
-        return None
+    if tool_name in worker_routed_tools and worker_routed_workspace_path is not None:
+        return {"base_dir": worker_routed_workspace_path}
     return {"base_dir": str(workspace_path)}
 
 
-def build_agent_tool_init_context(config: Config, agent_name: str) -> AgentToolInitContext:
+def build_agent_tool_init_context(
+    config: Config,
+    agent_name: str,
+    *,
+    storage_path: Path | None = None,
+) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
+    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    workspace_path, worker_routed_workspace_path = _resolve_agent_workspace_paths(
+        agent_name,
+        agent_config,
+        config,
+        storage_path=resolved_storage_path,
+    )
     return AgentToolInitContext(
-        workspace_path=_resolve_agent_workspace_path(agent_config),
+        workspace_path=workspace_path,
+        worker_routed_workspace_path=worker_routed_workspace_path,
         worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name)),
         worker_scope=config.get_agent_worker_scope(agent_name),
     )
@@ -283,8 +338,8 @@ def build_agent_tool_init_overrides(
     return _tool_init_overrides(
         tool_name,
         workspace_path=context.workspace_path,
+        worker_routed_workspace_path=context.worker_routed_workspace_path,
         worker_routed_tools=context.worker_routed_tools,
-        worker_scope=context.worker_scope,
     )
 
 
@@ -544,7 +599,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     tool_names = config.get_agent_tools(agent_name)
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name)
+    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     worker_scope = tool_init_context.worker_scope
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
@@ -662,8 +717,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     full_context = identity_context + datetime_context
 
     full_context += _build_additional_context(
+        agent_name,
         agent_config,
         config.defaults.max_preload_chars,
+        storage_path=resolved_storage_path,
+        config=config,
     )
 
     # Use rich prompt if available, otherwise use YAML config

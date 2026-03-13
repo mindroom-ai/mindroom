@@ -159,7 +159,7 @@ class TestListModels:
 
         test_config.agents["general"].worker_scope = "user"
         test_config.agents["code"].worker_scope = "user_agent"
-        test_config.agents["research"].worker_scope = "room_thread"
+        test_config.agents["research"].worker_scope = "user"
 
         app = FastAPI()
         app.include_router(router)
@@ -428,7 +428,7 @@ class TestChatCompletions:
 
         test_config.agents["general"].worker_scope = "user"
         test_config.agents["code"].worker_scope = "user_agent"
-        test_config.agents["research"].worker_scope = "room_thread"
+        test_config.agents["research"].worker_scope = "user"
         app = FastAPI()
         app.include_router(router)
 
