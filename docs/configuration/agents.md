@@ -202,7 +202,15 @@ agents:
     private:
       per: user
       template_dir: ./mind_template
+      context_files:
+        - SOUL.md
+        - AGENTS.md
+        - USER.md
+        - IDENTITY.md
+        - TOOLS.md
+        - HEARTBEAT.md
       knowledge:
+        path: memory
         watch: true
     knowledge_bases: [company_docs]
 ```
@@ -215,9 +223,10 @@ Those copied files are private per-requester state, not shared files next to `co
 For a Mind-style template, create a directory such as `./mind_template/` containing files like `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/`.
 When `memory_backend: file` is enabled, the private root is also the file-memory root for that requester, so `MEMORY.md` and `memory/` stay inside the same private tree.
 `private.knowledge` configures requester-local knowledge indexed from that private root.
-When `private.template_dir` is set, omitting `private.knowledge.path` uses `memory/` automatically.
-When `private.context_files` is omitted, MindRoom looks for the conventional private context files `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, and `HEARTBEAT.md` inside the copied private root.
-If your template uses different filenames, set `private.context_files` explicitly.
+`private.template_dir` only copies files into the private root.
+It does not implicitly load any context files and it does not implicitly create a private knowledge base.
+Set `private.context_files` explicitly for any private files you want loaded into role context.
+Set `private.knowledge.path` explicitly for any private files or folders you want indexed as requester-local knowledge.
 Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both private local knowledge and shared knowledge in the same run.
 Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 

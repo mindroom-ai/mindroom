@@ -135,6 +135,7 @@ def _mind_private_agent(
             template_dir=template_dir,
             context_files=["SOUL.md"],
             knowledge=AgentPrivateKnowledgeConfig(
+                path="memory",
                 watch=watch,
                 git=git,
             ),
