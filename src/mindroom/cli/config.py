@@ -78,20 +78,35 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
-def _default_storage_root_for_config(config_dir: Path) -> Path:
-    """Return the default runtime storage root implied by one config directory."""
-    return config_dir / "mindroom_data"
+def _configured_storage_root_override() -> Path | None:
+    """Return the active storage-root override from the environment, if any."""
+    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if not configured_root:
+        return None
+    return Path(configured_root).expanduser().resolve()
+
+
+def _storage_root_for_config(config_dir: Path) -> Path:
+    """Return the runtime storage root implied by env overrides or config location."""
+    if configured_root := _configured_storage_root_override():
+        return configured_root
+    return (config_dir / "mindroom_data").resolve()
 
 
 def _default_mind_workspace(config_dir: Path) -> Path:
     """Return the starter Mind workspace inside the canonical agent workspace."""
-    return agent_workspace_root_path(_default_storage_root_for_config(config_dir), "mind") / "mind_data"
+    return agent_workspace_root_path(_storage_root_for_config(config_dir), "mind") / "mind_data"
 
 
 def _default_mind_knowledge_base_path(config_dir: Path) -> str:
     """Return the starter knowledge-base path that points at the canonical Mind workspace."""
-    knowledge_root = (_default_mind_workspace(config_dir) / "memory").relative_to(config_dir)
-    return f"./{knowledge_root.as_posix()}"
+    knowledge_root = (_default_mind_workspace(config_dir) / "memory").resolve()
+    resolved_config_dir = config_dir.resolve()
+    try:
+        relative_knowledge_root = knowledge_root.relative_to(resolved_config_dir)
+    except ValueError:
+        return str(knowledge_root)
+    return f"./{relative_knowledge_root.as_posix()}"
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
@@ -706,6 +721,15 @@ def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset)
         )
 
     provider_lines_text = _provider_env_template(provider_preset)
+    storage_root_override = _configured_storage_root_override()
+    storage_root_block = (
+        ""
+        if storage_root_override is None
+        else (
+            "# Optional: override the runtime storage root used for canonical agent state\n"
+            f"MINDROOM_STORAGE_PATH={storage_root_override}\n\n"
+        )
+    )
 
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
@@ -713,7 +737,7 @@ MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
 {extra_matrix.rstrip()}
 
-{provider_lines_text}
+{storage_root_block}{provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
 # When set, all dashboard requests require: Authorization: Bearer <key>

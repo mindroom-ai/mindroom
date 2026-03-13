@@ -66,7 +66,7 @@ agents:
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
-    # Optional: additional files loaded into role context at agent init/reload
+    # Optional: additional files loaded into each freshly built agent instance
     context_files:
       - openclaw_data/SOUL.md
       - openclaw_data/AGENTS.md

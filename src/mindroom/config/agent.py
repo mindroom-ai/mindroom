@@ -49,7 +49,7 @@ class AgentConfig(BaseModel):
     )
     context_files: list[str] = Field(
         default_factory=list,
-        description="Workspace-relative file paths read at agent init and prepended to role context",
+        description="Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context",
     )
     thread_mode: Literal["thread", "room"] = Field(
         default="thread",

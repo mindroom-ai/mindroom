@@ -118,6 +118,33 @@ class TestConfigInit:
         assert (workspace / "MEMORY.md").exists()
         assert not (workspace / "BOOT.md").exists()
 
+    def test_init_full_profile_respects_storage_path_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Full template should scaffold the Mind workspace under MINDROOM_STORAGE_PATH when set."""
+        target = tmp_path / "config.yaml"
+        storage_root = tmp_path / "custom-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        workspace = storage_root / "agents" / "mind" / "workspace" / "mind_data"
+        assert workspace.exists()
+        assert (workspace / "memory").exists()
+        assert (workspace / "SOUL.md").exists()
+        assert (workspace / "MEMORY.md").exists()
+        assert (
+            config["knowledge_bases"]["mind_memory"]["path"]
+            == "./custom-storage/agents/mind/workspace/mind_data/memory"
+        )
+
+        env_content = (tmp_path / ".env").read_text()
+        assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
+
     def test_init_without_path_uses_detected_default_location(
         self,
         tmp_path: Path,
