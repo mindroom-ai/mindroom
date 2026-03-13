@@ -65,20 +65,19 @@ agents:
     memory_backend: file
 
     # Workspace-relative file-memory path inside this agent's canonical workspace (optional)
-    memory_file_path: openclaw_data
+    memory_file_path: mind_data
 
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
     # Optional: additional files loaded into each freshly built agent instance
     context_files:
-      - openclaw_data/SOUL.md
-      - openclaw_data/AGENTS.md
-      - openclaw_data/USER.md
-      - openclaw_data/IDENTITY.md
-      - openclaw_data/MEMORY.md
-      - openclaw_data/TOOLS.md
-      - openclaw_data/HEARTBEAT.md
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true

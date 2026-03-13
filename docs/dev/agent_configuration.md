@@ -151,7 +151,7 @@ agents:
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
-    memory_file_path: "openclaw_data"  # Optional: workspace-relative path for the agent's canonical file-memory workspace
+    memory_file_path: "mind_data"  # Optional: workspace-relative path for the agent's canonical file-memory workspace
     knowledge_bases:
       - docs
     context_files:

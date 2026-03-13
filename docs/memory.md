@@ -86,7 +86,7 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
-    memory_file_path: openclaw_data
+    memory_file_path: mind_data
 ```
 
 `memory_file_path` is resolved relative to the agent's canonical workspace root, not `config.yaml`.

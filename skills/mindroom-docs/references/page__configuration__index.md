@@ -75,16 +75,15 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
-    memory_file_path: openclaw_data  # Optional: Workspace-relative path for the agent's canonical file-memory workspace
+    memory_file_path: mind_data  # Optional: Workspace-relative path for the agent's canonical file-memory workspace
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
-      - openclaw_data/SOUL.md
-      - openclaw_data/AGENTS.md
-      - openclaw_data/USER.md
-      - openclaw_data/IDENTITY.md
-      - openclaw_data/MEMORY.md
-      - openclaw_data/TOOLS.md
-      - openclaw_data/HEARTBEAT.md
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
   researcher:
     display_name: Researcher
     role: Research and gather information
