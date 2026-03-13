@@ -93,6 +93,7 @@ agents:
     model: sonnet
     private:
       per: user
+      root: mind_data
       template_dir: ./mind_template
       knowledge:
         path: memory
@@ -104,10 +105,24 @@ With this configuration, each requester's private knowledge path becomes `<their
 The template source is explicit, so you can see and edit the files being copied into each requester's private root.
 `private.template_dir` only copies files.
 Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`.
+`private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`.
+`private.knowledge.path` can point to any file or folder inside the private root.
 MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
 For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
 This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private.knowledge.enabled` | bool | `true` | Whether requester-local knowledge indexing is active for this agent |
+| `private.knowledge.path` | string | `null` | Private-root-relative file or folder to index. Required when `private.knowledge.enabled` is `true` |
+| `private.knowledge.watch` | bool | `true` | Whether private knowledge should refresh when files change. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root |
+| `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
+| `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |
+| `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local knowledge |
+
+Use `private.knowledge` when the data itself should be private to that requester's private instance.
+Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
 
 ### Multiple Knowledge Bases
 

@@ -133,7 +133,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
 | `memory_file_path` | string | `null` | Custom shared directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an unscoped agent at an existing workspace. Resolved relative to the config file directory |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, and `private.knowledge` adds requester-local knowledge indexed from that private root |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -183,7 +183,9 @@ Agents using `user`, `user_agent`, or `room_thread` treat credentials as runtime
 
 ## Private Instances
 
-Use `private` when one shared agent definition should materialize a separate requester-local copy of its files, context, and local knowledge.
+Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
+The YAML definition stays shared.
+The private root, copied files, file-memory workspace, and private knowledge path do not.
 
 ```yaml
 knowledge_bases:
@@ -201,6 +203,7 @@ agents:
     memory_backend: file
     private:
       per: user
+      root: mind_data
       template_dir: ./mind_template
       context_files:
         - SOUL.md
@@ -209,26 +212,68 @@ agents:
         - IDENTITY.md
         - TOOLS.md
         - HEARTBEAT.md
+        - MEMORY.md
       knowledge:
         path: memory
         watch: true
     knowledge_bases: [company_docs]
 ```
 
-`private.per` says which requester boundary gets its own private instance.
-`private.root` is optional and defaults to `<agent_name>_data`, so the example above materializes `mind_data/` for each requester.
-`private.template_dir` points at a local directory, relative to `config.yaml` unless you use an absolute path.
-On first use, MindRoom copies that directory into the requester's own private root without overwriting existing files.
-Those copied files are private per-requester state, not shared files next to `config.yaml`.
-For a Mind-style template, create a directory such as `./mind_template/` containing files like `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/`.
-When `memory_backend: file` is enabled, the private root is also the file-memory root for that requester, so `MEMORY.md` and `memory/` stay inside the same private tree.
-`private.knowledge` configures requester-local knowledge indexed from that private root.
-`private.template_dir` only copies files into the private root.
-It does not implicitly load any context files and it does not implicitly create a private knowledge base.
-Set `private.context_files` explicitly for any private files you want loaded into role context.
-Set `private.knowledge.path` explicitly for any private files or folders you want indexed as requester-local knowledge.
-Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both private local knowledge and shared knowledge in the same run.
-Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+Example template directory:
+
+```text
+mind_template/
+├── SOUL.md
+├── AGENTS.md
+├── USER.md
+├── IDENTITY.md
+├── TOOLS.md
+├── HEARTBEAT.md
+├── MEMORY.md
+└── memory/
+```
+
+In the example above, each requester gets their own effective `mind_data/` root under the worker-owned state root for that request.
+That private root is not created next to `config.yaml`.
+It lives inside the runtime state owned by the effective `private.per` worker boundary.
+For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+
+### Private Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private.per` | `user`, `user_agent`, or `room_thread` | *required* | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope |
+| `private.root` | string | `<agent_name>_data` | Private root name under the effective worker-owned state root. Must be a relative path and cannot escape with `..` |
+| `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root on first use. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error on first use if the directory does not exist |
+| `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
+| `private.knowledge` | object | `null` | Optional requester-local knowledge indexed from inside the private root. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
+
+### Runtime Behavior
+
+1. MindRoom resolves the worker-owned state root from `private.per`.
+2. MindRoom creates the effective private root inside that worker-owned state root.
+3. If `private.template_dir` is set, MindRoom copies the template directory into the private root without overwriting files that already exist there.
+4. MindRoom loads any `private.context_files` from that private root when the agent is created or reloaded.
+5. If `memory_backend: file` is enabled, MindRoom uses that same private root as the file-memory root for that requester.
+6. If `private.knowledge.path` is configured, MindRoom indexes that private-root-relative path as requester-local knowledge for that requester only.
+
+### Important Rules
+
+- `private` is explicit opt-in.
+- `private` does not automatically enable file memory.
+- `private` does not automatically load any context files.
+- `private` does not automatically create a private knowledge base.
+- If `private.template_dir` is omitted, MindRoom still creates the private root.
+- Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
+- Set `private.context_files` explicitly for any copied files you want loaded into role context.
+- Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
+- Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want requester-local knowledge indexing.
+- `private` cannot be combined with `worker_scope`.
+- `private` cannot be combined with `memory_file_path`.
+- Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both requester-local knowledge and shared knowledge in the same run.
+- Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+- Custom templates are fully supported.
+- The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
 
 ## Thread Mode Resolution
 
