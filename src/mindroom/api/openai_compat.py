@@ -590,7 +590,7 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
 
 
 def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
-    """Resolve knowledge base(s) for an agent from the matching knowledge managers.
+    """Resolve shared configured knowledge base(s) for an agent.
 
     Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
     """
@@ -719,7 +719,8 @@ async def chat_completions(
     )
 
     # Initialize shared knowledge managers once per request (idempotent).
-    # Team and single-agent paths both rely on this for knowledge resolution.
+    # `/v1` only supports shared/unscoped agent state today, so private
+    # requester-local knowledge is intentionally out of scope here.
     try:
         await _ensure_knowledge_initialized(config)
     except Exception:
