@@ -25,6 +25,7 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
+_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
@@ -108,6 +109,27 @@ def _normalized_worker_backend_name() -> str:
 
 def _uses_unscoped_dedicated_worker_roots() -> bool:
     return _normalized_worker_backend_name() == "kubernetes" or bool(os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip())
+
+
+def _current_dedicated_worker_root() -> Path | None:
+    raw_worker_root = os.getenv(_DEDICATED_WORKER_ROOT_ENV, "").strip()
+    if not raw_worker_root:
+        return None
+    return Path(raw_worker_root).expanduser().resolve()
+
+
+def _resolve_current_dedicated_state_root(
+    *,
+    worker_key: str,
+    base_storage_path: Path,
+) -> Path | None:
+    current_dedicated_worker_key = os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip() or None
+    current_dedicated_worker_root = _current_dedicated_worker_root()
+    if current_dedicated_worker_key != worker_key or current_dedicated_worker_root is None:
+        return None
+    if base_storage_path.expanduser().resolve() != current_dedicated_worker_root:
+        return None
+    return current_dedicated_worker_root
 
 
 def worker_owned_tool_paths_use_relative_overrides() -> bool:
@@ -291,6 +313,11 @@ def _resolve_agent_worker_root(
     )
     if worker_key is None:
         return None
+    if dedicated_root := _resolve_current_dedicated_state_root(
+        worker_key=worker_key,
+        base_storage_path=base_storage_path,
+    ):
+        return dedicated_root
 
     return worker_root_path(base_storage_path, worker_key)
 
@@ -311,6 +338,11 @@ def _resolve_agent_unscoped_worker_root(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
+    if dedicated_root := _resolve_current_dedicated_state_root(
+        worker_key=worker_key,
+        base_storage_path=base_storage_path,
+    ):
+        return dedicated_root
     return worker_root_path(base_storage_path, worker_key)
 
 

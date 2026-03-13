@@ -758,6 +758,44 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     }
 
 
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
+    mock_storage: MagicMock,
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated worker pods should use the mounted root directly for canonical agent state."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "./mind_data"
+    config.agents["general"].tools = ["coding"]
+    config.agents["general"].include_default_tools = False
+
+    dedicated_root = tmp_path / "dedicated-worker"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    worker_key = resolve_unscoped_worker_key(agent_name="general")
+    monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+        create_agent("general", config=config, storage_path=dedicated_root)
+
+    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
+    assert dedicated_root / "sessions" / "general.db" in db_files
+    assert dedicated_root / "learning" / "general.db" in db_files
+    assert not any(path.is_relative_to(dedicated_root / "workers") for path in db_files)
+    assert mock_get_tool_by_name.call_args is not None
+    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {
+        "base_dir": str(dedicated_root / "workspace" / "general" / "mind_data"),
+    }
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Configured context files should be prepended to role context."""
