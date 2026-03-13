@@ -13,6 +13,8 @@ Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
 Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory.
 Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
+`private` changes where private files live.
+It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -104,10 +106,19 @@ agents:
     memory_backend: file
     private:
       per: user
+      root: mind_data
       template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root with its own copied `MEMORY.md` and `memory/` notes directory from `./mind_template/`.
+In this setup, each requester gets their own private `mind_data/` root inside the worker-owned state for that requester.
+When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root instead of `<storage_path>/memory_files/agent_<name>/`.
+If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester.
+MindRoom does not invent `MEMORY.md` or `memory/` for private agents.
+Put those files in your template directory if you want them scaffolded on first use.
+If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active.
+`private` and `memory_file_path` are mutually exclusive.
+Use `memory_file_path` for shared single-user workspaces.
+Use `private` for requester-isolated workspaces.
 
 ### File layout
 

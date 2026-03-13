@@ -112,7 +112,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 
 ### Model selection
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
+Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only agents whose effective worker scope is unscoped or `shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` always uses an isolating scope.
 
 ### Auto-routing
 
