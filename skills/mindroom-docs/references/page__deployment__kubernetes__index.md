@@ -49,7 +49,7 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Worker Backends
 
-The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. This section mixes current deployment behavior with intended end-state behavior. The dedicated-worker provisioning flow is implemented today. The canonical shared agent-state model described below is the target design, not a claim that every backend path already behaves that way.
 
 | Helm value                     | Behavior                                                                             | Best for                                                     |
 | ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -58,11 +58,11 @@ The instance chart supports two worker backend modes for worker-routed tools suc
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all worker-routed tool calls share the same runner process. The runner still reads and writes the same canonical agent state roots used by the primary runtime.
+`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all worker-routed tool calls share the same runner process. In the target model, the runner also reads and writes the same canonical agent state roots used by the primary runtime.
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. Each worker pod runs the sandbox-runner app and must be able to access the same canonical agent state roots used by every other runtime for the same agent. Dedicated workers may still keep worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
+`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. The target model is that each worker pod runs the sandbox-runner app and is able to access the same canonical agent state roots used by every other runtime for the same agent. Dedicated workers may still keep worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
 
 Typical Helm values look like:
 
@@ -89,12 +89,12 @@ Important behavior and constraints:
 - `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
-- Dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
+- In the target model, dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements
 
-Dedicated workers need access to the same PVC as the primary runtime. For multi-node operation, set `storageAccessMode: ReadWriteMany` so multiple workers can access the same canonical agent state roots concurrently. If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node. The chart enforces this constraint during template rendering.
+Dedicated workers need access to the same PVC as the primary runtime. For the target model, set `storageAccessMode: ReadWriteMany` so multiple workers can access the same canonical agent state roots concurrently. If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node. The chart enforces this constraint during template rendering.
 
 ### RBAC And Network Policy
 

@@ -2,11 +2,12 @@
 
 Last updated: 2026-03-13
 Owner: MindRoom backend
-Status: Phases 1-3 are complete in code.
-Phase 4 is in progress.
-The backend-neutral worker contract, lifecycle handling, and default routing policy are implemented.
-The built-in Kubernetes provider is also implemented and deployment-wired.
-What remains is production hardening, richer metrics, operator documentation, dedicated-worker production validation, and deferred product-boundary decisions around `/v1` identity and credential defaults.
+Status: Phase 1 routing scaffolding exists in code.
+Phase 2 is not complete and must be reworked around canonical agent-owned state.
+Later backend and provider work exists in code, but it should be treated as provisional until the Phase 2 state-ownership model is corrected.
+The backend-neutral worker contract, lifecycle handling, default routing policy, and Kubernetes provider implementation all exist.
+However, several mutable paths still behave as worker-owned state today, which conflicts with the intended model documented here.
+The immediate priority is to realign implementation and tests with canonical per-agent state before treating later phases as complete.
 
 ## Objective
 
