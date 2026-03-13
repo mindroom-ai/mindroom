@@ -142,6 +142,108 @@ class TestResolveConfigRelativePath:
         assert resolved == absolute_path.resolve()
 
 
+class TestResolveAvatarPath:
+    """Tests for resolve_avatar_path()."""
+
+    def test_avatars_dir_uses_storage_path_in_container_for_active_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Containerized runtime should write avatar overrides under persistent storage."""
+        active_config = tmp_path / "runtime" / "config.yaml"
+        storage_dir = tmp_path / "storage"
+        monkeypatch.setenv("DOCKER_CONTAINER", "1")
+        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
+        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+
+        resolved = constants_mod.avatars_dir()
+
+        assert resolved == storage_dir / "avatars"
+
+    def test_avatars_dir_keeps_explicit_non_active_config_relative_in_container(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit non-active config paths should still resolve relative to that config."""
+        active_config = tmp_path / "runtime" / "config.yaml"
+        explicit_config = tmp_path / "workspace" / "config.yaml"
+        storage_dir = tmp_path / "storage"
+        monkeypatch.setenv("DOCKER_CONTAINER", "1")
+        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
+        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+
+        resolved = constants_mod.avatars_dir(config_path=explicit_config)
+
+        assert resolved == explicit_config.parent / "avatars"
+
+    def test_returns_workspace_avatar_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Workspace avatars should resolve to their on-disk path."""
+        workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
+        workspace_avatar = workspace_dir / "agents" / "general.png"
+        workspace_avatar.parent.mkdir(parents=True)
+        workspace_avatar.write_bytes(b"workspace")
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+
+        resolved = constants_mod.resolve_avatar_path("agents", "general")
+
+        assert resolved == workspace_avatar
+
+    def test_returns_bundled_avatar_when_workspace_missing(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Runtime lookup should fall back to bundled avatars when no workspace override exists."""
+        workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
+        bundled_avatar = bundled_dir / "rooms" / "lobby.png"
+        bundled_avatar.parent.mkdir(parents=True)
+        bundled_avatar.write_bytes(b"bundled")
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+
+        resolved = constants_mod.resolve_avatar_path("rooms", "lobby")
+
+        assert resolved == bundled_avatar
+
+    def test_returns_workspace_avatar_path_when_no_avatar_exists(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Missing avatars should resolve to the workspace location generation writes to."""
+        workspace_dir = tmp_path / "workspace"
+        bundled_dir = tmp_path / "bundled"
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+
+        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")
+
+        assert resolved == workspace_dir / "rooms" / "nonexistent.png"
+
+    def test_returns_storage_workspace_avatar_path_in_container_when_no_avatar_exists(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Container runtime should generate missing avatars under persistent storage."""
+        active_config = tmp_path / "runtime" / "config.yaml"
+        storage_dir = tmp_path / "storage"
+        bundled_dir = tmp_path / "bundled"
+        monkeypatch.setenv("DOCKER_CONTAINER", "1")
+        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
+        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
+
+        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")
+
+        assert resolved == storage_dir / "avatars" / "rooms" / "nonexistent.png"
+
+
 class TestStoragePathResolution:
     """Tests for STORAGE_PATH_OBJ import-time canonicalization."""
 

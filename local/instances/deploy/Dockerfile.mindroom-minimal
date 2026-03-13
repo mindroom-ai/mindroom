@@ -23,6 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Copy source code
 COPY src /app/src
+COPY avatars /app/avatars
 COPY skills /app/skills
 COPY frontend /app/frontend
 
@@ -61,7 +62,6 @@ COPY --from=builder --chown=1000:1000 /app /app
 COPY --chown=1000:1000 config.yaml /app/
 COPY --chown=1000:1000 run-sandbox-runner.sh /app/
 COPY --chown=1000:1000 scripts /app/scripts/
-COPY --chown=1000:1000 avatars /app/avatars/
 
 # Make startup scripts executable and ensure runtime/cache directories
 # are writable by the non-root runtime user.

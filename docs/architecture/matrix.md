@@ -161,4 +161,4 @@ teams:
 
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
-When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and avatars are set from `avatars/rooms/{room_key}.png` if available.
+When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and managed avatars are resolved from workspace overrides or bundled defaults if available.

@@ -6,7 +6,6 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from functools import cached_property
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import nio
@@ -109,6 +108,7 @@ from .constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    resolve_avatar_path,
 )
 from .knowledge.manager import ensure_agent_knowledge_managers
 from .knowledge.utils import (
@@ -139,6 +139,7 @@ from .scheduling import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     import structlog
     from agno.agent import Agent
@@ -558,7 +559,7 @@ class AgentBot:
             return
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        avatar_path = Path(__file__).parent.parent.parent / "avatars" / entity_type / f"{self.agent_name}.png"
+        avatar_path = resolve_avatar_path(entity_type, self.agent_name)
 
         if avatar_path.exists():
             try:
