@@ -6,16 +6,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import mindroom.api.knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 
 if TYPE_CHECKING:
-    import pytest
     from fastapi.testclient import TestClient
 
 
-def _knowledge_config(path: Path, *, base_id: str = "research", with_git: bool = False) -> Config:
+def _knowledge_config(
+    path: Path,
+    *,
+    base_id: str = "research",
+    with_git: bool = False,
+    path_relative_to_agent_workspace: bool = False,
+) -> Config:
     git_config = (
         KnowledgeGitConfig(
             repo_url="https://github.com/example/private-repo.git",
@@ -31,6 +38,7 @@ def _knowledge_config(path: Path, *, base_id: str = "research", with_git: bool =
         knowledge_bases={
             base_id: KnowledgeBaseConfig(
                 path=str(path),
+                path_relative_to_agent_workspace=path_relative_to_agent_workspace,
                 watch=False,
                 git=git_config,
             ),
@@ -66,6 +74,38 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     assert init_managers.await_args.kwargs["reindex_on_create"] is True
 
 
+def test_knowledge_bases_list_marks_workspace_relative_bases_unsupported(test_client: TestClient) -> None:
+    """Base listing should not invent config-relative paths for workspace-relative bases."""
+    config = _knowledge_config(
+        Path("memory"),
+        path_relative_to_agent_workspace=True,
+    )
+
+    with (
+        patch("mindroom.api.knowledge.Config.from_yaml", return_value=config),
+        patch(
+            "mindroom.api.knowledge.initialize_knowledge_managers",
+            new=AsyncMock(return_value={}),
+        ),
+    ):
+        response = test_client.get("/api/knowledge/bases")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["bases"][0] == {
+        "name": "research",
+        "path": None,
+        "watch": False,
+        "file_count": None,
+        "indexed_count": None,
+        "unsupported_reason": (
+            "Knowledge base 'research' uses path_relative_to_agent_workspace=true and is not supported by "
+            "/api/knowledge because the API cannot infer which agent workspace to target"
+        ),
+    }
+
+
 def test_knowledge_root_resolves_relative_path_from_config_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -79,6 +119,49 @@ def test_knowledge_root_resolves_relative_path_from_config_dir(
     root = knowledge_api._knowledge_root(config, "research")
 
     assert root == (config_dir / "knowledge").resolve()
+
+
+@pytest.mark.parametrize(
+    ("method", "url", "kwargs"),
+    [
+        ("get", "/api/knowledge/bases/research/files", {}),
+        ("get", "/api/knowledge/bases/research/status", {}),
+        ("post", "/api/knowledge/bases/research/reindex", {}),
+        (
+            "post",
+            "/api/knowledge/bases/research/upload",
+            {"files": [("files", ("note.txt", b"hello", "text/plain"))]},
+        ),
+        ("delete", "/api/knowledge/bases/research/files/note.txt", {}),
+    ],
+)
+def test_workspace_relative_knowledge_routes_are_rejected(
+    test_client: TestClient,
+    method: str,
+    url: str,
+    kwargs: dict[str, object],
+) -> None:
+    """Workspace-relative bases should be rejected until the API accepts a workspace selector."""
+    config = _knowledge_config(
+        Path("memory"),
+        path_relative_to_agent_workspace=True,
+    )
+
+    with (
+        patch("mindroom.api.knowledge.Config.from_yaml", return_value=config),
+        patch(
+            "mindroom.api.knowledge.initialize_knowledge_managers",
+            new=AsyncMock(return_value={}),
+        ) as init_managers,
+    ):
+        response = getattr(test_client, method)(url, **kwargs)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Knowledge base 'research' uses path_relative_to_agent_workspace=true and is not supported by "
+        "/api/knowledge because the API cannot infer which agent workspace to target"
+    )
+    init_managers.assert_not_awaited()
 
 
 def test_knowledge_files_list_uses_manager_filters_when_available(

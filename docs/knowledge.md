@@ -102,7 +102,9 @@ agents:
 
 With this configuration, each requester's effective knowledge path becomes `<their workspace>/memory`.
 This requires every agent that uses the knowledge base to define `workspace`.
-MindRoom keeps a separate index and watcher per effective workspace path, so one requester's indexed data is not shared with another requester's runtime.
+MindRoom keeps a separate index per effective workspace path, so one requester's indexed data is not shared with another requester's runtime.
+When `watch: true`, unscoped and `worker_scope=shared` workspaces can run background watchers normally.
+For isolating worker scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the scoped index on access instead of keeping a background watcher alive for every workspace.
 Workspace-relative knowledge bases are initialized on first agent use instead of during the global startup pass.
 
 ### Multiple Knowledge Bases
@@ -290,4 +292,4 @@ Knowledge base configuration supports hot reload. When you change `config.yaml`:
 - Removed knowledge bases are stopped and cleaned up
 - Changed settings (path, chunking, embedder, git config) trigger a re-initialization
 - Unchanged knowledge bases continue running without interruption
-- File watchers are preserved across reloads
+- Background watchers are preserved across reloads when that knowledge base actually runs a watcher

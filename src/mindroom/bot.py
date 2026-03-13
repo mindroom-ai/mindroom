@@ -2785,6 +2785,7 @@ class AgentBot:
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
+            storage_path=self.storage_path,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

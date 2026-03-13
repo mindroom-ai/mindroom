@@ -37,7 +37,11 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
-from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
+from mindroom.knowledge.manager import (
+    ensure_agent_knowledge_managers,
+    get_knowledge_manager,
+    initialize_knowledge_managers,
+)
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
@@ -586,15 +590,77 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
     )
 
 
-def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
-    """Resolve knowledge base(s) for an agent from the global knowledge managers.
+def _agent_uses_workspace_relative_knowledge(agent_name: str, config: Config) -> bool:
+    agent_config = config.agents.get(agent_name)
+    return agent_config is not None and any(
+        config.knowledge_bases[base_id].path_relative_to_agent_workspace for base_id in agent_config.knowledge_bases
+    )
+
+
+async def _ensure_agent_knowledge_initialized(
+    agent_name: str,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    if not _agent_uses_workspace_relative_knowledge(agent_name, config):
+        return
+    await ensure_agent_knowledge_managers(
+        agent_name,
+        config,
+        STORAGE_PATH_OBJ,
+        execution_identity=execution_identity,
+        start_watchers=False,
+        reindex_on_create=True,
+    )
+
+
+async def _ensure_team_knowledge_initialized(
+    team_name: str,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> None:
+    team_config = config.teams.get(team_name)
+    if team_config is None:
+        return
+    for member_name in dict.fromkeys(team_config.agents):
+        await _ensure_agent_knowledge_initialized(
+            member_name,
+            config,
+            execution_identity=execution_identity,
+        )
+
+
+def _resolve_knowledge(
+    agent_name: str,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Knowledge | None:
+    """Resolve knowledge base(s) for an agent from the matching knowledge managers.
 
     Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
     """
+
+    def _get_knowledge(base_id: str) -> Knowledge | None:
+        base_config = config.knowledge_bases[base_id]
+        if not base_config.path_relative_to_agent_workspace:
+            manager = get_knowledge_manager(base_id)
+        else:
+            manager = get_knowledge_manager(
+                base_id,
+                agent_name=agent_name,
+                config=config,
+                storage_path=STORAGE_PATH_OBJ,
+                execution_identity=execution_identity,
+            )
+        return manager.get_knowledge() if manager is not None else None
+
     return resolve_agent_knowledge(
         agent_name,
         config,
-        lambda base_id: (manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None),
+        _get_knowledge,
         on_missing_bases=lambda missing_base_ids: logger.warning(
             "Knowledge bases not available for agent",
             agent=agent_name,
@@ -670,7 +736,7 @@ async def list_models(
 
 
 @router.post("/chat/completions", response_model=None)
-async def chat_completions(
+async def chat_completions(  # noqa: C901, PLR0912
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
@@ -705,6 +771,10 @@ async def chat_completions(
         stream=req.stream,
         session_id=session_id,
     )
+    execution_identity = _build_tool_execution_identity(
+        agent_name=agent_name,
+        session_id=session_id,
+    )
 
     # Initialize shared knowledge managers once per request (idempotent).
     # Team and single-agent paths both rely on this for knowledge resolution.
@@ -716,10 +786,14 @@ async def chat_completions(
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-        )
+        try:
+            await _ensure_team_knowledge_initialized(
+                team_name,
+                config,
+                execution_identity=execution_identity,
+            )
+        except Exception:
+            logger.warning("Scoped knowledge initialization failed, proceeding without knowledge", exc_info=True)
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
                 team_name,
@@ -741,19 +815,25 @@ async def chat_completions(
                     config,
                     thread_history,
                     req.user,
+                    execution_identity=execution_identity,
                 )
     else:
         # Resolve knowledge base for this agent
         try:
-            knowledge = _resolve_knowledge(agent_name, config)
+            await _ensure_agent_knowledge_initialized(
+                agent_name,
+                config,
+                execution_identity=execution_identity,
+            )
+            knowledge = _resolve_knowledge(
+                agent_name,
+                config,
+                execution_identity=execution_identity,
+            )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
 
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-        )
         if req.stream:
             response = await _stream_completion(
                 agent_name,
@@ -1032,7 +1112,12 @@ async def _stream_completion(
 # ---------------------------------------------------------------------------
 
 
-def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | None, TeamMode]:
+def _build_team(
+    team_name: str,
+    config: Config,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
     Returns (agents, team, mode). When no agents can be created,
@@ -1054,7 +1139,11 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                     member_name,
                     config,
                     storage_path=STORAGE_PATH_OBJ,
-                    knowledge=_resolve_knowledge(member_name, config),
+                    knowledge=_resolve_knowledge(
+                        member_name,
+                        config,
+                        execution_identity=execution_identity,
+                    ),
                     include_interactive_questions=False,
                 ),
             )
@@ -1089,9 +1178,10 @@ async def _non_stream_team_completion(
     config: Config,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config)
+    agents, team, mode = _build_team(team_name, config, execution_identity=execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1138,7 +1228,7 @@ async def _stream_team_completion(
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config)
+        agents, team, mode = _build_team(team_name, config, execution_identity=execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
