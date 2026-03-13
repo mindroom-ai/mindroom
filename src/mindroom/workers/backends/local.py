@@ -322,7 +322,7 @@ class _LocalWorkerBackend:
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         return list_worker_state_paths(
             self.worker_root,
-            state_paths_from_root=_local_worker_state_paths_for_root,
+            state_paths_from_root=local_worker_state_paths_for_root,
         )
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _LocalWorkerMetadata | None:
