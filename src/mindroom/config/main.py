@@ -11,9 +11,14 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import (
+    AgentConfig,
+    CultureConfig,
+    TeamConfig,
+    default_private_knowledge_path,
+)
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
@@ -116,6 +121,7 @@ def _router_agents_for_room(
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -222,15 +228,36 @@ class Config(BaseModel):
             (agent_name, base_id)
             for agent_name, agent_config in self.agents.items()
             for base_id in agent_config.knowledge_bases
-            if self.knowledge_bases[base_id].path_relative_to_agent_workspace and agent_config.workspace is None
+            if self.knowledge_bases[base_id].path_relative_to_agent_workspace and agent_config.private is None
         ]
         if missing_workspaces:
             formatted = ", ".join(
                 f"{agent_name} -> {base_id}"
                 for agent_name, base_id in sorted(missing_workspaces, key=lambda item: (item[0], item[1]))
             )
+            msg = f"Workspace-relative knowledge bases require agents.<name>.private; invalid assignments: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_knowledge(self) -> Config:
+        """Ensure private knowledge has a path when no scaffold default exists."""
+        invalid_private_knowledge = [
+            agent_name
+            for agent_name, agent_config in self.agents.items()
+            if (
+                agent_config.private is not None
+                and agent_config.private.knowledge is not None
+                and agent_config.private.knowledge.enabled
+                and agent_config.private.knowledge.path is None
+                and default_private_knowledge_path(agent_config.private.scaffold) is None
+            )
+        ]
+        if invalid_private_knowledge:
+            formatted = ", ".join(sorted(invalid_private_knowledge))
             msg = (
-                f"Workspace-relative knowledge bases require agents.<name>.workspace; invalid assignments: {formatted}"
+                "agents.<name>.private.knowledge.path is required when the selected scaffold does not define a "
+                f"default private knowledge path; invalid agents: {formatted}"
             )
             raise ValueError(msg)
         return self
@@ -241,18 +268,11 @@ class Config(BaseModel):
         invalid_overrides = [
             agent_name
             for agent_name, agent_config in self.agents.items()
-            if (
-                agent_config.memory_file_path is not None
-                or (agent_config.workspace is not None and agent_config.workspace.file_memory_path is not None)
-            )
-            and self.get_agent_memory_backend(agent_name) != "file"
+            if agent_config.memory_file_path is not None and self.get_agent_memory_backend(agent_name) != "file"
         ]
         if invalid_overrides:
             formatted = ", ".join(sorted(invalid_overrides))
-            msg = (
-                "agents.<name>.memory_file_path and agents.<name>.workspace.file_memory_path "
-                f"require effective file memory backend; invalid agents: {formatted}"
-            )
+            msg = f"agents.<name>.memory_file_path requires effective file memory backend; invalid agents: {formatted}"
             raise ValueError(msg)
         return self
 
@@ -450,9 +470,83 @@ class Config(BaseModel):
     def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:
         """Get the effective worker scope for an agent."""
         agent_config = self.get_agent(agent_name)
+        if agent_config.private is not None:
+            return agent_config.private.per
         if agent_config.worker_scope is not None:
             return agent_config.worker_scope
         return self.defaults.worker_scope
+
+    def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
+        """Return the synthetic knowledge base ID for one agent's private knowledge."""
+        agent_config = self.get_agent(agent_name)
+        if agent_config.private is None:
+            return None
+        if agent_config.private.knowledge is not None and not agent_config.private.knowledge.enabled:
+            return None
+        if (
+            agent_config.private.knowledge is None
+            and default_private_knowledge_path(agent_config.private.scaffold) is None
+        ):
+            return None
+        return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
+
+    def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
+        """Return the owning agent for a synthetic private knowledge base ID."""
+        if not base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX):
+            return None
+        agent_name = base_id.removeprefix(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        if agent_name not in self.agents:
+            return None
+        return agent_name
+
+    def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
+        """Return shared and private knowledge base IDs assigned to one agent."""
+        agent_config = self.get_agent(agent_name)
+        base_ids = list(agent_config.knowledge_bases)
+        private_base_id = self.get_agent_private_knowledge_base_id(agent_name)
+        if private_base_id is not None:
+            base_ids.append(private_base_id)
+        return base_ids
+
+    def get_knowledge_base_config(self, base_id: str) -> KnowledgeBaseConfig:
+        """Return one effective knowledge base config, including synthetic private bases."""
+        configured = self.knowledge_bases.get(base_id)
+        if configured is not None:
+            return configured
+
+        agent_name = self.get_private_knowledge_base_agent(base_id)
+        if agent_name is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        agent_config = self.get_agent(agent_name)
+        private_config = agent_config.private
+        if private_config is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        private_knowledge = private_config.knowledge
+        if private_knowledge is not None and not private_knowledge.enabled:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        knowledge_path = (
+            private_knowledge.path
+            if private_knowledge is not None and private_knowledge.path is not None
+            else default_private_knowledge_path(private_config.scaffold)
+        )
+        if knowledge_path is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        return KnowledgeBaseConfig(
+            path=knowledge_path,
+            path_relative_to_agent_workspace=True,
+            watch=True if private_knowledge is None else private_knowledge.watch,
+            chunk_size=5000 if private_knowledge is None else private_knowledge.chunk_size,
+            chunk_overlap=0 if private_knowledge is None else private_knowledge.chunk_overlap,
+            git=None if private_knowledge is None else private_knowledge.git,
+        )
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.

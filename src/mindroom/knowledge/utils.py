@@ -148,13 +148,13 @@ def resolve_agent_knowledge(
     on_missing_bases: Callable[[list[str]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or not agent_config.knowledge_bases:
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
         return None
 
     missing_base_ids: list[str] = []
     knowledges: list[Knowledge] = []
-    for base_id in agent_config.knowledge_bases:
+    for base_id in base_ids:
         knowledge = get_knowledge(base_id)
         if knowledge is None:
             missing_base_ids.append(base_id)

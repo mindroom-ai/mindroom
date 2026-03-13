@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, call
 import pytest
 from pydantic import ValidationError
 
-from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.knowledge.manager import (
@@ -116,6 +116,28 @@ class _DummyChromaDb:
 
     def exists(self) -> bool:
         return True
+
+
+def _mind_private_agent(
+    *,
+    watch: bool,
+    git: KnowledgeGitConfig | None = None,
+) -> AgentConfig:
+    """Return a worker-scoped private Mind agent config for knowledge tests."""
+    return AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        private=AgentPrivateConfig(
+            per="user",
+            root="mind_data",
+            scaffold="mind",
+            context_files=["SOUL.md"],
+            knowledge=AgentPrivateKnowledgeConfig(
+                watch=watch,
+                git=git,
+            ),
+        ),
+    )
 
 
 def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Config:
@@ -664,39 +686,23 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
 
 
 @pytest.mark.asyncio
-async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker_workspaces(
+async def test_private_knowledge_managers_scaffold_and_isolate_worker_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Workspace-relative knowledge should resolve to requester-scoped workspaces and managers."""
+    """Private knowledge should resolve to requester-scoped roots and managers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = Config(
         agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                memory_backend="file",
-                worker_scope="user",
-                workspace=AgentWorkspaceConfig(
-                    path="mind_data",
-                    template="mind",
-                    file_memory_path=".",
-                    context_files=["SOUL.md"],
-                ),
-                knowledge_bases=["mind_memory"],
-            ),
+            "mind": _mind_private_agent(watch=False),
         },
         models={},
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="memory",
-                path_relative_to_agent_workspace=True,
-                watch=False,
-            ),
-        },
     )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
 
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -721,17 +727,17 @@ async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker
         await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=alice_identity)
         await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
 
-        assert get_knowledge_manager("mind_memory") is None
+        assert get_knowledge_manager(private_base_id) is None
 
         alice_manager = get_knowledge_manager(
-            "mind_memory",
+            private_base_id,
             agent_name="mind",
             config=config,
             storage_path=tmp_path,
             execution_identity=alice_identity,
         )
         bob_manager = get_knowledge_manager(
-            "mind_memory",
+            private_base_id,
             agent_name="mind",
             config=config,
             storage_path=tmp_path,
@@ -760,38 +766,20 @@ async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker
 
 
 @pytest.mark.asyncio
-async def test_worker_scoped_workspace_relative_knowledge_refreshes_on_access_without_background_watchers(
+async def test_worker_scoped_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker-scoped workspace knowledge should refresh on access instead of starting persistent watchers."""
+    """Worker-scoped private knowledge should refresh on access instead of starting persistent watchers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = Config(
         agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                memory_backend="file",
-                worker_scope="user",
-                workspace=AgentWorkspaceConfig(
-                    path="mind_data",
-                    template="mind",
-                    file_memory_path=".",
-                    context_files=["SOUL.md"],
-                ),
-                knowledge_bases=["mind_memory"],
-            ),
+            "mind": _mind_private_agent(watch=True),
         },
         models={},
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="memory",
-                path_relative_to_agent_workspace=True,
-                watch=True,
-            ),
-        },
     )
 
     identity = ToolExecutionIdentity(
@@ -820,7 +808,7 @@ async def test_worker_scoped_workspace_relative_knowledge_refreshes_on_access_wi
 
 
 @pytest.mark.asyncio
-async def test_worker_scoped_git_workspace_relative_knowledge_refreshes_on_access_without_background_watchers(
+async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -831,24 +819,7 @@ async def test_worker_scoped_git_workspace_relative_knowledge_refreshes_on_acces
 
     config = Config(
         agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                memory_backend="file",
-                worker_scope="user",
-                workspace=AgentWorkspaceConfig(
-                    path="mind_data",
-                    template="mind",
-                    file_memory_path=".",
-                    context_files=["SOUL.md"],
-                ),
-                knowledge_bases=["mind_memory"],
-            ),
-        },
-        models={},
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="memory",
-                path_relative_to_agent_workspace=True,
+            "mind": _mind_private_agent(
                 watch=True,
                 git=KnowledgeGitConfig(
                     repo_url="https://github.com/example/memory.git",
@@ -857,6 +828,7 @@ async def test_worker_scoped_git_workspace_relative_knowledge_refreshes_on_acces
                 ),
             ),
         },
+        models={},
     )
 
     identity = ToolExecutionIdentity(
@@ -888,39 +860,23 @@ async def test_worker_scoped_git_workspace_relative_knowledge_refreshes_on_acces
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_keeps_workspace_relative_scoped_managers(
+async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Static manager initialization should not tear down live scoped workspace managers."""
+    """Static manager initialization should not tear down live scoped private managers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = Config(
         agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                memory_backend="file",
-                worker_scope="user",
-                workspace=AgentWorkspaceConfig(
-                    path="mind_data",
-                    template="mind",
-                    file_memory_path=".",
-                    context_files=["SOUL.md"],
-                ),
-                knowledge_bases=["mind_memory"],
-            ),
+            "mind": _mind_private_agent(watch=False),
         },
         models={},
-        knowledge_bases={
-            "mind_memory": KnowledgeBaseConfig(
-                path="memory",
-                path_relative_to_agent_workspace=True,
-                watch=False,
-            ),
-        },
     )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
 
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -934,11 +890,11 @@ async def test_initialize_knowledge_managers_keeps_workspace_relative_scoped_man
 
     try:
         managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
-        scoped_manager = managers["mind_memory"]
+        scoped_manager = managers[private_base_id]
 
         static_managers = await initialize_knowledge_managers(config, tmp_path, reindex_on_create=False)
         resolved_manager = get_knowledge_manager(
-            "mind_memory",
+            private_base_id,
             agent_name="mind",
             config=config,
             storage_path=tmp_path,

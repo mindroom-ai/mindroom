@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig, CultureConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -725,18 +725,17 @@ def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) ->
 
 
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_worker_scoped_workspace_loads_requester_context_from_isolated_workspace(
+def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
-    """Worker-scoped workspaces should scaffold per requester and isolate workspace context files."""
+    """Private per-user roots should scaffold per requester and isolate private context files."""
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].worker_scope = "user"
-    config.agents["general"].workspace = AgentWorkspaceConfig(
-        path="mind_data",
-        template="mind",
-        file_memory_path=".",
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        scaffold="mind",
         context_files=["USER.md"],
     )
 
@@ -766,7 +765,7 @@ def test_create_agent_worker_scoped_workspace_loads_requester_context_from_isola
         alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
         assert (alice_workspace / "USER.md").exists()
         assert (alice_workspace / "MEMORY.md").exists()
-        (alice_workspace / "USER.md").write_text("Alice private workspace context.", encoding="utf-8")
+        (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
         alice_agent = create_agent("general", config=config, storage_path=tmp_path)
 
     with tool_execution_identity(bob_identity):
@@ -776,9 +775,9 @@ def test_create_agent_worker_scoped_workspace_loads_requester_context_from_isola
         bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
 
     assert alice_workspace != bob_workspace
-    assert "Alice private workspace context." in alice_agent.role
+    assert "Alice private root context." in alice_agent.role
     assert (bob_workspace / "USER.md").exists()
-    assert "Alice private workspace context." not in bob_agent.role
+    assert "Alice private root context." not in bob_agent.role
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
@@ -795,12 +794,12 @@ def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
         )
 
 
-def test_config_rejects_workspace_relative_knowledge_base_without_workspace() -> None:
-    """Workspace-relative knowledge bases require an agent workspace definition."""
+def test_config_rejects_workspace_relative_knowledge_base_without_private_root() -> None:
+    """Workspace-relative knowledge bases require an agent private root definition."""
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "Workspace-relative knowledge bases require agents.<name>.workspace; "
+            "Workspace-relative knowledge bases require agents.<name>.private; "
             "invalid assignments: general -> research",
         ),
     ):
@@ -944,8 +943,7 @@ def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> Non
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "agents.<name>.memory_file_path and agents.<name>.workspace.file_memory_path "
-            "require effective file memory backend; invalid agents: general",
+            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
         ),
     ):
         Config(
@@ -990,6 +988,54 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     )
 
     assert config.agents["calculator"].knowledge_bases == ["research"]
+
+
+def test_config_private_knowledge_requires_path_without_scaffold_default() -> None:
+    """Private knowledge needs an explicit path when the scaffold does not imply one."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "agents.<name>.private.knowledge.path is required when the selected scaffold does not define a "
+            "default private knowledge path; invalid agents: mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(watch=False),
+                    ),
+                ),
+            },
+        )
+
+
+def test_config_private_and_shared_knowledge_coexist() -> None:
+    """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    scaffold="mind",
+                ),
+                knowledge_bases=["company_docs"],
+            ),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
+    private_config = config.get_knowledge_base_config(private_base_id)
+    assert private_config.path == "memory"
+    assert private_config.path_relative_to_agent_workspace is True
 
 
 def test_config_rejects_duplicate_default_tools() -> None:

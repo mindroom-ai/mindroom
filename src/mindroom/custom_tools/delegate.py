@@ -92,7 +92,7 @@ class DelegateTools(Toolkit):
             )
 
             def _get_knowledge(base_id: str) -> Knowledge | None:
-                base_config = self._config.knowledge_bases[base_id]
+                base_config = self._config.get_knowledge_base_config(base_id)
                 if not base_config.path_relative_to_agent_workspace:
                     manager = get_knowledge_manager(base_id)
                 else:

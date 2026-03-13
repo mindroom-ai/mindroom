@@ -5,7 +5,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory. Set `agents.<name>.workspace.file_memory_path` when a worker-scoped agent should keep file memory inside its effective workspace root.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -86,9 +86,9 @@ agents:
     memory_file_path: ./openclaw_data
 ```
 
-`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`. For worker-scoped agents, use `workspace.file_memory_path` instead of `memory_file_path` when you need per-requester file-memory isolation.
+`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`. For requester-private agents, use `private` instead of `memory_file_path` when you need per-requester file-memory isolation.
 
-Scoped workspace example:
+Private instance example:
 
 ```
 agents:
@@ -96,14 +96,12 @@ agents:
     display_name: Mind
     role: A persistent personal AI companion
     memory_backend: file
-    worker_scope: user
-    workspace:
-      path: mind_data
-      template: mind
-      file_memory_path: .
+    private:
+      per: user
+      scaffold: mind
 ```
 
-In this setup, each requester's effective workspace gets its own `MEMORY.md` and `memory/` notes directory.
+In this setup, each requester gets their own private `mind_data/` root with its own `MEMORY.md` and `memory/` notes directory.
 
 ### File layout
 

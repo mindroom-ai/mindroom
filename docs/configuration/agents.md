@@ -132,8 +132,8 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
-| `memory_file_path` | string | `null` | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory |
-| `workspace` | object | `null` | Optional scoped workspace for per-requester files, context, and knowledge. Relative workspace paths resolve relative to `config.yaml` when unscoped and under the active worker root when `worker_scope` is active |
+| `memory_file_path` | string | `null` | Custom shared directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an unscoped agent at an existing workspace. Resolved relative to the config file directory |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.scaffold: mind` scaffolds the standard Mind files, and `private.knowledge` adds requester-local knowledge indexed from that private root |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -145,7 +145,7 @@ agents:
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to route through the [sandbox proxy](../deployment/sandbox-proxy.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent |
-| `worker_scope` | string | `null` | Worker-state sharing mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, `user_agent`, and `room_thread` |
+| `worker_scope` | string | `null` | Worker-state sharing mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, `user_agent`, and `room_thread`. Do not set this when the agent uses `private`, because `private.per` becomes the worker scope for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
@@ -181,15 +181,14 @@ They still run in the sandbox runner, but they do not get a worker-specific stor
 The dashboard credential UI can only manage credentials for unscoped agents and agents with `worker_scope=shared`.
 Agents using `user`, `user_agent`, or `room_thread` treat credentials as runtime-owned worker state instead of dashboard-managed state.
 
-## Scoped Workspaces
+## Private Instances
 
-Use `workspace` when an agent needs a per-worker file tree instead of one shared config-relative directory.
+Use `private` when one shared agent definition should materialize a separate requester-local copy of its files, context, and local knowledge.
 
 ```yaml
 knowledge_bases:
-  mind_memory:
-    path: memory
-    path_relative_to_agent_workspace: true
+  company_docs:
+    path: ./company_docs
     watch: true
 
 agents:
@@ -199,30 +198,24 @@ agents:
     model: sonnet
     tools: [file, shell]
     worker_tools: [file, shell]
-    worker_scope: user
     memory_backend: file
-    workspace:
-      path: mind_data
-      template: mind
-      context_files:
-        - SOUL.md
-        - AGENTS.md
-        - USER.md
-        - IDENTITY.md
-        - TOOLS.md
-        - HEARTBEAT.md
-        - MEMORY.md
-      file_memory_path: .
-    knowledge_bases: [mind_memory]
+    private:
+      per: user
+      scaffold: mind
+      knowledge:
+        watch: true
+    knowledge_bases: [company_docs]
 ```
 
-`workspace.path` is always relative.
-Without worker scoping, it resolves relative to `config.yaml`.
-With `worker_scope: user`, the same `path` resolves inside each requester's worker root, so each requester gets an independent `mind_data/` tree.
-`template: mind` scaffolds `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/` on first use.
-`workspace.context_files` loads files relative to that effective workspace root.
-`workspace.file_memory_path: .` makes the file-memory backend use the workspace root itself, which keeps `MEMORY.md` and `memory/` inside each requester's workspace.
-Top-level `context_files` and `memory_file_path` remain available for shared config-relative setups, including the default `mindroom config init` output.
+`private.per` says which requester boundary gets its own private instance.
+`private.root` is optional and defaults to `<agent_name>_data`, so the example above materializes `mind_data/` for each requester.
+`private.scaffold: mind` scaffolds `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/` on first use.
+Those scaffolded files are private copies inside the requester's own root, not shared files next to `config.yaml`.
+When `memory_backend: file` is enabled, the private root is also the file-memory root for that requester, so `MEMORY.md` and `memory/` stay inside the same private tree.
+`private.knowledge` configures requester-local knowledge indexed from that private root.
+With the `mind` scaffold, omitting `private.knowledge.path` uses `memory/` automatically.
+Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both private local knowledge and shared knowledge in the same run.
+Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 
 ## Thread Mode Resolution
 
@@ -249,7 +242,7 @@ You can inject file content directly into an agent's role context without using 
 `context_files` behavior:
 
 - Paths are resolved relative to the config file directory
-- `workspace.context_files` paths are resolved relative to the effective workspace root
+- `private.context_files` paths are resolved relative to the effective private root
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 

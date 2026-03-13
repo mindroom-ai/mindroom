@@ -6,11 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.config.agent import default_private_context_files
 from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
 if TYPE_CHECKING:
-    from mindroom.config.agent import AgentWorkspaceConfig, WorkspaceTemplate
+    from mindroom.config.agent import WorkspaceTemplate
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -33,6 +34,14 @@ class ResolvedAgentWorkspace:
     root: Path
     context_files: tuple[Path, ...]
     file_memory_path: Path | None
+
+
+@dataclass(frozen=True)
+class _EffectiveAgentWorkspace:
+    root_path: str
+    template: WorkspaceTemplate | None
+    context_files: tuple[str, ...]
+    file_memory_path: str | None
 
 
 def ensure_workspace_template(
@@ -61,15 +70,40 @@ def ensure_workspace_template(
         memory_path.write_text(_MIND_MEMORY_TEMPLATE, encoding="utf-8")
 
 
+def _private_root_name(agent_name: str, config: Config) -> str:
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_config.private is None or agent_config.private.root is None:
+        return f"{agent_name}_data"
+    return agent_config.private.root
+
+
+def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWorkspace | None:
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_config.private is None:
+        return None
+    private_config = agent_config.private
+    context_files = (
+        tuple(private_config.context_files)
+        if private_config.context_files is not None
+        else default_private_context_files(private_config.scaffold)
+    )
+    return _EffectiveAgentWorkspace(
+        root_path=_private_root_name(agent_name, config),
+        template=private_config.scaffold,
+        context_files=context_files,
+        file_memory_path=".",
+    )
+
+
 def _resolve_workspace_root(
-    workspace: AgentWorkspaceConfig,
+    workspace: _EffectiveAgentWorkspace,
     *,
     state_storage_path: Path,
     use_state_storage_path: bool,
 ) -> Path:
     if use_state_storage_path:
-        return (state_storage_path / workspace.path).resolve()
-    return resolve_config_relative_path(workspace.path)
+        return (state_storage_path / workspace.root_path).resolve()
+    return resolve_config_relative_path(workspace.root_path)
 
 
 def _resolve_workspace(
@@ -84,7 +118,8 @@ def _resolve_workspace(
     if agent_config is None:
         return None
 
-    if agent_config.workspace is None:
+    workspace = _effective_workspace(agent_name, config)
+    if workspace is None:
         if agent_config.memory_file_path is None:
             return None
         legacy_root = resolve_config_relative_path(agent_config.memory_file_path)
@@ -96,7 +131,6 @@ def _resolve_workspace(
             file_memory_path=legacy_root,
         )
 
-    workspace = agent_config.workspace
     root = _resolve_workspace_root(
         workspace,
         state_storage_path=state_storage_path,
@@ -172,7 +206,7 @@ def resolve_agent_file_memory_path(
 ) -> Path | None:
     """Resolve the effective file-memory path for an agent."""
     agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.workspace is None:
+    if agent_config is None or agent_config.private is None:
         return None
     workspace = resolve_agent_workspace_from_state_path(
         agent_name,

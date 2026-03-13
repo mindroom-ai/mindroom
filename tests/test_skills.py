@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
-from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
@@ -351,9 +351,8 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     config = _base_config(["dispatch"])
     config.agents["code"].tools = ["coding", "shell"]
     config.agents["code"].include_default_tools = False
-    config.agents["code"].worker_scope = "user"
     config.agents["code"].worker_tools = ["coding"]
-    config.agents["code"].workspace = AgentWorkspaceConfig(path="mind_data")
+    config.agents["code"].private = AgentPrivateConfig(per="user", root="mind_data")
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -415,9 +414,8 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
     config = _base_config(["dispatch"])
     config.agents["code"].tools = ["coding", "shell"]
     config.agents["code"].include_default_tools = False
-    config.agents["code"].worker_scope = "user"
     config.agents["code"].worker_tools = ["coding"]
-    config.agents["code"].workspace = AgentWorkspaceConfig(path="mind_data")
+    config.agents["code"].private = AgentPrivateConfig(per="user", root="mind_data")
 
     result = await _run_skill_command_tool(
         config=config,

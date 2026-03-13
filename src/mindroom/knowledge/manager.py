@@ -75,10 +75,16 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
 
 
 def _knowledge_base_config(config: Config, base_id: str) -> KnowledgeBaseConfig:
-    if base_id not in config.knowledge_bases:
-        msg = f"Knowledge base '{base_id}' is not configured"
-        raise ValueError(msg)
-    return config.knowledge_bases[base_id]
+    return config.get_knowledge_base_config(base_id)
+
+
+def _knowledge_base_agent_name(
+    config: Config,
+    base_id: str,
+    *,
+    agent_name: str | None = None,
+) -> str | None:
+    return config.get_private_knowledge_base_agent(base_id) or agent_name
 
 
 def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
@@ -280,9 +286,10 @@ def _knowledge_base_uses_isolating_worker_workspace(
     *,
     agent_name: str | None = None,
 ) -> bool:
-    if agent_name is None or not _knowledge_base_uses_agent_workspace(config, base_id):
+    effective_agent_name = _knowledge_base_agent_name(config, base_id, agent_name=agent_name)
+    if effective_agent_name is None or not _knowledge_base_uses_agent_workspace(config, base_id):
         return False
-    return config.get_agent_worker_scope(agent_name) not in {None, "shared"}
+    return config.get_agent_worker_scope(effective_agent_name) not in {None, "shared"}
 
 
 def _should_start_background_watchers(
@@ -319,11 +326,12 @@ def _resolve_manager_storage_path(
 ) -> Path:
     if not _knowledge_base_uses_agent_workspace(config, base_id):
         return storage_path.expanduser().resolve()
-    if agent_name is None:
+    effective_agent_name = _knowledge_base_agent_name(config, base_id, agent_name=agent_name)
+    if effective_agent_name is None:
         msg = f"Knowledge base '{base_id}' requires an agent workspace"
         raise ValueError(msg)
     return resolve_agent_state_storage_path(
-        agent_name=agent_name,
+        agent_name=effective_agent_name,
         base_storage_path=storage_path.expanduser().resolve(),
         config=config,
         execution_identity=execution_identity,
@@ -340,11 +348,12 @@ def _resolve_effective_knowledge_path(
     create: bool = False,
 ) -> tuple[Path, Path]:
     base_config = _knowledge_base_config(config, base_id)
+    effective_agent_name = _knowledge_base_agent_name(config, base_id, agent_name=agent_name)
     resolved_storage_path = _resolve_manager_storage_path(
         config,
         storage_path,
         base_id,
-        agent_name=agent_name,
+        agent_name=effective_agent_name,
         execution_identity=execution_identity,
     )
     if not base_config.path_relative_to_agent_workspace:
@@ -353,19 +362,19 @@ def _resolve_effective_knowledge_path(
             knowledge_path.mkdir(parents=True, exist_ok=True)
         return resolved_storage_path, knowledge_path
 
-    if agent_name is None:
+    if effective_agent_name is None:
         msg = f"Knowledge base '{base_id}' requires an agent workspace"
         raise ValueError(msg)
 
     workspace = resolve_agent_workspace(
-        agent_name,
+        effective_agent_name,
         config,
         base_storage_path=storage_path,
         execution_identity=execution_identity,
         create=create,
     )
     if workspace is None:
-        msg = f"Knowledge base '{base_id}' requires agent '{agent_name}' to define a workspace"
+        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
         raise ValueError(msg)
 
     knowledge_path = (workspace.root / base_config.path).resolve()
@@ -1182,11 +1191,14 @@ async def ensure_agent_knowledge_managers(
 ) -> dict[str, KnowledgeManager]:
     """Ensure knowledge managers exist for one agent in one execution scope."""
     agent_config = config.agents.get(agent_name)
-    if agent_config is None or not agent_config.knowledge_bases:
+    if agent_config is None:
+        return {}
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
         return {}
 
     managers: dict[str, KnowledgeManager] = {}
-    for base_id in agent_config.knowledge_bases:
+    for base_id in base_ids:
         start_background_watchers = _should_start_background_watchers(
             config,
             base_id,
@@ -1229,7 +1241,7 @@ async def initialize_knowledge_managers(
     """Initialize process-wide knowledge managers for all configured knowledge bases."""
     configured_base_ids = set(config.knowledge_bases)
     for key in list(_knowledge_managers):
-        if key.base_id not in configured_base_ids:
+        if key.base_id not in configured_base_ids and config.get_private_knowledge_base_agent(key.base_id) is None:
             await _stop_and_remove_manager(key)
     for base_id, key in list(_static_knowledge_manager_keys.items()):
         if base_id not in configured_base_ids or _knowledge_base_uses_agent_workspace(config, base_id):
