@@ -716,6 +716,39 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_unset(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should validate canonical agent roots against the default storage root."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "default-storage"
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
+    monkeypatch.setattr(sandbox_runner_module, "STORAGE_PATH_OBJ", storage_root)
+
+    canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from default storage root fallback", "note.txt"],
+            "kwargs": {},
+            "worker_key": "v1:tenant-123:shared:general",
+            "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_storage(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

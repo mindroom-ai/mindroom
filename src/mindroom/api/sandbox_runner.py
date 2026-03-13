@@ -22,6 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
+from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolInitOverrideError,
@@ -335,7 +336,7 @@ def _runner_storage_root() -> Path:
     if dedicated_root := _runner_dedicated_worker_root():
         return shared_storage_root(dedicated_root)
 
-    return Path.cwd().resolve()
+    return STORAGE_PATH_OBJ.resolve()
 
 
 def _runner_uses_dedicated_worker() -> bool:
