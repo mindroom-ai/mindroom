@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import nio
 
+from mindroom.constants import resolve_avatar_path
 from mindroom.logging_config import get_logger
 from mindroom.matrix.avatar import check_and_set_avatar
 from mindroom.matrix.client import (
@@ -38,12 +38,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _ROOT_SPACE_AVATAR_KEY = "root_space"
-_AVATARS_DIR = Path(__file__).resolve().parents[3] / "avatars"
-
-
-def _managed_avatar_path(category: str, avatar_name: str) -> Path:
-    """Return the bundled avatar path for a managed room-like entity."""
-    return _AVATARS_DIR / category / f"{avatar_name}.png"
 
 
 async def _set_room_avatar_if_available(
@@ -54,12 +48,12 @@ async def _set_room_avatar_if_available(
     avatar_name: str,
     context: str,
 ) -> None:
-    """Set a room avatar when a bundled asset exists.
+    """Set a room avatar when a managed asset exists.
 
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.
     """
-    avatar_path = _managed_avatar_path(avatar_category, avatar_name)
+    avatar_path = resolve_avatar_path(avatar_category, avatar_name)
     if not avatar_path.exists():
         return
 
@@ -160,7 +154,7 @@ def _get_room_aliases() -> dict[str, str]:
     return state.get_room_aliases()
 
 
-def _get_room_id(room_key: str) -> str | None:
+def get_room_id(room_key: str) -> str | None:
     """Get room ID for a given room key/alias."""
     state = MatrixState.load()
     room = state.get_room(room_key)

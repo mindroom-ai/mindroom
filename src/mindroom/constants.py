@@ -60,6 +60,73 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
     return (_config_base_dir(config_path) / unresolved).resolve()
 
 
+def _docker_container_enabled() -> bool:
+    """Return whether MindRoom is running from the packaged container image."""
+    return os.getenv("DOCKER_CONTAINER", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _use_storage_path_for_workspace_assets(config_path: Path | None = None) -> bool:
+    """Return whether writable workspace assets should live under persistent storage."""
+    if not _docker_container_enabled():
+        return False
+    if config_path is None:
+        return True
+    return config_path.expanduser().resolve() == CONFIG_PATH.expanduser().resolve()
+
+
+def avatars_dir(*, config_path: Path | None = None) -> Path:
+    """Return the writable avatars directory for the active workspace.
+
+    Source checkouts keep avatars next to the active config file so generated
+    assets can be committed with the workspace.
+    Containerized deployments usually mount `config.yaml` as a single file, so
+    config-adjacent writes would be ephemeral; in that case, store writable
+    overrides under the persistent MindRoom storage root instead.
+    """
+    if _use_storage_path_for_workspace_assets(config_path):
+        return STORAGE_PATH_OBJ / "avatars"
+    return _config_base_dir(config_path) / "avatars"
+
+
+def bundled_avatars_dir() -> Path:
+    """Return the bundled avatar directory shipped with a source checkout or runtime image."""
+    return Path(__file__).resolve().parents[2] / "avatars"
+
+
+def workspace_avatar_path(
+    entity_type: str,
+    entity_name: str,
+    *,
+    config_path: Path | None = None,
+) -> Path:
+    """Return the writable workspace avatar path for a managed entity."""
+    return avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
+
+
+def resolve_avatar_path(
+    entity_type: str,
+    entity_name: str,
+    *,
+    config_path: Path | None = None,
+) -> Path:
+    """Return the best available avatar path for a managed entity.
+
+    Prefer a writable workspace override.
+    Fall back to the bundled runtime assets when no workspace file exists yet.
+    If neither exists, return the intended workspace path so callers that write
+    new avatars know where to place them.
+    """
+    workspace_path = workspace_avatar_path(entity_type, entity_name, config_path=config_path)
+    if workspace_path.exists():
+        return workspace_path
+
+    bundled_path = bundled_avatars_dir() / entity_type / f"{entity_name}.png"
+    if bundled_path.exists():
+        return bundled_path
+
+    return workspace_path
+
+
 def find_config() -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
