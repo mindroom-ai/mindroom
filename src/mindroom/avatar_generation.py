@@ -25,7 +25,7 @@ from mindroom.constants import (
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.logging_config import get_logger
-from mindroom.matrix.avatar import check_and_set_avatar
+from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.identity import MatrixID, extract_server_name_from_homeserver
 from mindroom.matrix.rooms import get_room_id
 from mindroom.matrix.state import MatrixState
@@ -178,11 +178,11 @@ def _missing_avatar_targets(
     *,
     config_path: Path | None = None,
 ) -> set[tuple[str, str]]:
-    """Return the managed avatar targets whose files do not exist yet."""
+    """Return the managed avatar targets with no bundled or workspace avatar yet."""
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in _managed_avatar_targets(config)
-        if not workspace_avatar_path(entity_type, entity_name, config_path=config_path).exists()
+        if not resolve_avatar_path(entity_type, entity_name, config_path=config_path).exists()
     }
 
 
@@ -303,11 +303,11 @@ async def _sync_avatar_target(
     room_id: str,
     label: str,
 ) -> bool:
-    """Apply one managed avatar target and report whether it changed."""
-    if await check_and_set_avatar(client, avatar_path, room_id=room_id):
+    """Apply one managed avatar target by replacing the current room avatar."""
+    if await set_room_avatar_from_file(client, room_id, avatar_path):
         get_console().print(f"[green]✓ Set avatar for {label}[/green]")
         return True
-    get_console().print(f"[yellow]⊘ Avatar already set or failed for {label}[/yellow]")
+    get_console().print(f"[red]✗ Failed to set avatar for {label}[/red]")
     return False
 
 
@@ -372,7 +372,11 @@ async def set_room_avatars_in_matrix() -> None:
         raise AvatarSyncError(msg)
 
     router_user = _build_router_user(router_account)
-    client = await login_agent_user(MATRIX_HOMESERVER, router_user)
+    try:
+        client = await login_agent_user(MATRIX_HOMESERVER, router_user)
+    except ValueError as exc:
+        msg = f"Failed to log in as router for avatar sync: {exc}"
+        raise AvatarSyncError(msg) from exc
     console.print("[green]✓ Logged in to Matrix as router[/green]")
 
     config = load_validated_config()
