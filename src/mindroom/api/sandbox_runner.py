@@ -473,11 +473,17 @@ def _resolve_worker_base_dir(
         msg = "base_dir must be a string path."
         raise TypeError(msg)
 
-    raw_path = Path(requested_base_dir).expanduser()
-    candidate = (shared_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
     visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
-    shared_roots = visible_agent_roots or (shared_root.resolve(),)
-    allowed_roots = (paths.root.resolve(), *shared_roots)
+    raw_path = Path(requested_base_dir).expanduser()
+    if raw_path.is_absolute():
+        candidate = raw_path.resolve()
+    elif visible_agent_roots:
+        candidate = (shared_root / raw_path).resolve()
+    else:
+        msg = f"base_dir requires a resolved worker key with visible agent roots: {worker_key}"
+        raise ValueError(msg)
+
+    allowed_roots = (paths.root.resolve(), *visible_agent_roots)
     if not any(candidate.is_relative_to(root) for root in allowed_roots):
         msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
         raise ValueError(msg)

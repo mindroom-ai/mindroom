@@ -625,12 +625,8 @@ class KubernetesResourceManager:
         storage_root = Path(self.config.storage_mount_path)
         visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
         if not visible_agent_roots:
-            return [
-                {
-                    "name": "worker-storage",
-                    "mountPath": self.config.storage_mount_path,
-                },
-            ]
+            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
+            raise WorkerBackendError(msg)
 
         mounts: list[dict[str, object]] = [
             {

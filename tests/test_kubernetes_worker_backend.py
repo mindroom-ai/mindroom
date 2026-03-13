@@ -15,6 +15,8 @@ from mindroom.workers.models import WorkerSpec
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
 _TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
+_TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
+_TEST_SCOPED_WORKER_KEY_B = "v1:tenant-123:shared:research"
 
 
 class _FakeApiError(Exception):
@@ -194,14 +196,15 @@ def _backend(
 def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     """Ensuring one worker should create a service/deployment pair on shared storage."""
     backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
+    worker_key = _TEST_SCOPED_WORKER_KEY_A
 
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    handle = backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
-    assert handle.worker_key == "worker-a"
+    assert handle.worker_key == worker_key
     assert handle.backend_name == "kubernetes"
     assert handle.endpoint.endswith("/api/sandbox-runner/execute")
     assert handle.debug_metadata["namespace"] == "chat"
-    assert handle.debug_metadata["state_subpath"] == f"workers/{worker_dir_name('worker-a')}"
+    assert handle.debug_metadata["state_subpath"] == f"workers/{worker_dir_name(worker_key)}"
     assert handle.debug_metadata["service_name"] == handle.worker_id
     assert handle.status == "ready"
 
@@ -220,14 +223,13 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
-    expected_dedicated_root = f"/app/worker/workers/{worker_dir_name('worker-a')}"
+    expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
     assert env_values["HOME"] == expected_dedicated_root
     assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
     assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_dedicated_root}/.shared_credentials"
-    assert "subPath" not in container["volumeMounts"][0]
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )
@@ -274,6 +276,14 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     }
 
 
+def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:
+    """Malformed worker keys must not fall back to mounting the whole storage root."""
+    backend, _apps_api, _core_api = _backend()
+
+    with pytest.raises(WorkerBackendError, match="Unsupported worker key"):
+        backend.ensure_worker(WorkerSpec("legacy-worker"), now=10.0)
+
+
 def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> None:
     """Configured owner deployments should fail closed when they cannot be resolved."""
     backend, _apps_api, _core_api = _backend(owner_deployment_name="mindroom-missing")
@@ -281,14 +291,14 @@ def test_kubernetes_backend_requires_configured_owner_deployment_to_exist() -> N
     backend._resources.apps_api.deployments.pop("mindroom-missing")
 
     with pytest.raises(WorkerBackendError, match="owner deployment 'mindroom-missing' was not found"):
-        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
 
 def test_kubernetes_backend_honors_custom_worker_port() -> None:
     """Dedicated workers should wire the configured port through env, service, and probes."""
     backend, apps_api, core_api = _backend(worker_port=9777)
 
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     service = core_api.created_bodies[0]
     deployment = apps_api.created_bodies[0]
@@ -419,7 +429,7 @@ def test_kubernetes_backend_keeps_scoped_workers_on_env_only_shared_sync(
 def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     """Idle cleanup should scale dedicated workers to zero while keeping their metadata."""
     backend, apps_api, core_api = _backend(idle_timeout_seconds=5.0)
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     deployment = apps_api.deployments[handle.worker_id]
     deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
     deployment.metadata.annotations["mindroom.ai/worker-status"] = "ready"
@@ -427,7 +437,7 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     cleaned = backend.cleanup_idle_workers(now=10.0)
 
     assert len(cleaned) == 1
-    assert cleaned[0].worker_key == "worker-a"
+    assert cleaned[0].worker_key == _TEST_SCOPED_WORKER_KEY_A
     assert cleaned[0].status == "idle"
     assert deployment.spec.replicas == 0
     assert handle.worker_id not in core_api.services
@@ -436,7 +446,7 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
 def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> None:
     """Cleanup should not report or patch workers that are already scaled to zero."""
     backend, apps_api, _core_api = _backend(idle_timeout_seconds=5.0)
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     deployment = apps_api.deployments[handle.worker_id]
     deployment.metadata.annotations["mindroom.ai/last-used-at"] = "0.0"
     deployment.metadata.annotations["mindroom.ai/worker-status"] = "ready"
@@ -445,7 +455,7 @@ def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> 
     patch_count_after_first_cleanup = len(apps_api.patched_bodies)
     second_cleaned = backend.cleanup_idle_workers(now=11.0)
 
-    assert [worker.worker_key for worker in first_cleaned] == ["worker-a"]
+    assert [worker.worker_key for worker in first_cleaned] == [_TEST_SCOPED_WORKER_KEY_A]
     assert second_cleaned == []
     assert len(apps_api.patched_bodies) == patch_count_after_first_cleanup
 
@@ -453,9 +463,9 @@ def test_kubernetes_backend_cleanup_is_idempotent_for_already_idle_workers() -> 
 def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resources() -> None:
     """Non-preserving eviction should delete the worker service and deployment resources."""
     backend, apps_api, core_api = _backend()
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
 
-    evicted = backend.evict_worker("worker-a", preserve_state=False, now=5.0)
+    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=False, now=5.0)
 
     assert evicted is None
     assert handle.worker_id not in apps_api.deployments
@@ -465,9 +475,9 @@ def test_kubernetes_backend_evict_without_preserving_state_deletes_runtime_resou
 def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deployment() -> None:
     """Idle-preserving eviction should scale down the worker and release its Service."""
     backend, apps_api, core_api = _backend()
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
 
-    evicted = backend.evict_worker("worker-a", preserve_state=True, now=5.0)
+    evicted = backend.evict_worker(_TEST_SCOPED_WORKER_KEY_A, preserve_state=True, now=5.0)
 
     assert evicted is not None
     assert evicted.status == "idle"
@@ -479,12 +489,12 @@ def test_kubernetes_backend_preserving_evict_deletes_service_but_keeps_deploymen
 def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
     """Worker discovery should stay confined to this backend's label set within a shared namespace."""
     backend, apps_api, _core_api = _backend()
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=0.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
 
     unrelated_body = deepcopy(apps_api.created_bodies[0])
     unrelated_name = "mindroom-worker-unrelated"
     unrelated_body["metadata"]["name"] = unrelated_name
-    unrelated_body["metadata"]["annotations"]["mindroom.ai/worker-key"] = "worker-b"
+    unrelated_body["metadata"]["annotations"]["mindroom.ai/worker-key"] = _TEST_SCOPED_WORKER_KEY_B
     unrelated_body["metadata"]["labels"]["mindroom.ai/tenant"] = "other"
     unrelated_body["metadata"]["labels"]["mindroom.ai/worker-id"] = unrelated_name
     unrelated_body["spec"]["selector"]["matchLabels"]["mindroom.ai/tenant"] = "other"
@@ -511,9 +521,9 @@ def test_kubernetes_backend_list_workers_is_scoped_to_backend_labels() -> None:
 def test_kubernetes_backend_touch_only_patches_deployment_metadata() -> None:
     """Refreshing worker usage must not mutate the pod template and trigger a rollout."""
     backend, apps_api, _core_api = _backend()
-    handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
-    touched = backend.touch_worker("worker-a", now=25.0)
+    touched = backend.touch_worker(_TEST_SCOPED_WORKER_KEY_A, now=25.0)
 
     assert touched is not None
     patch_name, patch_body = apps_api.patched_bodies[-1]
@@ -533,7 +543,7 @@ def test_kubernetes_backend_pins_workers_to_control_plane_node(
     )
     monkeypatch.setenv("HOSTNAME", "mindroom-control-plane")
 
-    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     assert deployment["spec"]["template"]["spec"]["nodeName"] == "gke-chat-node-1"
@@ -543,7 +553,7 @@ def test_kubernetes_backend_uses_explicit_worker_node_name_when_configured() -> 
     """Dedicated workers should honor an explicit node pin without querying the control-plane pod."""
     backend, apps_api, _core_api = _backend(node_name="gke-chat-node-2")
 
-    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     assert deployment["spec"]["template"]["spec"]["nodeName"] == "gke-chat-node-2"
@@ -553,7 +563,7 @@ def test_kubernetes_backend_does_not_pin_workers_when_colocation_disabled() -> N
     """RWX-capable deployments should be able to omit node pinning entirely."""
     backend, apps_api, _core_api = _backend()
 
-    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     deployment = apps_api.created_bodies[0]
     assert "nodeName" not in deployment["spec"]["template"]["spec"]
@@ -577,7 +587,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     backend._resources.wait_for_ready = MethodType(_boom, backend._resources)
 
     with pytest.raises(WorkerBackendError, match=error_message):
-        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     worker_id = next(iter(apps_api.deployments))
     deployment = apps_api.deployments[worker_id]
@@ -586,7 +596,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert deployment.metadata.annotations["mindroom.ai/failure-count"] == "1"
     assert deployment.spec.replicas == 0
 
-    handle = backend.get_worker("worker-a", now=11.0)
+    handle = backend.get_worker(_TEST_SCOPED_WORKER_KEY_A, now=11.0)
     assert handle is not None
     assert handle.status == "failed"
     assert handle.failure_reason == error_message
@@ -598,8 +608,8 @@ def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> No
     long_prefix = "mindroom-worker-prefix-that-is-intentionally-way-too-long-for-a-kubernetes-name"
     backend, apps_api, _core_api = _backend(name_prefix=long_prefix)
 
-    first = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
-    second = backend.ensure_worker(WorkerSpec("worker-b"), now=20.0)
+    first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=20.0)
 
     assert first.worker_id != second.worker_id
     assert len(first.worker_id) <= 63
