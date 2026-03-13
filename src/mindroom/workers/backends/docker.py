@@ -25,9 +25,7 @@ from mindroom.workers.backends._metadata_store import (
 )
 from mindroom.workers.backends.docker_config import (
     _DEFAULT_WORKER_PORT,
-    _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
-    _read_docker_user,
     docker_backend_config_signature,
     docker_workers_root,
     normalize_docker_name_prefix,
@@ -35,7 +33,6 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import (
     _PROJECTED_CONFIGS_DIRNAME,
-    _WORKER_CONFIG_STATE_DIRNAME,
     DockerProjectionManager,
 )
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
@@ -99,13 +96,8 @@ _DOCKER_DEPENDENCIES = ["docker"]
 _DOCKER_EXTRA = "docker"
 
 __all__ = [
-    "_PROJECTED_CONFIGS_DIRNAME",
-    "_WORKER_CONFIG_STATE_DIRNAME",
     "DockerWorkerBackend",
-    "_DockerWorkerBackendConfig",
-    "_default_docker_user_for_os",
     "_load_docker_client_and_errors",
-    "_read_docker_user",
     "docker_backend_config_signature",
 ]
 
@@ -632,20 +624,6 @@ class DockerWorkerBackend:
         env.update(self.config.extra_env)
         return env
 
-    def _config_mount_specs(
-        self,
-        paths: LocalWorkerStatePaths,
-        *,
-        worker_key: str | None = None,
-        materialize_projection: bool = True,
-    ) -> list[tuple[Path, str, bool]]:
-        mount_specs, _projection = self._projection_manager.config_mount_specs(
-            paths,
-            worker_key=worker_key,
-            materialize_projection=materialize_projection,
-        )
-        return mount_specs
-
     def _container_volumes(
         self,
         paths: LocalWorkerStatePaths,
@@ -655,10 +633,11 @@ class DockerWorkerBackend:
         volumes = {
             str(paths.root): {"bind": self.config.storage_mount_path, "mode": "rw"},
         }
-        for host_path, container_path, read_only in self._config_mount_specs(
+        mount_specs, _projection = self._projection_manager.config_mount_specs(
             paths,
             worker_key=worker_key,
-        ):
+        )
+        for host_path, container_path, read_only in mount_specs:
             volumes[str(host_path)] = {
                 "bind": container_path,
                 "mode": "ro" if read_only else "rw",

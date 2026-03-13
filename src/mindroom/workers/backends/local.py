@@ -87,8 +87,8 @@ def _read_worker_api_root() -> str:
     return _normalize_worker_api_root(os.getenv(_WORKER_ENDPOINT_ENV, _DEFAULT_WORKER_API_ROOT))
 
 
-def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths for one concrete worker state root."""
+def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
+    """Return the filesystem paths owned by one concrete worker root."""
     resolved_root = state_root.expanduser().resolve()
     metadata_dir = resolved_root / "metadata"
     return LocalWorkerStatePaths(
@@ -102,15 +102,10 @@ def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePath
     )
 
 
-def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths owned by one concrete worker root."""
-    return _local_worker_state_paths_for_root(state_root)
-
-
 def _local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
     """Return the filesystem paths owned by one worker key."""
     resolved_root = worker_root.expanduser().resolve()
-    return _local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
+    return local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
 
 
 def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerStatePaths:
@@ -119,7 +114,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     if state_root is None:
         msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
         raise WorkerBackendError(msg)
-    return _local_worker_state_paths_for_root(Path(state_root))
+    return local_worker_state_paths_for_root(Path(state_root))
 
 
 def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
@@ -314,7 +309,7 @@ class _LocalWorkerBackend:
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         return list_worker_state_paths(
             self.worker_root,
-            state_paths_from_root=_local_worker_state_paths_for_root,
+            state_paths_from_root=local_worker_state_paths_for_root,
         )
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _LocalWorkerMetadata | None:
