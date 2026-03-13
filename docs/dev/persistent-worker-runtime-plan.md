@@ -289,7 +289,7 @@ The current product rule is:
 
 - Unscoped agents can use the dashboard credential UI.
 - Agents with `worker_scope=shared` can use the dashboard credential UI.
-- Agents with `worker_scope=user`, `worker_scope=user_agent`, or `worker_scope=room_thread` must treat credentials as runtime-owned state.
+- Agents with `worker_scope=user` or `worker_scope=user_agent` must treat credentials as runtime-owned state.
 - Shared-only integrations are hidden or disabled for unsupported worker scopes.
 - `/api/tools` may still render a read-only view for unsupported scopes, but it must not imply that dashboard edits will affect the live runtime worker.
 

@@ -298,7 +298,7 @@ agents:
 
   bridge_helper:
     tools: [shell]
-    worker_scope: room_thread
+    worker_scope: user
 ```
 
 The supported values are:
@@ -308,12 +308,12 @@ The supported values are:
 | `shared` | One shared worker state per agent |
 | `user` | One worker state per requester |
 | `user_agent` | One worker state per requester and agent |
-| `room_thread` | One worker state per thread, or per room when no thread exists |
 
 If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected.
 `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
+When worker-owned execution is active, `memory_file_path` and `context_files` must stay relative so MindRoom can map them into the agent-owned workspace.
 The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`.
-Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
+Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state.
 
 ## Without configured worker routing
 
