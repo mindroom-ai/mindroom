@@ -58,6 +58,30 @@ def _scope_dir_name(scope_user_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_") or "default"
 
 
+def _resolution_for_caller_context(
+    caller_context: str | list[str],
+    *,
+    original_storage_path: Path,
+    resolved_storage_path: Path,
+    config: Config,
+) -> FileMemoryResolution:
+    preserve_resolved_storage_path = (
+        original_storage_path.expanduser().resolve() != resolved_storage_path.expanduser().resolve()
+    )
+    if isinstance(caller_context, str) and caller_context in config.agents:
+        return resolve_file_memory_resolution(
+            resolved_storage_path,
+            config,
+            agent_name=caller_context,
+            preserve_resolved_storage_path=preserve_resolved_storage_path,
+        )
+    return file_memory_resolution_from_paths(
+        original_storage_path=original_storage_path,
+        resolved_storage_path=resolved_storage_path,
+        preserve_resolved_storage_path=preserve_resolved_storage_path,
+    )
+
+
 def _resolve_scope_markdown_path(scope_path: Path, relative_path: str) -> Path | None:
     candidate = (scope_path / relative_path).resolve()
     resolved_scope = scope_path.resolve()
@@ -415,9 +439,11 @@ def _find_file_anchor_memory_result(
     config: Config,
 ) -> MemoryResult | None:
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        resolution = file_memory_resolution_from_paths(
+        resolution = _resolution_for_caller_context(
+            caller_context,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
+            config=config,
         )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
             if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
@@ -454,9 +480,11 @@ def _mutate_file_memory_targets(
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
     for target_storage_path in mutation_target_storage_paths(scope_user_id, caller_context, storage_path, config):
-        resolution = file_memory_resolution_from_paths(
+        resolution = _resolution_for_caller_context(
+            caller_context,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
+            config=config,
         )
         for target_id in dict.fromkeys(
             _file_mutation_target_ids(scope_user_id, memory_id, anchor_result, resolution, config),
@@ -557,9 +585,11 @@ def get_file_agent_memory(
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        resolution = file_memory_resolution_from_paths(
+        resolution = _resolution_for_caller_context(
+            caller_context,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
+            config=config,
         )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
             result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
@@ -673,9 +703,11 @@ def store_file_conversation_memory(
     room_user_id = room_scope_user_id(room_id) if room_id else None
 
     for target_storage_path in target_storage_paths:
-        resolution = file_memory_resolution_from_paths(
+        resolution = _resolution_for_caller_context(
+            agent_name,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
+            config=config,
         )
         _append_scope_memory_entry(
             scope_user_id,

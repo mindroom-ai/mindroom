@@ -498,6 +498,29 @@ async def test_memory_file_path_uses_custom_scope_dir(storage_path: Path, config
 
 
 @pytest.mark.asyncio
+async def test_relative_memory_file_path_supports_crud(storage_path: Path, config: Config) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "./mind_data"
+
+    with patch("mindroom.constants.CONFIG_PATH", storage_path / "config.yaml"):
+        await add_agent_memory("Original memory", "general", storage_path, config)
+        memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+        result = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert result is not None
+        assert result["memory"] == "Original memory"
+
+        await update_agent_memory(memory_id, "Updated memory", "general", storage_path, config)
+        updated = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated memory"
+
+        await delete_agent_memory(memory_id, "general", storage_path, config)
+        assert await get_agent_memory(memory_id, "general", storage_path, config) is None
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_memory_file_path_uses_canonical_worker_owned_scope(
     storage_path: Path,
     config: Config,
