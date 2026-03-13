@@ -213,21 +213,22 @@ class TestDelegateKnowledge:
         )
 
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-
         mock_response = MagicMock()
         mock_response.content = "Found relevant docs"
         mock_agent = AsyncMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
 
         with (
-            patch("mindroom.custom_tools.delegate.get_knowledge_manager", return_value=mock_manager) as mock_get_km,
+            patch("mindroom.custom_tools.delegate.get_knowledge_for_base", return_value=mock_knowledge) as mock_get,
             patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create,
         ):
             result = await tools.delegate_task("researcher", "Find info about X")
 
-            mock_get_km.assert_called_with("docs")
+            mock_get.assert_called_once_with(
+                "docs",
+                config=config,
+                storage_path=tmp_path,
+            )
             mock_create.assert_called_once_with(
                 "researcher",
                 config,

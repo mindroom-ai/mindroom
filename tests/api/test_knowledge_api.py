@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import mindroom.api.knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 
 if TYPE_CHECKING:
     import pytest
@@ -256,3 +258,27 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     assert call_order == ["sync", "reindex"]
     manager.sync_git_repository.assert_awaited_once()
     manager.reindex_all.assert_awaited_once()
+
+
+def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path) -> None:
+    """The API helper should not reuse a cached manager for an old base path."""
+    storage_path = tmp_path / "storage"
+    old_path = tmp_path / "old"
+    new_path = tmp_path / "new"
+    old_path.mkdir(parents=True, exist_ok=True)
+    new_path.mkdir(parents=True, exist_ok=True)
+
+    config_old = _knowledge_config(old_path)
+    config_new = _knowledge_config(new_path)
+
+    async def _run() -> None:
+        try:
+            await initialize_knowledge_managers(config_old, storage_path, start_watchers=False, reindex_on_create=False)
+            with patch("mindroom.api.knowledge.STORAGE_PATH_OBJ", storage_path):
+                manager = await knowledge_api._ensure_manager(config_new, "research")
+            assert manager is not None
+            assert manager.knowledge_path == new_path.resolve()
+        finally:
+            await shutdown_knowledge_managers()
+
+    asyncio.run(_run())

@@ -14,17 +14,38 @@ from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
+_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db"})
 
 
-def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
-    path = Path(value)
+def _validate_safe_relative_path(
+    value: str,
+    *,
+    field_name: str,
+    allow_current_dir: bool = False,
+    reserved_first_parts: frozenset[str] = frozenset(),
+) -> str:
+    stripped = value.strip()
+    if not stripped:
+        msg = f"{field_name} must not be empty"
+        raise ValueError(msg)
+
+    path = Path(stripped)
     if path.is_absolute():
         msg = f"{field_name} must be a relative path"
         raise ValueError(msg)
     if ".." in path.parts:
         msg = f"{field_name} must stay within the workspace root"
         raise ValueError(msg)
-    return value
+    if not allow_current_dir and path == Path():
+        msg = f"{field_name} must not be the workspace root"
+        raise ValueError(msg)
+
+    first_part = next(iter(path.parts), None)
+    if first_part in reserved_first_parts:
+        msg = f"{field_name} must not use reserved runtime directory '{first_part}'"
+        raise ValueError(msg)
+
+    return stripped
 
 
 class AgentPrivateKnowledgeConfig(BaseModel):
@@ -60,7 +81,11 @@ class AgentPrivateKnowledgeConfig(BaseModel):
         """Private knowledge paths must stay inside the private root."""
         if value is None:
             return None
-        return _validate_safe_relative_path(value, field_name="private.knowledge.path")
+        return _validate_safe_relative_path(
+            value,
+            field_name="private.knowledge.path",
+            allow_current_dir=True,
+        )
 
     @model_validator(mode="after")
     def validate_chunking(self) -> Self:
@@ -100,7 +125,11 @@ class AgentPrivateConfig(BaseModel):
         """Private roots must stay relative so requester scoping remains deterministic."""
         if value is None:
             return None
-        return _validate_safe_relative_path(value, field_name="private.root")
+        return _validate_safe_relative_path(
+            value,
+            field_name="private.root",
+            reserved_first_parts=_RESERVED_PRIVATE_ROOT_FIRST_PARTS,
+        )
 
     @field_validator("template_dir")
     @classmethod

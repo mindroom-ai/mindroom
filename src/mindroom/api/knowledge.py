@@ -89,7 +89,8 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
 
 async def _ensure_manager(config: Config, base_id: str) -> KnowledgeManager | None:
     existing = get_knowledge_manager(base_id)
-    if existing is not None and existing.matches(config, STORAGE_PATH_OBJ):
+    knowledge_path = _knowledge_root(config, base_id)
+    if existing is not None and existing.matches(config, STORAGE_PATH_OBJ, knowledge_path):
         return existing
     managers = await _ensure_managers(config)
     return managers.get(base_id)

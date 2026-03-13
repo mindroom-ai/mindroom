@@ -8,14 +8,18 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
+from mindroom.knowledge.manager import get_knowledge_manager
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from agno.knowledge.document import Document
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -30,6 +34,30 @@ class _KnowledgeVectorDb(Protocol):
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]: ...
+
+
+def get_knowledge_for_base(
+    base_id: str,
+    *,
+    config: Config,
+    storage_path: Path,
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Knowledge | None:
+    """Resolve one configured base ID to its current Knowledge instance."""
+    manager: KnowledgeManager | None
+    if config.get_private_knowledge_base_agent(base_id) is None:
+        manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+        if manager is None:
+            manager = get_knowledge_manager(base_id)
+    else:
+        manager = get_knowledge_manager(
+            base_id,
+            config=config,
+            storage_path=storage_path,
+            execution_identity=execution_identity,
+        )
+    return manager.get_knowledge() if manager is not None else None
 
 
 @dataclass

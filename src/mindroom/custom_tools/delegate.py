@@ -12,14 +12,12 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import ensure_agent_knowledge_managers
+from mindroom.knowledge.utils import get_knowledge_for_base, resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.knowledge.knowledge import Knowledge
 
     from mindroom.config.main import Config
 
@@ -91,21 +89,14 @@ class DelegateTools(Toolkit):
                 self._storage_path,
             )
 
-            def _get_knowledge(base_id: str) -> Knowledge | None:
-                if self._config.get_private_knowledge_base_agent(base_id) is None:
-                    manager = get_knowledge_manager(base_id)
-                else:
-                    manager = get_knowledge_manager(
-                        base_id,
-                        config=self._config,
-                        storage_path=self._storage_path,
-                    )
-                return manager.get_knowledge() if manager is not None else None
-
             knowledge = resolve_agent_knowledge(
                 agent_name,
                 self._config,
-                _get_knowledge,
+                lambda base_id: get_knowledge_for_base(
+                    base_id,
+                    config=self._config,
+                    storage_path=self._storage_path,
+                ),
             )
             agent = create_agent(
                 agent_name,

@@ -106,8 +106,8 @@ from .constants import (
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
-from .knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
-from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .knowledge.manager import ensure_agent_knowledge_managers
+from .knowledge.utils import MultiKnowledgeVectorDb, get_knowledge_for_base, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -403,23 +404,20 @@ class AgentBot:
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
         """Return shared knowledge for agents assigned to one or more knowledge bases."""
 
-        def _get_knowledge(base_id: str) -> Knowledge | None:
-            if self.config.get_private_knowledge_base_agent(base_id) is None:
-                manager = self.orchestrator.knowledge_managers.get(base_id) if self.orchestrator is not None else None
-                if manager is None:
-                    manager = get_knowledge_manager(base_id)
-            else:
-                manager = get_knowledge_manager(
-                    base_id,
-                    config=self.config,
-                    storage_path=self.storage_path,
-                )
-            return manager.get_knowledge() if manager is not None else None
+        def _shared_manager(base_id: str) -> KnowledgeManager | None:
+            if self.orchestrator is None:
+                return None
+            return self.orchestrator.knowledge_managers.get(base_id)
 
         return resolve_agent_knowledge(
             agent_name,
             self.config,
-            _get_knowledge,
+            lambda base_id: get_knowledge_for_base(
+                base_id,
+                config=self.config,
+                storage_path=self.storage_path,
+                shared_manager_lookup=_shared_manager,
+            ),
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
