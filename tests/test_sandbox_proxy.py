@@ -732,7 +732,70 @@ class TestWorkerToolsOverride:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Proxy execution should rewrite canonical storage-root base_dir paths for remote workers."""
+        """Worker-keyed proxy execution should rewrite canonical agent base_dir paths portably."""
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            def raise_for_status(self) -> None:
+                return
+
+            def json(self) -> dict[str, object]:
+                return {"ok": True, "result": "sandbox-result"}
+
+        class _FakeClient:
+            def __init__(self, *, timeout: float) -> None:
+                pass
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return
+
+            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:  # noqa: ARG002
+                captured["url"] = url
+                captured["json"] = json
+                return _FakeResponse()
+
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+        tool = get_tool_by_name(
+            "coding",
+            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
+            worker_tools_override=["coding"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        with tool_execution_identity(execution_identity):
+            result = entrypoint(path=".")
+
+        assert result == "sandbox-result"
+        assert captured["url"].endswith("/api/sandbox-runner/execute")
+        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace/mind_data"}
+
+    def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unscoped proxied calls must keep absolute canonical paths unchanged."""
         captured: dict[str, Any] = {}
 
         class _FakeResponse:
@@ -777,4 +840,6 @@ class TestWorkerToolsOverride:
 
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
-        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace/mind_data"}
+        assert captured["json"]["tool_init_overrides"] == {
+            "base_dir": "/mindroom_data/agents/general/workspace/mind_data",
+        }

@@ -311,9 +311,26 @@ def _current_shared_storage_root() -> Path:
     return shared_storage_root(STORAGE_PATH_OBJ)
 
 
-def _portable_tool_init_overrides(tool_init_overrides: dict[str, object] | None) -> dict[str, object] | None:
-    """Rewrite storage-root absolute base_dir values into shared-root-relative paths."""
+def _agent_tree_relative_path(path: Path) -> str | None:
+    """Return a portable path rooted at the shared agents/ tree when possible."""
+    try:
+        agent_index = path.parts.index("agents")
+    except ValueError:
+        return None
+    if agent_index >= len(path.parts) - 1:
+        return None
+    return Path(*path.parts[agent_index:]).as_posix()
+
+
+def _portable_tool_init_overrides(
+    tool_init_overrides: dict[str, object] | None,
+    *,
+    worker_key: str | None,
+) -> dict[str, object] | None:
+    """Rewrite storage-root absolute base_dir values only for worker-keyed requests."""
     if not tool_init_overrides:
+        return tool_init_overrides
+    if worker_key is None:
         return tool_init_overrides
 
     portable_overrides = dict(tool_init_overrides)
@@ -329,7 +346,8 @@ def _portable_tool_init_overrides(tool_init_overrides: dict[str, object] | None)
     try:
         portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
     except ValueError:
-        return portable_overrides
+        if relative_agent_path := _agent_tree_relative_path(base_dir.resolve()):
+            portable_overrides["base_dir"] = relative_agent_path
     return portable_overrides
 
 
@@ -382,7 +400,6 @@ def _call_proxy_sync(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> object:
-    portable_tool_init_overrides = _portable_tool_init_overrides(tool_init_overrides)
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -406,6 +423,11 @@ def _call_proxy_sync(
             worker_api_endpoint(worker_handle, "execute")
             if worker_handle is not None
             else (f"{_PROXY_URL}{_SANDBOX_PROXY_EXECUTE_PATH}")
+        )
+        worker_key = worker_payload.get("worker_key")
+        portable_tool_init_overrides = _portable_tool_init_overrides(
+            tool_init_overrides,
+            worker_key=worker_key if isinstance(worker_key, str) else None,
         )
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
