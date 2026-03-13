@@ -397,7 +397,6 @@ def _get_worker_manager(
         ),
     )
 
-
 def _resolve_worker_handle(
     runtime_paths: RuntimePaths,
     proxy_config: SandboxProxyConfig,
