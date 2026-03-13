@@ -73,7 +73,11 @@ from mindroom.thread_utils import (
     should_agent_respond,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    tool_execution_identity,
+)
 
 from . import interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
@@ -403,6 +407,7 @@ class AgentBot:
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
         """Return shared knowledge for agents assigned to one or more knowledge bases."""
+        execution_identity = get_tool_execution_identity()
 
         def _shared_manager(base_id: str) -> KnowledgeManager | None:
             if self.orchestrator is None:
@@ -417,6 +422,7 @@ class AgentBot:
                 config=self.config,
                 storage_path=self.storage_path,
                 shared_manager_lookup=_shared_manager,
+                execution_identity=execution_identity,
             ),
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",

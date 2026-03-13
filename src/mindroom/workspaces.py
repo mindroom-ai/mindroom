@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import (
+    resolve_agent_state_storage_path,
+    resolve_execution_identity_for_worker_scope,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -93,19 +96,29 @@ def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWork
             else None
         ),
         context_files=tuple(private_config.context_files or ()),
-        file_memory_path=".",
+        file_memory_path="." if config.get_agent_memory_backend(agent_name) == "file" else None,
     )
 
 
-def _resolve_workspace_root(
-    workspace: _EffectiveAgentWorkspace,
-    *,
-    state_storage_path: Path,
-    use_state_storage_path: bool,
-) -> Path:
-    if use_state_storage_path:
-        return (state_storage_path / workspace.root_path).resolve()
-    return resolve_config_relative_path(workspace.root_path)
+def _resolve_workspace_execution_identity(
+    agent_name: str,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+) -> ToolExecutionIdentity | None:
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_config.private is None:
+        return execution_identity
+
+    worker_scope = config.get_agent_worker_scope(agent_name)
+    resolved_identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
+    if resolved_identity is None:
+        msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+        raise ValueError(msg)
+    return resolved_identity
 
 
 def _resolve_workspace(
@@ -133,11 +146,11 @@ def _resolve_workspace(
             file_memory_path=legacy_root,
         )
 
-    root = _resolve_workspace_root(
-        workspace,
-        state_storage_path=state_storage_path,
-        use_state_storage_path=use_state_storage_path,
-    )
+    if not use_state_storage_path:
+        msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+        raise ValueError(msg)
+
+    root = (state_storage_path / workspace.root_path).resolve()
     if create:
         root.mkdir(parents=True, exist_ok=True)
         if workspace.template_dir is not None:
@@ -165,11 +178,16 @@ def resolve_agent_workspace(
 ) -> ResolvedAgentWorkspace | None:
     """Resolve one agent's effective workspace for the current execution scope."""
     resolved_base_storage_path = (base_storage_path or STORAGE_PATH_OBJ).expanduser().resolve()
+    resolved_execution_identity = _resolve_workspace_execution_identity(
+        agent_name,
+        config,
+        execution_identity,
+    )
     state_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_base_storage_path,
         config=config,
-        execution_identity=execution_identity,
+        execution_identity=resolved_execution_identity,
     ).resolve()
     return _resolve_workspace(
         agent_name,

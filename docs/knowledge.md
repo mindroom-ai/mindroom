@@ -107,6 +107,8 @@ The template source is explicit, so you can see and edit the files being copied 
 Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`.
 `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`.
 `private.knowledge.path` can point to any file or folder inside the private root.
+When `private.knowledge.path` points to a single file, MindRoom indexes that file directly and watches its parent directory for changes.
+Git-backed private knowledge must point to a directory, not a single file.
 MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
 For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
