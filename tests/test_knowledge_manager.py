@@ -237,13 +237,14 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     storage_path = tmp_path / "storage"
+    knowledge_path = (tmp_path / "knowledge").resolve()
     config_1536 = _make_config(tmp_path / "knowledge", embedder_dimensions=1536)
     config_3072 = _make_config(tmp_path / "knowledge", embedder_dimensions=3072)
 
     manager = KnowledgeManager(base_id="research", config=config_1536, storage_path=storage_path)
 
-    assert not manager.matches(config_3072, storage_path)
-    assert manager.needs_full_reindex(config_3072, storage_path)
+    assert not manager.matches(config_3072, storage_path, knowledge_path)
+    assert manager.needs_full_reindex(config_3072, storage_path, knowledge_path)
 
 
 def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
@@ -256,6 +257,7 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     storage_path = tmp_path / "storage"
+    knowledge_path = (tmp_path / "knowledge").resolve()
     implicit_default = Config(
         agents={},
         models={},
@@ -290,8 +292,8 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
 
     manager = KnowledgeManager(base_id="research", config=implicit_default, storage_path=storage_path)
 
-    assert manager.matches(explicit_default, storage_path)
-    assert not manager.needs_full_reindex(explicit_default, storage_path)
+    assert manager.matches(explicit_default, storage_path, knowledge_path)
+    assert not manager.needs_full_reindex(explicit_default, storage_path, knowledge_path)
 
 
 def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -977,6 +979,86 @@ async def test_initialize_knowledge_managers_removes_private_scoped_managers_whe
             is None
         )
         assert get_knowledge_manager(private_base_id) is None
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_private_scoped_knowledge_manager_cache_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Older scoped private managers should be evicted instead of accumulating forever."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 2)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                private=AgentPrivateConfig(
+                    per="room_thread",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    context_files=["SOUL.md"],
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identities = [
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            session_id=f"session-{thread_id}",
+        )
+        for thread_id in ("thread-1", "thread-2", "thread-3")
+    ]
+
+    try:
+        for identity in identities:
+            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[0],
+            )
+            is None
+        )
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[1],
+            )
+            is not None
+        )
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[2],
+            )
+            is not None
+        )
     finally:
         await shutdown_knowledge_managers()
 

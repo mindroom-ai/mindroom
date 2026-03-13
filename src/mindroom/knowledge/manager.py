@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+from collections import OrderedDict
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
 
-    from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+    from mindroom.config.knowledge import KnowledgeGitConfig
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -74,20 +75,9 @@ def _collection_name(base_id: str, knowledge_path: Path) -> str:
     return f"{_COLLECTION_PREFIX}_{_base_storage_key(base_id, knowledge_path)}"
 
 
-def _knowledge_base_config(config: Config, base_id: str) -> KnowledgeBaseConfig:
-    return config.get_knowledge_base_config(base_id)
-
-
-def _knowledge_base_agent_name(
-    config: Config,
-    base_id: str,
-) -> str | None:
-    return config.get_private_knowledge_base_agent(base_id)
-
-
 def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
     embedder_config = config.memory.embedder.config
-    base_config = _knowledge_base_config(config, base_id)
+    base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
     return (
         base_id,
@@ -110,7 +100,7 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str, kno
 
 
 def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_path: Path) -> tuple[str, ...]:
-    base_config = _knowledge_base_config(config, base_id)
+    base_config = config.get_knowledge_base_config(base_id)
     git_config = base_config.git
     return (
         *_indexing_settings_key(config, storage_path, base_id, knowledge_path),
@@ -274,15 +264,11 @@ class KnowledgeManagerKey:
     knowledge_path: str
 
 
-def _knowledge_base_is_private(config: Config, base_id: str) -> bool:
-    return _knowledge_base_agent_name(config, base_id) is not None
-
-
 def _knowledge_base_uses_isolating_worker_workspace(
     config: Config,
     base_id: str,
 ) -> bool:
-    effective_agent_name = _knowledge_base_agent_name(config, base_id)
+    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     if effective_agent_name is None:
         return False
     return config.get_agent_worker_scope(effective_agent_name) not in {None, "shared"}
@@ -294,7 +280,7 @@ def _should_start_background_watchers(
     *,
     start_watchers: bool,
 ) -> bool:
-    if not start_watchers or not _knowledge_base_config(config, base_id).watch:
+    if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
         return False
     return not _knowledge_base_uses_isolating_worker_workspace(config, base_id)
 
@@ -305,7 +291,7 @@ def _should_incrementally_sync_on_access(
     *,
     start_watchers: bool,
 ) -> bool:
-    if not start_watchers or not _knowledge_base_config(config, base_id).watch:
+    if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
         return False
     return _knowledge_base_uses_isolating_worker_workspace(config, base_id)
 
@@ -317,12 +303,9 @@ def _resolve_manager_storage_path(
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
-    if not _knowledge_base_is_private(config, base_id):
-        return storage_path.expanduser().resolve()
-    effective_agent_name = _knowledge_base_agent_name(config, base_id)
+    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     if effective_agent_name is None:
-        msg = f"Knowledge base '{base_id}' is not a private knowledge base"
-        raise ValueError(msg)
+        return storage_path.expanduser().resolve()
     return resolve_agent_state_storage_path(
         agent_name=effective_agent_name,
         base_storage_path=storage_path.expanduser().resolve(),
@@ -339,8 +322,8 @@ def _resolve_effective_knowledge_path(
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> tuple[Path, Path]:
-    base_config = _knowledge_base_config(config, base_id)
-    effective_agent_name = _knowledge_base_agent_name(config, base_id)
+    base_config = config.get_knowledge_base_config(base_id)
+    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     resolved_storage_path = _resolve_manager_storage_path(
         config,
         storage_path,
@@ -421,7 +404,7 @@ class KnowledgeManager:
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
         if self.knowledge_path is None:
-            self.knowledge_path = _resolve_knowledge_path(_knowledge_base_config(self.config, self.base_id).path)
+            self.knowledge_path = _resolve_knowledge_path(self.config.get_knowledge_base_config(self.base_id).path)
         self.knowledge_path = self.knowledge_path.resolve()
         self.knowledge_path.mkdir(parents=True, exist_ok=True)
         self._settings = _settings_key(self.config, self.storage_path, self.base_id, self.knowledge_path)
@@ -452,19 +435,17 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def matches(self, config: Config, storage_path: Path, knowledge_path: Path | None = None) -> bool:
+    def matches(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
         """Return True when manager settings match the provided config."""
-        resolved_knowledge_path = self._knowledge_root() if knowledge_path is None else knowledge_path
-        return self._settings == _settings_key(config, storage_path, self.base_id, resolved_knowledge_path)
+        return self._settings == _settings_key(config, storage_path, self.base_id, knowledge_path)
 
-    def needs_full_reindex(self, config: Config, storage_path: Path, knowledge_path: Path | None = None) -> bool:
+    def needs_full_reindex(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
         """Return True when index-affecting settings changed."""
-        resolved_knowledge_path = self._knowledge_root() if knowledge_path is None else knowledge_path
         return self._indexing_settings != _indexing_settings_key(
             config,
             storage_path,
             self.base_id,
-            resolved_knowledge_path,
+            knowledge_path,
         )
 
     def get_knowledge(self) -> Knowledge:
@@ -472,7 +453,7 @@ class KnowledgeManager:
         return self._knowledge
 
     def _git_config(self) -> KnowledgeGitConfig | None:
-        return _knowledge_base_config(self.config, self.base_id).git
+        return self.config.get_knowledge_base_config(self.base_id).git
 
     def _skip_hidden_paths(self) -> bool:
         git_config = self._git_config()
@@ -708,7 +689,7 @@ class KnowledgeManager:
 
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
-        base_config = _knowledge_base_config(self.config, self.base_id)
+        base_config = self.config.get_knowledge_base_config(self.base_id)
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
@@ -943,7 +924,7 @@ class KnowledgeManager:
         """Start background file watching if enabled."""
         await self._start_git_sync()
 
-        base_config = _knowledge_base_config(self.config, self.base_id)
+        base_config = self.config.get_knowledge_base_config(self.base_id)
         if not base_config.watch:
             return
         if self._watch_task is not None and not self._watch_task.done():
@@ -1082,9 +1063,12 @@ class KnowledgeManager:
 
 _knowledge_managers: dict[KnowledgeManagerKey, KnowledgeManager] = {}
 _static_knowledge_manager_keys: dict[str, KnowledgeManagerKey] = {}
+_scoped_private_manager_lru: OrderedDict[KnowledgeManagerKey, None] = OrderedDict()
+_SCOPED_PRIVATE_MANAGER_CACHE_LIMIT = 128
 
 
 async def _stop_and_remove_manager(key: KnowledgeManagerKey) -> None:
+    _scoped_private_manager_lru.pop(key, None)
     manager = _knowledge_managers.pop(key, None)
     if manager is None:
         return
@@ -1095,6 +1079,24 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
     if manager._git_config() is not None:
         return await manager.sync_git_repository()
     return await manager.sync_indexed_files()
+
+
+async def _touch_scoped_private_manager_key(
+    key: KnowledgeManagerKey,
+    *,
+    config: Config,
+    base_id: str,
+) -> None:
+    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+        return
+
+    _scoped_private_manager_lru.pop(key, None)
+    _scoped_private_manager_lru[key] = None
+
+    while len(_scoped_private_manager_lru) > _SCOPED_PRIVATE_MANAGER_CACHE_LIMIT:
+        oldest_key = next(iter(_scoped_private_manager_lru))
+        _scoped_private_manager_lru.pop(oldest_key, None)
+        await _stop_and_remove_manager(oldest_key)
 
 
 async def _ensure_knowledge_manager(
@@ -1118,6 +1120,7 @@ async def _ensure_knowledge_manager(
             await _sync_manager_without_full_reindex(existing)
         if start_background_watchers:
             await existing.start_watcher()
+        await _touch_scoped_private_manager_key(key, config=config, base_id=base_id)
         return existing
 
     full_reindex_required = (
@@ -1162,6 +1165,7 @@ async def _ensure_knowledge_manager(
         await manager.start_watcher()
 
     _knowledge_managers[key] = manager
+    await _touch_scoped_private_manager_key(key, config=config, base_id=base_id)
     return manager
 
 
@@ -1299,4 +1303,5 @@ async def shutdown_knowledge_managers() -> None:
         await _stop_and_remove_manager(key)
 
     _static_knowledge_manager_keys.clear()
+    _scoped_private_manager_lru.clear()
     _knowledge_managers.clear()

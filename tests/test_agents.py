@@ -1061,6 +1061,71 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         )
 
 
+@pytest.mark.parametrize(
+    ("root", "expected_message"),
+    [
+        ("", "private.root must not be empty"),
+        ("   ", "private.root must not be empty"),
+        (".", "private.root must not be the workspace root"),
+        ("sessions", "private.root must not use reserved runtime directory 'sessions'"),
+        ("sessions/nested", "private.root must not use reserved runtime directory 'sessions'"),
+        ("learning", "private.root must not use reserved runtime directory 'learning'"),
+        ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
+    ],
+)
+def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
+    """Private roots must stay out of the worker root and runtime-managed directories."""
+    with pytest.raises(ValidationError, match=re.escape(expected_message)):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root=root,
+                    ),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize("path", ["", "   "])
+def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
+    """Blank private knowledge paths should be rejected explicitly."""
+    with pytest.raises(ValidationError, match=re.escape("private.knowledge.path must not be empty")):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(path=path),
+                    ),
+                ),
+            },
+        )
+
+
+def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
+    """A dot path is allowed to index the entire private root explicitly."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    knowledge=AgentPrivateKnowledgeConfig(path="."),
+                ),
+            ),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_knowledge_base_config(private_base_id).path == "."
+
+
 def test_config_private_and_shared_knowledge_coexist() -> None:
     """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
     config = Config(
