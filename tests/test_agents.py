@@ -981,6 +981,25 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     assert config.agents["calculator"].knowledge_bases == ["research"]
 
 
+def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
+    """Top-level knowledge base IDs must not collide with synthetic private IDs."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "knowledge_bases keys must not use the reserved private prefix '__agent_private__:'; "
+            "invalid keys: __agent_private__:mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(display_name="Mind"),
+            },
+            knowledge_bases={
+                "__agent_private__:mind": KnowledgeBaseConfig(path="./company_docs"),
+            },
+        )
+
+
 def test_config_private_knowledge_requires_path_without_template_default() -> None:
     """Private knowledge needs an explicit path when no template default exists."""
     with pytest.raises(
@@ -1026,6 +1045,29 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
     assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
+
+
+def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
+    """Synthetic private base IDs should resolve only while private knowledge is actually active."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                ),
+            ),
+            "assistant": AgentConfig(display_name="Assistant"),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    assert config.get_private_knowledge_base_agent("__agent_private__:mind") == "mind"
+    assert config.get_private_knowledge_base_agent("__agent_private__:assistant") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:missing") is None
 
 
 def test_config_rejects_duplicate_default_tools() -> None:

@@ -916,6 +916,71 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
 
 
 @pytest.mark.asyncio
+async def test_initialize_knowledge_managers_removes_private_scoped_managers_when_private_knowledge_is_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Config reload should tear down scoped private managers once the agent drops private knowledge."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config_with_private = Config(
+        agents={
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+    config_without_private = Config(
+        agents={
+            "mind": AgentConfig(display_name="Mind"),
+        },
+        models={},
+    )
+    private_base_id = config_with_private.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config_with_private, tmp_path, execution_identity=identity)
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_with_private,
+                storage_path=tmp_path,
+                execution_identity=identity,
+            )
+            is not None
+        )
+
+        await initialize_knowledge_managers(config_without_private, tmp_path, reindex_on_create=False)
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_with_private,
+                storage_path=tmp_path,
+                execution_identity=identity,
+            )
+            is None
+        )
+        assert get_knowledge_manager(private_base_id) is None
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_sync_git_repository_indexes_files_after_initial_clone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
