@@ -37,17 +37,17 @@ services:
       - traefik.enable=true
       # Dashboard routes go directly to the MindRoom runtime, which now serves the bundled UI
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.rule=Host(`${INSTANCE_DOMAIN}`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.entrypoints=${TRAEFIK_WEB_ENTRYPOINT:-websecure}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}.tls.certresolver=${TRAEFIK_CERTRESOLVER:-porkbun}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.service=${INSTANCE_NAME:-mindroom}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}.priority=50
       - traefik.http.services.${INSTANCE_NAME:-mindroom}.loadbalancer.server.port=8765
       # OpenAI-compatible /v1 routes go directly to the MindRoom runtime (has its own auth)
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.rule=Host(`${INSTANCE_DOMAIN}`) && PathPrefix(`/v1`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.entrypoints=${TRAEFIK_WEB_ENTRYPOINT:-websecure}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.tls.certresolver=${TRAEFIK_CERTRESOLVER:-porkbun}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.service=${INSTANCE_NAME:-mindroom}-v1
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.priority=100
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-v1.loadbalancer.server.port=8765

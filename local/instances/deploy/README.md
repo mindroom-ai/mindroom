@@ -7,7 +7,10 @@
 - Python 3.12+ installed
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
 - Optional for HTTPS/domain routing: a Traefik container attached to the external Docker network `mynetwork`
-- Without Traefik, `./deploy.py start` still exposes localhost ports, but `https://{DOMAIN}`, `https://m-{DOMAIN}`, Authelia, and Matrix `.well-known` routes stay unavailable
+- HTTPS/domain routes only work when Traefik exposes entrypoint names and a certresolver that match the instance labels.
+- The defaults are `websecure`, `matrix-fed`, and `porkbun`.
+- Override them per instance with `TRAEFIK_WEB_ENTRYPOINT`, `TRAEFIK_MATRIX_ENTRYPOINT`, and `TRAEFIK_CERTRESOLVER` in `envs/{instance_name}.env`.
+- Without Traefik, `./deploy.py start` still exposes localhost ports, but `https://{DOMAIN}`, `https://m-{DOMAIN}`, Authelia, and Matrix `.well-known` routes stay unavailable.
 
 ### Using the Instance Manager
 
@@ -73,7 +76,7 @@ After starting, these direct host-port endpoints are available immediately:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
 
-If Traefik is already attached to `mynetwork`, these HTTPS/domain routes also work:
+When your Traefik config matches the instance's `TRAEFIK_*` settings, these HTTPS/domain routes are published:
 - **MindRoom Domain**: `https://{DOMAIN}`
 - **Matrix Domain** (if enabled): `https://m-{DOMAIN}`
 - **Auth Portal** (if enabled): `https://auth-{DOMAIN}`
@@ -319,6 +322,7 @@ nano envs/prod.env
 ./deploy.py start prod
 
 # Attach Traefik to mynetwork before relying on the HTTPS/domain routes above.
+# Match its entrypoint and certresolver names to the instance's TRAEFIK_* settings.
 # The provided compose files use Traefik labels, not nginx configuration.
 ./deploy.py list
 ```

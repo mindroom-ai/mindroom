@@ -19,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -42,6 +43,9 @@ ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 DEFAULT_REGISTRY = "ghcr.io/mindroom-ai"
 EXTERNAL_NETWORK = "mynetwork"
+DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
+DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
+DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
 
 
 # Pydantic Models
@@ -101,6 +105,15 @@ class Registry(BaseModel):
     instances: dict[str, Instance] = Field(default_factory=dict)
     allocated_ports: AllocatedPorts = Field(default_factory=AllocatedPorts)
     defaults: RegistryDefaults = Field(default_factory=RegistryDefaults)
+
+
+@dataclass(frozen=True)
+class TraefikSettings:
+    """Traefik labels that the instance publishes."""
+
+    web_entrypoint: str = DEFAULT_TRAEFIK_WEB_ENTRYPOINT
+    matrix_entrypoint: str = DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT
+    certresolver: str = DEFAULT_TRAEFIK_CERTRESOLVER
 
 
 def load_registry() -> Registry:
@@ -301,6 +314,24 @@ def _ensure_instance_env_file_reference(env_file: Path) -> None:
     suffix = "" if not content or content.endswith("\n") else "\n"
     with env_file.open("a") as f:
         f.write(f"{suffix}{reference}\n")
+
+
+def _load_traefik_settings(env_file: Path) -> TraefikSettings:
+    """Read optional Traefik label overrides from the instance env file."""
+    values: dict[str, str] = {}
+    if env_file.exists():
+        for raw_line in env_file.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip("'\"")
+
+    return TraefikSettings(
+        web_entrypoint=values.get("TRAEFIK_WEB_ENTRYPOINT", DEFAULT_TRAEFIK_WEB_ENTRYPOINT),
+        matrix_entrypoint=values.get("TRAEFIK_MATRIX_ENTRYPOINT", DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT),
+        certresolver=values.get("TRAEFIK_CERTRESOLVER", DEFAULT_TRAEFIK_CERTRESOLVER),
+    )
 
 
 def _matrix_host_override_path(name: str) -> Path:
@@ -518,7 +549,23 @@ def _auth_url(instance: Instance) -> str:
     return f"https://auth-{instance.domain}"
 
 
-def _print_missing_traefik_warning(instance: Instance, *, only_matrix: bool) -> None:
+def _print_traefik_label_requirements(instance: Instance, settings: TraefikSettings) -> None:
+    """Print the Traefik settings that must match this instance's labels."""
+    requirements = [f"web={settings.web_entrypoint}", f"resolver={settings.certresolver}"]
+    if instance.matrix_type is not None:
+        requirements.append(f"matrix={settings.matrix_entrypoint}")
+
+    console.print(
+        f"  [dim]Match Traefik entrypoints/certresolver to envs/{instance.name}.env: {', '.join(requirements)}[/dim]",
+    )
+
+
+def _print_missing_traefik_warning(
+    instance: Instance,
+    settings: TraefikSettings,
+    *,
+    only_matrix: bool,
+) -> None:
     """Explain that only direct localhost access is available without Traefik."""
     blocked_features = ["HTTPS domain routes"]
     if not only_matrix and instance.auth_type is not None:
@@ -531,6 +578,7 @@ def _print_missing_traefik_warning(instance: Instance, *, only_matrix: bool) -> 
     console.print(
         f"  [dim]{', '.join(blocked_features)} remain unavailable until Traefik joins that network.[/dim]",
     )
+    _print_traefik_label_requirements(instance, settings)
     console.print(
         f"  [dim]Attach Traefik with: docker network connect {EXTERNAL_NETWORK} <traefik-container>[/dim]",
     )
@@ -541,6 +589,7 @@ def _print_running_instance_access(
     *,
     only_matrix: bool,
     traefik_proxies: list[str],
+    traefik_settings: TraefikSettings,
 ) -> None:
     """Print the endpoints that are actually usable for the running instance."""
     if only_matrix:
@@ -551,16 +600,21 @@ def _print_running_instance_access(
             console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
 
     if not traefik_proxies:
-        _print_missing_traefik_warning(instance, only_matrix=only_matrix)
+        _print_missing_traefik_warning(instance, traefik_settings, only_matrix=only_matrix)
         return
 
-    console.print(f"  [dim]Traefik:[/dim] {', '.join(traefik_proxies)} on {EXTERNAL_NETWORK}")
+    console.print(f"  [dim]Traefik detected:[/dim] {', '.join(traefik_proxies)} on {EXTERNAL_NETWORK}")
+    console.print(
+        "  [dim]HTTPS/domain routes below are published through Traefik labels and only work after the proxy"
+        " matches this instance's entrypoint and certresolver names.[/dim]",
+    )
+    _print_traefik_label_requirements(instance, traefik_settings)
     if not only_matrix:
-        console.print(f"  [dim]MindRoom domain:[/dim] https://{instance.domain}")
+        console.print(f"  [dim]Configured MindRoom domain:[/dim] https://{instance.domain}")
     if instance.matrix_type is not None:
-        console.print(f"  [dim]Matrix domain:[/dim] https://m-{instance.domain}")
+        console.print(f"  [dim]Configured Matrix domain:[/dim] https://m-{instance.domain}")
     if not only_matrix and instance.auth_type is not None:
-        console.print(f"  [dim]Auth URL:[/dim] {_auth_url(instance)}")
+        console.print(f"  [dim]Configured Auth URL:[/dim] {_auth_url(instance)}")
 
 
 def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
@@ -950,6 +1004,7 @@ def start(  # noqa: PLR0912, PLR0915
 
     _ensure_external_network(EXTERNAL_NETWORK)
     traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
+    traefik_settings = _load_traefik_settings(env_file)
     cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]{status_msg}[/yellow]"):
@@ -971,6 +1026,7 @@ def start(  # noqa: PLR0912, PLR0915
             instance,
             only_matrix=only_matrix,
             traefik_proxies=traefik_proxies,
+            traefik_settings=traefik_settings,
         )
         if instance.matrix_type and previous_status == InstanceStatus.CREATED:
             _print_matrix_restart_hint(
@@ -1064,7 +1120,7 @@ def restart(
     _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(  # noqa: PLR0912
+def _restart_instance(  # noqa: PLR0912, PLR0915
     name: str,
     instance: Instance,
     registry: Registry,
@@ -1117,6 +1173,7 @@ def _restart_instance(  # noqa: PLR0912
 
     _ensure_external_network(EXTERNAL_NETWORK)
     traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
+    traefik_settings = _load_traefik_settings(env_file)
     start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
 
     with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
@@ -1138,6 +1195,7 @@ def _restart_instance(  # noqa: PLR0912
             instance,
             only_matrix=only_matrix,
             traefik_proxies=traefik_proxies,
+            traefik_settings=traefik_settings,
         )
     else:
         console.print(f"[red]✗[/red] Failed to start instance '{name}'")
@@ -1266,7 +1324,7 @@ def get_actual_status(name: str) -> tuple[bool, bool]:
     running_containers = {line.strip() for line in result.stdout.strip().splitlines() if line.strip()}
 
     mindroom_running = "mindroom" in running_containers
-    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
+    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis", "wellknown"])
 
     return mindroom_running, matrix_running
 

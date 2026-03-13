@@ -101,6 +101,20 @@ def test_traefik_proxy_names_only_returns_traefik_containers(monkeypatch: pytest
     assert deploy._traefik_proxy_names("mynetwork") == ["traefik-main"]
 
 
+def test_load_traefik_settings_reads_env_overrides(tmp_path: Path) -> None:
+    """Per-instance env files should override Traefik label defaults."""
+    env_file = tmp_path / "alpha.env"
+    env_file.write_text(
+        "TRAEFIK_WEB_ENTRYPOINT=public-web\nTRAEFIK_MATRIX_ENTRYPOINT=federation\nTRAEFIK_CERTRESOLVER=letsencrypt\n",
+    )
+
+    assert deploy._load_traefik_settings(env_file) == deploy.TraefikSettings(
+        web_entrypoint="public-web",
+        matrix_entrypoint="federation",
+        certresolver="letsencrypt",
+    )
+
+
 def test_print_running_instance_access_warns_without_traefik(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -114,6 +128,7 @@ def test_print_running_instance_access_warns_without_traefik(
         instance,
         only_matrix=False,
         traefik_proxies=[],
+        traefik_settings=deploy.TraefikSettings(),
     )
 
     text = console.export_text()
@@ -121,6 +136,40 @@ def test_print_running_instance_access_warns_without_traefik(
     assert "Matrix local:" in text
     assert "No Traefik container detected" in text
     assert "domain-based federation" in text
+    assert "web=websecure" in text
+    assert "matrix=matrix-fed" in text
+    assert "resolver=porkbun" in text
+
+
+def test_print_running_instance_access_keeps_domain_routes_conditional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detected Traefik proxies should not be reported as sufficient on their own."""
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    console = Console(record=True)
+    monkeypatch.setattr(deploy, "console", console)
+
+    deploy._print_running_instance_access(
+        instance,
+        only_matrix=False,
+        traefik_proxies=["traefik-main"],
+        traefik_settings=deploy.TraefikSettings(
+            web_entrypoint="public-web",
+            matrix_entrypoint="federation",
+            certresolver="letsencrypt",
+        ),
+    )
+
+    text = console.export_text()
+    assert "Traefik detected:" in text
+    assert "only work" in text
+    assert "after the proxy matches this instance's entrypoint and certresolver names" in text
+    assert "Configured MindRoom domain:" in text
+    assert "Configured Matrix domain:" in text
+    assert "web=public-web" in text
+    assert "matrix=federation" in text
+    assert "resolver=letsencrypt" in text
 
 
 def test_stop_uses_project_down_without_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,3 +266,15 @@ def test_remove_all_persists_progress_when_later_instance_fails(
 
     saved_registry = json.loads(reg_file.read_text())
     assert sorted(saved_registry["instances"]) == ["beta"]
+
+
+def test_get_actual_status_counts_wellknown_as_matrix_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matrix stacks should still show activity if only the wellknown container remains."""
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        assert "docker ps --filter" in cmd
+        return SimpleNamespace(returncode=0, stdout="wellknown\n", stderr="")
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    assert deploy.get_actual_status("alpha") == (False, True)
