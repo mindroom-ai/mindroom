@@ -47,14 +47,6 @@ class ToolExecutionIdentity:
     account_id: str | None = None
 
 
-@dataclass(frozen=True)
-class AgentOwnedPath:
-    """Resolved canonical agent-owned path information."""
-
-    resolved_path: Path
-    state_root: Path
-
-
 _TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
     "tool_execution_identity",
     default=None,
@@ -329,21 +321,16 @@ def resolve_agent_owned_path(
     *,
     agent_name: str,
     base_storage_path: Path,
-) -> AgentOwnedPath:
+) -> Path:
     """Resolve one agent-owned path into the canonical shared agent workspace.
 
     Durable agent files are shared per agent across all requesters and worker scopes.
     ``worker_scope`` only changes which runtime executes the tool call, not which
     files are authoritative.
     """
-    state_root = agent_state_root_path(base_storage_path, agent_name)
     relative_target = agent_workspace_relative_path(path_text)
     agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
-    target_path = _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
-    return AgentOwnedPath(
-        resolved_path=target_path,
-        state_root=state_root,
-    )
+    return _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
 
 
 def resolve_agent_state_storage_path(

@@ -639,8 +639,8 @@ def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Pat
         base_storage_path=tmp_path,
     )
 
-    assert resolved.state_root == agent_state_root_path(tmp_path, "general")
-    assert resolved.resolved_path == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+    assert resolved.is_relative_to(agent_state_root_path(tmp_path, "general"))
+    assert resolved == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
 
 
 def test_resolve_agent_owned_path_rejects_absolute_paths(tmp_path: Path) -> None:

@@ -185,7 +185,7 @@ agents:
 
 - Paths are resolved relative to the agent's canonical workspace
 - `context_files` are injected in listed order
-- Content is refreshed when agents are created or reloaded
+- Content is refreshed for each freshly built agent instance, so normal replies pick up edits on the next request
 
 ## Room Configuration
 

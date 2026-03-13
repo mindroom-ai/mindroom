@@ -36,27 +36,22 @@ def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> boo
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
-def _effective_storage_path_for_agent(agent_name: str, storage_path: Path) -> Path:
-    """Return the canonical durable state root for one agent.
-
-    Memory does not split by requester for ``user`` or ``user_agent`` workers.
-    Those scopes isolate runtime execution, not authoritative agent memory/files.
-    """
-    return resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-
-
 def resolve_context_storage_path(
     storage_path: Path,
     *,
     agent_name: str | None = None,
 ) -> Path:
-    """Resolve the authoritative storage root for an agent-aware memory operation."""
+    """Resolve the authoritative storage root for an agent-aware memory operation.
+
+    Memory does not split by requester for ``user`` or ``user_agent`` workers.
+    Those scopes isolate runtime execution, not authoritative agent memory/files.
+    """
     if agent_name is None:
         return storage_path
-    return _effective_storage_path_for_agent(agent_name, storage_path)
+    return resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+    )
 
 
 def effective_storage_paths_for_context(
@@ -65,17 +60,11 @@ def effective_storage_paths_for_context(
 ) -> list[Path]:
     """Return the distinct storage roots affected by the caller context."""
     if isinstance(caller_context, str):
-        return [_effective_storage_path_for_agent(caller_context, storage_path)]
-    return _effective_storage_paths_for_team(caller_context, storage_path)
+        return [resolve_context_storage_path(storage_path, agent_name=caller_context)]
 
-
-def _effective_storage_paths_for_team(
-    agent_names: list[str],
-    storage_path: Path,
-) -> list[Path]:
     effective_paths: list[Path] = []
-    for agent_name in agent_names:
-        effective_path = _effective_storage_path_for_agent(agent_name, storage_path)
+    for agent_name in caller_context:
+        effective_path = resolve_context_storage_path(storage_path, agent_name=agent_name)
         if effective_path not in effective_paths:
             effective_paths.append(effective_path)
     return effective_paths or [storage_path]
@@ -201,7 +190,7 @@ def resolve_file_memory_resolution(
         agent_config.memory_file_path,
         agent_name=agent_name,
         base_storage_path=storage_path,
-    ).resolved_path
+    )
     return FileMemoryResolution(
         storage_path=resolution.storage_path,
         use_configured_path=resolution.use_configured_path,

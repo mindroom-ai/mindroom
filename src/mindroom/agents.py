@@ -120,7 +120,7 @@ def _load_context_files(
             raw_path,
             agent_name=agent_name,
             base_storage_path=storage_path,
-        ).resolved_path
+        )
         if resolved_path.is_file():
             loaded_parts.append(
                 _AdditionalContextChunk(
@@ -252,7 +252,7 @@ def _build_additional_context(
     return additional_context
 
 
-def _resolve_agent_workspace_paths(
+def _resolve_agent_workspace_path(
     agent_name: str,
     agent_config: AgentConfig,
     *,
@@ -264,12 +264,11 @@ def _resolve_agent_workspace_paths(
         workspace_path.mkdir(parents=True, exist_ok=True)
         return workspace_path
 
-    resolved = resolve_agent_owned_path(
+    workspace_path = resolve_agent_owned_path(
         agent_config.memory_file_path,
         agent_name=agent_name,
         base_storage_path=storage_path,
     )
-    workspace_path = resolved.resolved_path
     workspace_path.mkdir(parents=True, exist_ok=True)
     return workspace_path
 
@@ -282,7 +281,7 @@ def _tool_supports_base_dir(tool_name: str) -> bool:
     return any(field.name == "base_dir" for field in metadata.config_fields)
 
 
-def _tool_init_overrides(
+def _tool_base_dir_override(
     tool_name: str,
     *,
     workspace_path: Path,
@@ -302,7 +301,7 @@ def build_agent_tool_init_context(
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
-    workspace_path = _resolve_agent_workspace_paths(
+    workspace_path = _resolve_agent_workspace_path(
         agent_name,
         agent_config,
         storage_path=resolved_storage_path,
@@ -310,18 +309,6 @@ def build_agent_tool_init_context(
     return AgentToolInitContext(
         workspace_path=workspace_path,
         worker_scope=config.get_agent_worker_scope(agent_name),
-    )
-
-
-def build_agent_tool_init_overrides(
-    tool_name: str,
-    *,
-    context: AgentToolInitContext,
-) -> dict[str, object] | None:
-    """Resolve safe per-tool init overrides for one agent tool."""
-    return _tool_init_overrides(
-        tool_name,
-        workspace_path=context.workspace_path,
     )
 
 
@@ -394,7 +381,10 @@ def build_agent_toolkit(
 
     return get_tool_by_name(
         tool_name,
-        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=resolved_tool_init_context),
+        tool_init_overrides=_tool_base_dir_override(
+            tool_name,
+            workspace_path=resolved_tool_init_context.workspace_path,
+        ),
         worker_tools_override=resolved_worker_tools,
         worker_scope=resolved_tool_init_context.worker_scope,
         routing_agent_name=agent_name,
