@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from mindroom.cli.main import app
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -522,6 +523,31 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
 
+    def test_avatars_generate_reports_avatar_generation_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Avatar generation should exit cleanly when generation fails."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n"
+            "authorization:\n  global_users: []\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+
+        with patch(
+            "mindroom.avatar_generation.run_avatar_generation",
+            AsyncMock(side_effect=AvatarGenerationError("Avatar generation failed. See errors above.")),
+        ):
+            result = runner.invoke(app, ["avatars", "generate"])
+
+        assert result.exit_code == 1
+        assert "Avatar generation failed" in _strip_ansi(result.output)
+
 
 # ---------------------------------------------------------------------------
 # version & help
@@ -538,10 +564,11 @@ class TestVersionAndHelp:
         assert "Mindroom version" in result.output
 
     def test_help_mentions_config(self) -> None:
-        """Top-level help includes the config subcommand."""
+        """Top-level help includes key subcommands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "config" in result.output
+        assert "avatars" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +595,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -587,7 +615,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -602,7 +631,8 @@ class TestRunApiFlags:
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
             "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n",
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
         )
         monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
         mock_main = AsyncMock()
@@ -611,6 +641,97 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+
+
+class TestAvatarsCommands:
+    """Tests for `mindroom avatars`."""
+
+    def test_avatars_help_lists_subcommands(self) -> None:
+        """The avatars command should expose generate and sync subcommands."""
+        result = runner.invoke(app, ["avatars", "--help"])
+        assert result.exit_code == 0
+        output = _strip_ansi(result.output)
+        assert "generate" in output
+        assert "sync" in output
+
+    def test_avatars_generate_runs_generation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Avatar generation command should invoke the generation workflow."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        run_avatar_generation = AsyncMock()
+        with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
+            result = runner.invoke(app, ["avatars", "generate"])
+        assert result.exit_code == 0
+        run_avatar_generation.assert_awaited_once_with()
+
+    def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Avatar sync command should invoke the Matrix sync workflow."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        set_room_avatars_in_matrix = AsyncMock()
+
+        with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
+            result = runner.invoke(app, ["avatars", "sync"])
+
+        assert result.exit_code == 0
+        set_room_avatars_in_matrix.assert_awaited_once_with()
+
+    def test_avatars_sync_reports_sync_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unexpected avatar sync failures should propagate for debugging."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+
+        with patch(
+            "mindroom.avatar_generation.set_room_avatars_in_matrix",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            result = runner.invoke(app, ["avatars", "sync"])
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, RuntimeError)
+        assert str(result.exception) == "boom"
+
+    def test_avatars_sync_requires_initialized_router_account(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Avatar sync should fail when the router account has not been initialized yet."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+
+        with patch(
+            "mindroom.avatar_generation.set_room_avatars_in_matrix",
+            AsyncMock(side_effect=AvatarSyncError("No router account found in Matrix state.")),
+        ):
+            result = runner.invoke(app, ["avatars", "sync"])
+
+        assert result.exit_code == 1
+        assert "No router account found in Matrix state." in _strip_ansi(result.output)
 
 
 # ---------------------------------------------------------------------------

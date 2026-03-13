@@ -12,7 +12,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
 - **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
-- **`utilities/generate_avatars.py`** - Generate avatar images for agents
 - **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
 - **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
 - **`utilities/setup_cleanup_cron.sh`** - Setup cron job for periodic cleanup
@@ -37,9 +36,14 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 ./scripts/testing/benchmark_matrix_throughput.py
 ```
 
-### Generate agent avatars
+### Generate and sync managed avatars
+Run MindRoom at least once before syncing so the router account exists in Matrix state.
+When you run this from a source checkout, generated files are written under `./avatars/`.
+In containerized deployments, generated overrides are stored under the persistent MindRoom storage path instead of the image-bundled `/app/avatars`.
+
 ```bash
-./scripts/utilities/generate_avatars.py
+GOOGLE_API_KEY=your-google-api-key uv run mindroom avatars generate
+uv run mindroom avatars sync
 ```
 
 ## Requirements
