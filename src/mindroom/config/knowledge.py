@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -37,6 +39,10 @@ class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
+    path_relative_to_agent_workspace: bool = Field(
+        default=False,
+        description="Resolve `path` relative to the assigned agent workspace instead of config.yaml",
+    )
     watch: bool = Field(default=True, description="Watch folder for changes")
     chunk_size: int = Field(
         default=5000,
@@ -59,4 +65,12 @@ class KnowledgeBaseConfig(BaseModel):
         if self.chunk_overlap >= self.chunk_size:
             msg = "chunk_overlap must be smaller than chunk_size"
             raise ValueError(msg)
+        if self.path_relative_to_agent_workspace:
+            path = Path(self.path)
+            if path.is_absolute():
+                msg = "knowledge_bases.<id>.path must be relative when path_relative_to_agent_workspace=true"
+                raise ValueError(msg)
+            if ".." in path.parts:
+                msg = "knowledge_bases.<id>.path must stay within the agent workspace root"
+                raise ValueError(msg)
         return self

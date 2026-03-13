@@ -128,6 +128,7 @@ agents:
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
 | `memory_file_path`            | string | `null`      | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory                                                                                 |
+| `workspace`                   | object | `null`      | Optional scoped workspace for per-requester files, context, and knowledge. Relative workspace paths resolve relative to `config.yaml` when unscoped and under the active worker root when `worker_scope` is active                                                                                                                |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
 | `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                |
 | `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
@@ -164,6 +165,43 @@ Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the
 
 The dashboard credential UI can only manage credentials for unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` treat credentials as runtime-owned worker state instead of dashboard-managed state.
 
+## Scoped Workspaces
+
+Use `workspace` when an agent needs a per-worker file tree instead of one shared config-relative directory.
+
+```
+knowledge_bases:
+  mind_memory:
+    path: memory
+    path_relative_to_agent_workspace: true
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    tools: [file, shell]
+    worker_tools: [file, shell]
+    worker_scope: user
+    memory_backend: file
+    workspace:
+      path: mind_data
+      template: mind
+      context_files:
+        - SOUL.md
+        - AGENTS.md
+        - USER.md
+        - IDENTITY.md
+        - TOOLS.md
+        - HEARTBEAT.md
+        - MEMORY.md
+      file_memory_path: .
+    knowledge_bases: [mind_memory]
+```
+
+`workspace.path` is always relative. Without worker scoping, it resolves relative to `config.yaml`. With `worker_scope: user`, the same `path` resolves inside each requester's worker root, so each requester gets an independent `mind_data/` tree. `template: mind` scaffolds `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and `memory/` on first use. `workspace.context_files` loads files relative to that effective workspace root. `workspace.file_memory_path: .` makes the file-memory backend use the workspace root itself, which keeps `MEMORY.md` and `memory/` inside each requester's workspace. Top-level `context_files` and `memory_file_path` remain available for shared config-relative setups, including the default `mindroom config init` output.
+
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID. For an agent, MindRoom checks `room_thread_modes` in this order. First, it checks an exact room ID key. Second, it checks the managed room key/alias associated with that room ID. Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room. If none match, it falls back to `thread_mode`.
@@ -179,6 +217,7 @@ You can inject file content directly into an agent's role context without using 
 `context_files` behavior:
 
 - Paths are resolved relative to the config file directory
+- `workspace.context_files` paths are resolved relative to the effective workspace root
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 

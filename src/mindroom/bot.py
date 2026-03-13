@@ -106,6 +106,7 @@ from .constants import (
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from .knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -399,22 +400,28 @@ class AgentBot:
             return agent_config.show_tool_calls
         return self.config.defaults.show_tool_calls
 
-    def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
-        """Get shared knowledge instance for a configured knowledge base."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return None
-        manager = orchestrator.knowledge_managers.get(base_id)
-        if manager is None:
-            return None
-        return manager.get_knowledge()
-
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
         """Return shared knowledge for agents assigned to one or more knowledge bases."""
+
+        def _get_knowledge(base_id: str) -> Knowledge | None:
+            base_config = self.config.knowledge_bases[base_id]
+            if not base_config.path_relative_to_agent_workspace:
+                manager = self.orchestrator.knowledge_managers.get(base_id) if self.orchestrator is not None else None
+                if manager is None:
+                    manager = get_knowledge_manager(base_id)
+            else:
+                manager = get_knowledge_manager(
+                    base_id,
+                    agent_name=agent_name,
+                    config=self.config,
+                    storage_path=self.storage_path,
+                )
+            return manager.get_knowledge() if manager is not None else None
+
         return resolve_agent_knowledge(
             agent_name,
             self.config,
-            self._get_shared_knowledge,
+            _get_knowledge,
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
@@ -1680,6 +1687,13 @@ class AgentBot:
             user_id=requester_user_id,
             session_id=session_id,
         )
+        for agent_name in agent_names:
+            await ensure_agent_knowledge_managers(
+                agent_name,
+                self.config,
+                self.storage_path,
+                execution_identity=execution_identity,
+            )
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1900,7 +1914,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -1922,6 +1935,12 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        await ensure_agent_knowledge_managers(
+            self.agent_name,
+            self.config,
+            self.storage_path,
+            execution_identity=execution_identity,
+        )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
 
@@ -1929,6 +1948,7 @@ class AgentBot:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
                 with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    knowledge = self._knowledge_for_agent(self.agent_name)
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2017,7 +2037,6 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2040,6 +2059,12 @@ class AgentBot:
             session_id=session_id,
             agent_name=agent_name,
         )
+        await ensure_agent_knowledge_managers(
+            agent_name,
+            self.config,
+            self.storage_path,
+            execution_identity=execution_identity,
+        )
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
@@ -2053,6 +2078,7 @@ class AgentBot:
 
         async with typing_indicator(self.client, room_id):
             with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                knowledge = self._knowledge_for_agent(agent_name)
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
@@ -2194,7 +2220,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
@@ -2217,12 +2242,19 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        await ensure_agent_knowledge_managers(
+            self.agent_name,
+            self.config,
+            self.storage_path,
+            execution_identity=execution_identity,
+        )
         run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
                 with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    knowledge = self._knowledge_for_agent(self.agent_name)
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,

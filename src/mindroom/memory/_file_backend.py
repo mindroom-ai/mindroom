@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
+from mindroom.workspaces import resolve_agent_file_memory_path
 
 from ._policy import (
     agent_name_from_scope_user_id,
@@ -80,6 +81,16 @@ def _scope_dir(
 ) -> Path:
     agent_name = agent_name_from_scope_user_id(scope_user_id)
     if agent_name is not None:
+        workspace_memory_path = resolve_agent_file_memory_path(
+            agent_name,
+            config,
+            state_storage_path=resolution.storage_path,
+            use_state_storage_path=not resolution.use_configured_path,
+            create=create,
+        )
+        if workspace_memory_path is not None:
+            return workspace_memory_path
+
         agent_config = config.agents.get(agent_name)
         if (
             resolution.allow_agent_memory_file_path_override

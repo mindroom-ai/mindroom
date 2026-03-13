@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
@@ -23,10 +24,9 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.workspaces import resolve_agent_workspace
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
@@ -104,11 +104,11 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
-def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChunk]:
+def _load_context_files(context_files: list[Path | str]) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
-        resolved_path = resolve_config_relative_path(raw_path)
+        resolved_path = raw_path if isinstance(raw_path, Path) else resolve_config_relative_path(raw_path)
         if resolved_path.is_file():
             loaded_parts.append(
                 _AdditionalContextChunk(
@@ -211,6 +211,8 @@ def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_pr
 def _build_additional_context(
     agent_config: AgentConfig,
     max_preload_chars: int,
+    *,
+    workspace_context_files: tuple[Path, ...] = (),
 ) -> str:
     """Build additional role context from configured files/directories.
 
@@ -218,8 +220,9 @@ def _build_additional_context(
     reload), so file content snapshots update on agent hot-reload.
     """
     personality_chunks: list[_AdditionalContextChunk] = []
-    if agent_config.context_files:
-        personality_chunks = _load_context_files(agent_config.context_files)
+    context_files: list[Path | str] = [*agent_config.context_files, *workspace_context_files]
+    if context_files:
+        personality_chunks = _load_context_files(context_files)
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
     if omitted_chars > 0:
@@ -229,16 +232,6 @@ def _build_additional_context(
             max_preload_chars=max_preload_chars,
         )
     return additional_context
-
-
-def _resolve_agent_workspace_path(agent_config: AgentConfig) -> Path | None:
-    """Return the agent workspace directory when one is explicitly configured."""
-    if agent_config.memory_file_path is None:
-        return None
-
-    workspace_path = resolve_config_relative_path(agent_config.memory_file_path)
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    return workspace_path
 
 
 def _tool_supports_base_dir(tool_name: str) -> bool:
@@ -264,11 +257,21 @@ def _tool_init_overrides(
     return {"base_dir": str(workspace_path)}
 
 
-def build_agent_tool_init_context(config: Config, agent_name: str) -> AgentToolInitContext:
+def build_agent_tool_init_context(
+    config: Config,
+    agent_name: str,
+    *,
+    storage_path: Path | None = None,
+) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
-    agent_config = config.get_agent(agent_name)
+    workspace = resolve_agent_workspace(
+        agent_name,
+        config,
+        base_storage_path=storage_path,
+        create=True,
+    )
     return AgentToolInitContext(
-        workspace_path=_resolve_agent_workspace_path(agent_config),
+        workspace_path=workspace.root if workspace is not None else None,
         worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name)),
         worker_scope=config.get_agent_worker_scope(agent_name),
     )
@@ -544,12 +547,22 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     tool_names = config.get_agent_tools(agent_name)
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        storage_path=resolved_storage_path,
+    )
     worker_scope = tool_init_context.worker_scope
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
         config=config,
+    )
+    workspace = resolve_agent_workspace(
+        agent_name,
+        config,
+        base_storage_path=resolved_storage_path,
+        create=True,
     )
 
     # Create tools
@@ -664,6 +677,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     full_context += _build_additional_context(
         agent_config,
         config.defaults.max_preload_chars,
+        workspace_context_files=workspace.context_files if workspace is not None else (),
     )
 
     # Use rich prompt if available, otherwise use YAML config

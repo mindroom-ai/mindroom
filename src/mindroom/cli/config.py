@@ -28,6 +28,7 @@ from mindroom.constants import (
     env_key_for_provider,
 )
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.workspaces import ensure_workspace_template
 
 console = Console()
 
@@ -65,33 +66,9 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
 _CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
 
 
-_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
-_MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
-_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
-
-
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
     """Create the default Mind workspace files used by the full/public templates."""
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
-
-    for filename in _MIND_WORKSPACE_TEMPLATE_FILES:
-        source_path = _MIND_TEMPLATE_DIR / filename
-        file_path = workspace_path / filename
-        if file_path.exists() and not force:
-            continue
-        file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    memory_path = workspace_path / "MEMORY.md"
-    if not memory_path.exists() or force:
-        memory_path.write_text(_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+    ensure_workspace_template(workspace_path, template="mind", force=force)
 
 
 def _write_env_file(
