@@ -97,7 +97,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
+`memory_file_path` seeds the OpenClaw workspace into the agent's canonical workspace root, so the canonical `MEMORY.md` is loaded automatically by the file backend as the entrypoint. Every runtime for that agent reads and writes that same canonical copy, so there is no need to list `MEMORY.md` in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 

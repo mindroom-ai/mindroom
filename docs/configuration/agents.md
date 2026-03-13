@@ -64,7 +64,7 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Custom file-memory scope directory (optional, overrides default <root>/agent_<name>/)
+    # Canonical workspace seed path for file memory (optional)
     memory_file_path: ./openclaw_data
 
     # Assign agent to one or more configured knowledge bases (optional)
@@ -132,7 +132,7 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
-| `memory_file_path` | string | `null` | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory |
+| `memory_file_path` | string | `null` | Workspace path to seed into this agent's canonical state root when using file memory |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -157,6 +157,10 @@ Per-agent values override them.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+When `memory_file_path` is set, MindRoom seeds that path into the agent's canonical workspace and treats the canonical copy as authoritative.
+Relative paths are resolved from the config directory.
+Absolute paths are copied once into a deterministic `_absolute/...` location under the agent workspace so every runtime sees the same files.
+`context_files` follow the same canonicalization rule.
 
 ## Worker Routing
 
@@ -176,12 +180,12 @@ Leave `worker_scope` unset to keep proxied calls unscoped.
 They still run in the sandbox runner, but they do not get a scoped reusable worker runtime.
 `worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
-### Planned State Ownership Invariant
+### State Ownership
 
-The persistent worker runtime work treats state ownership separately from runtime isolation.
+MindRoom treats state ownership separately from runtime isolation.
 Each agent has one canonical state root.
 That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state.
-All worker scopes should read and write that same canonical agent state root.
+All worker scopes read and write that same canonical agent state root.
 `worker_scope` controls execution isolation and runtime reuse, not which files are authoritative.
 Multiple runtimes may access the same agent state root concurrently, so sensitive files and databases must tolerate concurrent writers or use explicit locking.
 

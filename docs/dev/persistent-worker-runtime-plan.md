@@ -2,12 +2,11 @@
 
 Last updated: 2026-03-13
 Owner: MindRoom backend
-Status: Phase 1 routing scaffolding exists in code.
-Phase 2 is not complete and must be reworked around canonical agent-owned state.
-Later backend and provider work exists in code, but it should be treated as provisional until the Phase 2 state-ownership model is corrected.
+Status: Phases 1, 2, and 3 are implemented in code.
+Phase 4 provider and operator hardening is still in progress.
 The backend-neutral worker contract, lifecycle handling, default routing policy, and Kubernetes provider implementation all exist.
-However, several mutable paths still behave as worker-owned state today, which conflicts with the intended model documented here.
-The immediate priority is to realign implementation and tests with canonical per-agent state before treating later phases as complete.
+Canonical per-agent state now backs context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state across all worker scopes.
+Worker runtimes remain non-authoritative execution environments for caches, temporary files, and provider metadata.
 
 ## Objective
 
@@ -29,12 +28,10 @@ Doing the work in this order prevents expensive lifecycle and deployment work fr
 
 ## Current Status
 
-Phase 1 and Phase 3 established the routing, backend, and lifecycle scaffolding.
-The current codebase can route tool calls into persistent workers and can provision dedicated Kubernetes workers.
-However, the current implementation still treats several mutable paths as worker-owned state.
-That is not the intended end state.
-This document now clarifies the target model as agent-owned canonical state across all scopes.
-Implementation and tests should be realigned to that invariant before any further productionization work.
+Phase 1, Phase 2, and Phase 3 are implemented in code.
+The current codebase routes tool calls into persistent workers and resolves durable agent state through one canonical root per agent across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
+Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
+Phase 4 remains in progress as production hardening, operator guidance, metrics, and broader rollout validation continue.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
@@ -301,7 +298,7 @@ The local provider should support introspection of active workers and cleanup of
 
 The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
 The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
-The corrected target model is for Kubernetes workers to mount the same canonical agent state root for the same agent across all scopes, while still keeping worker-specific runtime caches and metadata isolated by worker key.
+The current implementation mounts the same canonical agent state root for the same agent across all scopes, while still keeping worker-specific runtime caches and metadata isolated by worker key.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
 Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical agent state roots it executes against, as well as an authenticated internal endpoint.

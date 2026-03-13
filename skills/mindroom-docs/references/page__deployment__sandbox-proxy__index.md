@@ -1,6 +1,6 @@
 # Sandbox Proxy Isolation
 
-When agents have code-execution tools (`shell`, `file`, `python`), they can read and modify anything on the filesystem, including config files, credentials, and application code. The **sandbox proxy** isolates these tools by forwarding their calls to a separate worker runtime that has no direct access to the primary process secrets. This page describes the intended end-state model for sandboxed execution. The current backend still has worker-rooted state behavior in some paths, so treat the canonical agent-state language below as target behavior unless a section explicitly says it is current behavior.
+When agents have code-execution tools (`shell`, `file`, `python`), they can read and modify anything on the filesystem, including config files, credentials, and application code. The **sandbox proxy** isolates these tools by forwarding their calls to a separate worker runtime that has no direct access to the primary process secrets. This page describes the current sandboxed execution model.
 
 ## How it works
 
@@ -16,7 +16,7 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 1. Agent invokes `shell.run_shell_command(...)` or another worker-routed tool.
 1. The primary MindRoom runtime resolves the target worker from the configured backend plus worker scope.
 1. The call is forwarded over HTTP to the target worker runtime.
-1. In the target model, the worker executes the tool locally against the agent's canonical state plus any worker-local caches and returns the result.
+1. The worker executes the tool locally against the agent's canonical state plus any worker-local caches and returns the result.
 1. All other tools such as API tools or Matrix-bound tools execute in the primary MindRoom runtime as usual.
 
 The worker runtime authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once. Credentials never become part of the normal tool arguments or the model prompt.
@@ -26,9 +26,9 @@ MindRoom currently ships two worker backend shapes:
 - `static_runner`: one shared sandbox-runner process, usually a sidecar container or a local HTTP service.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
 
-## Target State Ownership
+## State Ownership
 
-The intended end state is: Each agent has one canonical state root. That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state. All worker scopes should read and write that same canonical agent state root. Worker runtimes may keep their own virtualenvs, caches, scratch files, and provider metadata, but those files are not authoritative agent state. Multiple runtimes may access the same canonical agent state root concurrently, so sensitive files and databases must tolerate concurrent writers or use explicit locking.
+Each agent has one canonical state root. That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state. All worker scopes read and write that same canonical agent state root. Worker runtimes may keep their own virtualenvs, caches, scratch files, and provider metadata, but those files are not authoritative agent state. Multiple runtimes may access the same canonical agent state root concurrently, so sensitive files and databases must tolerate concurrent writers or use explicit locking.
 
 ## Deployment modes
 
@@ -67,14 +67,14 @@ volumes:
   sandbox-workspace:
 ```
 
-For the target model, add a shared agent-state volume or bind mount that both the primary runtime and the runner can access. Keep secrets and other primary-only files on separate mounts that are not exposed to the runner.
+Add a shared agent-state volume or bind mount that both the primary runtime and the runner can access. Keep secrets and other primary-only files on separate mounts that are not exposed to the runner.
 
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **Target shared agent-state access** — the runner should be able to read and write the same canonical agent state roots used by the primary runtime
+- **Shared agent-state access** — the runner reads and writes the same canonical agent state roots used by the primary runtime
 - **Scratch workspace** — a dedicated volume for worker-local runtime files and caches
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the worker-local workspace so the tool registry and cache files have a private runtime home
 
@@ -83,13 +83,13 @@ Key differences from the primary MindRoom runtime:
 In Kubernetes the shared runner can still run as a second container in the same pod, sharing `localhost` networking. This is the `workerBackend: static_runner` Helm mode. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The sidecar gets:
 
 - An `emptyDir` volume for worker-local scratch workspace and caches.
-- In the target model, access to the same shared storage that exposes canonical agent state roots to the primary runtime.
+- Access to the same shared storage that exposes canonical agent state roots to the primary runtime.
 - Read-only access to config for plugin tool registration.
 - No access to the primary secrets volume.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
-In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. Dedicated workers must be able to access the canonical agent state roots for the agents they execute, while still keeping worker-local caches and metadata isolated by worker key. That canonical-agent-state access is the target model for this mode, not a claim that every current backend path already behaves that way. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
+In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. Dedicated workers must be able to access the canonical agent state roots for the agents they execute, while still keeping worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
 
 Use the instance Helm chart with values like:
 
@@ -105,7 +105,7 @@ sandbox_proxy_token: "replace-me"
 
 Important notes for this mode:
 
-- `storageAccessMode` should be `ReadWriteMany` for the target model because multiple dedicated workers may need concurrent access to the same canonical agent state root.
+- `storageAccessMode` should be `ReadWriteMany` because multiple dedicated workers may need concurrent access to the same canonical agent state root.
 - If you must keep `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 - `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
 - The chart creates the worker-manager ServiceAccount, Role, RoleBinding, and worker-specific NetworkPolicy rules automatically when this backend is enabled.
@@ -208,8 +208,8 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - The shared token authenticates all proxy traffic, so use a strong random value.
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space for worker-local runtime files and should, in the target model, still access the canonical agent state roots used by the primary runtime.
-- With `workerBackend: kubernetes`, dedicated worker pods should, in the target model, access the same canonical agent state roots across scopes while keeping worker-local caches isolated by worker key.
+- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space for worker-local runtime files and still accesses the canonical agent state roots used by the primary runtime.
+- With `workerBackend: kubernetes`, dedicated worker pods access the same canonical agent state roots across scopes while keeping worker-local caches isolated by worker key.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ## Per-agent configuration

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -38,6 +39,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.skills import Skills
+
+
+def _canonical_absolute_agent_path(storage_path: Path, agent_name: str, source_path: Path) -> Path:
+    parts = list(source_path.parts)
+    if source_path.anchor and parts and parts[0] == source_path.anchor:
+        parts = parts[1:]
+
+    canonical_path = agent_workspace_root_path(storage_path, agent_name) / "_absolute"
+    if source_path.anchor not in {"", "/", "\\"}:
+        canonical_path /= re.sub(r"[^a-zA-Z0-9._@+-]+", "_", source_path.anchor.replace(":", "")).strip("_") or "root"
+    return canonical_path.joinpath(*parts)
 
 
 def _write_skill(
@@ -348,7 +360,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
 
-    workspace = tmp_path / "mind_data"
+    workspace = tmp_path / "external" / "mind_data"
     config = _base_config(["dispatch"])
     config.agents["code"].memory_backend = "file"
     config.agents["code"].memory_file_path = str(workspace)
@@ -357,13 +369,14 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     config.agents["code"].worker_scope = "user"
     config.agents["code"].worker_tools = ["coding"]
 
-    toolkits = _collect_agent_toolkits(config, "code")
+    toolkits = _collect_agent_toolkits(config, "code", storage_path=tmp_path)
 
-    assert workspace.is_dir()
+    expected_workspace = _canonical_absolute_agent_path(tmp_path, "code", workspace)
+    assert expected_workspace.is_dir()
     assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
-    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace)}
 
 
 def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_workspace(

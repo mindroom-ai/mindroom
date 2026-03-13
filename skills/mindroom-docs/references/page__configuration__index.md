@@ -75,7 +75,7 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
-    memory_file_path: ./openclaw_data  # Optional: Per-agent file-memory scope directory (relative to config.yaml)
+    memory_file_path: ./openclaw_data  # Optional: Seed path for the agent's canonical file-memory workspace
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
       - ./openclaw_data/SOUL.md

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -32,6 +33,17 @@ from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _canonical_absolute_agent_path(storage_path: Path, agent_name: str, source_path: Path) -> Path:
+    parts = list(source_path.parts)
+    if source_path.anchor and parts and parts[0] == source_path.anchor:
+        parts = parts[1:]
+
+    canonical_path = agent_workspace_root_path(storage_path, agent_name) / "_absolute"
+    if source_path.anchor not in {"", "/", "\\"}:
+        canonical_path /= re.sub(r"[^a-zA-Z0-9._@+-]+", "_", source_path.anchor.replace(":", "")).strip("_") or "root"
+    return canonical_path.joinpath(*parts)
 
 
 @pytest.fixture
@@ -415,6 +427,7 @@ async def test_team_can_crud_member_memory_in_custom_memory_file_path(
 ) -> None:
     workspace = storage_path / "general-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\n\nSeeded note.\n", encoding="utf-8")
 
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
@@ -440,11 +453,14 @@ async def test_team_can_crud_member_memory_in_custom_memory_file_path(
     updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
     assert updated is not None
     assert updated["memory"] == "Updated general private note"
-    assert "Updated general private note" in (workspace / "MEMORY.md").read_text(encoding="utf-8")
+    canonical_workspace = _canonical_absolute_agent_path(storage_path, "general", workspace)
+    assert "Seeded note." in (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Updated general private note" in (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Updated general private note" not in (workspace / "MEMORY.md").read_text(encoding="utf-8")
 
     await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
     assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
-    assert "Updated general private note" not in (workspace / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Updated general private note" not in (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -586,7 +602,10 @@ async def test_file_backend_rejects_path_traversal_memory_id(storage_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_memory_file_path_uses_custom_scope_dir(storage_path: Path, config: Config) -> None:
+async def test_memory_file_path_bootstraps_absolute_path_into_canonical_agent_scope(
+    storage_path: Path,
+    config: Config,
+) -> None:
     workspace = storage_path / "my-workspace"
     workspace.mkdir(parents=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nExisting curated memory.\n", encoding="utf-8")
@@ -597,9 +616,11 @@ async def test_memory_file_path_uses_custom_scope_dir(storage_path: Path, config
 
     await add_agent_memory("New memory entry", "general", storage_path, config)
 
-    content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
+    canonical_workspace = _canonical_absolute_agent_path(storage_path, "general", workspace)
+    content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
     assert "Existing curated memory." in content
     assert "New memory entry" in content
+    assert "New memory entry" not in (workspace / "MEMORY.md").read_text(encoding="utf-8")
     assert not (storage_path / "memory_files" / "agent_general").exists()
 
 
@@ -676,6 +697,8 @@ async def test_memory_file_path_entrypoint_loaded_in_prompt(storage_path: Path, 
 
     enhanced = await build_memory_enhanced_prompt("What language?", "general", storage_path, config)
     assert "I prefer Python over JavaScript." in enhanced
+    canonical_workspace = _canonical_absolute_agent_path(storage_path, "general", workspace)
+    assert (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8").startswith("# Memory")
 
 
 @pytest.mark.asyncio
@@ -690,9 +713,11 @@ async def test_memory_file_path_daily_files_in_custom_scope(storage_path: Path, 
     result = append_agent_daily_memory("Daily note", "general", storage_path, config)
     assert result["memory"] == "Daily note"
 
-    daily_files = list((workspace / "memory").rglob("*.md"))
+    canonical_workspace = _canonical_absolute_agent_path(storage_path, "general", workspace)
+    daily_files = list((canonical_workspace / "memory").rglob("*.md"))
     assert len(daily_files) == 1
     assert "Daily note" in daily_files[0].read_text(encoding="utf-8")
+    assert not list((workspace / "memory").rglob("*.md"))
 
 
 @pytest.mark.asyncio
@@ -712,6 +737,9 @@ async def test_memory_file_path_does_not_affect_other_agents(storage_path: Path,
 
     calc_memories = await list_all_agent_memories("calculator", storage_path, config)
     assert any(memory["memory"] == "Default scope memory" for memory in calc_memories)
+    general_workspace = _canonical_absolute_agent_path(storage_path, "general", workspace)
+    assert (general_workspace / "MEMORY.md").exists()
+    assert not (workspace / "MEMORY.md").exists()
     assert (
         agent_state_root_path(storage_path, "calculator") / "memory_files" / "agent_calculator" / "MEMORY.md"
     ).exists()

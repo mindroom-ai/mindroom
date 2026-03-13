@@ -24,6 +24,7 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _AGENT_WORKSPACE_DIRNAME = "workspace"
+_ABSOLUTE_AGENT_PATH_DIRNAME = "_absolute"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "google",
@@ -213,31 +214,6 @@ def resolve_execution_identity_for_worker_scope(
     )
 
 
-def resolve_agent_worker_key(
-    *,
-    agent_name: str,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> str | None:
-    """Resolve the current worker key for an agent when worker routing is active."""
-    if agent_name not in config.agents:
-        return None
-
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    if worker_scope is None:
-        return None
-
-    identity = resolve_execution_identity_for_worker_scope(
-        worker_scope,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    if identity is None:
-        return None
-
-    return resolve_worker_key(worker_scope, identity, agent_name=agent_name)
-
-
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_dir_part(worker_key)
@@ -312,13 +288,28 @@ def _bootstrap_missing_path(source_path: Path, target_path: Path, *, state_root:
     marker_path.touch()
 
 
-def _resolve_agent_workspace_target(path_text: str, *, agent_root: Path) -> Path:
-    candidate = (agent_root / Path(path_text)).resolve()
+def _canonical_agent_workspace_relative_path(path_text: str, *, source_path: Path) -> Path:
+    raw_path = Path(path_text).expanduser()
+    if not raw_path.is_absolute():
+        return raw_path
+
+    target_parts = [_ABSOLUTE_AGENT_PATH_DIRNAME]
+    if source_path.anchor not in {"", "/", "\\"}:
+        target_parts.append(_normalize_worker_dir_part(source_path.anchor.replace(":", "")))
+
+    relative_parts = list(source_path.parts)
+    if source_path.anchor and relative_parts and relative_parts[0] == source_path.anchor:
+        relative_parts = relative_parts[1:]
+    return Path(*target_parts, *relative_parts)
+
+
+def _resolve_agent_workspace_target(relative_path: Path, *, agent_root: Path) -> Path:
+    candidate = (agent_root / relative_path).resolve()
     resolved_root = agent_root.resolve()
     try:
         candidate.relative_to(resolved_root)
     except ValueError as exc:
-        msg = f"Agent-owned paths must stay within {resolved_root}: {path_text}"
+        msg = f"Agent-owned paths must stay within {resolved_root}: {relative_path}"
         raise ValueError(msg) from exc
     return candidate
 
@@ -339,14 +330,9 @@ def resolve_agent_owned_path(
     if state_root is None:
         state_root = agent_state_root_path(base_storage_path, agent_name)
 
-    if Path(path_text).is_absolute():
-        return AgentOwnedPath(
-            resolved_path=source_path,
-            state_root=state_root,
-        )
-
+    relative_target = _canonical_agent_workspace_relative_path(path_text, source_path=source_path)
     agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
-    target_path = _resolve_agent_workspace_target(path_text, agent_root=agent_workspace_root)
+    target_path = _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
     _bootstrap_missing_path(source_path, target_path, state_root=state_root)
     return AgentOwnedPath(
         resolved_path=target_path,

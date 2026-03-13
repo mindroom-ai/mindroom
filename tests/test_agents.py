@@ -34,6 +34,17 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
+def _canonical_absolute_agent_path(storage_path: Path, agent_name: str, source_path: Path) -> Path:
+    parts = list(source_path.parts)
+    if source_path.anchor and parts and parts[0] == source_path.anchor:
+        parts = parts[1:]
+
+    canonical_path = agent_workspace_root_path(storage_path, agent_name) / "_absolute"
+    if source_path.anchor not in {"", "/", "\\"}:
+        canonical_path /= re.sub(r"[^a-zA-Z0-9._@+-]+", "_", source_path.anchor.replace(":", "")).strip("_") or "root"
+    return canonical_path.joinpath(*parts)
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
@@ -254,24 +265,28 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """base_dir-aware tools should use the agent workspace from memory_file_path."""
+    """Absolute memory_file_path should seed into the canonical agent workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = tmp_path / "mind_data"
+    workspace = tmp_path / "external" / "mind_data"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "README.md").write_text("Seeded workspace.\n", encoding="utf-8")
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = str(workspace)
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
-    create_agent("general", config=config)
+    create_agent("general", config=config, storage_path=tmp_path)
 
-    assert workspace.is_dir()
+    expected_workspace = _canonical_absolute_agent_path(tmp_path, "general", workspace)
+    assert expected_workspace.is_dir()
+    assert (expected_workspace / "README.md").read_text(encoding="utf-8") == "Seeded workspace.\n"
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
-    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace)}
     assert overrides_by_tool["duckduckgo"] is None
 
 
@@ -320,7 +335,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     """Worker-routed scoped tools should receive the same workspace override as local tools."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = tmp_path / "mind_data"
+    workspace = tmp_path / "external" / "mind_data"
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = str(workspace)
@@ -329,14 +344,15 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     config.agents["general"].worker_scope = "user"
     config.agents["general"].worker_tools = ["coding"]
 
-    create_agent("general", config=config)
+    create_agent("general", config=config, storage_path=tmp_path)
 
-    assert workspace.is_dir()
+    expected_workspace = _canonical_absolute_agent_path(tmp_path, "general", workspace)
+    assert expected_workspace.is_dir()
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
-    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace)}
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -817,7 +833,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
 
 @patch("mindroom.agents.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
-    """Configured context files should be prepended to role context."""
+    """Absolute context files should seed once into the canonical agent root."""
     config = Config.from_yaml()
     soul_path = tmp_path / "SOUL.md"
     user_path = tmp_path / "USER.md"
@@ -833,6 +849,19 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     assert "Core personality directive." in agent.role
     assert "### USER.md" in agent.role
     assert "User preference: concise answers." in agent.role
+
+    canonical_soul = _canonical_absolute_agent_path(tmp_path, "general", soul_path)
+    canonical_user = _canonical_absolute_agent_path(tmp_path, "general", user_path)
+    assert canonical_soul.read_text(encoding="utf-8") == "Core personality directive."
+    assert canonical_user.read_text(encoding="utf-8") == "User preference: concise answers."
+
+    canonical_soul.write_text("Canonical soul directive.", encoding="utf-8")
+    soul_path.write_text("Changed source directive.", encoding="utf-8")
+
+    updated_agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "Canonical soul directive." in updated_agent.role
+    assert "Changed source directive." not in updated_agent.role
 
 
 @patch("mindroom.agents.SqliteDb")
