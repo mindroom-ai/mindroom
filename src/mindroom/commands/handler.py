@@ -29,6 +29,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_exec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     import nio
     import structlog
@@ -57,6 +58,7 @@ class CommandHandlerContext:
 
     client: nio.AsyncClient
     config: Config
+    storage_path: Path
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -207,9 +209,14 @@ def _resolve_skill_command_agent(  # noqa: C901
     )
 
 
-def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
+def _collect_agent_toolkits(
+    config: Config,
+    agent_name: str,
+    *,
+    storage_path: Path | None = None,
+) -> list[tuple[str, Toolkit]]:
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name)
+    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=storage_path)
     worker_scope = tool_init_context.worker_scope
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in config.get_agent_tools(agent_name):
@@ -354,6 +361,7 @@ async def _maybe_await(value: object) -> object:
 async def _run_skill_command_tool(
     *,
     config: Config,
+    storage_path: Path | None = None,
     agent_name: str,
     command_tool: str,
     skill_name: str,
@@ -379,7 +387,7 @@ async def _run_skill_command_tool(
 
     try:
         with tool_execution_identity(execution_identity):
-            toolkits = _collect_agent_toolkits(config, agent_name)
+            toolkits = _collect_agent_toolkits(config, agent_name, storage_path=storage_path)
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
                 return f"❌ {error}"
@@ -575,6 +583,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif spec.dispatch and spec.dispatch.kind == "tool":
                     response_text = await _run_skill_command_tool(
                         config=context.config,
+                        storage_path=context.storage_path,
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,

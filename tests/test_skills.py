@@ -24,7 +24,13 @@ from mindroom.tool_system.metadata import (
     register_tool_with_metadata,
 )
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    resolve_worker_key,
+    tool_execution_identity,
+    worker_root_path,
+)
 from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
@@ -357,6 +363,52 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+
+
+def test_collect_agent_toolkits_uses_runtime_storage_path_for_worker_owned_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill command dispatch should respect the bot runtime storage path."""
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
+        captured_calls.append((tool_name, dict(kwargs)))
+        return object()
+
+    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].memory_file_path = "./mind_data"
+    config.agents["code"].tools = ["coding"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_scope = "shared"
+    config.agents["code"].worker_tools = ["coding"]
+
+    runtime_storage = tmp_path / "runtime-storage"
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    worker_key = resolve_worker_key("shared", identity, agent_name="code")
+    assert worker_key is not None
+    expected_workspace = worker_root_path(runtime_storage, worker_key) / "workspace" / "code" / "mind_data"
+
+    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
+    with tool_execution_identity(identity):
+        toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+
+    assert [tool_name for tool_name, _ in toolkits] == ["coding"]
+    assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
+    assert expected_workspace.is_dir()
 
 
 @pytest.mark.asyncio
