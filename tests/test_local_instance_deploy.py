@@ -229,6 +229,57 @@ def test_remove_instance_preserves_state_when_teardown_fails(
     assert env_file.exists()
 
 
+def test_remove_instance_repairs_container_owned_data_before_deleting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removal should recover from root-owned bind-mount files created by containers."""
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    data_dir = Path(instance.data_dir)
+    data_dir.mkdir(parents=True)
+    env_file = env_dir / "alpha.env"
+    env_file.write_text("INSTANCE_NAME=alpha\n")
+
+    registry = deploy.Registry(
+        instances={"alpha": instance},
+        allocated_ports=deploy.AllocatedPorts(mindroom=[instance.mindroom_port], matrix=[instance.matrix_port or 8448]),
+    )
+
+    commands: list[str] = []
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        if "docker ps -a --filter" in cmd:
+            return SimpleNamespace(returncode=0, stdout="ghcr.io/mindroom-ai/mindroom-tuwunel:latest\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    permission_denied = PermissionError("permission denied")
+    rmtree_calls = 0
+
+    def _rmtree(path: Path) -> None:
+        nonlocal rmtree_calls
+        rmtree_calls += 1
+        assert path == data_dir
+        if rmtree_calls == 1:
+            raise permission_denied
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    monkeypatch.setattr(deploy.shutil, "rmtree", _rmtree)
+
+    deploy._remove_instance("alpha", registry, deploy.console)
+
+    assert rmtree_calls == 2
+    assert any(cmd.startswith("docker run --rm ") for cmd in commands)
+    assert "alpha" not in registry.instances
+    assert not env_file.exists()
+    assert registry.allocated_ports.mindroom == []
+    assert registry.allocated_ports.matrix == []
+
+
 def test_remove_all_persists_progress_when_later_instance_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -274,6 +325,18 @@ def test_get_actual_status_does_not_count_wellknown_as_matrix_running(monkeypatc
     def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
         assert "docker ps --filter" in cmd
         return SimpleNamespace(returncode=0, stdout="wellknown\n", stderr="")
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    assert deploy.get_actual_status("alpha") == (False, False)
+
+
+def test_get_actual_status_requires_matrix_runtime_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Database sidecars alone should not count as a running Matrix server."""
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        assert "docker ps --filter" in cmd
+        return SimpleNamespace(returncode=0, stdout="postgres\nredis\n", stderr="")
 
     monkeypatch.setattr(deploy.subprocess, "run", _run)
 

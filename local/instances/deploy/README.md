@@ -72,9 +72,11 @@ This will start:
 
 ### 4. Access Your Instance
 
-After starting, these direct host-port endpoints are available immediately:
+After starting, these direct host-port endpoints are exposed on the host:
 - **MindRoom**: `http://localhost:{MINDROOM_PORT}` (e.g., `http://localhost:8765`)
 - **Matrix Server** (if enabled): `http://localhost:{MATRIX_PORT}` (e.g., `http://localhost:8448`)
+
+Some services, especially Synapse, can take a moment before they answer requests on those ports.
 
 When your Traefik config matches the instance's `TRAEFIK_*` settings, these HTTPS/domain routes are published:
 - **MindRoom Domain**: `https://{DOMAIN}`
