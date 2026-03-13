@@ -5,7 +5,7 @@ Owner: MindRoom backend
 Status: Phase 1 is complete.
 Phase 2 is partially complete.
 Canonical per-agent state ownership is implemented, but per-agent filesystem visibility for agent-isolated scopes is not fully enforced yet.
-Phase 3 is largely implemented.
+Phase 3 is complete.
 Phase 4 provider and operator hardening is still in progress.
 The backend-neutral worker contract, lifecycle handling, default routing policy, and Kubernetes provider implementation all exist.
 Worker runtimes remain non-authoritative execution environments for caches, temporary files, and provider metadata.
@@ -47,7 +47,7 @@ Phase 2 is only partially complete.
 The current codebase routes tool calls into persistent workers and resolves durable agent state through one canonical root per agent across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
 That fixes state ownership, but it does not yet fully fix filesystem visibility for agent-isolated scopes.
 Some current backend paths still expose broader shared storage than this plan allows for `shared`, `user_agent`, and unscoped dedicated execution.
-Phase 3 is largely implemented because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
+Phase 3 is complete because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
 Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
 Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
@@ -488,7 +488,7 @@ System tests should cover:
 Phase 1 is complete.
 Phase 1 introduced `worker_scope`, worker key resolution, execution identity propagation, and generic worker-routed tool dispatch.
 Phase 1 validated persistence with `shell`, `file`, and `python`.
-Phase 1 introduced the first path-alignment work for worker-routed memory, but that work now needs to be redirected toward canonical agent-state resolution.
+Phase 1 introduced the first path-alignment work for worker-routed memory, which later evolved into the canonical agent-state work delivered in Phase 2.
 
 ### Phase 2: Agent-Owned Canonical State And Filesystem Visibility
 
@@ -497,11 +497,14 @@ Canonical agent-owned state is implemented.
 Per-agent filesystem visibility for agent-isolated scopes is still missing in some backend paths.
 Phase 2 remains the correctness phase.
 
-Phase 2 must deliver:
+Phase 2 already delivered:
 
-- Introduce canonical agent-state resolution that is independent of worker scope.
-- Route `context_files`, workspace files, file-backed memory, mem0-backed state, sessions, and learning through that canonical agent state root.
-- Separate canonical agent state from worker runtime caches, virtualenvs, scratch files, and provider metadata.
+- Canonical agent-state resolution that is independent of worker scope.
+- Routing `context_files`, workspace files, file-backed memory, mem0-backed state, sessions, and learning through that canonical agent state root.
+- Separation of canonical agent state from worker runtime caches, virtualenvs, scratch files, and provider metadata.
+
+Phase 2 remaining work is:
+
 - Ensure `shared`, `user_agent`, and unscoped dedicated execution only expose the addressed agent root plus the worker runtime root.
 - Treat `user` as a deliberate multi-agent workstation mode if it remains supported for filesystem-capable worker tools.
 - Add explicit concurrent-writer handling for sensitive agent-owned artifacts.
