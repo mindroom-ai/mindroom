@@ -436,6 +436,29 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     assert toolkits_by_name["delegate"]._storage_path == runtime_storage
 
 
+def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: Path) -> None:
+    """Implicit delegate/self_config toolkits should match create_agent() behavior."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = []
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].allow_self_config = True
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["delegate", "self_config"]
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["delegate"]._storage_path == runtime_storage
+
+
 @pytest.mark.asyncio
 async def test_skill_command_tool_dispatch() -> None:
     """Run a tool dispatch for a skill command with raw args."""

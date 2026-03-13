@@ -420,6 +420,33 @@ def build_agent_toolkit(
     )
 
 
+def get_agent_toolkit_names(
+    agent_name: str,
+    config: Config,
+    *,
+    delegation_depth: int = 0,
+) -> list[str]:
+    """Return the complete ordered toolkit list for an agent runtime."""
+    tool_names = list(config.get_agent_tools(agent_name))
+    agent_config = config.get_agent(agent_name)
+
+    if agent_config.delegate_to and "delegate" not in tool_names:
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+
+        if delegation_depth < _MAX_DEPTH:
+            tool_names.append("delegate")
+
+    allow_self_config = (
+        agent_config.allow_self_config
+        if agent_config.allow_self_config is not None
+        else config.defaults.allow_self_config
+    )
+    if allow_self_config and "self_config" not in tool_names:
+        tool_names.append("self_config")
+
+    return tool_names
+
+
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 _RICH_PROMPTS = {
     "code": agent_prompts.CODE_AGENT_PROMPT,
@@ -674,7 +701,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     load_plugins(config)
 
-    tool_names = config.get_agent_tools(agent_name)
+    tool_names = get_agent_toolkit_names(
+        agent_name,
+        config,
+        delegation_depth=delegation_depth,
+    )
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     memory_storage_path = resolve_agent_state_storage_path(
@@ -701,29 +732,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tools.append(toolkit)
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
-
-    # Auto-inject delegation tool when delegate_to is configured
-    from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools  # noqa: PLC0415
-
-    if agent_config.delegate_to and "delegate" not in tool_names and delegation_depth < MAX_DELEGATION_DEPTH:
-        tools.append(
-            DelegateTools(
-                agent_name=agent_name,
-                delegate_to=agent_config.delegate_to,
-                storage_path=resolved_storage_path,
-                config=config,
-                delegation_depth=delegation_depth,
-            ),
-        )
-
-    # Auto-inject self-config tool when allow_self_config is enabled
-    allow_self_config = (
-        agent_config.allow_self_config if agent_config.allow_self_config is not None else defaults.allow_self_config
-    )
-    if allow_self_config and not any(tool.name == "self_config" for tool in tools):
-        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-        tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 
     storage = create_session_storage(agent_name, resolved_storage_path, config)
     learning_storage = (

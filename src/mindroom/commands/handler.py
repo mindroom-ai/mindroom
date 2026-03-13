@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit
+from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -217,7 +217,7 @@ def _collect_agent_toolkits(
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=storage_path)
     toolkits: list[tuple[str, Toolkit]] = []
-    for tool_name in config.get_agent_tools(agent_name):
+    for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -230,7 +230,7 @@ def _collect_agent_toolkits(
             if toolkit is None:
                 continue
             toolkits.append((tool_name, toolkit))
-        except ValueError as exc:
+        except (ImportError, ValueError) as exc:
             logger.warning(
                 "Failed to load tool for skill dispatch",
                 tool=tool_name,
