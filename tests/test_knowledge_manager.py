@@ -22,6 +22,7 @@ from mindroom.knowledge.manager import (
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
 )
+from mindroom.knowledge.utils import get_knowledge_for_base
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
 
 if TYPE_CHECKING:
@@ -771,6 +772,72 @@ async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots
 
 
 @pytest.mark.asyncio
+async def test_private_knowledge_single_file_target_indexes_without_creating_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private knowledge paths may point to a single file inside the private root."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir(
+        files={
+            "USER.md": "Private user profile.\n",
+            "MEMORY.md": "# Memory\n",
+        },
+    )
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    knowledge=AgentPrivateKnowledgeConfig(path="USER.md", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        manager = managers[private_base_id]
+
+        worker_key = resolve_worker_key("user", identity)
+        assert worker_key is not None
+        knowledge_file = worker_root_path(tmp_path, worker_key) / "mind_data" / "USER.md"
+
+        assert manager.knowledge_path == knowledge_file.resolve()
+        assert knowledge_file.is_file()
+        assert manager.list_files() == [knowledge_file.resolve()]
+        assert _DummyChromaDb.metadatas == [
+            {
+                "source_path": "USER.md",
+                "source_mtime_ns": knowledge_file.stat().st_mtime_ns,
+                "source_size": knowledge_file.stat().st_size,
+            },
+        ]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -914,6 +981,42 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
 
         assert static_managers == {}
         assert resolved_manager is scoped_manager
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ensure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-base lookups should find managers created through ensure_agent_knowledge_managers()."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = Config(
+        agents={
+            "researcher": AgentConfig(
+                display_name="Researcher",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+        },
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        manager = managers["docs"]
+        knowledge = get_knowledge_for_base("docs", config=config, storage_path=tmp_path)
+
+        assert knowledge is manager.get_knowledge()
     finally:
         await shutdown_knowledge_managers()
 

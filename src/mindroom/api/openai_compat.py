@@ -38,10 +38,9 @@ from mindroom.ai import (
 from mindroom.config.main import Config
 from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
 from mindroom.knowledge.manager import (
-    get_knowledge_manager,
     initialize_knowledge_managers,
 )
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.utils import get_knowledge_for_base, resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
@@ -594,15 +593,14 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
     Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
     """
-
-    def _get_knowledge(base_id: str) -> Knowledge | None:
-        manager = get_knowledge_manager(base_id)
-        return manager.get_knowledge() if manager is not None else None
-
     return resolve_agent_knowledge(
         agent_name,
         config,
-        _get_knowledge,
+        lambda base_id: get_knowledge_for_base(
+            base_id,
+            config=config,
+            storage_path=STORAGE_PATH_OBJ,
+        ),
         on_missing_bases=lambda missing_base_ids: logger.warning(
             "Knowledge bases not available for agent",
             agent=agent_name,

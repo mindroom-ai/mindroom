@@ -836,6 +836,25 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
     assert "Template user." not in agent.role
 
 
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_root_requires_execution_identity(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Private agents should fail closed instead of falling back to shared config-relative state."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+    )
+
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        create_agent("general", config=config, storage_path=tmp_path)
+
+    assert not (tmp_path / "mind_data").exists()
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):

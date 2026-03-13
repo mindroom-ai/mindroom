@@ -60,6 +60,20 @@ def _resolve_knowledge_path(path: str) -> Path:
     return resolve_config_relative_path(path)
 
 
+def _knowledge_path_is_file(configured_path: str, knowledge_path: Path) -> bool:
+    if knowledge_path.exists():
+        return knowledge_path.is_file()
+    configured_path_obj = Path(configured_path)
+    return configured_path_obj != Path() and configured_path_obj.suffix != ""
+
+
+def _ensure_knowledge_path_ready(configured_path: str, knowledge_path: Path) -> None:
+    if _knowledge_path_is_file(configured_path, knowledge_path):
+        knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        return
+    knowledge_path.mkdir(parents=True, exist_ok=True)
+
+
 def _safe_identifier(value: str) -> str:
     sanitized = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in value)
     return sanitized or "default"
@@ -333,7 +347,7 @@ def _resolve_effective_knowledge_path(
     if effective_agent_name is None:
         knowledge_path = _resolve_knowledge_path(base_config.path).resolve()
         if create:
-            knowledge_path.mkdir(parents=True, exist_ok=True)
+            _ensure_knowledge_path_ready(base_config.path, knowledge_path)
         return resolved_storage_path, knowledge_path
 
     workspace = resolve_agent_workspace(
@@ -349,7 +363,7 @@ def _resolve_effective_knowledge_path(
 
     knowledge_path = (workspace.root / base_config.path).resolve()
     if create:
-        knowledge_path.mkdir(parents=True, exist_ok=True)
+        _ensure_knowledge_path_ready(base_config.path, knowledge_path)
     return resolved_storage_path, knowledge_path
 
 
@@ -406,14 +420,12 @@ class KnowledgeManager:
         if self.knowledge_path is None:
             self.knowledge_path = _resolve_knowledge_path(self.config.get_knowledge_base_config(self.base_id).path)
         self.knowledge_path = self.knowledge_path.resolve()
-        self.knowledge_path.mkdir(parents=True, exist_ok=True)
-        self._settings = _settings_key(self.config, self.storage_path, self.base_id, self.knowledge_path)
-        self._indexing_settings = _indexing_settings_key(
-            self.config,
-            self.storage_path,
-            self.base_id,
-            self.knowledge_path,
-        )
+        configured_path = self.config.get_knowledge_base_config(self.base_id).path
+        _ensure_knowledge_path_ready(configured_path, self.knowledge_path)
+        if self._git_config() is not None and self._knowledge_source_is_file():
+            msg = f"Knowledge base '{self.base_id}' uses Git sync and must point to a directory, not a file"
+            raise ValueError(msg)
+        self._refresh_settings(self.config, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
             self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
         ).resolve()
@@ -428,12 +440,41 @@ class KnowledgeManager:
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
-    def _knowledge_root(self) -> Path:
+    def _refresh_settings(self, config: Config, storage_path: Path, knowledge_path: Path) -> None:
+        self.config = config
+        self.storage_path = storage_path
+        self.knowledge_path = knowledge_path.resolve()
+        self._settings = _settings_key(config, storage_path, self.base_id, self.knowledge_path)
+        self._indexing_settings = _indexing_settings_key(
+            config,
+            storage_path,
+            self.base_id,
+            self.knowledge_path,
+        )
+
+    def _knowledge_source_path(self) -> Path:
         knowledge_path = self.knowledge_path
         if knowledge_path is None:
             msg = f"Knowledge path for base '{self.base_id}' is not initialized"
             raise RuntimeError(msg)
         return knowledge_path
+
+    def _knowledge_source_is_file(self) -> bool:
+        return _knowledge_path_is_file(
+            self.config.get_knowledge_base_config(self.base_id).path,
+            self._knowledge_source_path(),
+        )
+
+    def _knowledge_root(self) -> Path:
+        knowledge_path = self._knowledge_source_path()
+        if self._knowledge_source_is_file():
+            return knowledge_path.parent
+        return knowledge_path
+
+    def _knowledge_watch_path(self) -> Path:
+        if self._knowledge_source_is_file():
+            return self._knowledge_root()
+        return self._knowledge_source_path()
 
     def matches(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
         """Return True when manager settings match the provided config."""
@@ -463,6 +504,8 @@ class KnowledgeManager:
         return any(part.startswith(".") for part in relative_path.parts)
 
     def _include_file(self, file_path: Path) -> bool:
+        if self._knowledge_source_is_file():
+            return file_path.resolve() == self._knowledge_source_path() and file_path.is_file()
         knowledge_root = self._knowledge_root()
         try:
             relative_path = file_path.relative_to(knowledge_root)
@@ -598,18 +641,28 @@ class KnowledgeManager:
 
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
-        knowledge_root = self._knowledge_root()
-        if not knowledge_root.exists():
+        knowledge_source = self._knowledge_source_path()
+        if not knowledge_source.exists():
             return []
+        if self._knowledge_source_is_file():
+            return [knowledge_source] if self._include_file(knowledge_source) else []
+        knowledge_root = self._knowledge_root()
         return sorted(path for path in knowledge_root.rglob("*") if self._include_file(path))
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
+        knowledge_source = self._knowledge_source_path()
         knowledge_root = self._knowledge_root()
         candidate = Path(file_path)
         resolved = (
             candidate.expanduser().resolve() if candidate.is_absolute() else (knowledge_root / candidate).resolve()
         )
+
+        if self._knowledge_source_is_file():
+            if resolved != knowledge_source:
+                msg = f"Path {resolved} is outside knowledge target {knowledge_source}"
+                raise ValueError(msg)
+            return resolved
 
         try:
             resolved.relative_to(knowledge_root)
@@ -769,7 +822,7 @@ class KnowledgeManager:
             "Knowledge base initialized",
             base_id=self.base_id,
             indexed_count=indexed_count,
-            path=str(self._knowledge_root()),
+            path=str(self._knowledge_source_path()),
         )
 
     async def load_indexed_files(self) -> int:
@@ -932,7 +985,7 @@ class KnowledgeManager:
 
         self._watch_stop_event = asyncio.Event()
         self._watch_task = asyncio.create_task(self._watch_loop())
-        logger.info("Knowledge folder watcher started", base_id=self.base_id, path=str(self._knowledge_root()))
+        logger.info("Knowledge folder watcher started", base_id=self.base_id, path=str(self._knowledge_source_path()))
 
     async def stop_watcher(self) -> None:
         """Stop the background file watcher."""
@@ -1031,14 +1084,14 @@ class KnowledgeManager:
         files = self.list_files()
         return {
             "base_id": self.base_id,
-            "folder_path": str(self._knowledge_root()),
+            "folder_path": str(self._knowledge_source_path()),
             "file_count": len(files),
             "indexed_count": len(self._indexed_files),
         }
 
     async def _watch_loop(self) -> None:
         """Watch the knowledge folder for file changes."""
-        async for changes in awatch(self._knowledge_root(), stop_event=self._watch_stop_event):
+        async for changes in awatch(self._knowledge_watch_path(), stop_event=self._watch_stop_event):
             if not changes:
                 continue
 
@@ -1112,10 +1165,7 @@ async def _ensure_knowledge_manager(
 ) -> KnowledgeManager:
     existing = _knowledge_managers.get(key)
     if existing is not None and existing.matches(config, storage_path, knowledge_path):
-        existing.config = config
-        existing.knowledge_path = knowledge_path.resolve()
-        existing._settings = _settings_key(config, storage_path, base_id, knowledge_path)
-        existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id, knowledge_path)
+        existing._refresh_settings(config, storage_path, knowledge_path)
         if incremental_sync_on_access:
             await _sync_manager_without_full_reindex(existing)
         if start_background_watchers:

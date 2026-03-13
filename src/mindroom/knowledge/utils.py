@@ -46,17 +46,16 @@ def get_knowledge_for_base(
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     manager: KnowledgeManager | None
-    if config.get_private_knowledge_base_agent(base_id) is None:
-        manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
-        if manager is None:
-            manager = get_knowledge_manager(base_id)
-    else:
+    manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+    if manager is None:
         manager = get_knowledge_manager(
             base_id,
             config=config,
             storage_path=storage_path,
             execution_identity=execution_identity,
         )
+    if manager is None and config.get_private_knowledge_base_agent(base_id) is None:
+        manager = get_knowledge_manager(base_id)
     return manager.get_knowledge() if manager is not None else None
 
 

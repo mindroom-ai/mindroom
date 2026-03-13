@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import get_tool_execution_identity, resolve_agent_state_storage_path
 from mindroom.workspaces import resolve_agent_workspace
 
 if TYPE_CHECKING:
@@ -262,12 +262,14 @@ def build_agent_tool_init_context(
     agent_name: str,
     *,
     storage_path: Path | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     workspace = resolve_agent_workspace(
         agent_name,
         config,
         base_storage_path=storage_path,
+        execution_identity=execution_identity,
         create=True,
     )
     return AgentToolInitContext(
@@ -538,6 +540,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    execution_identity = get_tool_execution_identity()
 
     # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
@@ -551,17 +554,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         agent_name,
         storage_path=resolved_storage_path,
+        execution_identity=execution_identity,
     )
     worker_scope = tool_init_context.worker_scope
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
         config=config,
+        execution_identity=execution_identity,
     )
     workspace = resolve_agent_workspace(
         agent_name,
         config,
         base_storage_path=resolved_storage_path,
+        execution_identity=execution_identity,
         create=True,
     )
 
@@ -642,9 +648,19 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
         tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
 
-    storage = create_session_storage(agent_name, resolved_storage_path, config)
+    storage = create_session_storage(
+        agent_name,
+        resolved_storage_path,
+        config,
+        execution_identity=execution_identity,
+    )
     learning_storage = (
-        _create_learning_storage(agent_name, resolved_storage_path, config)
+        _create_learning_storage(
+            agent_name,
+            resolved_storage_path,
+            config,
+            execution_identity=execution_identity,
+        )
         if _is_learning_enabled(agent_config, defaults)
         else None
     )

@@ -15,6 +15,7 @@ from mindroom.agents import create_agent, describe_agent
 from mindroom.knowledge.manager import ensure_agent_knowledge_managers
 from mindroom.knowledge.utils import get_knowledge_for_base, resolve_agent_knowledge
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,10 +84,12 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
+            execution_identity = get_tool_execution_identity()
             await ensure_agent_knowledge_managers(
                 agent_name,
                 self._config,
                 self._storage_path,
+                execution_identity=execution_identity,
             )
 
             knowledge = resolve_agent_knowledge(
@@ -96,6 +99,7 @@ class DelegateTools(Toolkit):
                     base_id,
                     config=self._config,
                     storage_path=self._storage_path,
+                    execution_identity=execution_identity,
                 ),
             )
             agent = create_agent(

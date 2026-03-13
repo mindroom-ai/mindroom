@@ -264,6 +264,8 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - `private` does not automatically load any context files.
 - `private` does not automatically create a private knowledge base.
 - If `private.template_dir` is omitted, MindRoom still creates the private root.
+- Private agents require an active requester-scoped runtime context.
+- MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
 - Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
 - Set `private.context_files` explicitly for any copied files you want loaded into role context.
 - Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
