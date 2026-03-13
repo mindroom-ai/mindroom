@@ -46,7 +46,7 @@ Phase 1 is complete.
 Phase 2 is only partially complete.
 The current codebase routes tool calls into persistent workers and resolves durable agent state through one canonical root per agent across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
 That fixes state ownership, but it does not yet fully fix filesystem visibility for agent-isolated scopes.
-Some current backend paths still expose broader shared storage than this plan allows for `shared`, `user_agent`, and unscoped dedicated execution.
+Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution, but shared-runner and local worker paths still expose broader shared storage than this plan allows for agent-isolated scopes.
 Phase 3 is complete because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
 Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
 Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
@@ -325,8 +325,8 @@ The local provider should support introspection of active workers and cleanup of
 The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
 The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
 The current implementation already provisions dedicated worker Deployments and Services and routes them through the canonical agent-state model.
-What is still missing is stricter per-agent filesystem visibility for agent-isolated scopes.
-Mounting the whole shared agent-state tree is not sufficient for this plan, even if the worker starts inside the correct agent workspace.
+For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes backend now mounts only the addressed agent root plus the worker runtime root.
+`user` intentionally remains broader and mounts the shared `agents/` tree as a multi-agent workstation mode.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
 Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical agent state roots it executes against, as well as an authenticated internal endpoint.

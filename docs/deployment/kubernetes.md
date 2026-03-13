@@ -78,8 +78,8 @@ Dedicated workers may still keep worker-local caches and metadata isolated by wo
 Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
 
 > [!WARNING]
-> The current Kubernetes worker backend mounts the shared storage root into each worker pod.
-> That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation.
+> The Kubernetes dedicated-worker backend now narrows mounts for `shared`, `user_agent`, and unscoped dedicated execution so those workers only see the addressed agent root plus their worker root.
+> `worker_scope=user` is intentionally broader and mounts the `agents/` tree as a per-requester workstation mode.
 > `user` creates one persistent runtime per requester.
 > Multiple agents may run inside that runtime.
 > Those agents may access each other's mounted files inside that runtime.

@@ -9,12 +9,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 WorkerScope = Literal["shared", "user", "user_agent"]
+ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
@@ -173,6 +174,34 @@ def is_unscoped_worker_key(worker_key: str) -> bool:
     return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
 
 
+def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
+    """Return the parsed scope discriminator for one resolved worker key."""
+    parts = worker_key.split(":")
+    if len(parts) < 4 or parts[0] != "v1":
+        return None
+    scope = parts[2]
+    if scope not in {"shared", "user", "user_agent", "unscoped"}:
+        return None
+    return cast("ResolvedWorkerKeyScope", scope)
+
+
+def worker_key_agent_name(worker_key: str) -> str | None:
+    """Return the encoded agent name for one resolved worker key, when present."""
+    scope = resolved_worker_key_scope(worker_key)
+    if scope is None or scope == "user":
+        return None
+
+    parts = worker_key.split(":")
+    if scope in {"shared", "unscoped"}:
+        if len(parts) < 4:
+            return None
+        return parts[3]
+
+    if len(parts) < 5:
+        return None
+    return parts[-1]
+
+
 def resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
     *,
@@ -238,6 +267,26 @@ def shared_storage_root(base_storage_path: Path) -> Path:
 def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
     """Return the canonical shared state root for one agent."""
     return shared_storage_root(base_storage_path) / "agents" / _normalize_worker_dir_part(agent_name)
+
+
+def visible_agent_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
+    """Return the canonical agent-state roots a worker key is allowed to see by default.
+
+    `shared`, `user_agent`, and unscoped dedicated workers are agent-isolated and
+    therefore only see the addressed agent root.
+    `user` is intentionally broader and sees the shared `agents/` tree because it
+    acts as a per-requester multi-agent workstation.
+    """
+    scope = resolved_worker_key_scope(worker_key)
+    if scope is None:
+        return ()
+    if scope == "user":
+        return (shared_storage_root(base_storage_path) / "agents",)
+
+    agent_name = worker_key_agent_name(worker_key)
+    if agent_name is None:
+        return ()
+    return (agent_state_root_path(base_storage_path, agent_name),)
 
 
 def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:

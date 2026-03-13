@@ -330,6 +330,60 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     assert "worker root" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_agent_root(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped workers should reject base_dir overrides outside their visible agent roots."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "worker_key": "v1:tenant-123:shared:general",
+            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "allowed agent roots" in response.json()["detail"]
+
+
+def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": "v1:tenant-123:user:@alice:example.org",
+            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+
+
 @REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_tools(
     runner_client: TestClient,

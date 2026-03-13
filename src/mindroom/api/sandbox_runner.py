@@ -34,6 +34,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     tool_execution_identity,
+    visible_agent_state_roots_for_worker_key,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -461,6 +462,7 @@ def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> Sandb
 def _resolve_worker_base_dir(
     paths: LocalWorkerStatePaths,
     storage_root: Path,
+    worker_key: str,
     requested_base_dir: object | None,
 ) -> Path:
     """Resolve the effective base_dir inside shared storage or the worker root."""
@@ -472,9 +474,11 @@ def _resolve_worker_base_dir(
 
     raw_path = Path(requested_base_dir).expanduser()
     candidate = (storage_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
-    allowed_roots = (paths.root.resolve(), storage_root.resolve())
+    visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
+    shared_roots = visible_agent_roots or (storage_root.resolve(),)
+    allowed_roots = (paths.root.resolve(), *shared_roots)
     if not any(candidate.is_relative_to(root) for root in allowed_roots):
-        msg = f"base_dir must stay inside the shared storage root or worker root: {requested_base_dir}"
+        msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
         raise ValueError(msg)
 
     candidate.mkdir(parents=True, exist_ok=True)
@@ -499,6 +503,7 @@ def _prepare_worker_request(
         "base_dir": _resolve_worker_base_dir(
             paths,
             storage_root,
+            request.worker_key,
             request.tool_init_overrides.get("base_dir"),
         ),
     }

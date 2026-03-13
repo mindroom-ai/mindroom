@@ -7,7 +7,7 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
@@ -301,6 +301,56 @@ def test_kubernetes_backend_honors_custom_worker_port() -> None:
     assert container["ports"] == [{"containerPort": 9777, "name": "api"}]
     assert container["readinessProbe"]["httpGet"]["port"] == "api"
     assert container["livenessProbe"]["httpGet"]["port"] == "api"
+
+
+def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -> None:
+    """Shared-scope dedicated workers should mount only their agent root, not the whole agents tree."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = "v1:tenant-123:shared:code"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+
+    assert mount_paths["/app/worker/agents/code"] == "agents/code"
+    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
+    assert mount_paths["/app/worker/credentials"] == "credentials"
+    assert mount_paths["/app/worker/.shared_credentials"] == ".shared_credentials"
+    assert "/app/worker/agents" not in mount_paths
+
+
+def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
+    """User-scope dedicated workers intentionally keep broad agent visibility."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = "v1:tenant-123:user:@alice:example.org"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+
+    assert mount_paths["/app/worker/agents"] == "agents"
+    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
+
+
+def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:
+    """Unscoped dedicated workers should mount only the addressed agent root."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = resolve_unscoped_worker_key(agent_name="general")
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+
+    assert mount_paths["/app/worker/agents/general"] == "agents/general"
+    assert "/app/worker/agents" not in mount_paths
 
 
 def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(

@@ -78,7 +78,7 @@ Key differences from the primary MindRoom runtime:
 - **Scratch workspace** — a dedicated volume for worker-local runtime files and caches
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the worker-local workspace so the tool registry and cache files have a private runtime home
 
-> [!WARNING] Current worker backends expose the shared storage root to the runner process. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
+> [!WARNING] Shared-runner and local worker backends still expose broader shared storage to the runner process. Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution, but `user` remains intentionally broader. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary unless the backend also narrows the visible mounts. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -211,7 +211,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space for worker-local runtime files and still accesses the canonical agent state roots used by the primary runtime.
-- With `workerBackend: kubernetes`, dedicated worker pods access the same canonical agent state roots across scopes while keeping worker-local caches isolated by worker key.
+- With `workerBackend: kubernetes`, dedicated worker pods mount only the addressed agent root for `shared`, `user_agent`, and unscoped dedicated execution, while `user` intentionally mounts the broader `agents/` tree and worker-local caches remain isolated by worker key.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ## Per-agent configuration
@@ -279,7 +279,7 @@ The supported values are:
 | `user`       | One worker runtime per requester, potentially reused across multiple agents for that requester |
 | `user_agent` | One worker runtime per requester and agent                                                     |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state. For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary. It is a runtime reuse mode. It creates one persistent runtime per requester, and multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Use `user_agent` if you need the clearest per-agent filesystem isolation.
+If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The implemented model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state. For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary. It is a runtime reuse mode. It creates one persistent runtime per requester, and multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ## Without configured worker routing
 

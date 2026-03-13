@@ -163,7 +163,7 @@ Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the
 
 ### Filesystem Isolation
 
-`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
+`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution so those runtimes only see the addressed agent root plus their worker root. Shared-runner and local worker backends do not provide that hard boundary today. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### State Ownership
 

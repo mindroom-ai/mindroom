@@ -6,9 +6,11 @@ import hashlib
 import importlib
 import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -450,7 +452,7 @@ class KubernetesResourceManager:
                     "command": ["/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
                     "env": self._worker_env(worker_key, state_subpath),
-                    "volumeMounts": self._volume_mounts(),
+                    "volumeMounts": self._volume_mounts(worker_key, state_subpath),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
                         "periodSeconds": 5,
@@ -538,13 +540,8 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
-    def _volume_mounts(self) -> list[dict[str, object]]:
-        mounts: list[dict[str, object]] = [
-            {
-                "name": "worker-storage",
-                "mountPath": self.config.storage_mount_path,
-            },
-        ]
+    def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+        mounts = self._scoped_storage_mounts(worker_key, state_subpath)
         if self.config.config_map_name is not None:
             mounts.append(
                 {
@@ -623,3 +620,43 @@ class KubernetesResourceManager:
         }
         self._owner_reference_loaded = True
         return self._owner_reference
+
+    def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+        storage_root = Path(self.config.storage_mount_path)
+        visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
+        if not visible_agent_roots:
+            return [
+                {
+                    "name": "worker-storage",
+                    "mountPath": self.config.storage_mount_path,
+                },
+            ]
+
+        mounts: list[dict[str, object]] = [
+            {
+                "name": "worker-storage",
+                "mountPath": str(agent_root),
+                "subPath": str(agent_root.relative_to(storage_root)),
+            }
+            for agent_root in visible_agent_roots
+        ]
+        mounts.extend(
+            [
+                {
+                    "name": "worker-storage",
+                    "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
+                    "subPath": state_subpath,
+                },
+                {
+                    "name": "worker-storage",
+                    "mountPath": f"{self.config.storage_mount_path}/credentials",
+                    "subPath": "credentials",
+                },
+                {
+                    "name": "worker-storage",
+                    "mountPath": f"{self.config.storage_mount_path}/.shared_credentials",
+                    "subPath": ".shared_credentials",
+                },
+            ],
+        )
+        return mounts
