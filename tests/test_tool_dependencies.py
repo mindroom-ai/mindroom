@@ -83,6 +83,20 @@ def test_full_runtime_image_keeps_sentence_transformers_runtime_only() -> None:
     assert "--all-extras --no-extra sentence_transformers" in dockerfile
 
 
+@pytest.mark.parametrize(
+    "dockerfile_path",
+    [
+        Path("local/instances/deploy/Dockerfile.mindroom"),
+        Path("local/instances/deploy/Dockerfile.mindroom-minimal"),
+    ],
+)
+def test_runtime_images_copy_workspace_avatars(dockerfile_path: Path) -> None:
+    """Runtime images should still ship workspace avatar assets under /app/avatars."""
+    dockerfile = dockerfile_path.read_text(encoding="utf-8")
+
+    assert "COPY avatars /app/avatars" in dockerfile
+
+
 def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []

@@ -3,6 +3,7 @@
 import importlib
 import subprocess
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -124,3 +125,13 @@ def test_build_frontend_retries_bun_install_only(
             0.0,
         ),
     ]
+
+
+def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
+    """Wheel builds should not ship repo avatar assets inside the package."""
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text())
+
+    force_include = data["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    assert "avatars" not in force_include

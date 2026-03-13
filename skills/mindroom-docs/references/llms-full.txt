@@ -3949,7 +3949,7 @@ teams:
 
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
-When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and avatars are set from `avatars/rooms/{room_key}.png` if available.
+When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and managed avatars are resolved from workspace overrides or bundled defaults if available.
 
 # Agent Orchestration
 
@@ -5603,6 +5603,7 @@ mindroom [OPTIONS] COMMAND [ARGS]...
 │                     service.                                                           │
 │ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
 │ config              Manage MindRoom configuration files.                               │
+│ avatars             Generate and sync managed avatar assets.                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -5652,6 +5653,57 @@ Start MindRoom with your configuration.
 │ --api-host                      TEXT     Host for the bundled dashboard/API server     │
 │                                          [default: 0.0.0.0]                            │
 │ --help          -h                       Show this message and exit.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## avatars
+
+Generate and sync managed avatar assets.
+
+```
+ Usage: root avatars [OPTIONS] COMMAND [ARGS]...
+
+ Generate and sync managed avatar assets.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.                     │
+│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
+│            router account.                                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## avatars generate
+
+Generate missing managed avatar files in the workspace. In a source checkout, generated files are written under `./avatars/`. In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
+
+```
+ Usage: root avatars generate [OPTIONS]
+
+ Generate missing managed avatar files in the workspace.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+## avatars sync
+
+Sync configured room and root-space avatars to Matrix using the initialized router account.
+
+```
+ Usage: root avatars sync [OPTIONS]
+
+ Sync configured room and root-space avatars to Matrix using the initialized router
+ account.
+
+
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
