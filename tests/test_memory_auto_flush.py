@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 
@@ -207,10 +206,7 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
         session_id="session-alice",
     )
 
-    with (
-        patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"),
-        tool_execution_identity(alice_identity),
-    ):
+    with tool_execution_identity(alice_identity):
         mark_auto_flush_dirty_session(
             tmp_path,
             config,
@@ -222,7 +218,7 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
 
     fake_session = _FakeSession(
         updated_at=100,
-        messages=[_FakeMessage(role="user", content="remember this worker-isolated detail")],
+        messages=[_FakeMessage(role="user", content="remember this shared agent detail")],
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
@@ -233,9 +229,8 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
         _fake_extract_memory_summary,
     )
 
-    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
-        worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
-        await worker._run_cycle(config)
+    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    await worker._run_cycle(config)
 
     worker_daily_files = list(
         (agent_workspace_root_path(tmp_path, "general") / "custom-agent-memory" / "memory").rglob("*.md"),
@@ -270,13 +265,12 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
         _fake_extract_memory_summary,
     )
 
-    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
-        worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
-        wrote_memory = await worker._flush_session(
-            config,
-            agent_name="general",
-            session_id="session-general",
-        )
+    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    wrote_memory = await worker._flush_session(
+        config,
+        agent_name="general",
+        session_id="session-general",
+    )
 
     assert wrote_memory is True
     custom_daily_files = list(
@@ -311,21 +305,20 @@ async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
     worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
     assert worker_key is not None
 
-    with patch("mindroom.constants.CONFIG_PATH", tmp_path / "config.yaml"):
-        with tool_execution_identity(alice_identity):
-            await add_agent_memory("Alice isolated memory", "general", tmp_path, config)
+    with tool_execution_identity(alice_identity):
+        await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config)
 
-        append_agent_daily_memory("Shared leaked memory", "general", tmp_path, config)
+    append_agent_daily_memory("Shared daily memory", "general", tmp_path, config)
 
-        worker_context = await _build_existing_memory_context(
-            agent_name="general",
-            storage_path=worker_root_path(tmp_path, worker_key),
-            config=config,
-            preserve_resolved_storage_path=True,
-        )
+    worker_context = await _build_existing_memory_context(
+        agent_name="general",
+        storage_path=worker_root_path(tmp_path, worker_key),
+        config=config,
+        preserve_resolved_storage_path=True,
+    )
 
-    assert "Alice isolated memory" in worker_context
-    assert "Shared leaked memory" in worker_context
+    assert "Alice-authored shared memory" in worker_context
+    assert "Shared daily memory" in worker_context
 
 
 async def _fake_extract_memory_summary(**_: object) -> str:

@@ -35,17 +35,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
-def _canonical_absolute_agent_path(storage_path: Path, agent_name: str, source_path: Path) -> Path:
-    parts = list(source_path.parts)
-    if source_path.anchor and parts and parts[0] == source_path.anchor:
-        parts = parts[1:]
-
-    canonical_path = agent_workspace_root_path(storage_path, agent_name) / "_absolute"
-    if source_path.anchor not in {"", "/", "\\"}:
-        canonical_path /= re.sub(r"[^a-zA-Z0-9._@+-]+", "_", source_path.anchor.replace(":", "")).strip("_") or "root"
-    return canonical_path.joinpath(*parts)
-
-
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
@@ -266,64 +255,43 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Absolute memory_file_path should seed into the canonical agent workspace."""
+    """Workspace-relative memory_file_path should point tools at the canonical workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = tmp_path / "external" / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "README.md").write_text("Seeded workspace.\n", encoding="utf-8")
+    (workspace / "README.md").write_text("Canonical workspace.\n", encoding="utf-8")
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = str(workspace)
+    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
     create_agent("general", config=config, storage_path=tmp_path)
 
-    expected_workspace = _canonical_absolute_agent_path(tmp_path, "general", workspace)
-    assert expected_workspace.is_dir()
-    assert (expected_workspace / "README.md").read_text(encoding="utf-8") == "Seeded workspace.\n"
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace)}
-    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace)}
+    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agents.SqliteDb")
-def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
-    mock_storage: MagicMock,  # noqa: ARG001
-    mock_get_tool_by_name: MagicMock,
-    tmp_path: Path,
-) -> None:
-    """Relative memory_file_path should bootstrap from config dir into the canonical agent workspace."""
-    mock_get_tool_by_name.return_value = MagicMock()
-
+def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
+    """Absolute memory_file_path should fail fast instead of creating copied state."""
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
-    config.agents["general"].tools = ["coding"]
-    config.agents["general"].include_default_tools = False
 
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ValidationError, match="workspace-relative"):
+        config.agents["general"].memory_file_path = str(tmp_path / "external" / "mind_data")
 
-    original_cwd = Path.cwd()
-    other_cwd = tmp_path / "other"
-    other_cwd.mkdir(parents=True, exist_ok=True)
-    os.chdir(other_cwd)
-    try:
-        with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-            create_agent("general", config=config, storage_path=tmp_path)
-    finally:
-        os.chdir(original_cwd)
 
-    expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
-    assert mock_get_tool_by_name.call_args is not None
-    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
-    assert expected_workspace.is_dir()
+def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
+    """Absolute context_files should fail fast instead of creating copied state."""
+    config = Config.from_yaml()
+
+    with pytest.raises(ValidationError, match="workspace-relative"):
+        config.agents["general"].context_files = [str(tmp_path / "SOUL.md")]
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -336,10 +304,10 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     """Worker-routed scoped tools should receive the same workspace override as local tools."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = tmp_path / "external" / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = str(workspace)
+    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
@@ -347,13 +315,11 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
 
     create_agent("general", config=config, storage_path=tmp_path)
 
-    expected_workspace = _canonical_absolute_agent_path(tmp_path, "general", workspace)
-    assert expected_workspace.is_dir()
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace)}
-    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace)}
+    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -665,52 +631,31 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
         resolve_worker_key(cast("WorkerScope", "bogus"), execution_identity)
 
 
-def test_resolve_agent_owned_path_bootstraps_relative_path_into_canonical_workspace(tmp_path: Path) -> None:
-    """Relative agent-owned paths should seed into the canonical agent workspace."""
-    config_dir = tmp_path / "cfg"
-    source_dir = config_dir / "mind_data"
-    source_dir.mkdir(parents=True, exist_ok=True)
-    source_file = source_dir / "SOUL.md"
-    source_file.write_text("Config soul context.", encoding="utf-8")
-
-    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-        resolved = resolve_agent_owned_path(
-            "./mind_data/SOUL.md",
-            agent_name="general",
-            base_storage_path=tmp_path,
-        )
-
-    assert resolved.state_root == agent_state_root_path(tmp_path, "general")
-    assert resolved.resolved_path == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
-    assert resolved.resolved_path.read_text(encoding="utf-8") == "Config soul context."
-
-
-def test_resolve_agent_owned_path_maps_absolute_paths_under_canonical_workspace(tmp_path: Path) -> None:
-    """Absolute agent-owned paths should be canonicalized under _absolute/."""
-    source_file = tmp_path / "external" / "SOUL.md"
-    source_file.parent.mkdir(parents=True, exist_ok=True)
-    source_file.write_text("Absolute soul context.", encoding="utf-8")
-
+def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Path) -> None:
+    """Agent-owned paths should resolve directly inside the canonical workspace."""
     resolved = resolve_agent_owned_path(
-        str(source_file),
+        "mind_data/SOUL.md",
         agent_name="general",
         base_storage_path=tmp_path,
     )
 
     assert resolved.state_root == agent_state_root_path(tmp_path, "general")
-    assert resolved.resolved_path == _canonical_absolute_agent_path(tmp_path, "general", source_file)
-    assert resolved.resolved_path.read_text(encoding="utf-8") == "Absolute soul context."
+    assert resolved.resolved_path == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+
+
+def test_resolve_agent_owned_path_rejects_absolute_paths(tmp_path: Path) -> None:
+    """Agent-owned paths must not point outside the canonical workspace."""
+    with pytest.raises(ValueError, match="workspace-relative"):
+        resolve_agent_owned_path(
+            str(tmp_path / "external" / "SOUL.md"),
+            agent_name="general",
+            base_storage_path=tmp_path,
+        )
 
 
 def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None:
     """Agent-owned paths must stay inside the canonical agent workspace."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    with (
-        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
-        pytest.raises(ValueError, match="Agent-owned paths must stay within"),
-    ):
+    with pytest.raises(ValueError, match="stay within the agent workspace"):
         resolve_agent_owned_path(
             "../escape.md",
             agent_name="general",
@@ -720,28 +665,27 @@ def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_bootstraps_canonical_context_files_and_reloads_from_agent_root(
+def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Context files should seed once into the canonical agent root and stay shared across scopes."""
+    """Context files should be read live from the canonical agent root across scopes."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = Config.from_yaml()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
-    config.agents["general"].context_files = ["./mind_data/SOUL.md"]
+    config.agents["general"].memory_file_path = "mind_data"
+    config.agents["general"].context_files = ["mind_data/SOUL.md"]
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
     config.agents["general"].worker_tools = ["coding"]
 
-    config_dir = tmp_path / "cfg"
-    source_workspace = config_dir / "mind_data"
-    source_workspace.mkdir(parents=True, exist_ok=True)
-    source_soul = source_workspace / "SOUL.md"
-    source_soul.write_text("Config soul context.", encoding="utf-8")
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    canonical_workspace.mkdir(parents=True, exist_ok=True)
+    canonical_soul = canonical_workspace / "SOUL.md"
+    canonical_soul.write_text("Canonical soul context.", encoding="utf-8")
 
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -753,44 +697,28 @@ def test_create_agent_bootstraps_canonical_context_files_and_reloads_from_agent_
         session_id="session-1",
     )
 
-    with (
-        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
-        tool_execution_identity(execution_identity),
-    ):
+    with tool_execution_identity(execution_identity):
         agent = create_agent("general", config=config, storage_path=tmp_path)
 
-    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
-    canonical_soul = canonical_workspace / "SOUL.md"
-
-    assert canonical_soul.read_text(encoding="utf-8") == "Config soul context."
-    assert "Config soul context." in agent.role
+    assert "Canonical soul context." in agent.role
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
-    canonical_soul.write_text("Worker-owned soul context.", encoding="utf-8")
-    source_soul.write_text("Changed config soul context.", encoding="utf-8")
+    canonical_soul.write_text("Updated canonical soul context.", encoding="utf-8")
 
-    with (
-        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
-        tool_execution_identity(execution_identity),
-    ):
+    with tool_execution_identity(execution_identity):
         updated_agent = create_agent("general", config=config, storage_path=tmp_path)
 
-    assert "Worker-owned soul context." in updated_agent.role
-    assert "Changed config soul context." not in updated_agent.role
+    assert "Updated canonical soul context." in updated_agent.role
 
     canonical_soul.unlink()
 
-    with (
-        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
-        tool_execution_identity(execution_identity),
-    ):
+    with tool_execution_identity(execution_identity):
         deleted_agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert not canonical_soul.exists()
-    assert "Config soul context." not in deleted_agent.role
-    assert "Changed config soul context." not in deleted_agent.role
-    assert "Worker-owned soul context." not in deleted_agent.role
+    assert "Canonical soul context." not in deleted_agent.role
+    assert "Updated canonical soul context." not in deleted_agent.role
 
     bob_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -803,10 +731,7 @@ def test_create_agent_bootstraps_canonical_context_files_and_reloads_from_agent_
     )
     canonical_soul.write_text("Shared canonical soul context.", encoding="utf-8")
 
-    with (
-        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
-        tool_execution_identity(bob_identity),
-    ):
+    with tool_execution_identity(bob_identity):
         bob_agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert "Shared canonical soul context." in bob_agent.role
@@ -887,14 +812,16 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
 
 @patch("mindroom.agents.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
-    """Absolute context files should seed once into the canonical agent root."""
+    """Context files should load directly from the canonical workspace."""
     config = Config.from_yaml()
-    soul_path = tmp_path / "SOUL.md"
-    user_path = tmp_path / "USER.md"
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    soul_path = workspace / "SOUL.md"
+    user_path = workspace / "USER.md"
+    workspace.mkdir(parents=True, exist_ok=True)
     soul_path.write_text("Core personality directive.", encoding="utf-8")
     user_path.write_text("User preference: concise answers.", encoding="utf-8")
 
-    config.agents["general"].context_files = [str(soul_path), str(user_path)]
+    config.agents["general"].context_files = ["SOUL.md", "USER.md"]
 
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
@@ -903,19 +830,11 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     assert "Core personality directive." in agent.role
     assert "### USER.md" in agent.role
     assert "User preference: concise answers." in agent.role
-
-    canonical_soul = _canonical_absolute_agent_path(tmp_path, "general", soul_path)
-    canonical_user = _canonical_absolute_agent_path(tmp_path, "general", user_path)
-    assert canonical_soul.read_text(encoding="utf-8") == "Core personality directive."
-    assert canonical_user.read_text(encoding="utf-8") == "User preference: concise answers."
-
-    canonical_soul.write_text("Canonical soul directive.", encoding="utf-8")
-    soul_path.write_text("Changed source directive.", encoding="utf-8")
+    soul_path.write_text("Canonical soul directive.", encoding="utf-8")
 
     updated_agent = create_agent("general", config=config, storage_path=tmp_path)
 
     assert "Canonical soul directive." in updated_agent.role
-    assert "Changed source directive." not in updated_agent.role
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -927,12 +846,14 @@ def test_agent_preload_cap_truncates_context_files_in_order(
     config = Config.from_yaml()
     config.defaults.max_preload_chars = 420
 
-    first_path = tmp_path / "FIRST.md"
-    second_path = tmp_path / "SECOND.md"
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    first_path = workspace / "FIRST.md"
+    second_path = workspace / "SECOND.md"
     first_path.write_text("FIRST_START " + "A" * 220 + " FIRST_END", encoding="utf-8")
     second_path.write_text("SECOND_START " + "B" * 220 + " SECOND_END", encoding="utf-8")
 
-    config.agents["general"].context_files = [str(first_path), str(second_path)]
+    config.agents["general"].context_files = ["FIRST.md", "SECOND.md"]
 
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
@@ -946,7 +867,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
 def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Missing context files should not prevent agent creation."""
     config = Config.from_yaml()
-    config.agents["general"].context_files = [str(tmp_path / "does-not-exist.md")]
+    config.agents["general"].context_files = ["does-not-exist.md"]
 
     agent = create_agent("general", config=config, storage_path=tmp_path)
 
@@ -954,13 +875,12 @@ def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path
     assert "does-not-exist.md" not in agent.role
 
 
-def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) -> None:
-    """Relative context paths should resolve from the config directory, not CWD."""
+def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: Path) -> None:
+    """Relative context paths should resolve from the canonical workspace, not CWD."""
     config = Config.from_yaml()
-
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    soul_path = config_dir / "SOUL.md"
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    soul_path = workspace / "SOUL.md"
     soul_path.write_text("Relative soul context.", encoding="utf-8")
 
     config.agents["general"].context_files = ["SOUL.md"]
@@ -970,7 +890,7 @@ def test_agent_relative_context_paths_resolve_from_config_dir(tmp_path: Path) ->
     other_cwd.mkdir(parents=True, exist_ok=True)
     os.chdir(other_cwd)
     try:
-        with patch("mindroom.agents.SqliteDb"), patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+        with patch("mindroom.agents.SqliteDb"):
             agent = create_agent("general", config=config, storage_path=tmp_path)
     finally:
         os.chdir(original_cwd)
@@ -1140,7 +1060,7 @@ def test_config_accepts_memory_file_path_with_file_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.agents["general"].memory_file_path == "./openclaw_data"
+    assert config.agents["general"].memory_file_path == "openclaw_data"
 
 
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:

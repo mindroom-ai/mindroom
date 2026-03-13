@@ -79,16 +79,16 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
-    memory_file_path: ./openclaw_data  # Optional: Seed path for the agent's canonical file-memory workspace
+    memory_file_path: openclaw_data  # Optional: Workspace-relative path for the agent's canonical file-memory workspace
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into role context at init/reload
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+      - openclaw_data/SOUL.md
+      - openclaw_data/AGENTS.md
+      - openclaw_data/USER.md
+      - openclaw_data/IDENTITY.md
+      - openclaw_data/MEMORY.md
+      - openclaw_data/TOOLS.md
+      - openclaw_data/HEARTBEAT.md
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -264,9 +264,9 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](agents.md))
+- `agents.<name>.context_files` inject workspace-relative file context at agent creation/reload (see [Agents](agents.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](agents.md))
-- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom file-memory scope for that agent
+- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a workspace-relative custom file-memory scope for that agent
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to

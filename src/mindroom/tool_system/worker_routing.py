@@ -5,14 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-
-from mindroom.constants import resolve_config_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -22,7 +19,6 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _AGENT_WORKSPACE_DIRNAME = "workspace"
-_ABSOLUTE_AGENT_PATH_DIRNAME = "_absolute"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "google",
@@ -249,60 +245,23 @@ def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:
     return agent_state_root_path(base_storage_path, agent_name) / _AGENT_WORKSPACE_DIRNAME
 
 
-def _bootstrap_marker_path(state_root: Path, target_path: Path) -> Path:
-    relative_target = target_path.relative_to(state_root.resolve())
-    marker_root = state_root / ".mindroom_bootstrap"
-    if target_path.suffix:
-        return marker_root / relative_target.parent / f"{relative_target.name}.seeded"
-    return marker_root / relative_target / ".seeded"
+def agent_workspace_relative_path(path_text: str) -> Path:
+    """Validate and normalize a path that must live inside an agent workspace."""
+    normalized_text = path_text.strip()
+    if not normalized_text:
+        msg = "Agent-owned paths must not be empty."
+        raise ValueError(msg)
 
+    candidate = Path(normalized_text).expanduser()
+    if candidate.is_absolute():
+        msg = f"Agent-owned paths must be workspace-relative, not absolute: {path_text}"
+        raise ValueError(msg)
 
-def _copy_bootstrap_source(source_path: Path, target_path: Path) -> None:
-    if source_path.is_dir():
-        target_path.mkdir(parents=True, exist_ok=True)
-        for child in source_path.iterdir():
-            _copy_bootstrap_source(child, target_path / child.name)
-        return
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, target_path)
+    if ".." in candidate.parts:
+        msg = f"Agent-owned paths must stay within the agent workspace: {path_text}"
+        raise ValueError(msg)
 
-
-def _bootstrap_missing_path(source_path: Path, target_path: Path, *, state_root: Path) -> None:
-    """Seed config-side starter files into a missing canonical agent-owned path once.
-
-    The copy under ``agents/<agent>/workspace`` is authoritative after bootstrap.
-    Later config edits do not overwrite canonical runtime state automatically.
-    """
-    marker_path = _bootstrap_marker_path(state_root, target_path)
-    if marker_path.exists():
-        return
-
-    if target_path.exists():
-        marker_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_path.touch()
-        return
-
-    if not source_path.exists():
-        return
-
-    _copy_bootstrap_source(source_path, target_path)
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.touch()
-
-
-def _canonical_agent_workspace_relative_path(path_text: str, *, source_path: Path) -> Path:
-    raw_path = Path(path_text).expanduser()
-    if not raw_path.is_absolute():
-        return raw_path
-
-    target_parts = [_ABSOLUTE_AGENT_PATH_DIRNAME]
-    if source_path.anchor not in {"", "/", "\\"}:
-        target_parts.append(_normalize_worker_dir_part(source_path.anchor.replace(":", "")))
-
-    relative_parts = list(source_path.parts)
-    if source_path.anchor and relative_parts and relative_parts[0] == source_path.anchor:
-        relative_parts = relative_parts[1:]
-    return Path(*target_parts, *relative_parts)
+    return candidate
 
 
 def _resolve_agent_workspace_target(relative_path: Path, *, agent_root: Path) -> Path:
@@ -321,22 +280,17 @@ def resolve_agent_owned_path(
     *,
     agent_name: str,
     base_storage_path: Path,
-    state_root: Path | None = None,
 ) -> AgentOwnedPath:
     """Resolve one agent-owned path into the canonical shared agent workspace.
 
     Durable agent files are shared per agent across all requesters and worker scopes.
     ``worker_scope`` only changes which runtime executes the tool call, not which
-    workspace copy is authoritative.
+    files are authoritative.
     """
-    source_path = resolve_config_relative_path(path_text)
-    if state_root is None:
-        state_root = agent_state_root_path(base_storage_path, agent_name)
-
-    relative_target = _canonical_agent_workspace_relative_path(path_text, source_path=source_path)
+    state_root = agent_state_root_path(base_storage_path, agent_name)
+    relative_target = agent_workspace_relative_path(path_text)
     agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
     target_path = _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
-    _bootstrap_missing_path(source_path, target_path, state_root=state_root)
     return AgentOwnedPath(
         resolved_path=target_path,
         state_root=state_root,

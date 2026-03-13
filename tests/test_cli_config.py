@@ -67,15 +67,15 @@ class TestConfigInit:
         assert mind["include_default_tools"] is False
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
-        assert mind["memory_file_path"] == "./mind_data"
+        assert mind["memory_file_path"] == "mind_data"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
-            "./mind_data/SOUL.md",
-            "./mind_data/AGENTS.md",
-            "./mind_data/USER.md",
-            "./mind_data/IDENTITY.md",
-            "./mind_data/TOOLS.md",
-            "./mind_data/HEARTBEAT.md",
+            "mind_data/SOUL.md",
+            "mind_data/AGENTS.md",
+            "mind_data/USER.md",
+            "mind_data/IDENTITY.md",
+            "mind_data/TOOLS.md",
+            "mind_data/HEARTBEAT.md",
         ]
         assert mind["knowledge_bases"] == ["mind_memory"]
         assert mind["tools"] == [

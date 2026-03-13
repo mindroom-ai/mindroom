@@ -347,7 +347,7 @@ The system should preserve one canonical agent state root regardless of which ru
 The initialization rules are:
 
 - Switching an agent between `shared`, `user`, `user_agent`, and unscoped dedicated execution keeps the same canonical agent state root.
-- Bootstrap logic may seed missing agent state once, but it must not create ongoing worker-local authoritative copies.
+- Agent-owned files must be addressed directly inside the canonical agent workspace, with no bootstrap copies or alternate authoritative locations.
 - Worker runtime roots may always be recreated from scratch.
 - Existing shared agent storage should be the migration target whenever a scoped implementation previously forked state by worker key.
 - No compatibility fallback remains between legacy sandbox config and `worker_tools`.

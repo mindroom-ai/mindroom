@@ -64,21 +64,21 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Canonical workspace seed path for file memory (optional)
-    memory_file_path: ./openclaw_data
+    # Workspace-relative file-memory path inside this agent's canonical workspace (optional)
+    memory_file_path: openclaw_data
 
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
     # Optional: additional files loaded into role context at agent init/reload
     context_files:
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+      - openclaw_data/SOUL.md
+      - openclaw_data/AGENTS.md
+      - openclaw_data/USER.md
+      - openclaw_data/IDENTITY.md
+      - openclaw_data/MEMORY.md
+      - openclaw_data/TOOLS.md
+      - openclaw_data/HEARTBEAT.md
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
@@ -132,9 +132,9 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
-| `memory_file_path` | string | `null` | Workspace path to seed into this agent's canonical state root when using file memory |
+| `memory_file_path` | string | `null` | Workspace-relative directory inside this agent's canonical workspace to use for file memory |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
-| `context_files` | list | `[]` | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
+| `context_files` | list | `[]` | Workspace-relative file paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
@@ -157,10 +157,9 @@ Per-agent values override them.
 The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
 Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
-When `memory_file_path` is set, MindRoom seeds that path into the agent's canonical workspace and treats the canonical copy as authoritative.
-Relative paths are resolved from the config directory.
-Absolute paths are copied once into a deterministic `_absolute/...` location under the agent workspace so every runtime sees the same files.
-`context_files` follow the same canonicalization rule.
+When `memory_file_path` is set, it must be a workspace-relative directory inside the agent's canonical workspace.
+`context_files` follow the same rule and must point at files inside that canonical workspace.
+Absolute paths and `..` traversal are rejected.
 
 ## Worker Routing
 
@@ -216,7 +215,7 @@ You can inject file content directly into an agent's role context without using 
 
 `context_files` behavior:
 
-- Paths are resolved relative to the config file directory
+- Paths are resolved relative to the agent's canonical workspace
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 

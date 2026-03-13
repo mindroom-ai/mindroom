@@ -230,7 +230,8 @@ def _build_additional_context(
     """Build additional role context from configured files/directories.
 
     This is evaluated when the agent is created (and re-created on config
-    reload), so file content snapshots update on agent hot-reload.
+    reload), so the current contents of the canonical agent workspace are
+    reflected on hot-reload.
     """
     personality_chunks: list[_AdditionalContextChunk] = []
     if agent_config.context_files:

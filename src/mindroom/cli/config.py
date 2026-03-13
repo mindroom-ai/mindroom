@@ -581,16 +581,16 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: ./mind_data
+    memory_file_path: mind_data
     rooms:
       - personal
     context_files:
-      - ./mind_data/SOUL.md
-      - ./mind_data/AGENTS.md
-      - ./mind_data/USER.md
-      - ./mind_data/IDENTITY.md
-      - ./mind_data/TOOLS.md
-      - ./mind_data/HEARTBEAT.md
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
     knowledge_bases:
       - mind_memory
     tools:

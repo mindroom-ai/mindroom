@@ -56,7 +56,7 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: ./openclaw_data
+    memory_file_path: openclaw_data
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
@@ -69,12 +69,12 @@ agents:
       - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
 
     context_files:
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+      - openclaw_data/SOUL.md
+      - openclaw_data/AGENTS.md
+      - openclaw_data/USER.md
+      - openclaw_data/IDENTITY.md
+      - openclaw_data/TOOLS.md
+      - openclaw_data/HEARTBEAT.md
 
     knowledge_bases: [openclaw_memory]
 
@@ -97,7 +97,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` seeds the OpenClaw workspace into the agent's canonical workspace root, so the canonical `MEMORY.md` is loaded automatically by the file backend as the entrypoint. Every runtime for that agent reads and writes that same canonical copy, so there is no need to list `MEMORY.md` in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
+`memory_file_path` points directly at a workspace-relative directory inside the agent's canonical workspace, so the canonical `MEMORY.md` is loaded automatically by the file backend as the entrypoint. Every runtime for that agent reads and writes that same canonical file, so there is no need to list `MEMORY.md` in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -122,11 +122,11 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory.backend: mem0` for vector memory (global default)
 - `memory.backend: file` for file-first memory (global default)
 - `memory_backend: file` on an individual agent to override the global default
-- `memory_file_path: ./openclaw_data` to point the file-memory scope at an existing workspace directory instead of the default `<root>/agent_<name>/`
+- `memory_file_path: openclaw_data` to point the file-memory scope at an existing workspace directory inside the canonical agent workspace instead of the default `<root>/agent_<name>/`
 - Agents that use file memory without `memory_file_path` continue to use the global `memory.file.path` (or the default `<storage_path>/memory_files/`)
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root and `memory.auto_flush.enabled: true`.
+Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root inside the canonical agent workspace and `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
