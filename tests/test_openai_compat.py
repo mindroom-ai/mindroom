@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,7 +13,6 @@ if TYPE_CHECKING:
 
 import pytest
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from mindroom.api.openai_compat import (
@@ -23,7 +23,7 @@ from mindroom.api.openai_compat import (
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
@@ -2317,19 +2317,19 @@ class TestTeamCompletion:
             assert "include_default_tools" not in mock_create.call_args.kwargs
             assert mock_create.call_args.kwargs["include_interactive_questions"] is False
 
-    def test_build_team_passes_workspace_relative_knowledge_to_member_agents(self) -> None:
-        """Team member creation resolves workspace-relative knowledge with the request identity."""
-        from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
-
+    def test_build_team_passes_private_knowledge_to_member_agents(self) -> None:
+        """Team member creation resolves private knowledge with the request identity."""
         config = Config(
             agents={
                 "research": AgentConfig(
                     display_name="Research",
                     role="Research role",
                     rooms=[],
-                    worker_scope="shared",
-                    workspace=AgentWorkspaceConfig(path="workspace"),
-                    knowledge_bases=["docs"],
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="workspace",
+                        knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                    ),
                 ),
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -2342,10 +2342,10 @@ class TestTeamCompletion:
                     mode="coordinate",
                 ),
             },
-            knowledge_bases={
-                "docs": KnowledgeBaseConfig(path="memory", path_relative_to_agent_workspace=True, watch=False),
-            },
+            knowledge_bases={},
         )
+        private_base_id = config.get_agent_private_knowledge_base_id("research")
+        assert private_base_id is not None
         mock_knowledge = MagicMock()
         mock_manager = MagicMock()
         mock_manager.get_knowledge.return_value = mock_knowledge
@@ -2355,7 +2355,7 @@ class TestTeamCompletion:
         )
 
         def fake_get_manager(base_id: str, **kwargs: object) -> MagicMock | None:
-            assert base_id == "docs"
+            assert base_id == private_base_id
             assert kwargs["agent_name"] == "research"
             assert kwargs["config"] is config
             assert kwargs["execution_identity"] is execution_identity
@@ -2413,19 +2413,19 @@ def knowledge_config() -> Config:
 
 
 @pytest.fixture
-def shared_workspace_knowledge_config() -> Config:
-    """Config with a shared-scope agent that uses workspace-relative knowledge."""
-    from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
-
+def private_instance_knowledge_config() -> Config:
+    """Config with a private-instance agent that uses requester-local knowledge."""
     return Config(
         agents={
             "research": AgentConfig(
                 display_name="ResearchAgent",
-                role="Research assistant with workspace knowledge",
+                role="Research assistant with private knowledge",
                 rooms=[],
-                worker_scope="shared",
-                workspace=AgentWorkspaceConfig(path="workspace"),
-                knowledge_bases=["docs"],
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="workspace",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                ),
             ),
         },
         models={"default": ModelConfig(provider="ollama", id="test-model")},
@@ -2438,9 +2438,7 @@ def shared_workspace_knowledge_config() -> Config:
                 mode="coordinate",
             ),
         },
-        knowledge_bases={
-            "docs": KnowledgeBaseConfig(path="memory", path_relative_to_agent_workspace=True, watch=False),
-        },
+        knowledge_bases={},
     )
 
 
@@ -2455,25 +2453,6 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     app.include_router(router)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))),
-        patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
-    ):
-        yield TestClient(app)
-
-
-@pytest.fixture
-def shared_workspace_knowledge_app_client(shared_workspace_knowledge_config: Config) -> Iterator[TestClient]:
-    """Create a FastAPI test client with shared workspace-relative knowledge."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
-    from mindroom.api.openai_compat import router  # noqa: PLC0415
-
-    app = FastAPI()
-    app.include_router(router)
-    with (
-        patch(
-            "mindroom.api.openai_compat._load_config",
-            return_value=(shared_workspace_knowledge_config, Path(__file__)),
-        ),
         patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
     ):
         yield TestClient(app)
@@ -2506,20 +2485,25 @@ class TestKnowledgeIntegration:
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
 
-    def test_workspace_relative_knowledge_prepared_and_passed(
+    def test_private_knowledge_prepared_and_passed(
         self,
-        shared_workspace_knowledge_app_client: TestClient,
-        shared_workspace_knowledge_config: Config,
+        private_instance_knowledge_config: Config,
     ) -> None:
-        """Workspace-relative knowledge is prepared with request identity before agent execution."""
+        """Private knowledge is prepared with request identity before agent execution."""
         mock_knowledge = MagicMock()
         mock_manager = MagicMock()
         mock_manager.get_knowledge.return_value = mock_knowledge
+        private_base_id = private_instance_knowledge_config.get_agent_private_knowledge_base_id("research")
+        assert private_base_id is not None
+        execution_identity = _build_tool_execution_identity(
+            agent_name="research",
+            session_id="session-123",
+        )
 
         def fake_get_manager(base_id: str, **kwargs: object) -> MagicMock | None:
-            assert base_id == "docs"
+            assert base_id == private_base_id
             assert kwargs["agent_name"] == "research"
-            assert kwargs["config"] is shared_workspace_knowledge_config
+            assert kwargs["config"] is private_instance_knowledge_config
             assert kwargs["storage_path"] is not None
             execution_identity = kwargs["execution_identity"]
             assert execution_identity is not None
@@ -2528,37 +2512,37 @@ class TestKnowledgeIntegration:
             return mock_manager
 
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch(
-                "mindroom.api.openai_compat.initialize_knowledge_managers",
-                new=AsyncMock(return_value={}),
-            ),
             patch(
                 "mindroom.api.openai_compat.ensure_agent_knowledge_managers",
-                new=AsyncMock(return_value={"docs": mock_manager}),
+                new=AsyncMock(return_value={private_base_id: mock_manager}),
             ) as mock_ensure_scoped,
             patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
         ):
-            mock_ai.return_value = "Response with scoped knowledge"
-
-            response = shared_workspace_knowledge_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "research",
-                    "messages": [{"role": "user", "content": "What does the workspace memory say?"}],
-                },
+            from mindroom.api.openai_compat import (  # noqa: PLC0415
+                _ensure_agent_knowledge_initialized,
+                _resolve_knowledge,
             )
 
-        assert response.status_code == 200
-        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+            asyncio.run(
+                _ensure_agent_knowledge_initialized(
+                    "research",
+                    private_instance_knowledge_config,
+                    execution_identity=execution_identity,
+                ),
+            )
+            knowledge = _resolve_knowledge(
+                "research",
+                private_instance_knowledge_config,
+                execution_identity=execution_identity,
+            )
+
+        assert knowledge is mock_knowledge
         mock_ensure_scoped.assert_awaited_once()
-        assert mock_ensure_scoped.await_args.args[:2] == ("research", shared_workspace_knowledge_config)
+        assert mock_ensure_scoped.await_args.args[:2] == ("research", private_instance_knowledge_config)
         assert mock_ensure_scoped.await_args.kwargs["start_watchers"] is False
         assert mock_ensure_scoped.await_args.kwargs["reindex_on_create"] is True
         scoped_identity = mock_ensure_scoped.await_args.kwargs["execution_identity"]
-        assert scoped_identity is not None
-        assert scoped_identity.agent_name == "research"
-        assert scoped_identity.channel == "openai_compat"
+        assert scoped_identity is execution_identity
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
@@ -2617,44 +2601,37 @@ class TestKnowledgeIntegration:
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is None
 
-    def test_team_workspace_relative_knowledge_managers_prepared(
+    def test_team_private_knowledge_managers_prepared(
         self,
-        shared_workspace_knowledge_app_client: TestClient,
-        shared_workspace_knowledge_config: Config,
+        private_instance_knowledge_config: Config,
     ) -> None:
-        """Team requests prepare scoped knowledge managers for workspace-relative member bases."""
+        """Team requests prepare scoped knowledge managers for private member bases."""
+        execution_identity = _build_tool_execution_identity(
+            agent_name="team/research_team",
+            session_id="session-123",
+        )
         with (
-            patch(
-                "mindroom.api.openai_compat.initialize_knowledge_managers",
-                new=AsyncMock(return_value={}),
-            ),
             patch(
                 "mindroom.api.openai_compat.ensure_agent_knowledge_managers",
                 new=AsyncMock(return_value={}),
             ) as mock_ensure_scoped,
-            patch(
-                "mindroom.api.openai_compat._non_stream_team_completion",
-                new=AsyncMock(return_value=JSONResponse({"ok": True})),
-            ),
         ):
-            response = shared_workspace_knowledge_app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "team/research_team",
-                    "messages": [{"role": "user", "content": "Summarize the workspace docs"}],
-                },
+            from mindroom.api.openai_compat import _ensure_team_knowledge_initialized  # noqa: PLC0415
+
+            asyncio.run(
+                _ensure_team_knowledge_initialized(
+                    "research_team",
+                    private_instance_knowledge_config,
+                    execution_identity=execution_identity,
+                ),
             )
 
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
         mock_ensure_scoped.assert_awaited_once()
-        assert mock_ensure_scoped.await_args.args[:2] == ("research", shared_workspace_knowledge_config)
+        assert mock_ensure_scoped.await_args.args[:2] == ("research", private_instance_knowledge_config)
         assert mock_ensure_scoped.await_args.kwargs["start_watchers"] is False
         assert mock_ensure_scoped.await_args.kwargs["reindex_on_create"] is True
         scoped_identity = mock_ensure_scoped.await_args.kwargs["execution_identity"]
-        assert scoped_identity is not None
-        assert scoped_identity.agent_name == "team/research_team"
-        assert scoped_identity.channel == "openai_compat"
+        assert scoped_identity is execution_identity
 
     def test_streaming_with_knowledge(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed through in streaming mode too."""

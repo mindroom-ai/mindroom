@@ -591,9 +591,11 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
 
 
 def _agent_uses_workspace_relative_knowledge(agent_name: str, config: Config) -> bool:
-    agent_config = config.agents.get(agent_name)
-    return agent_config is not None and any(
-        config.knowledge_bases[base_id].path_relative_to_agent_workspace for base_id in agent_config.knowledge_bases
+    if agent_name not in config.agents:
+        return False
+    return any(
+        config.get_knowledge_base_config(base_id).path_relative_to_agent_workspace
+        for base_id in config.get_agent_knowledge_base_ids(agent_name)
     )
 
 
@@ -644,7 +646,7 @@ def _resolve_knowledge(
     """
 
     def _get_knowledge(base_id: str) -> Knowledge | None:
-        base_config = config.knowledge_bases[base_id]
+        base_config = config.get_knowledge_base_config(base_id)
         if not base_config.path_relative_to_agent_workspace:
             manager = get_knowledge_manager(base_id)
         else:

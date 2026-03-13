@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.config.agent import AgentWorkspaceConfig
+from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.memory.functions import (
     add_agent_memory,
@@ -186,11 +186,10 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
 ) -> None:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].worker_scope = "user"
-    config.agents["general"].workspace = AgentWorkspaceConfig(
-        path="mind_data",
-        template="mind",
-        file_memory_path=".",
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        scaffold="mind",
         context_files=["SOUL.md"],
     )
 

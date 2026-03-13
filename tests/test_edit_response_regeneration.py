@@ -35,6 +35,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.get_agent_worker_scope.return_value = None
     config.authorization.agent_reply_permissions = {}
@@ -185,6 +186,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.get_agent_worker_scope.return_value = None
     config.authorization.agent_reply_permissions = {}
@@ -282,6 +284,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     }
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.authorization.agent_reply_permissions = {}
 
@@ -449,6 +452,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     config.domain = "example.com"
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
+    config.get_agent_knowledge_base_ids.return_value = []
     config.authorization.agent_reply_permissions = {}
 
     # Create the bot
@@ -725,6 +729,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True
@@ -833,6 +838,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True
@@ -1024,6 +1030,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     config.agents = {"test_agent": Mock(knowledge_bases=[])}
     config.domain = "example.com"
     config.ids = {}
+    config.get_agent_knowledge_base_ids.return_value = []
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.voice = Mock()
     config.voice.enabled = True

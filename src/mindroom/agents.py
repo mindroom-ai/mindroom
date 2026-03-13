@@ -709,7 +709,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_interactive_questions:
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
+    knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,

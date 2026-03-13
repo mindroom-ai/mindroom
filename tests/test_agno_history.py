@@ -768,6 +768,7 @@ class TestEditRemovesStaleRun:
         config.agents = {"test_agent": Mock(knowledge_bases=[])}
         config.domain = "example.com"
         config.ids = {}
+        config.get_agent_knowledge_base_ids.return_value = []
         config.get_mindroom_user_id.return_value = "@mindroom:example.com"
         config.authorization.agent_reply_permissions = {}
 
@@ -857,6 +858,7 @@ class TestEditRemovesStaleRun:
         config.agents = {"test_agent": Mock(knowledge_bases=[])}
         config.domain = "example.com"
         config.ids = {}
+        config.get_agent_knowledge_base_ids.return_value = []
         config.get_mindroom_user_id.return_value = "@mindroom:example.com"
         config.authorization.agent_reply_permissions = {}
 
