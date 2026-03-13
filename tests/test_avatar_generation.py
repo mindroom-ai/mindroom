@@ -570,6 +570,64 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
 
 
 @pytest.mark.asyncio
+async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Matrix avatar sync should fail the command when a room avatar update is rejected."""
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": ["war_room"],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    room_avatar_path = workspace_avatar_dir / "rooms" / "war_room.png"
+    room_avatar_path.parent.mkdir(parents=True)
+    room_avatar_path.write_bytes(b"room-bytes")
+
+    router_account = SimpleNamespace(username="router")
+    router_account.password = b"pw".decode()
+
+    def _get_account(key: str) -> object | None:
+        return router_account if key == "agent_router" else None
+
+    state = SimpleNamespace(
+        space_room_id=None,
+        get_account=_get_account,
+    )
+    client = SimpleNamespace(close=AsyncMock())
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "load_validated_config",
+        lambda: generate_avatars.Config.model_validate(raw_config),
+    )
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        generate_avatars,
+        "get_room_id",
+        lambda room_name: "!war:localhost" if room_name == "war_room" else None,
+    )
+    monkeypatch.setattr(generate_avatars, "MATRIX_HOMESERVER", "http://localhost:8008")
+
+    with pytest.raises(
+        generate_avatars.AvatarSyncError,
+        match=r"Failed to set avatars for: room 'war_room'",
+    ):
+        await generate_avatars.set_room_avatars_in_matrix()
+
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,

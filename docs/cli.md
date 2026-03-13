@@ -177,6 +177,8 @@ Generate and sync managed avatar assets.
 ## avatars generate
 
 Generate missing managed avatar files in the workspace.
+In a source checkout, generated files are written under `./avatars/`.
+In containerized deployments, generated overrides are written under the persistent MindRoom storage path.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

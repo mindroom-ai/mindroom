@@ -121,7 +121,7 @@ def run(
     )
 
 
-def _load_active_config_or_exit() -> tuple[Path, Config]:
+def _load_active_config_or_exit() -> Config:
     """Load the active config file or exit with friendly validation errors."""
     ensure_writable_config_path()
 
@@ -140,7 +140,7 @@ def _load_active_config_or_exit() -> tuple[Path, Config]:
         console.print("\n  [cyan]mindroom config validate[/cyan]  Check your config")
         raise typer.Exit(1) from None
 
-    return config_path, config
+    return config
 
 
 async def _run(
@@ -152,7 +152,7 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    _config_path, config = _load_active_config_or_exit()
+    config = _load_active_config_or_exit()
 
     # Check for missing API keys
     _check_env_keys(config)

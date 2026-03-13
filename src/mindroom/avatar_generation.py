@@ -311,10 +311,11 @@ async def _sync_avatar_target(
     return False
 
 
-async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int]:
-    """Apply configured room avatars and return success/skip counts."""
+async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int, list[str]]:
+    """Apply configured room avatars and return success/skip counts plus failed labels."""
     success_count = 0
     skip_count = 0
+    failed_labels: list[str] = []
     for room_name in sorted(_managed_room_avatar_keys(config)):
         avatar_path = resolve_avatar_path("rooms", room_name)
         if not avatar_path.exists():
@@ -326,37 +327,37 @@ async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config)
             get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
             continue
 
-        success_count += int(
-            await _sync_avatar_target(
-                client,
-                avatar_path=avatar_path,
-                room_id=room_id,
-                label=f"room '{room_name}'",
-            ),
+        label = f"room '{room_name}'"
+        success = await _sync_avatar_target(
+            client,
+            avatar_path=avatar_path,
+            room_id=room_id,
+            label=label,
         )
-    return success_count, skip_count
+        success_count += int(success)
+        if not success:
+            failed_labels.append(label)
+    return success_count, skip_count, failed_labels
 
 
 async def _sync_root_space_avatar(
     client: nio.AsyncClient,
     config: Config,
     state: MatrixState,
-) -> int:
+) -> bool | None:
     """Apply the managed root-space avatar when both the asset and room exist."""
     if not config.matrix_space.enabled or not state.space_room_id:
-        return 0
+        return None
 
     root_space_avatar_path = resolve_avatar_path("spaces", ROOT_SPACE_AVATAR_NAME)
     if not root_space_avatar_path.exists():
-        return 0
+        return None
 
-    return int(
-        await _sync_avatar_target(
-            client,
-            avatar_path=root_space_avatar_path,
-            room_id=state.space_room_id,
-            label="root space",
-        ),
+    return await _sync_avatar_target(
+        client,
+        avatar_path=root_space_avatar_path,
+        room_id=state.space_room_id,
+        label="root space",
     )
 
 
@@ -380,9 +381,14 @@ async def set_room_avatars_in_matrix() -> None:
     console.print("[green]✓ Logged in to Matrix as router[/green]")
 
     config = load_validated_config()
+    failed_labels: list[str] = []
     try:
-        success_count, skip_count = await _sync_configured_room_avatars(client, config)
-        success_count += await _sync_root_space_avatar(client, config, state)
+        success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config)
+        root_space_success = await _sync_root_space_avatar(client, config, state)
+        if root_space_success is True:
+            success_count += 1
+        elif root_space_success is False:
+            failed_labels.append("root space")
     finally:
         await client.close()
 
@@ -390,6 +396,11 @@ async def set_room_avatars_in_matrix() -> None:
         console.print(f"\n[green]✓ Set {success_count} room avatars[/green]")
     if skip_count > 0:
         console.print(f"[dim]⊘ Skipped {skip_count} rooms (no avatar file)[/dim]")
+    if failed_labels:
+        formatted_labels = ", ".join(failed_labels)
+        msg = f"Failed to set avatars for: {formatted_labels}"
+        console.print(f"[red]Error:[/red] {msg}")
+        raise AvatarSyncError(msg)
 
 
 def _build_avatar_generation_targets(

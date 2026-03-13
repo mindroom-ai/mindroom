@@ -38,6 +38,8 @@ If you're looking for platform deployment scripts (infrastructure, database migr
 
 ### Generate and sync managed avatars
 Run MindRoom at least once before syncing so the router account exists in Matrix state.
+When you run this from a source checkout, generated files are written under `./avatars/`.
+In containerized deployments, generated overrides are stored under the persistent MindRoom storage path instead of the image-bundled `/app/avatars`.
 
 ```bash
 GOOGLE_API_KEY=your-google-api-key uv run mindroom avatars generate
