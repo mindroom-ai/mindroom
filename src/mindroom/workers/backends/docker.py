@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import os
 import shutil
 import threading
 import time
@@ -26,7 +25,9 @@ from mindroom.workers.backends._metadata_store import (
 )
 from mindroom.workers.backends.docker_config import (
     _DEFAULT_WORKER_PORT,
+    _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
+    _read_docker_user,
     docker_backend_config_signature,
     docker_workers_root,
     normalize_docker_name_prefix,
@@ -122,22 +123,6 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
     if not safe_prefix:
         safe_prefix = normalize_docker_name_prefix("mindroom-worker")[:max_prefix_length].rstrip("-") or "worker"
     return f"{safe_prefix}-{digest}"
-
-
-def _default_docker_user_for_os(os_name: str) -> str | None:
-    if os_name == "posix":
-        return f"{os.getuid()}:{os.getgid()}"
-    if os_name == "nt":
-        return None
-    return None
-
-
-def _read_docker_user() -> str | None:
-    raw_value = os.getenv("MINDROOM_DOCKER_WORKER_USER")
-    if raw_value is None:
-        return _default_docker_user_for_os(os.name)
-    normalized = raw_value.strip()
-    return normalized or None
 
 
 def _host_config_contents_hash(host_config_path: Path | None) -> str:

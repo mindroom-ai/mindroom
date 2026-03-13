@@ -602,8 +602,8 @@ def test_read_docker_user_defaults_to_current_posix_uid_gid(
 ) -> None:
     """Unset Docker worker user should follow the current POSIX runtime user."""
     monkeypatch.delenv("MINDROOM_DOCKER_WORKER_USER", raising=False)
-    monkeypatch.setattr("mindroom.workers.backends.docker.os.getuid", lambda: 501)
-    monkeypatch.setattr("mindroom.workers.backends.docker.os.getgid", lambda: 20)
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 501)
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getgid", lambda: 20)
 
     assert _default_docker_user_for_os("posix") == "501:20"
 
