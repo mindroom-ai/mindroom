@@ -372,7 +372,6 @@ def _resolve_user_agent_worker_payload(
         raise RuntimeError(msg)
     return worker_key, worker_target.private_agent_names
 
-
 def _get_worker_manager(
     runtime_paths: RuntimePaths,
     proxy_config: SandboxProxyConfig,
@@ -406,11 +405,8 @@ def _resolve_worker_handle(
     *,
     private_agent_names: frozenset[str] | None = None,
 ) -> WorkerHandle:
-    worker_manager = _get_worker_manager(runtime_paths, proxy_config)
-    existing_handle = worker_manager.get_worker(worker_key)
-    if existing_handle is not None and existing_handle.status == "ready":
-        return existing_handle
-    return worker_manager.ensure_worker(
+    """Reconcile and return the dedicated worker handle for one worker key."""
+    return _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
         WorkerSpec(worker_key, private_agent_names=private_agent_names),
     )
 
