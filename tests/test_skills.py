@@ -11,7 +11,7 @@ from agno.tools import Toolkit
 
 import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentWorkspaceConfig
 from mindroom.config.main import Config
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
@@ -24,7 +24,13 @@ from mindroom.tool_system.metadata import (
     register_tool_with_metadata,
 )
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity, resolve_worker_key
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    resolve_worker_key,
+    tool_execution_identity,
+)
+from mindroom.workspaces import resolve_agent_workspace
 from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
@@ -341,22 +347,116 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
 
     monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
 
-    workspace = tmp_path / "mind_data"
+    runtime_storage_path = tmp_path / "runtime_storage"
     config = _base_config(["dispatch"])
-    config.agents["code"].memory_backend = "file"
-    config.agents["code"].memory_file_path = str(workspace)
     config.agents["code"].tools = ["coding", "shell"]
     config.agents["code"].include_default_tools = False
     config.agents["code"].worker_scope = "user"
     config.agents["code"].worker_tools = ["coding"]
+    config.agents["code"].workspace = AgentWorkspaceConfig(path="mind_data")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id="tenant-123",
+        account_id="account-456",
+    )
 
-    toolkits = _collect_agent_toolkits(config, "code")
+    with tool_execution_identity(identity):
+        toolkits = _collect_agent_toolkits(
+            config,
+            "code",
+            storage_path=runtime_storage_path,
+        )
 
-    assert workspace.is_dir()
+    expected_workspace = resolve_agent_workspace(
+        "code",
+        config,
+        base_storage_path=runtime_storage_path,
+        execution_identity=identity,
+        create=False,
+    )
+
+    assert expected_workspace is not None
+    assert expected_workspace.root.is_dir()
     assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
     assert overrides_by_tool["coding"] is None
-    assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace.root)}
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspace_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill tool dispatch should resolve workspace overrides from the bot runtime storage path."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> DemoTools:
+        captured_calls.append((tool_name, dict(kwargs)))
+        return DemoTools()
+
+    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+
+    runtime_storage_path = tmp_path / "runtime_storage"
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["coding", "shell"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_scope = "user"
+    config.agents["code"].worker_tools = ["coding"]
+    config.agents["code"].workspace = AgentWorkspaceConfig(path="mind_data")
+
+    result = await _run_skill_command_tool(
+        config=config,
+        agent_name="code",
+        storage_path=runtime_storage_path,
+        command_tool="shell.demo",
+        skill_name="dispatch",
+        args_text="hello",
+        requester_user_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id=create_session_id("!room:example.org", "$thread"),
+        tenant_id=os.getenv("CUSTOMER_ID"),
+        account_id=os.getenv("ACCOUNT_ID"),
+    )
+    expected_workspace = resolve_agent_workspace(
+        "code",
+        config,
+        base_storage_path=runtime_storage_path,
+        execution_identity=identity,
+        create=False,
+    )
+
+    assert result == "skill:dispatch:hello"
+    assert expected_workspace is not None
+    overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
+    assert overrides_by_tool == {
+        "coding": None,
+        "shell": {"base_dir": str(expected_workspace.root)},
+    }
 
 
 @pytest.mark.asyncio
