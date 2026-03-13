@@ -297,11 +297,8 @@ def _get_worker_manager() -> WorkerManager:
 
 
 def _resolve_worker_handle(worker_key: str) -> WorkerHandle:
-    worker_manager = _get_worker_manager()
-    existing_handle = worker_manager.get_worker(worker_key)
-    if existing_handle is not None and existing_handle.status == "ready":
-        return existing_handle
-    return worker_manager.ensure_worker(WorkerSpec(worker_key))
+    """Reconcile and return the dedicated worker handle for one worker key."""
+    return _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
 
 
 def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:
