@@ -2,7 +2,7 @@ import type { PROVIDERS } from '@/lib/providers';
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
-export type WorkerScope = 'shared' | 'user' | 'user_agent' | 'room_thread';
+export type WorkerScope = 'shared' | 'user' | 'user_agent';
 
 export interface ModelConfig {
   provider: ProviderType;
