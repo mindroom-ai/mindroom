@@ -438,7 +438,7 @@ def _find_file_anchor_memory_result(
     storage_path: Path,
     config: Config,
 ) -> MemoryResult | None:
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
             resolution = _resolution_for_scope_user_id(
                 scope_user_id,
@@ -584,7 +584,7 @@ def get_file_agent_memory(
     config: Config,
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
             resolution = _resolution_for_scope_user_id(
                 scope_user_id,
@@ -697,7 +697,7 @@ def store_file_conversation_memory(
     if not condensed_prompt:
         return
 
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
+    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path)
     scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
     room_user_id = room_scope_user_id(room_id) if room_id else None

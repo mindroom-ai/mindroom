@@ -17,8 +17,6 @@ from mindroom.constants import resolve_config_relative_path
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from mindroom.config.main import Config
-
 WorkerScope = Literal["shared", "user", "user_agent"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
@@ -317,15 +315,11 @@ def _resolve_agent_workspace_target(relative_path: Path, *, agent_root: Path) ->
 def resolve_agent_owned_path(
     path_text: str,
     *,
-    field_name: str,
     agent_name: str,
     base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
     state_root: Path | None = None,
 ) -> AgentOwnedPath:
     """Resolve one agent-owned path into the canonical shared agent workspace."""
-    del config, execution_identity, field_name
     source_path = resolve_config_relative_path(path_text)
     if state_root is None:
         state_root = agent_state_root_path(base_storage_path, agent_name)
@@ -344,9 +338,6 @@ def resolve_agent_state_storage_path(
     *,
     agent_name: str,
     base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     """Return the storage path that should back the agent's mutable state."""
-    del config, execution_identity
     return agent_state_root_path(base_storage_path, agent_name)

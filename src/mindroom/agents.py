@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 logger = get_logger(__name__)
 
@@ -112,17 +112,14 @@ def _load_context_files(
     *,
     agent_name: str,
     storage_path: Path,
-    config: Config,
 ) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
         resolved_path = resolve_agent_owned_path(
             raw_path,
-            field_name="context_files",
             agent_name=agent_name,
             base_storage_path=storage_path,
-            config=config,
         ).resolved_path
         if resolved_path.is_file():
             loaded_parts.append(
@@ -229,7 +226,6 @@ def _build_additional_context(
     max_preload_chars: int,
     *,
     storage_path: Path,
-    config: Config,
 ) -> str:
     """Build additional role context from configured files/directories.
 
@@ -242,7 +238,6 @@ def _build_additional_context(
             agent_config.context_files,
             agent_name=agent_name,
             storage_path=storage_path,
-            config=config,
         )
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
@@ -258,7 +253,6 @@ def _build_additional_context(
 def _resolve_agent_workspace_paths(
     agent_name: str,
     agent_config: AgentConfig,
-    config: Config,
     *,
     storage_path: Path,
 ) -> Path:
@@ -270,10 +264,8 @@ def _resolve_agent_workspace_paths(
 
     resolved = resolve_agent_owned_path(
         agent_config.memory_file_path,
-        field_name="memory_file_path",
         agent_name=agent_name,
         base_storage_path=storage_path,
-        config=config,
     )
     workspace_path = resolved.resolved_path
     workspace_path.mkdir(parents=True, exist_ok=True)
@@ -311,7 +303,6 @@ def build_agent_tool_init_context(
     workspace_path = _resolve_agent_workspace_paths(
         agent_name,
         agent_config,
-        config,
         storage_path=resolved_storage_path,
     )
     return AgentToolInitContext(
@@ -359,7 +350,6 @@ def build_agent_toolkit(
     resolved_memory_storage_path = memory_storage_path or resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
-        config=config,
     )
     agent_config = config.get_agent(agent_name)
 
@@ -478,54 +468,40 @@ def _resolve_agent_learning(
 def create_session_storage(
     agent_name: str,
     storage_path: Path,
-    config: Config,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
     return _create_agent_state_db(
         agent_name,
         storage_path,
-        config,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
-        execution_identity=execution_identity,
     )
 
 
 def _create_learning_storage(
     agent_name: str,
     storage_path: Path,
-    config: Config,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent learning storage for an agent."""
     return _create_agent_state_db(
         agent_name,
         storage_path,
-        config,
         subdir="learning",
         session_table=f"{agent_name}_learning_sessions",
-        execution_identity=execution_identity,
     )
 
 
 def _create_agent_state_db(
     agent_name: str,
     storage_path: Path,
-    config: Config,
     *,
     subdir: str,
     session_table: str,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
-    """Create a scope-aware SQLite database for one agent state category."""
+    """Create a persistent SQLite database for one agent state category."""
     state_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
-        config=config,
-        execution_identity=execution_identity,
     )
     db_dir = state_storage_path / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -700,7 +676,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
-        config=config,
     )
 
     # Create tools
@@ -722,9 +697,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    storage = create_session_storage(agent_name, resolved_storage_path, config)
+    storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
-        _create_learning_storage(agent_name, resolved_storage_path, config)
+        _create_learning_storage(agent_name, resolved_storage_path)
         if _is_learning_enabled(agent_config, defaults)
         else None
     )
@@ -759,7 +734,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_config,
         config.defaults.max_preload_chars,
         storage_path=resolved_storage_path,
-        config=config,
     )
 
     # Use rich prompt if available, otherwise use YAML config

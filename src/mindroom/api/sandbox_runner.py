@@ -184,6 +184,13 @@ class SandboxWorkerCleanupResponse(BaseModel):
     cleaned_workers: list[SandboxWorkerResponse]
 
 
+@dataclass(frozen=True)
+class _PreparedWorkerRequest:
+    handle: WorkerHandle
+    paths: LocalWorkerStatePaths
+    runtime_overrides: dict[str, object]
+
+
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
     if _sandbox_proxy._PROXY_TOKEN is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
@@ -474,10 +481,10 @@ def _resolve_worker_base_dir(
     return candidate
 
 
-def _normalize_request_worker_base_dir(
+def _prepare_worker_request(
     request: SandboxRunnerExecuteRequest,
-) -> SandboxRunnerExecuteResponse | None:
-    """Validate worker-scoped base_dir overrides before execution starts."""
+) -> _PreparedWorkerRequest | SandboxRunnerExecuteResponse | None:
+    """Prepare one worker-backed request for execution."""
     if request.worker_key is None:
         return None
 
@@ -486,38 +493,36 @@ def _normalize_request_worker_base_dir(
     except WorkerBackendError as exc:
         return _worker_initialization_failure_response(request.worker_key, exc)
 
-    try:
-        storage_root = _runner_storage_root()
-        _resolve_worker_base_dir(
-            local_worker_state_paths_from_handle(worker_handle),
+    paths = local_worker_state_paths_from_handle(worker_handle)
+    storage_root = _runner_storage_root()
+    runtime_overrides = {
+        "base_dir": _resolve_worker_base_dir(
+            paths,
             storage_root,
             request.tool_init_overrides.get("base_dir"),
-        )
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ),
+    }
+    return _PreparedWorkerRequest(
+        handle=worker_handle,
+        paths=paths,
+        runtime_overrides=runtime_overrides,
+    )
 
-    return None
 
-
-async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+async def _execute_request_inprocess(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
     runtime_overrides: dict[str, object] | None = None
     if request.worker_key is not None:
         try:
-            worker_handle = _prepare_worker(request.worker_key)
-        except WorkerBackendError as exc:
-            return _worker_initialization_failure_response(request.worker_key, exc)
-        paths = local_worker_state_paths_from_handle(worker_handle)
-        storage_root = _runner_storage_root()
-        try:
-            runtime_overrides = {
-                "base_dir": _resolve_worker_base_dir(
-                    paths,
-                    storage_root,
-                    request.tool_init_overrides.get("base_dir"),
-                ),
-            }
+            prepared = prepared_worker or _prepare_worker_request(request)
         except (TypeError, ValueError) as exc:
             return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+        if isinstance(prepared, SandboxRunnerExecuteResponse):
+            return prepared
+        assert prepared is not None
+        runtime_overrides = prepared.runtime_overrides
 
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
@@ -569,13 +574,12 @@ def _subprocess_failure_response(
 
 
 def _resolve_subprocess_worker_context(
-    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None,
 ) -> tuple[str | None, dict[str, str] | None, str | None]:
-    if request.worker_key is None:
+    if prepared_worker is None:
         return None, None, None
 
-    worker_handle = _prepare_worker(request.worker_key)
-    paths = local_worker_state_paths_from_handle(worker_handle)
+    paths = prepared_worker.paths
     return (
         str(paths.venv_dir / "bin" / "python"),
         _worker_subprocess_env(paths),
@@ -608,14 +612,18 @@ def _parse_subprocess_response(
     return _subprocess_failure_response(request, "Sandbox subprocess returned an invalid response.")
 
 
-def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+def _execute_request_subprocess_sync(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
     try:
-        python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(request)
-    except WorkerBackendError as exc:
-        if request.worker_key is None:
-            msg = "Worker initialization failed without a worker key."
-            raise RuntimeError(msg) from exc
-        return _worker_initialization_failure_response(request.worker_key, exc)
+        prepared = prepared_worker or _prepare_worker_request(request)
+    except (TypeError, ValueError) as exc:
+        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    if isinstance(prepared, SandboxRunnerExecuteResponse):
+        return prepared
+
+    python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared)
 
     try:
         completed = subprocess.run(
@@ -636,8 +644,11 @@ def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> Sa
     return _parse_subprocess_response(request, completed)
 
 
-async def _execute_request_subprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    return await asyncio.to_thread(_execute_request_subprocess_sync, request)
+async def _execute_request_subprocess(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
+    return await asyncio.to_thread(_execute_request_subprocess_sync, request, prepared_worker)
 
 
 def _run_subprocess_worker() -> int:
@@ -744,16 +755,23 @@ async def execute_tool_call(
         )
 
     request.credential_overrides = credential_overrides
-    if (normalized_worker_response := _normalize_request_worker_base_dir(request)) is not None:
-        return normalized_worker_response
+    prepared_worker: _PreparedWorkerRequest | None = None
+    if request.worker_key is not None:
+        try:
+            prepared = _prepare_worker_request(request)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(prepared, SandboxRunnerExecuteResponse):
+            return prepared
+        prepared_worker = prepared
     if _runner_uses_subprocess():
-        return await _execute_request_subprocess(request)
+        return await _execute_request_subprocess(request, prepared_worker)
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
     if request.worker_key is not None:
-        return await _execute_request_subprocess(request)
-    return await _execute_request_inprocess(request)
+        return await _execute_request_subprocess(request, prepared_worker)
+    return await _execute_request_inprocess(request, prepared_worker)
 
 
 if __name__ == "__main__":

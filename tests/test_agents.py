@@ -24,6 +24,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
+    resolve_agent_owned_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     tool_execution_identity,
@@ -662,6 +663,59 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
 
     with pytest.raises(ValueError, match="Unknown worker scope"):
         resolve_worker_key(cast("WorkerScope", "bogus"), execution_identity)
+
+
+def test_resolve_agent_owned_path_bootstraps_relative_path_into_canonical_workspace(tmp_path: Path) -> None:
+    """Relative agent-owned paths should seed into the canonical agent workspace."""
+    config_dir = tmp_path / "cfg"
+    source_dir = config_dir / "mind_data"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source_file = source_dir / "SOUL.md"
+    source_file.write_text("Config soul context.", encoding="utf-8")
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+        resolved = resolve_agent_owned_path(
+            "./mind_data/SOUL.md",
+            agent_name="general",
+            base_storage_path=tmp_path,
+        )
+
+    assert resolved.state_root == agent_state_root_path(tmp_path, "general")
+    assert resolved.resolved_path == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+    assert resolved.resolved_path.read_text(encoding="utf-8") == "Config soul context."
+
+
+def test_resolve_agent_owned_path_maps_absolute_paths_under_canonical_workspace(tmp_path: Path) -> None:
+    """Absolute agent-owned paths should be canonicalized under _absolute/."""
+    source_file = tmp_path / "external" / "SOUL.md"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("Absolute soul context.", encoding="utf-8")
+
+    resolved = resolve_agent_owned_path(
+        str(source_file),
+        agent_name="general",
+        base_storage_path=tmp_path,
+    )
+
+    assert resolved.state_root == agent_state_root_path(tmp_path, "general")
+    assert resolved.resolved_path == _canonical_absolute_agent_path(tmp_path, "general", source_file)
+    assert resolved.resolved_path.read_text(encoding="utf-8") == "Absolute soul context."
+
+
+def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None:
+    """Agent-owned paths must stay inside the canonical agent workspace."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    with (
+        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
+        pytest.raises(ValueError, match="Agent-owned paths must stay within"),
+    ):
+        resolve_agent_owned_path(
+            "../escape.md",
+            agent_name="general",
+            base_storage_path=tmp_path,
+        )
 
 
 @patch("mindroom.agents.get_tool_by_name")

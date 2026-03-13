@@ -36,45 +36,41 @@ def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> boo
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
-def _effective_storage_path_for_agent(agent_name: str, storage_path: Path, config: Config) -> Path:
+def _effective_storage_path_for_agent(agent_name: str, storage_path: Path) -> Path:
     return resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
-        config=config,
     )
 
 
 def resolve_context_storage_path(
     storage_path: Path,
-    config: Config,
     *,
     agent_name: str | None = None,
 ) -> Path:
     """Resolve the storage root for an agent-aware memory operation."""
     if agent_name is None:
         return storage_path
-    return _effective_storage_path_for_agent(agent_name, storage_path, config)
+    return _effective_storage_path_for_agent(agent_name, storage_path)
 
 
 def effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
-    config: Config,
 ) -> list[Path]:
     """Return the distinct storage roots affected by the caller context."""
     if isinstance(caller_context, str):
-        return [_effective_storage_path_for_agent(caller_context, storage_path, config)]
-    return _effective_storage_paths_for_team(caller_context, storage_path, config)
+        return [_effective_storage_path_for_agent(caller_context, storage_path)]
+    return _effective_storage_paths_for_team(caller_context, storage_path)
 
 
 def _effective_storage_paths_for_team(
     agent_names: list[str],
     storage_path: Path,
-    config: Config,
 ) -> list[Path]:
     effective_paths: list[Path] = []
     for agent_name in agent_names:
-        effective_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+        effective_path = _effective_storage_path_for_agent(agent_name, storage_path)
         if effective_path not in effective_paths:
             effective_paths.append(effective_path)
     return effective_paths or [storage_path]
@@ -136,8 +132,8 @@ def mutation_target_storage_paths(
 ) -> list[Path]:
     """Return all storage roots that should reflect mutations for this scope."""
     if (team_members := _team_members_from_scope_user_id(scope_user_id, config)) is not None:
-        return effective_storage_paths_for_context(team_members, storage_path, config)
-    return effective_storage_paths_for_context(caller_context, storage_path, config)
+        return effective_storage_paths_for_context(team_members, storage_path)
+    return effective_storage_paths_for_context(caller_context, storage_path)
 
 
 def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
@@ -183,7 +179,7 @@ def resolve_file_memory_resolution(
     preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Resolve file-memory storage settings for one caller context."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
+    resolved_storage_path = resolve_context_storage_path(storage_path, agent_name=agent_name)
     resolution = file_memory_resolution_from_paths(
         original_storage_path=storage_path,
         resolved_storage_path=resolved_storage_path,
@@ -198,10 +194,8 @@ def resolve_file_memory_resolution(
 
     agent_memory_scope_path = resolve_agent_owned_path(
         agent_config.memory_file_path,
-        field_name="memory_file_path",
         agent_name=agent_name,
         base_storage_path=storage_path,
-        config=config,
     ).resolved_path
     return FileMemoryResolution(
         storage_path=resolution.storage_path,

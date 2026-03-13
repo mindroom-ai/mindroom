@@ -272,7 +272,7 @@ def _apply_context_window_limit(
 
     # Use pre-loaded session or load from storage
     if session is None:
-        storage = create_session_storage(agent_name, storage_path, config)
+        storage = create_session_storage(agent_name, storage_path)
         session = _get_agent_session(storage, session_id)
     if not session or not session.runs:
         return
@@ -877,7 +877,7 @@ async def _prepare_agent_and_prompt(
     session = None
     has_prior_runs = False
     if session_id and thread_history:
-        storage = create_session_storage(agent_name, storage_path, config)
+        storage = create_session_storage(agent_name, storage_path)
         session = _get_agent_session(storage, session_id)
         has_prior_runs = session is not None and bool(session.runs)
 

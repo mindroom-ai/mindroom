@@ -382,6 +382,56 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
     assert "base_dir" in response.json()["detail"]
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker request validation should reuse the prepared worker for parent dispatch."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    prepare_calls = 0
+    original_prepare = sandbox_runner_module._prepare_worker
+
+    def _counting_prepare(worker_key: str) -> object:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(worker_key)
+
+    async def _fake_execute_request_subprocess(
+        request: sandbox_runner_module.SandboxRunnerExecuteRequest,
+        prepared_worker: object | None = None,
+    ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        assert request.worker_key == "worker-a"
+        assert prepared_worker is not None
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+
+    monkeypatch.setattr(sandbox_runner_module, "_prepare_worker", _counting_prepare)
+    monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "result": "ok", "error": None}
+    assert prepare_calls == 1
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)
