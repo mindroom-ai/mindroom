@@ -223,25 +223,11 @@ class Config(BaseModel):
             )
             msg = f"Agents reference unknown knowledge bases: {formatted}"
             raise ValueError(msg)
-
-        missing_workspaces = [
-            (agent_name, base_id)
-            for agent_name, agent_config in self.agents.items()
-            for base_id in agent_config.knowledge_bases
-            if self.knowledge_bases[base_id].path_relative_to_agent_workspace and agent_config.private is None
-        ]
-        if missing_workspaces:
-            formatted = ", ".join(
-                f"{agent_name} -> {base_id}"
-                for agent_name, base_id in sorted(missing_workspaces, key=lambda item: (item[0], item[1]))
-            )
-            msg = f"Workspace-relative knowledge bases require agents.<name>.private; invalid assignments: {formatted}"
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
     def validate_private_knowledge(self) -> Config:
-        """Ensure private knowledge has a path when no scaffold default exists."""
+        """Ensure private knowledge has a path when no template default exists."""
         invalid_private_knowledge = [
             agent_name
             for agent_name, agent_config in self.agents.items()
@@ -250,14 +236,14 @@ class Config(BaseModel):
                 and agent_config.private.knowledge is not None
                 and agent_config.private.knowledge.enabled
                 and agent_config.private.knowledge.path is None
-                and default_private_knowledge_path(agent_config.private.scaffold) is None
+                and default_private_knowledge_path(agent_config.private.template_dir) is None
             )
         ]
         if invalid_private_knowledge:
             formatted = ", ".join(sorted(invalid_private_knowledge))
             msg = (
-                "agents.<name>.private.knowledge.path is required when the selected scaffold does not define a "
-                f"default private knowledge path; invalid agents: {formatted}"
+                "agents.<name>.private.knowledge.path is required when private.template_dir is not configured "
+                f"and no default private knowledge path is available; invalid agents: {formatted}"
             )
             raise ValueError(msg)
         return self
@@ -485,7 +471,7 @@ class Config(BaseModel):
             return None
         if (
             agent_config.private.knowledge is None
-            and default_private_knowledge_path(agent_config.private.scaffold) is None
+            and default_private_knowledge_path(agent_config.private.template_dir) is None
         ):
             return None
         return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
@@ -533,7 +519,7 @@ class Config(BaseModel):
         knowledge_path = (
             private_knowledge.path
             if private_knowledge is not None and private_knowledge.path is not None
-            else default_private_knowledge_path(private_config.scaffold)
+            else default_private_knowledge_path(private_config.template_dir)
         )
         if knowledge_path is None:
             msg = f"Knowledge base '{base_id}' is not configured"
@@ -541,7 +527,6 @@ class Config(BaseModel):
 
         return KnowledgeBaseConfig(
             path=knowledge_path,
-            path_relative_to_agent_workspace=True,
             watch=True if private_knowledge is None else private_knowledge.watch,
             chunk_size=5000 if private_knowledge is None else private_knowledge.chunk_size,
             chunk_overlap=0 if private_knowledge is None else private_knowledge.chunk_overlap,

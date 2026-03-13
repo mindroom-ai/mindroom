@@ -404,15 +404,13 @@ class AgentBot:
         """Return shared knowledge for agents assigned to one or more knowledge bases."""
 
         def _get_knowledge(base_id: str) -> Knowledge | None:
-            base_config = self.config.get_knowledge_base_config(base_id)
-            if not base_config.path_relative_to_agent_workspace:
+            if self.config.get_private_knowledge_base_agent(base_id) is None:
                 manager = self.orchestrator.knowledge_managers.get(base_id) if self.orchestrator is not None else None
                 if manager is None:
                     manager = get_knowledge_manager(base_id)
             else:
                 manager = get_knowledge_manager(
                     base_id,
-                    agent_name=agent_name,
                     config=self.config,
                     storage_path=self.storage_path,
                 )

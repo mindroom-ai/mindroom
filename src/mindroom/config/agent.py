@@ -13,9 +13,8 @@ from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
-WorkspaceTemplate = Literal["mind"]
 PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
-_MIND_PRIVATE_CONTEXT_FILES: tuple[str, ...] = (
+_DEFAULT_PRIVATE_CONTEXT_FILES: tuple[str, ...] = (
     "SOUL.md",
     "AGENTS.md",
     "USER.md",
@@ -23,6 +22,7 @@ _MIND_PRIVATE_CONTEXT_FILES: tuple[str, ...] = (
     "TOOLS.md",
     "HEARTBEAT.md",
 )
+_DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory"
 
 
 def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
@@ -36,17 +36,17 @@ def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
     return value
 
 
-def default_private_context_files(scaffold: WorkspaceTemplate | None) -> tuple[str, ...]:
-    """Return the scaffold-owned default private context files."""
-    if scaffold == "mind":
-        return _MIND_PRIVATE_CONTEXT_FILES
+def default_private_context_files(template_dir: str | None) -> tuple[str, ...]:
+    """Return default private context files when a template directory is configured."""
+    if template_dir is not None:
+        return _DEFAULT_PRIVATE_CONTEXT_FILES
     return ()
 
 
-def default_private_knowledge_path(scaffold: WorkspaceTemplate | None) -> str | None:
-    """Return the scaffold-owned default private knowledge path."""
-    if scaffold == "mind":
-        return "memory"
+def default_private_knowledge_path(template_dir: str | None) -> str | None:
+    """Return the default private knowledge path when a template directory is configured."""
+    if template_dir is not None:
+        return _DEFAULT_PRIVATE_KNOWLEDGE_PATH
     return None
 
 
@@ -104,13 +104,13 @@ class AgentPrivateConfig(BaseModel):
         default=None,
         description="Private root path relative to the active worker state root; defaults to <agent_name>_data",
     )
-    scaffold: WorkspaceTemplate | None = Field(
+    template_dir: str | None = Field(
         default=None,
-        description="Optional built-in private scaffold copied into each requester root on first use",
+        description="Optional local directory copied into each requester root on first use",
     )
     context_files: list[str] | None = Field(
         default=None,
-        description="Optional private-root-relative context files; defaults to scaffold-owned files when omitted",
+        description="Optional private-root-relative context files; defaults to the conventional Mind-style files when template_dir is set",
     )
     knowledge: AgentPrivateKnowledgeConfig | None = Field(
         default=None,
@@ -124,6 +124,18 @@ class AgentPrivateConfig(BaseModel):
         if value is None:
             return None
         return _validate_safe_relative_path(value, field_name="private.root")
+
+    @field_validator("template_dir")
+    @classmethod
+    def validate_template_dir(cls, value: str | None) -> str | None:
+        """Normalize configured template directories."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = "private.template_dir must not be empty"
+            raise ValueError(msg)
+        return stripped
 
     @field_validator("context_files")
     @classmethod

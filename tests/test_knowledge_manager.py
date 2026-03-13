@@ -25,6 +25,7 @@ from mindroom.knowledge.manager import (
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -121,6 +122,7 @@ class _DummyChromaDb:
 def _mind_private_agent(
     *,
     watch: bool,
+    template_dir: str,
     git: KnowledgeGitConfig | None = None,
 ) -> AgentConfig:
     """Return a worker-scoped private Mind agent config for knowledge tests."""
@@ -130,7 +132,7 @@ def _mind_private_agent(
         private=AgentPrivateConfig(
             per="user",
             root="mind_data",
-            scaffold="mind",
+            template_dir=template_dir,
             context_files=["SOUL.md"],
             knowledge=AgentPrivateKnowledgeConfig(
                 watch=watch,
@@ -686,18 +688,20 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
 
 
 @pytest.mark.asyncio
-async def test_private_knowledge_managers_scaffold_and_isolate_worker_roots(
+async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Private knowledge should resolve to requester-scoped roots and managers."""
+    """Private knowledge should copy the configured template into requester-scoped roots."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
+    template_dir = build_private_template_dir()
     config = Config(
         agents={
-            "mind": _mind_private_agent(watch=False),
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
         },
         models={},
     )
@@ -731,14 +735,12 @@ async def test_private_knowledge_managers_scaffold_and_isolate_worker_roots(
 
         alice_manager = get_knowledge_manager(
             private_base_id,
-            agent_name="mind",
             config=config,
             storage_path=tmp_path,
             execution_identity=alice_identity,
         )
         bob_manager = get_knowledge_manager(
             private_base_id,
-            agent_name="mind",
             config=config,
             storage_path=tmp_path,
             execution_identity=bob_identity,
@@ -769,15 +771,17 @@ async def test_private_knowledge_managers_scaffold_and_isolate_worker_roots(
 async def test_worker_scoped_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
     """Worker-scoped private knowledge should refresh on access instead of starting persistent watchers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
+    template_dir = build_private_template_dir()
     config = Config(
         agents={
-            "mind": _mind_private_agent(watch=True),
+            "mind": _mind_private_agent(watch=True, template_dir=str(template_dir)),
         },
         models={},
     )
@@ -811,16 +815,19 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
 async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
     """Worker-scoped Git knowledge should refresh on access instead of starting git polling tasks."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
+    template_dir = build_private_template_dir()
     config = Config(
         agents={
             "mind": _mind_private_agent(
                 watch=True,
+                template_dir=str(template_dir),
                 git=KnowledgeGitConfig(
                     repo_url="https://github.com/example/memory.git",
                     branch="main",
@@ -863,15 +870,17 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
 async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
 ) -> None:
     """Static manager initialization should not tear down live scoped private managers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
+    template_dir = build_private_template_dir()
     config = Config(
         agents={
-            "mind": _mind_private_agent(watch=False),
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
         },
         models={},
     )
@@ -895,7 +904,6 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
         static_managers = await initialize_knowledge_managers(config, tmp_path, reindex_on_create=False)
         resolved_manager = get_knowledge_manager(
             private_base_id,
-            agent_name="mind",
             config=config,
             storage_path=tmp_path,
             execution_identity=identity,
