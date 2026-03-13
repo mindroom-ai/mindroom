@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
@@ -720,6 +721,8 @@ async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker
         await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=alice_identity)
         await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
 
+        assert get_knowledge_manager("mind_memory") is None
+
         alice_manager = get_knowledge_manager(
             "mind_memory",
             agent_name="mind",
@@ -754,6 +757,251 @@ async def test_workspace_relative_knowledge_managers_scaffold_and_isolate_worker
         assert (bob_workspace / "MEMORY.md").exists()
     finally:
         await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_worker_scoped_workspace_relative_knowledge_refreshes_on_access_without_background_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-scoped workspace knowledge should refresh on access instead of starting persistent watchers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                worker_scope="user",
+                workspace=AgentWorkspaceConfig(
+                    path="mind_data",
+                    template="mind",
+                    file_memory_path=".",
+                    context_files=["SOUL.md"],
+                ),
+                knowledge_bases=["mind_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "mind_memory": KnowledgeBaseConfig(
+                path="memory",
+                path_relative_to_agent_workspace=True,
+                watch=True,
+            ),
+        },
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert sync_indexed_files.await_count == 2
+        start_watcher.assert_not_awaited()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_worker_scoped_git_workspace_relative_knowledge_refreshes_on_access_without_background_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker-scoped Git knowledge should refresh on access instead of starting git polling tasks."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                worker_scope="user",
+                workspace=AgentWorkspaceConfig(
+                    path="mind_data",
+                    template="mind",
+                    file_memory_path=".",
+                    context_files=["SOUL.md"],
+                ),
+                knowledge_bases=["mind_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "mind_memory": KnowledgeBaseConfig(
+                path="memory",
+                path_relative_to_agent_workspace=True,
+                watch=True,
+                git=KnowledgeGitConfig(
+                    repo_url="https://github.com/example/memory.git",
+                    branch="main",
+                    poll_interval_seconds=30,
+                ),
+            ),
+        },
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    sync_indexed_files = AsyncMock()
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert sync_git_repository.await_count == 2
+        sync_indexed_files.assert_not_awaited()
+        start_watcher.assert_not_awaited()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_keeps_workspace_relative_scoped_managers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Static manager initialization should not tear down live scoped workspace managers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                worker_scope="user",
+                workspace=AgentWorkspaceConfig(
+                    path="mind_data",
+                    template="mind",
+                    file_memory_path=".",
+                    context_files=["SOUL.md"],
+                ),
+                knowledge_bases=["mind_memory"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "mind_memory": KnowledgeBaseConfig(
+                path="memory",
+                path_relative_to_agent_workspace=True,
+                watch=False,
+            ),
+        },
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        scoped_manager = managers["mind_memory"]
+
+        static_managers = await initialize_knowledge_managers(config, tmp_path, reindex_on_create=False)
+        resolved_manager = get_knowledge_manager(
+            "mind_memory",
+            agent_name="mind",
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=identity,
+        )
+
+        assert static_managers == {}
+        assert resolved_manager is scoped_manager
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_indexes_files_after_initial_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first git sync should index all tracked files cloned into a fresh workspace."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    def _run_git(*args: str) -> None:
+        subprocess.run(list(args), cwd=remote_repo, check=True, capture_output=True, text=True)
+
+    remote_repo = tmp_path / "remote"
+    remote_repo.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(_run_git, "git", "init", "-b", "main")
+    await asyncio.to_thread(_run_git, "git", "config", "user.email", "tests@example.com")
+    await asyncio.to_thread(_run_git, "git", "config", "user.name", "MindRoom Tests")
+    (remote_repo / "doc.md").write_text("hello", encoding="utf-8")
+    await asyncio.to_thread(_run_git, "git", "add", "doc.md")
+    await asyncio.to_thread(_run_git, "git", "commit", "-m", "init")
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(tmp_path / "knowledge"),
+                watch=False,
+                git=KnowledgeGitConfig(
+                    repo_url=str(remote_repo),
+                    branch="main",
+                    poll_interval_seconds=30,
+                ),
+            ),
+        },
+    )
+
+    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+
+    result = await manager.sync_git_repository()
+
+    assert result == {"updated": True, "changed_count": 1, "removed_count": 0}
+    assert manager._indexed_files == {"doc.md"}
+    assert _DummyChromaDb.metadatas == [
+        {
+            "source_path": "doc.md",
+            "source_mtime_ns": (manager.knowledge_path / "doc.md").stat().st_mtime_ns,
+            "source_size": (manager.knowledge_path / "doc.md").stat().st_size,
+        },
+    ]
 
 
 @pytest.mark.asyncio
