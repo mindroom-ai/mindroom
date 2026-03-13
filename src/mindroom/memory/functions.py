@@ -13,25 +13,21 @@ from mindroom.tool_system.worker_routing import (
 
 from ._file_backend import (
     add_file_agent_memory,
-    add_file_room_memory,
     append_agent_daily_file_memory,
     delete_file_agent_memory,
     get_file_agent_memory,
     list_file_agent_memories,
     load_scope_entrypoint_context,
     search_file_agent_memories,
-    search_file_room_memories,
     store_file_conversation_memory,
     update_file_agent_memory,
 )
 from ._mem0_backend import (
     add_mem0_agent_memory,
-    add_mem0_room_memory,
     delete_mem0_agent_memory,
     get_mem0_agent_memory,
     list_mem0_agent_memories,
     search_mem0_agent_memories,
-    search_mem0_room_memories,
     store_mem0_conversation_memory,
     update_mem0_agent_memory,
 )
@@ -39,7 +35,6 @@ from ._policy import (
     agent_scope_user_id,
     caller_uses_file_memory_backend,
     resolve_file_memory_resolution,
-    room_scope_user_id,
     team_uses_file_memory_backend,
     use_file_memory_backend,
 )
@@ -202,91 +197,25 @@ async def delete_agent_memory(
     )
 
 
-async def add_room_memory(
-    content: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    agent_name: str | None = None,
-    metadata: dict | None = None,
-) -> None:
-    """Add a memory for a room."""
-    if use_file_memory_backend(config, agent_name=agent_name):
-        add_file_room_memory(content, room_id, storage_path, config, agent_name=agent_name)
-        return
-    await add_mem0_room_memory(
-        content,
-        room_id,
-        storage_path,
-        config,
-        agent_name=agent_name,
-        metadata=metadata,
-        create_memory=create_memory_instance,
-    )
-
-
-async def search_room_memories(
-    query: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    agent_name: str | None = None,
-    limit: int = 3,
-) -> list[MemoryResult]:
-    """Search room memories."""
-    if use_file_memory_backend(config, agent_name=agent_name):
-        return search_file_room_memories(
-            query,
-            room_id,
-            storage_path,
-            config,
-            agent_name=agent_name,
-            limit=limit,
-        )
-    return await search_mem0_room_memories(
-        query,
-        room_id,
-        storage_path,
-        config,
-        agent_name=agent_name,
-        limit=limit,
-        create_memory=create_memory_instance,
-    )
-
-
 async def build_memory_enhanced_prompt(
     prompt: str,
     agent_name: str,
     storage_path: Path,
     config: Config,
-    room_id: str | None = None,
 ) -> str:
     """Build a prompt enhanced with relevant memories."""
     resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
     logger.debug("Building enhanced prompt", agent=agent_name)
     if use_file_memory_backend(config, agent_name=agent_name):
-        return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, resolution, config, room_id)
+        return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, resolution, config)
 
     agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    room_memories: list[MemoryResult] = []
-    if room_id:
-        room_memories = await search_room_memories(
-            prompt,
-            room_id,
-            storage_path,
-            config,
-            agent_name=agent_name,
-        )
-        if room_memories:
-            logger.debug("Room memories added", count=len(room_memories))
-
     return build_prompt_with_memories(
         prompt,
         agent_memories=agent_memories,
-        room_memories=room_memories,
     )
 
 
@@ -296,29 +225,14 @@ async def _build_file_memory_enhanced_prompt(
     base_storage_path: Path,
     resolution: FileMemoryResolution,
     config: Config,
-    room_id: str | None,
 ) -> str:
     agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
     agent_memories = await search_agent_memories(prompt, agent_name, base_storage_path, config)
-
-    room_entrypoint = ""
-    room_memories: list[MemoryResult] = []
-    if room_id:
-        room_entrypoint = load_scope_entrypoint_context(room_scope_user_id(room_id), resolution, config)
-        room_memories = await search_room_memories(
-            prompt,
-            room_id,
-            base_storage_path,
-            config,
-            agent_name=agent_name,
-        )
 
     return build_file_prompt_with_memory_context(
         prompt,
         agent_entrypoint=agent_entrypoint,
         agent_memories=agent_memories,
-        room_entrypoint=room_entrypoint,
-        room_memories=room_memories,
     )
 
 
@@ -328,7 +242,6 @@ async def store_conversation_memory(
     storage_path: Path,
     session_id: str,
     config: Config,
-    room_id: str | None = None,
     thread_history: list[dict] | None = None,
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -345,7 +258,7 @@ async def store_conversation_memory(
             else team_uses_file_memory_backend(config, agent_name)
         )
         if use_file_backend:
-            store_file_conversation_memory(prompt, agent_name, storage_path, config, room_id)
+            store_file_conversation_memory(prompt, agent_name, storage_path, config)
             return
 
         await store_mem0_conversation_memory(
@@ -354,7 +267,6 @@ async def store_conversation_memory(
             storage_path,
             session_id,
             config,
-            room_id,
             replica_key=new_memory_id() if isinstance(agent_name, list) else None,
             create_memory=create_memory_instance,
         )

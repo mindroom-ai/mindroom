@@ -12,7 +12,6 @@ from mindroom.config.main import Config
 from mindroom.memory._prompting import _format_memories_as_context
 from mindroom.memory.functions import (
     add_agent_memory,
-    add_room_memory,
     build_memory_enhanced_prompt,
     delete_agent_memory,
     get_agent_memory,
@@ -240,24 +239,6 @@ class TestMemoryFacade:
 
         mock_memory.delete.assert_not_called()
 
-    @pytest.mark.asyncio
-    async def test_add_room_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
-        with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
-            await add_room_memory(
-                "Room discussion content",
-                "!room:server",
-                storage_path,
-                config,
-                agent_name="helper",
-                metadata={"topic": "math"},
-            )
-
-        call_args = mock_memory.add.call_args
-        assert call_args[1]["user_id"] == "room_room_server"
-        assert call_args[1]["metadata"]["room_id"] == "!room:server"
-        assert call_args[1]["metadata"]["contributed_by"] == "helper"
-        assert call_args[1]["metadata"]["topic"] == "math"
-
     def test_format_memories_as_context(self) -> None:
         memories: list[MemoryResult] = [
             {"memory": "First memory", "id": "1"},
@@ -274,7 +255,7 @@ class TestMemoryFacade:
         assert context == expected
 
     def test_format_memories_as_context_empty(self) -> None:
-        assert _format_memories_as_context([], "room") == ""
+        assert _format_memories_as_context([], "agent") == ""
 
     @pytest.mark.asyncio
     async def test_build_memory_enhanced_prompt(
@@ -284,8 +265,7 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         agent_memories = [{"memory": "I previously calculated 2+2=4", "id": "1"}]
-        room_memories = [{"memory": "We discussed math earlier", "id": "2"}]
-        mock_memory.search.side_effect = [{"results": agent_memories}, {"results": room_memories}]
+        mock_memory.search.return_value = {"results": agent_memories}
 
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory):
             enhanced = await build_memory_enhanced_prompt(
@@ -293,13 +273,10 @@ class TestMemoryFacade:
                 "calculator",
                 storage_path,
                 config,
-                room_id="!room:server",
             )
 
         assert "[Automatically extracted agent memories - may not be relevant to current context]" in enhanced
         assert "I previously calculated 2+2=4" in enhanced
-        assert "[Automatically extracted room memories - may not be relevant to current context]" in enhanced
-        assert "We discussed math earlier" in enhanced
         assert "What is 3+3?" in enhanced
 
     @pytest.mark.asyncio
@@ -325,19 +302,13 @@ class TestMemoryFacade:
                 storage_path,
                 "session123",
                 config,
-                room_id="!room:server",
             )
 
-        assert mock_memory.add.call_count == 2
+        assert mock_memory.add.call_count == 1
         agent_call = mock_memory.add.call_args_list[0]
         assert agent_call[0][0] == [{"role": "user", "content": "What is 2+2?"}]
         assert agent_call[1]["user_id"] == "agent_calculator"
         assert agent_call[1]["metadata"]["type"] == "conversation"
-
-        room_call = mock_memory.add.call_args_list[1]
-        assert room_call[0][0] == [{"role": "user", "content": "What is 2+2?"}]
-        assert room_call[1]["user_id"] == "room_room_server"
-        assert room_call[1]["metadata"]["type"] == "conversation"
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_no_prompt(
