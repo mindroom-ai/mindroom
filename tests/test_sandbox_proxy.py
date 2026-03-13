@@ -344,8 +344,8 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     }
 
 
-def test_resolve_worker_handle_reconciles_dedicated_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dedicated workers should always reconcile through ensure_worker before use."""
+def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dedicated worker routing should always reconcile through ensure_worker before use."""
 
     class _FakeWorkerManager:
         def __init__(self, ensured_handle: WorkerHandle) -> None:
@@ -374,14 +374,21 @@ def test_resolve_worker_handle_reconciles_dedicated_worker(monkeypatch: pytest.M
     )
     fake_manager = _FakeWorkerManager(refreshed_handle)
     monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+    monkeypatch.setattr(sandbox_proxy_module, "primary_worker_backend_is_dedicated", lambda: True)
 
-    resolved_handle = sandbox_proxy_module._resolve_worker_handle("worker-a")
+    payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_scope=None,
+        routing_agent_name="code",
+    )
 
-    assert resolved_handle is refreshed_handle
-    assert fake_manager.ensure_calls == ["worker-a"]
+    assert payload["worker_key"] == "v1:default:unscoped:code"
+    assert worker_handle is refreshed_handle
+    assert fake_manager.ensure_calls == ["v1:default:unscoped:code"]
 
 
-def test_resolve_worker_handle_preserves_worker_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dedicated worker reconciliation should pass the resolved worker key through unchanged."""
 
     class _FakeWorkerManager:
@@ -411,11 +418,27 @@ def test_resolve_worker_handle_preserves_worker_key(monkeypatch: pytest.MonkeyPa
     )
     fake_manager = _FakeWorkerManager(ensured_handle)
     monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
 
-    resolved_handle = sandbox_proxy_module._resolve_worker_handle("worker-b")
+    with tool_execution_identity(execution_identity):
+        payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_scope="user",
+            routing_agent_name="code",
+        )
 
-    assert resolved_handle is ensured_handle
-    assert fake_manager.ensure_calls == ["worker-b"]
+    assert payload["worker_key"] == "v1:default:user:@alice:example.org"
+    assert worker_handle is ensured_handle
+    assert fake_manager.ensure_calls == ["v1:default:user:@alice:example.org"]
 
 
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:

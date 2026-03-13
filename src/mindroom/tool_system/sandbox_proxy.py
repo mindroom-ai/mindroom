@@ -258,7 +258,7 @@ def _build_worker_routing_payload(
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
         )
-        worker_handle = _resolve_worker_handle(worker_key)
+        worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
         return (
             {
                 "routing_agent_name": routing_agent_name,
@@ -280,7 +280,7 @@ def _build_worker_routing_payload(
         )
         raise RuntimeError(msg)
 
-    worker_handle = _resolve_worker_handle(worker_key)
+    worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
     return (
         {
             "worker_scope": worker_scope,
@@ -294,11 +294,6 @@ def _build_worker_routing_payload(
 
 def _get_worker_manager() -> WorkerManager:
     return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
-
-
-def _resolve_worker_handle(worker_key: str) -> WorkerHandle:
-    """Reconcile and return the dedicated worker handle for one worker key."""
-    return _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
 
 
 def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:

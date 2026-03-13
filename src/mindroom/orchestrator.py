@@ -952,23 +952,24 @@ async def main(
 
     # Canonicalize once at startup so downstream storage paths are cwd-stable.
     storage_path = storage_path.expanduser().resolve()
-    set_primary_credentials_storage_path(storage_path)
-    set_primary_worker_storage_path(storage_path)
-
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
-
-    # Ensure storage exists before any runtime components try to write into it.
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-    config_path = Path(CONFIG_PATH)
-
-    logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
-    set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
+    orchestrator: MultiAgentOrchestrator | None = None
 
     try:
+        set_primary_credentials_storage_path(storage_path)
+        set_primary_worker_storage_path(storage_path)
+
+        logger.info("Syncing API keys from environment to CredentialsManager...")
+        sync_env_to_credentials()
+
+        # Ensure storage exists before any runtime components try to write into it.
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        config_path = Path(CONFIG_PATH)
+
+        logger.info("Starting orchestrator...")
+        orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+        set_runtime_starting()
         auxiliary_specs = [
             ("config watcher", lambda: _watch_config_task(config_path, orchestrator), "config_watcher_supervisor"),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
@@ -1003,7 +1004,8 @@ async def main(
         for task in auxiliary_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        await orchestrator.stop()
+        if orchestrator is not None:
+            await orchestrator.stop()
         reset_runtime_state()
         set_primary_credentials_storage_path(None)
         set_primary_worker_storage_path(None)

@@ -586,6 +586,37 @@ class TestAgentBot:
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_resets_runtime_storage_paths_when_env_sync_fails(self, tmp_path: Path) -> None:
+        """Startup failures before orchestrator creation should still clear runtime storage helpers."""
+        reset_runtime_state()
+        worker_storage_path_calls: list[Path | None] = []
+        credentials_storage_path_calls: list[Path | None] = []
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator") as mock_orchestrator_cls,
+            patch(
+                "mindroom.orchestrator.set_primary_worker_storage_path",
+                side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),
+            ),
+            patch(
+                "mindroom.orchestrator.set_primary_credentials_storage_path",
+                side_effect=lambda storage_path: credentials_storage_path_calls.append(storage_path),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
+            )
+
+        assert worker_storage_path_calls == [tmp_path.resolve(), None]
+        assert credentials_storage_path_calls == [tmp_path.resolve(), None]
+        mock_orchestrator_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = Config.from_yaml()
