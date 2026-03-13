@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from rich.console import Console
 
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
@@ -194,6 +195,53 @@ def test_stop_uses_project_down_without_env_file(tmp_path: Path, monkeypatch: py
 
     assert commands == ["docker compose -p alpha down"]
     assert registry.instances["alpha"].status == deploy.InstanceStatus.STOPPED
+
+
+def test_restart_only_matrix_recreates_matrix_services_without_project_down(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix-only restart should not tear down the full instance project."""
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    env_file = env_dir / "alpha.env"
+    env_file.write_text("INSTANCE_NAME=alpha\n")
+    registry = deploy.Registry(instances={"alpha": instance})
+
+    commands: list[str] = []
+    monkeypatch.setattr(deploy, "save_registry", lambda _registry: None)
+    monkeypatch.setattr(deploy, "_sync_matrix_host_overrides", lambda _instances: None)
+    monkeypatch.setattr(deploy, "_ensure_instance_env_file_reference", lambda _env_file: None)
+    monkeypatch.setattr(deploy, "_ensure_external_network", lambda _name: False)
+    monkeypatch.setattr(deploy, "_traefik_proxy_names", lambda _name: [])
+    monkeypatch.setattr(deploy, "_load_traefik_settings", lambda _env_file: deploy.TraefikSettings())
+    monkeypatch.setattr(deploy, "_print_running_instance_access", lambda *_args, **_kwargs: None)
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    deploy._restart_instance("alpha", instance, registry, only_matrix=True, no_build=True)
+
+    assert len(commands) == 1
+    assert "docker compose -p alpha down" not in commands[0]
+    assert "up -d --force-recreate tuwunel wellknown" in commands[0]
+    assert registry.instances["alpha"].status == deploy.InstanceStatus.PARTIAL
+
+
+def test_compose_loads_shared_env_before_instance_env() -> None:
+    """Per-instance env values should override the shared repo defaults."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+
+    assert compose["services"]["mindroom"]["env_file"] == [
+        {"path": "../../../.env", "required": False},
+        {"path": "${INSTANCE_ENV_FILE}", "required": True},
+    ]
 
 
 def test_remove_instance_preserves_state_when_teardown_fails(

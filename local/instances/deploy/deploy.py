@@ -261,9 +261,9 @@ def _ensure_env_dir() -> None:
     ENV_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _get_docker_compose_files(instance: Instance, name: str) -> str:
+def _get_docker_compose_files(instance: Instance) -> str:
     """Get the docker-compose command with appropriate files based on matrix and auth type."""
-    env_file = ENV_DIR / f"{name}.env"
+    env_file = ENV_DIR / f"{instance.name}.env"
     compose_files = [SCRIPT_DIR / "docker-compose.yml"]
 
     # Add Matrix server compose file if configured
@@ -281,7 +281,7 @@ def _get_docker_compose_files(instance: Instance, name: str) -> str:
                 SCRIPT_DIR / "docker-compose.wellknown.yml",
             ],
         )
-    matrix_host_override = _matrix_host_override_path(name)
+    matrix_host_override = _matrix_host_override_path(instance.name)
     if matrix_host_override.exists():
         compose_files.append(matrix_host_override)
 
@@ -645,13 +645,14 @@ def _bring_up_instance(
     status_message: str,
     success_verb: str,
     show_peer_restart_hint: bool = False,
+    force_recreate: bool = False,
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
     env_file = _require_instance_env_file(name)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
 
-    compose_files = _get_docker_compose_files(instance, name)
+    compose_files = _get_docker_compose_files(instance)
     try:
         services = _get_services_to_start(instance, only_matrix)
     except ValueError as e:
@@ -667,7 +668,9 @@ def _bring_up_instance(
     _ensure_external_network(EXTERNAL_NETWORK)
     traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
     traefik_settings = _load_traefik_settings(env_file)
-    cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
+    up_flags = [flag for flag in [build_flag, "--force-recreate" if force_recreate else ""] if flag]
+    up_options = f" {' '.join(up_flags)}" if up_flags else ""
+    cmd = f"{compose_files} -p {name} up -d{up_options} {services}"
 
     with console.status(f"[yellow]{status_message}[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -1157,18 +1160,6 @@ def _restart_instance(
     no_build: bool = False,
 ) -> None:
     """Helper function to restart a single instance."""
-    # Stop the instance
-    stop_cmd = _get_docker_compose_down_command(name)
-
-    with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
-        result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        console.print(f"[red]✗[/red] Failed to stop instance '{name}'")
-        if result.stderr:
-            console.print(f"[dim]{result.stderr}[/dim]")
-        raise typer.Exit(1)
-
     _bring_up_instance(
         name,
         instance,
@@ -1181,6 +1172,7 @@ def _restart_instance(
         if only_matrix
         else f"Restarting instance '{name}'...",
         success_verb="restarted",
+        force_recreate=True,
     )
 
 
@@ -1306,7 +1298,7 @@ def _get_cleanup_image(name: str, instance: Instance) -> str | None:
     if not env_file.exists():
         return None
 
-    compose_cmd = f"{_get_docker_compose_files(instance, name)} config --images"
+    compose_cmd = f"{_get_docker_compose_files(instance)} config --images"
     result = subprocess.run(compose_cmd, check=False, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         return None

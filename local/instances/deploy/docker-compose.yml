@@ -7,10 +7,10 @@ services:
     container_name: ${INSTANCE_NAME:-mindroom}-mindroom
     restart: always
     env_file:
-      - path: ${INSTANCE_ENV_FILE}
-        required: true
       - path: ../../../.env
         required: false
+      - path: ${INSTANCE_ENV_FILE}
+        required: true
     user: "${UID:-1000}:${GID:-1000}"
     volumes:
       - ${DATA_DIR}/config/config.yaml:/app/config.yaml
