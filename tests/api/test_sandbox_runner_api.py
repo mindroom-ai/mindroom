@@ -716,6 +716,42 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_storage(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should still resolve relative agent paths from shared storage roots."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from dedicated worker canonical workspace", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
+    assert not (worker_root / "workspace" / "note.txt").exists()
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
 def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

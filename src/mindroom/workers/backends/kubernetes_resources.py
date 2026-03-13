@@ -505,12 +505,12 @@ class KubernetesResourceManager:
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
-            {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
+            {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
             {"name": "VIRTUAL_ENV", "value": venv_path},
             {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
-                "value": f"{self.config.storage_mount_path}/.shared_credentials",
+                "value": f"{dedicated_root}/.shared_credentials",
             },
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
@@ -646,16 +646,6 @@ class KubernetesResourceManager:
                     "name": "worker-storage",
                     "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
                     "subPath": state_subpath,
-                },
-                {
-                    "name": "worker-storage",
-                    "mountPath": f"{self.config.storage_mount_path}/credentials",
-                    "subPath": "credentials",
-                },
-                {
-                    "name": "worker-storage",
-                    "mountPath": f"{self.config.storage_mount_path}/.shared_credentials",
-                    "subPath": ".shared_credentials",
                 },
             ],
         )

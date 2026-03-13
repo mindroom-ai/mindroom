@@ -211,7 +211,7 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space for worker-local runtime files and still accesses the canonical agent state roots used by the primary runtime.
-- With `workerBackend: kubernetes`, dedicated worker pods mount only the addressed agent root for `shared`, `user_agent`, and unscoped dedicated execution, while `user` intentionally mounts the broader `agents/` tree and worker-local caches remain isolated by worker key.
+- With `workerBackend: kubernetes`, dedicated worker pods mount only the addressed agent root plus the worker runtime root for `shared`, `user_agent`, and unscoped dedicated execution, while `user` intentionally mounts the broader `agents/` tree and worker-local caches and mirrored credentials remain isolated by worker key.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ## Per-agent configuration

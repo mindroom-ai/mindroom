@@ -221,12 +221,12 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name('worker-a')}"
-    assert env_values["MINDROOM_STORAGE_PATH"] == "/app/worker"
+    assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
     assert env_values["HOME"] == expected_dedicated_root
     assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
     assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
-    assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
+    assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_dedicated_root}/.shared_credentials"
     assert "subPath" not in container["volumeMounts"][0]
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
@@ -317,9 +317,14 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
 
     assert mount_paths["/app/worker/agents/code"] == "agents/code"
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
-    assert mount_paths["/app/worker/credentials"] == "credentials"
-    assert mount_paths["/app/worker/.shared_credentials"] == ".shared_credentials"
+    assert "/app/worker/credentials" not in mount_paths
+    assert "/app/worker/.shared_credentials" not in mount_paths
     assert "/app/worker/agents" not in mount_paths
+
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+    assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_worker_root}/.shared_credentials"
 
 
 def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
@@ -336,6 +341,8 @@ def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
 
     assert mount_paths["/app/worker/agents"] == "agents"
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
+    assert "/app/worker/credentials" not in mount_paths
+    assert "/app/worker/.shared_credentials" not in mount_paths
 
 
 def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:
@@ -348,9 +355,13 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers()
     deployment = apps_api.created_bodies[0]
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
 
     assert mount_paths["/app/worker/agents/general"] == "agents/general"
+    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/agents" not in mount_paths
+    assert "/app/worker/credentials" not in mount_paths
+    assert "/app/worker/.shared_credentials" not in mount_paths
 
 
 def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(

@@ -92,7 +92,8 @@ Important behavior and constraints:
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - Dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
-- Current chart behavior mounts that shared storage root rather than narrowing mounts to one agent root per worker.
+- Dedicated workers narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution to the addressed agent root plus the worker runtime root.
+- Dedicated workers keep mirrored credentials under the worker runtime root rather than mounting shared-root credential directories into agent-isolated pods.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

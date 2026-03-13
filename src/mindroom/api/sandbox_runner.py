@@ -33,6 +33,7 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_j
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    shared_storage_root,
     tool_execution_identity,
     visible_agent_state_roots_for_worker_key,
     worker_dir_name,
@@ -466,6 +467,7 @@ def _resolve_worker_base_dir(
     requested_base_dir: object | None,
 ) -> Path:
     """Resolve the effective base_dir inside shared storage or the worker root."""
+    shared_root = shared_storage_root(storage_root)
     if requested_base_dir is None:
         return paths.workspace.resolve()
     if not isinstance(requested_base_dir, str):
@@ -473,9 +475,9 @@ def _resolve_worker_base_dir(
         raise TypeError(msg)
 
     raw_path = Path(requested_base_dir).expanduser()
-    candidate = (storage_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+    candidate = (shared_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
     visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
-    shared_roots = visible_agent_roots or (storage_root.resolve(),)
+    shared_roots = visible_agent_roots or (shared_root.resolve(),)
     allowed_roots = (paths.root.resolve(), *shared_roots)
     if not any(candidate.is_relative_to(root) for root in allowed_roots):
         msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
