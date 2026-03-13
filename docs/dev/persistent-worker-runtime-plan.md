@@ -102,7 +102,7 @@ The current canonical shape is versioned and string-based so it can evolve witho
 
 ## Execution Identity
 
-Every tool call needs a serializable execution identity that contains only the information needed for routing and scoped state resolution.
+Every tool call needs a serializable execution identity that contains only the information needed for routing, runtime selection, and credential policy.
 Execution identity must not contain process-local objects such as the Matrix client, the whole config object, or other non-serializable services.
 
 The execution identity should contain these fields.
@@ -511,9 +511,9 @@ The highest-value target is to introduce one canonical agent state root per agen
 
 ## File Map For Remaining Work
 
-- `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
+- `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and the current worker-path plumbing that must be reworked around canonical agent-owned state.
 - `src/mindroom/tool_system/metadata.py` is the source of truth for per-tool default execution targets and for the built-in default worker-routing policy.
-- `src/mindroom/agents.py` now resolves session and learning storage through worker-aware paths and remains the place to keep agent construction aligned with scoped state.
+- `src/mindroom/agents.py` currently resolves session and learning storage through worker-aware paths and is one of the main places that must be reworked so agent construction targets canonical agent-owned state instead.
 - `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
 - `src/mindroom/api/openai_compat.py` keeps enforcing conservative `/v1` scope eligibility and trusted requester identity rules.
 - `src/mindroom/api/sandbox_runner.py` should remain an execution runtime component over the worker backend contract rather than a lifecycle owner.
