@@ -1030,7 +1030,7 @@ agents:
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
 | `memory_file_path`            | string | `null`      | Workspace-relative directory inside this agent's canonical workspace to use for file memory                                                                                                                                                                                                                                       |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
-| `context_files`               | list   | `[]`        | Workspace-relative file paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                             |
+| `context_files`               | list   | `[]`        | Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                           |
 | `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
 | `room_thread_modes`           | map    | `{}`        | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback                                                                                                                                                                           |
 | `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
@@ -1064,7 +1064,7 @@ Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the
 
 ### Filesystem Isolation
 
-`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through the worker. This matters most for `worker_scope=user`, because that scope intentionally reuses one runtime per requester across agents. Treat `user` as a per-requester workstation or trust-sharing mode. If you want the clearest per-agent boundary for filesystem-capable tools, prefer `shared` or `user_agent`.
+`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### State Ownership
 
@@ -1090,7 +1090,7 @@ You can inject file content directly into an agent's role context without using 
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
-This loading happens when the agent is created (and on config reload), not continuously on every message.
+MindRoom loads the files when it builds an agent instance. The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
 
 ## Agent Delegation
 
@@ -5078,7 +5078,7 @@ Key differences from the primary MindRoom runtime:
 - **Scratch workspace** — a dedicated volume for worker-local runtime files and caches
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the worker-local workspace so the tool registry and cache files have a private runtime home
 
-> [!WARNING] Current worker backends expose the shared storage root to the runner process. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary. If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime. This matters most for `worker_scope=user`, which intentionally reuses one runtime per requester across agents. Treat `user` as a per-requester workstation or trust-sharing mode. Prefer `shared` or `user_agent` when you want the clearest per-agent boundary.
+> [!WARNING] Current worker backends expose the shared storage root to the runner process. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -5279,7 +5279,7 @@ The supported values are:
 | `user`       | One worker runtime per requester, potentially reused across multiple agents for that requester |
 | `user_agent` | One worker runtime per requester and agent                                                     |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state. For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary. It is a runtime reuse mode.
+If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state. For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary. It is a runtime reuse mode. It creates one persistent runtime per requester, and multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ## Without configured worker routing
 
@@ -5351,7 +5351,7 @@ The instance chart supports two worker backend modes for worker-routed tools suc
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. Each worker pod runs the sandbox-runner app and is able to access the same canonical agent state roots used by every other runtime for the same agent. Dedicated workers may still keep worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
 
-> [!WARNING] The current Kubernetes worker backend mounts the shared storage root into each worker pod. That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, a reused `user` worker can potentially reach multiple agent workspaces for that requester. Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode. Prefer `shared` or `user_agent` if you want the clearest per-agent boundary.
+> [!WARNING] The current Kubernetes worker backend mounts the shared storage root into each worker pod. That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 Typical Helm values look like:
 

@@ -89,7 +89,9 @@ class TestConfigInit:
             "matrix_message",
         ]
         assert mind["skills"] == ["mindroom-docs"]
-        assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
+        assert (
+            config["knowledge_bases"]["mind_memory"]["path"] == "./mindroom_data/agents/mind/workspace/mind_data/memory"
+        )
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
@@ -104,7 +106,7 @@ class TestConfigInit:
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
 
-        workspace = tmp_path / "mind_data"
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
         assert workspace.exists()
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()

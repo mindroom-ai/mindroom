@@ -81,13 +81,15 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 ## Scope Semantics
 
 - `shared` means one runtime may be reused by many callers for the same agent, and all of them use that agent's canonical state root.
-- `user` means one runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents it executes.
+- `user` means one persistent runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents it executes.
 - `user_agent` means runtimes are isolated per requester and agent, but every runtime for that agent still reads and writes the same canonical agent state root.
 - Unscoped dedicated execution still uses the same canonical agent state root for the addressed agent.
 - `shared`, `user`, `user_agent`, and unscoped dedicated execution differ in runtime isolation and reuse.
 - They do not change which files are authoritative for the agent.
 - `user` is therefore a trust-sharing mode rather than an agent-level filesystem isolation boundary for filesystem-capable worker tools.
-- If one reused runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime.
+- Multiple agents may run inside that runtime.
+- Those agents may access each other's mounted files inside that runtime.
+- Use `user_agent` when you need the clearest per-agent filesystem isolation.
 
 ## Worker Key Resolution
 

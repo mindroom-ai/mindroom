@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -13,6 +13,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.ollama import Ollama
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -38,6 +39,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Config tests
@@ -581,6 +586,57 @@ class TestPrepareAgentAndPrompt:
             )
             mock_stuff.assert_called_once()
             assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_reloads_context_files_for_next_reply(
+        self,
+        config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """Editing a context file should affect the next reply preparation without restart."""
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = "mind_data"
+        config.agents["general"].context_files = ["mind_data/SOUL.md"]
+        config.agents["general"].tools = []
+        config.agents["general"].include_default_tools = False
+
+        workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+        workspace.mkdir(parents=True, exist_ok=True)
+        soul_path = workspace / "SOUL.md"
+        soul_path.write_text("First context version.", encoding="utf-8")
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+        ):
+            first_agent, first_prompt, first_unseen = await _prepare_agent_and_prompt(
+                "general",
+                "test",
+                tmp_path,
+                None,
+                config,
+                session_id=None,
+            )
+
+            soul_path.write_text("Second context version.", encoding="utf-8")
+
+            second_agent, second_prompt, second_unseen = await _prepare_agent_and_prompt(
+                "general",
+                "test",
+                tmp_path,
+                None,
+                config,
+                session_id=None,
+            )
+
+        assert "First context version." in first_agent.role
+        assert "Second context version." not in first_agent.role
+        assert "Second context version." in second_agent.role
+        assert "First context version." not in second_agent.role
+        assert first_prompt == "enhanced"
+        assert second_prompt == "enhanced"
+        assert first_unseen == []
+        assert second_unseen == []
 
     @pytest.mark.asyncio
     async def test_openai_compat_with_prior_runs_skips_stuffing(self, config: Config, tmp_path: object) -> None:

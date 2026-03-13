@@ -134,7 +134,7 @@ agents:
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
 | `memory_file_path` | string | `null` | Workspace-relative directory inside this agent's canonical workspace to use for file memory |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
-| `context_files` | list | `[]` | Workspace-relative file paths loaded at agent init/reload and prepended to role context (under `Personality Context`) |
+| `context_files` | list | `[]` | Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
 | `num_history_runs` | int | `null` | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages` |
@@ -184,10 +184,11 @@ They still run in the sandbox runner, but they do not get a scoped reusable work
 `worker_scope` does not guarantee an agent-level filesystem boundary.
 It only selects which proxied calls may reuse the same runtime.
 For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary.
-If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through the worker.
-This matters most for `worker_scope=user`, because that scope intentionally reuses one runtime per requester across agents.
+`user` creates one persistent runtime per requester.
+Multiple agents may run inside that runtime.
+Those agents may access each other's mounted files inside that runtime.
 Treat `user` as a per-requester workstation or trust-sharing mode.
-If you want the clearest per-agent boundary for filesystem-capable tools, prefer `shared` or `user_agent`.
+Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### State Ownership
 
@@ -229,7 +230,8 @@ You can inject file content directly into an agent's role context without using 
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
-This loading happens when the agent is created (and on config reload), not continuously on every message.
+MindRoom loads the files when it builds an agent instance.
+The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
 
 ## Agent Delegation
 

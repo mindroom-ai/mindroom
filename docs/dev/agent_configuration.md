@@ -175,7 +175,7 @@ agents:
 - **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
 - **memory_file_path**: Optional directory for this agent's file-memory scope, resolved relative to the agent's canonical workspace
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
-- **context_files**: Workspace-relative file paths loaded into role context when the agent is created/reloaded
+- **context_files**: Workspace-relative file paths loaded into each freshly built agent instance, so edits affect the next reply/request without restarting the process
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 

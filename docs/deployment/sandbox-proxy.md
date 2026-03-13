@@ -100,10 +100,11 @@ Key differences from the primary MindRoom runtime:
 > [!WARNING]
 > Current worker backends expose the shared storage root to the runner process.
 > For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary.
-> If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime.
-> This matters most for `worker_scope=user`, which intentionally reuses one runtime per requester across agents.
+> `user` creates one persistent runtime per requester.
+> Multiple agents may run inside that runtime.
+> Those agents may access each other's mounted files inside that runtime.
 > Treat `user` as a per-requester workstation or trust-sharing mode.
-> Prefer `shared` or `user_agent` when you want the clearest per-agent boundary.
+> Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
@@ -337,6 +338,9 @@ The dashboard credential UI only supports unscoped agents and agents with `worke
 Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state.
 For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary.
 It is a runtime reuse mode.
+It creates one persistent runtime per requester, and multiple agents may run inside that runtime.
+Those agents may access each other's mounted files inside that runtime.
+Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 ## Without configured worker routing
 

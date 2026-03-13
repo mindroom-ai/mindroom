@@ -28,6 +28,7 @@ from mindroom.constants import (
     env_key_for_provider,
 )
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 console = Console()
 
@@ -75,6 +76,22 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
     "HEARTBEAT.md",
 )
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
+
+
+def _default_storage_root_for_config(config_dir: Path) -> Path:
+    """Return the default runtime storage root implied by one config directory."""
+    return config_dir / "mindroom_data"
+
+
+def _default_mind_workspace(config_dir: Path) -> Path:
+    """Return the starter Mind workspace inside the canonical agent workspace."""
+    return agent_workspace_root_path(_default_storage_root_for_config(config_dir), "mind") / "mind_data"
+
+
+def _default_mind_knowledge_base_path(config_dir: Path) -> str:
+    """Return the starter knowledge-base path that points at the canonical Mind workspace."""
+    knowledge_root = (_default_mind_workspace(config_dir) / "memory").relative_to(config_dir)
+    return f"./{knowledge_root.as_posix()}"
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
@@ -246,13 +263,13 @@ def config_init(
         content = _minimal_template(selected_preset)
     else:
         full_profile: Literal["full", "public"] = "public" if selected_profile == "public" else "full"
-        content = _full_template(selected_preset, profile=full_profile)
+        content = _full_template(selected_preset, target.parent, profile=full_profile)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
     if selected_profile != "minimal":
-        _ensure_mind_workspace(target.parent / "mind_data", force=force)
+        _ensure_mind_workspace(_default_mind_workspace(target.parent), force=force)
 
     env_path = target.parent / ".env"
     env_created = _write_env_file(env_path, selected_profile, selected_preset, force=force)
@@ -539,9 +556,15 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     return textwrap.indent("\n".join(lines), "    ")
 
 
-def _full_template(provider_preset: _ProviderPreset, *, profile: Literal["full", "public"] = "full") -> str:
+def _full_template(
+    provider_preset: _ProviderPreset,
+    config_dir: Path,
+    *,
+    profile: Literal["full", "public"] = "full",
+) -> str:
     """Return a provider-aware starter config."""
     model_block = _model_template_block(provider_preset)
+    mind_memory_knowledge_path = _default_mind_knowledge_base_path(config_dir)
 
     if profile == "public":
         mindroom_user_block = ""
@@ -627,7 +650,7 @@ matrix_space:
 
 knowledge_bases:
   mind_memory:
-    path: ./mind_data/memory
+    path: {mind_memory_knowledge_path}
     watch: true
 
 # File-based memory avoids external memory LLMs, and starter configs use a local embedder for knowledge indexing.

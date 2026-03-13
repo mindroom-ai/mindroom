@@ -80,9 +80,11 @@ Idle cleanup scales worker Deployments to zero while preserving canonical agent 
 > [!WARNING]
 > The current Kubernetes worker backend mounts the shared storage root into each worker pod.
 > That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation.
-> For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, a reused `user` worker can potentially reach multiple agent workspaces for that requester.
+> `user` creates one persistent runtime per requester.
+> Multiple agents may run inside that runtime.
+> Those agents may access each other's mounted files inside that runtime.
 > Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode.
-> Prefer `shared` or `user_agent` if you want the clearest per-agent boundary.
+> Use `user_agent` if you need the clearest per-agent filesystem isolation.
 
 Typical Helm values look like:
 

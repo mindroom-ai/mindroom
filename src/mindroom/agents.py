@@ -229,9 +229,10 @@ def _build_additional_context(
 ) -> str:
     """Build additional role context from configured files/directories.
 
-    This is evaluated when the agent is created (and re-created on config
-    reload), so the current contents of the canonical agent workspace are
-    reflected on hot-reload.
+    This is evaluated each time one agent instance is created.
+    The normal Matrix and OpenAI-compatible request paths build fresh agent
+    instances per reply/request, so edits in the canonical agent workspace are
+    reflected on the next reply without a process restart.
     """
     personality_chunks: list[_AdditionalContextChunk] = []
     if agent_config.context_files:
