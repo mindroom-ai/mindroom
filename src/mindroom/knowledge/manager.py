@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -60,15 +60,29 @@ def _resolve_knowledge_path(path: str) -> Path:
     return resolve_config_relative_path(path)
 
 
-def _knowledge_path_is_file(configured_path: str, knowledge_path: Path) -> bool:
+def _knowledge_path_kind(
+    configured_path: str,
+    knowledge_path: Path,
+    *,
+    git_enabled: bool,
+) -> Literal["file", "directory", "unknown"]:
     if knowledge_path.exists():
-        return knowledge_path.is_file()
+        return "file" if knowledge_path.is_file() else "directory"
+    if git_enabled:
+        return "directory"
     configured_path_obj = Path(configured_path)
-    return configured_path_obj != Path() and configured_path_obj.suffix != ""
+    if configured_path_obj == Path() or configured_path_obj.suffix == "":
+        return "directory"
+    return "unknown"
 
 
-def _ensure_knowledge_path_ready(configured_path: str, knowledge_path: Path) -> None:
-    if _knowledge_path_is_file(configured_path, knowledge_path):
+def _ensure_knowledge_path_ready(
+    configured_path: str,
+    knowledge_path: Path,
+    *,
+    git_enabled: bool,
+) -> None:
+    if _knowledge_path_kind(configured_path, knowledge_path, git_enabled=git_enabled) != "directory":
         knowledge_path.parent.mkdir(parents=True, exist_ok=True)
         return
     knowledge_path.mkdir(parents=True, exist_ok=True)
@@ -347,7 +361,11 @@ def _resolve_effective_knowledge_path(
     if effective_agent_name is None:
         knowledge_path = _resolve_knowledge_path(base_config.path).resolve()
         if create:
-            _ensure_knowledge_path_ready(base_config.path, knowledge_path)
+            _ensure_knowledge_path_ready(
+                base_config.path,
+                knowledge_path,
+                git_enabled=base_config.git is not None,
+            )
         return resolved_storage_path, knowledge_path
 
     workspace = resolve_agent_workspace(
@@ -363,7 +381,11 @@ def _resolve_effective_knowledge_path(
 
     knowledge_path = (workspace.root / base_config.path).resolve()
     if create:
-        _ensure_knowledge_path_ready(base_config.path, knowledge_path)
+        _ensure_knowledge_path_ready(
+            base_config.path,
+            knowledge_path,
+            git_enabled=base_config.git is not None,
+        )
     return resolved_storage_path, knowledge_path
 
 
@@ -420,8 +442,12 @@ class KnowledgeManager:
         if self.knowledge_path is None:
             self.knowledge_path = _resolve_knowledge_path(self.config.get_knowledge_base_config(self.base_id).path)
         self.knowledge_path = self.knowledge_path.resolve()
-        configured_path = self.config.get_knowledge_base_config(self.base_id).path
-        _ensure_knowledge_path_ready(configured_path, self.knowledge_path)
+        base_config = self.config.get_knowledge_base_config(self.base_id)
+        _ensure_knowledge_path_ready(
+            base_config.path,
+            self.knowledge_path,
+            git_enabled=base_config.git is not None,
+        )
         if self._git_config() is not None and self._knowledge_source_is_file():
             msg = f"Knowledge base '{self.base_id}' uses Git sync and must point to a directory, not a file"
             raise ValueError(msg)
@@ -459,11 +485,16 @@ class KnowledgeManager:
             raise RuntimeError(msg)
         return knowledge_path
 
-    def _knowledge_source_is_file(self) -> bool:
-        return _knowledge_path_is_file(
-            self.config.get_knowledge_base_config(self.base_id).path,
+    def _knowledge_source_kind(self) -> Literal["file", "directory", "unknown"]:
+        base_config = self.config.get_knowledge_base_config(self.base_id)
+        return _knowledge_path_kind(
+            base_config.path,
             self._knowledge_source_path(),
+            git_enabled=base_config.git is not None,
         )
+
+    def _knowledge_source_is_file(self) -> bool:
+        return self._knowledge_source_kind() == "file"
 
     def _knowledge_root(self) -> Path:
         knowledge_path = self._knowledge_source_path()
@@ -472,9 +503,10 @@ class KnowledgeManager:
         return knowledge_path
 
     def _knowledge_watch_path(self) -> Path:
-        if self._knowledge_source_is_file():
-            return self._knowledge_root()
-        return self._knowledge_source_path()
+        knowledge_source = self._knowledge_source_path()
+        if self._knowledge_source_kind() == "directory" and knowledge_source.exists():
+            return knowledge_source
+        return knowledge_source.parent
 
     def matches(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
         """Return True when manager settings match the provided config."""

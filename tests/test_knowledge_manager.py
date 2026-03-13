@@ -838,6 +838,55 @@ async def test_private_knowledge_single_file_target_indexes_without_creating_dir
 
 
 @pytest.mark.asyncio
+async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassified_as_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing dotted directory names should stay directory-like instead of being forced into file mode."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "nested" / "docs.v1"
+    config = Config(
+        agents={
+            "researcher": AgentConfig(
+                display_name="Researcher",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+        },
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        manager = managers["docs"]
+
+        assert docs_path.parent.is_dir()
+        assert not docs_path.exists()
+        assert manager.list_files() == []
+
+        docs_path.mkdir(parents=True, exist_ok=True)
+        guide_path = docs_path / "guide.md"
+        guide_path.write_text("Shared docs.\n", encoding="utf-8")
+
+        assert await manager.index_file(guide_path, upsert=True)
+        assert manager.list_files() == [guide_path.resolve()]
+        assert _DummyChromaDb.metadatas == [
+            {
+                "source_path": "guide.md",
+                "source_mtime_ns": guide_path.stat().st_mtime_ns,
+                "source_size": guide_path.stat().st_size,
+            },
+        ]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
