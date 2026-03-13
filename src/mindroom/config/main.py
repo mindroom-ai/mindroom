@@ -226,6 +226,21 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_reserved_knowledge_base_ids(self) -> Config:
+        """Reject top-level knowledge base IDs that collide with synthetic private IDs."""
+        reserved_ids = sorted(
+            base_id for base_id in self.knowledge_bases if base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        )
+        if reserved_ids:
+            formatted = ", ".join(reserved_ids)
+            msg = (
+                "knowledge_bases keys must not use the reserved private prefix "
+                f"'{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_private_knowledge(self) -> Config:
         """Ensure private knowledge has a path when no template default exists."""
         invalid_private_knowledge = [
@@ -482,6 +497,8 @@ class Config(BaseModel):
             return None
         agent_name = base_id.removeprefix(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
         if agent_name not in self.agents:
+            return None
+        if self.get_agent_private_knowledge_base_id(agent_name) != base_id:
             return None
         return agent_name
 
