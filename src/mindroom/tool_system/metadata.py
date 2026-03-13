@@ -8,6 +8,7 @@ import inspect
 import os
 from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
@@ -25,7 +26,6 @@ from mindroom.tool_system.worker_routing import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools import Toolkit
 
@@ -107,6 +107,8 @@ def _build_tool_config_init_kwargs(
         init_kwargs.update(
             {field_name: value for field_name, value in runtime_overrides.items() if field_name in config_field_names},
         )
+    if "base_dir" in init_kwargs and isinstance(init_kwargs["base_dir"], str):
+        init_kwargs["base_dir"] = Path(init_kwargs["base_dir"])
     return init_kwargs
 
 

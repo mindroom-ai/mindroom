@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.worker_routing import (
-    get_tool_execution_identity,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
 )
@@ -197,18 +196,12 @@ def resolve_file_memory_resolution(
     if agent_config is None or agent_config.memory_file_path is None:
         return resolution
 
-    state_root_override = None
-    if preserve_resolved_storage_path and config.get_agent_worker_scope(agent_name) is not None:
-        state_root_override = resolved_storage_path
-
     agent_memory_scope_path = resolve_agent_owned_path(
         agent_config.memory_file_path,
         field_name="memory_file_path",
         agent_name=agent_name,
         base_storage_path=storage_path,
         config=config,
-        execution_identity=get_tool_execution_identity(),
-        state_root=state_root_override,
     ).resolved_path
     return FileMemoryResolution(
         storage_path=resolution.storage_path,

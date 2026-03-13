@@ -318,6 +318,19 @@ def _runner_dedicated_worker_root() -> Path | None:
     return None
 
 
+def _runner_storage_root() -> Path:
+    storage_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if storage_root:
+        return Path(storage_root).expanduser().resolve()
+
+    if dedicated_root := _runner_dedicated_worker_root():
+        if dedicated_root.parent.name == "workers":
+            return dedicated_root.parent.parent
+        return dedicated_root
+
+    return Path.cwd().resolve()
+
+
 def _runner_uses_dedicated_worker() -> bool:
     return _runner_dedicated_worker_key() is not None
 
@@ -344,7 +357,7 @@ def _current_runtime_site_packages() -> list[str]:
 def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
-    env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
+    env["MINDROOM_STORAGE_PATH"] = str(_runner_storage_root())
     env[LOCAL_WORKER_ROOT_ENV] = str(paths.root.parent)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
@@ -440,9 +453,10 @@ def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> Sandb
 
 def _resolve_worker_base_dir(
     paths: LocalWorkerStatePaths,
+    storage_root: Path,
     requested_base_dir: object | None,
 ) -> Path:
-    """Resolve the effective base_dir inside one worker root."""
+    """Resolve the effective base_dir inside shared storage or the worker root."""
     if requested_base_dir is None:
         return paths.workspace.resolve()
     if not isinstance(requested_base_dir, str):
@@ -450,12 +464,11 @@ def _resolve_worker_base_dir(
         raise TypeError(msg)
 
     raw_path = Path(requested_base_dir).expanduser()
-    candidate = (paths.root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
-    try:
-        candidate.relative_to(paths.root.resolve())
-    except ValueError as exc:
-        msg = f"base_dir must stay inside the worker root: {requested_base_dir}"
-        raise ValueError(msg) from exc
+    candidate = (storage_root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+    allowed_roots = (paths.root.resolve(), storage_root.resolve())
+    if not any(candidate.is_relative_to(root) for root in allowed_roots):
+        msg = f"base_dir must stay inside the shared storage root or worker root: {requested_base_dir}"
+        raise ValueError(msg)
 
     candidate.mkdir(parents=True, exist_ok=True)
     return candidate
@@ -474,8 +487,10 @@ def _normalize_request_worker_base_dir(
         return _worker_initialization_failure_response(request.worker_key, exc)
 
     try:
+        storage_root = _runner_storage_root()
         _resolve_worker_base_dir(
             local_worker_state_paths_from_handle(worker_handle),
+            storage_root,
             request.tool_init_overrides.get("base_dir"),
         )
     except (TypeError, ValueError) as exc:
@@ -492,9 +507,14 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
         except WorkerBackendError as exc:
             return _worker_initialization_failure_response(request.worker_key, exc)
         paths = local_worker_state_paths_from_handle(worker_handle)
+        storage_root = _runner_storage_root()
         try:
             runtime_overrides = {
-                "base_dir": _resolve_worker_base_dir(paths, request.tool_init_overrides.get("base_dir")),
+                "base_dir": _resolve_worker_base_dir(
+                    paths,
+                    storage_root,
+                    request.tool_init_overrides.get("base_dir"),
+                ),
             }
         except (TypeError, ValueError) as exc:
             return SandboxRunnerExecuteResponse(ok=False, error=str(exc))

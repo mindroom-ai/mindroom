@@ -17,7 +17,12 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    agent_workspace_root_path,
+    resolve_worker_key,
+    worker_dir_name,
+)
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
 
@@ -578,10 +583,12 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker requests should honor a forwarded canonical base_dir inside the worker root."""
+    """Worker requests should honor a forwarded canonical base_dir inside shared agent storage."""
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
+    storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -592,14 +599,14 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
             "args": ["hello from canonical workspace", "note.txt"],
             "kwargs": {},
             "worker_key": "worker-a",
-            "tool_init_overrides": {"base_dir": "workspace/general/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
         },
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    canonical_file = worker_root / worker_dir_name("worker-a") / "workspace" / "general" / "mind_data" / "note.txt"
+    canonical_file = agent_workspace_root_path(storage_root, "general") / "mind_data" / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from canonical workspace"
     assert not (worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt").exists()
 

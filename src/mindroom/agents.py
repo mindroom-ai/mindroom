@@ -23,9 +23,9 @@ from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
-    worker_owned_tool_paths_use_relative_overrides,
 )
 
 if TYPE_CHECKING:
@@ -76,9 +76,7 @@ class _AdditionalContextChunk:
 class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
-    workspace_path: Path | None
-    worker_routed_workspace_path: str | None
-    worker_routed_tools: frozenset[str]
+    workspace_path: Path
     worker_scope: WorkerScope | None
 
 
@@ -263,10 +261,12 @@ def _resolve_agent_workspace_paths(
     config: Config,
     *,
     storage_path: Path,
-) -> tuple[Path | None, str | None]:
-    """Return the host and worker-visible workspace paths when explicitly configured."""
+) -> Path:
+    """Return the canonical workspace path for one agent."""
     if agent_config.memory_file_path is None:
-        return None, None
+        workspace_path = agent_workspace_root_path(storage_path, agent_name)
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        return workspace_path
 
     resolved = resolve_agent_owned_path(
         agent_config.memory_file_path,
@@ -277,10 +277,7 @@ def _resolve_agent_workspace_paths(
     )
     workspace_path = resolved.resolved_path
     workspace_path.mkdir(parents=True, exist_ok=True)
-    worker_routed_workspace_path = str(workspace_path)
-    if resolved.worker_relative_path is not None and worker_owned_tool_paths_use_relative_overrides():
-        worker_routed_workspace_path = resolved.worker_relative_path
-    return workspace_path, worker_routed_workspace_path
+    return workspace_path
 
 
 def _tool_supports_base_dir(tool_name: str) -> bool:
@@ -294,15 +291,11 @@ def _tool_supports_base_dir(tool_name: str) -> bool:
 def _tool_init_overrides(
     tool_name: str,
     *,
-    workspace_path: Path | None,
-    worker_routed_workspace_path: str | None,
-    worker_routed_tools: frozenset[str],
+    workspace_path: Path,
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
-    if workspace_path is None or not _tool_supports_base_dir(tool_name):
+    if not _tool_supports_base_dir(tool_name):
         return None
-    if tool_name in worker_routed_tools and worker_routed_workspace_path is not None:
-        return {"base_dir": worker_routed_workspace_path}
     return {"base_dir": str(workspace_path)}
 
 
@@ -315,7 +308,7 @@ def build_agent_tool_init_context(
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
-    workspace_path, worker_routed_workspace_path = _resolve_agent_workspace_paths(
+    workspace_path = _resolve_agent_workspace_paths(
         agent_name,
         agent_config,
         config,
@@ -323,8 +316,6 @@ def build_agent_tool_init_context(
     )
     return AgentToolInitContext(
         workspace_path=workspace_path,
-        worker_routed_workspace_path=worker_routed_workspace_path,
-        worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name)),
         worker_scope=config.get_agent_worker_scope(agent_name),
     )
 
@@ -338,8 +329,6 @@ def build_agent_tool_init_overrides(
     return _tool_init_overrides(
         tool_name,
         workspace_path=context.workspace_path,
-        worker_routed_workspace_path=context.worker_routed_workspace_path,
-        worker_routed_tools=context.worker_routed_tools,
     )
 
 

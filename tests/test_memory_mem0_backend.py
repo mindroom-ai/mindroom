@@ -18,9 +18,8 @@ from mindroom.memory.functions import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    resolve_worker_key,
+    agent_state_root_path,
     tool_execution_identity,
-    worker_root_path,
 )
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
@@ -74,8 +73,6 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
         resolved_thread_id="$thread",
         session_id="session-alice",
     )
-    worker_key = resolve_worker_key("user", execution_identity)
-    assert worker_key is not None
 
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
@@ -88,7 +85,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             execution_identity=execution_identity,
         )
 
-    expected_storage_path = worker_root_path(storage_path, worker_key)
+    expected_storage_path = agent_state_root_path(storage_path, "general")
     assert captured_calls == [
         (
             expected_storage_path,
@@ -109,7 +106,10 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
 
 
 @pytest.mark.asyncio
-async def test_mem0_team_conversation_memory_uses_worker_storage(storage_path: Path, config: Config) -> None:
+async def test_mem0_team_conversation_memory_reuses_canonical_agent_roots(
+    storage_path: Path,
+    config: Config,
+) -> None:
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
@@ -176,12 +176,10 @@ async def test_mem0_team_conversation_memory_uses_worker_storage(storage_path: P
             bob_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
 
     assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
-    assert not any(result.get("memory") == "Alice team private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice team private memory" for result in bob_results)
 
-    alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    assert alice_worker_key is not None
-    alice_worker_root = worker_root_path(storage_path, alice_worker_key)
-    assert (alice_worker_root, "team_calculator+general") in stored_memories
+    assert (agent_state_root_path(storage_path, "general"), "team_calculator+general") in stored_memories
+    assert (agent_state_root_path(storage_path, "calculator"), "team_calculator+general") in stored_memories
     assert (storage_path, "team_calculator+general") not in stored_memories
 
 

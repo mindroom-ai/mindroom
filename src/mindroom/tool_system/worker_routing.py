@@ -23,9 +23,6 @@ WorkerScope = Literal["shared", "user", "user_agent"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
-_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
-_DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
-_DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
@@ -59,8 +56,7 @@ class AgentOwnedPath:
     """Resolved canonical agent-owned path information."""
 
     resolved_path: Path
-    state_root: Path | None
-    worker_relative_path: str | None
+    state_root: Path
 
 
 _TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
@@ -98,43 +94,6 @@ def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_key_part(identity.requester_id)
     return None
-
-
-def _normalized_worker_backend_name() -> str:
-    raw = os.getenv(_WORKER_BACKEND_ENV, "").strip().lower()
-    if raw in {"k8s", "kubernetes"}:
-        return "kubernetes"
-    return raw
-
-
-def _uses_unscoped_dedicated_worker_roots() -> bool:
-    return _normalized_worker_backend_name() == "kubernetes" or bool(os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip())
-
-
-def _current_dedicated_worker_root() -> Path | None:
-    raw_worker_root = os.getenv(_DEDICATED_WORKER_ROOT_ENV, "").strip()
-    if not raw_worker_root:
-        return None
-    return Path(raw_worker_root).expanduser().resolve()
-
-
-def _resolve_current_dedicated_state_root(
-    *,
-    worker_key: str,
-    base_storage_path: Path,
-) -> Path | None:
-    current_dedicated_worker_key = os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip() or None
-    current_dedicated_worker_root = _current_dedicated_worker_root()
-    if current_dedicated_worker_key != worker_key or current_dedicated_worker_root is None:
-        return None
-    if base_storage_path.expanduser().resolve() != current_dedicated_worker_root:
-        return None
-    return current_dedicated_worker_root
-
-
-def worker_owned_tool_paths_use_relative_overrides() -> bool:
-    """Return whether worker-owned tool paths must be sent relative to the worker root."""
-    return _normalized_worker_backend_name() == "kubernetes"
 
 
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
@@ -291,84 +250,29 @@ def worker_dir_name(worker_key: str) -> str:
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the persistent state root path for a worker key."""
-    resolved_base_path = base_storage_path.expanduser().resolve()
+    resolved_base_path = shared_storage_root(base_storage_path)
     workers_dir = (
         resolved_base_path.parent if resolved_base_path.parent.name == "workers" else resolved_base_path / "workers"
     )
     return workers_dir / worker_dir_name(worker_key)
 
 
-def _resolve_agent_worker_root(
-    *,
-    agent_name: str,
-    base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path | None:
-    """Resolve the current worker root for an agent when worker routing is active."""
-    worker_key = resolve_agent_worker_key(
-        agent_name=agent_name,
-        config=config,
-        execution_identity=execution_identity,
-    )
-    if worker_key is None:
-        return None
-    if dedicated_root := _resolve_current_dedicated_state_root(
-        worker_key=worker_key,
-        base_storage_path=base_storage_path,
-    ):
-        return dedicated_root
-
-    return worker_root_path(base_storage_path, worker_key)
+def shared_storage_root(base_storage_path: Path) -> Path:
+    """Return the shared storage root even when passed a nested worker/agent path."""
+    resolved_base_path = base_storage_path.expanduser().resolve()
+    if resolved_base_path.parent.name in {"workers", "agents"}:
+        return resolved_base_path.parent.parent
+    return resolved_base_path
 
 
-def _resolve_agent_unscoped_worker_root(
-    *,
-    agent_name: str,
-    base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path | None:
-    """Resolve the backend-owned worker root for unscoped dedicated execution."""
-    if agent_name not in config.agents or config.get_agent_worker_scope(agent_name) is not None:
-        return None
-    if not _uses_unscoped_dedicated_worker_roots():
-        return None
-    worker_key = resolve_unscoped_worker_key(
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    if dedicated_root := _resolve_current_dedicated_state_root(
-        worker_key=worker_key,
-        base_storage_path=base_storage_path,
-    ):
-        return dedicated_root
-    return worker_root_path(base_storage_path, worker_key)
+def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
+    """Return the canonical shared state root for one agent."""
+    return shared_storage_root(base_storage_path) / "agents" / _normalize_worker_dir_part(agent_name)
 
 
-def resolve_agent_owned_state_root(
-    *,
-    agent_name: str,
-    base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path | None:
-    """Resolve the worker-owned state root for one agent when applicable."""
-    scoped_root = _resolve_agent_worker_root(
-        agent_name=agent_name,
-        base_storage_path=base_storage_path,
-        config=config,
-        execution_identity=execution_identity,
-    )
-    if scoped_root is not None:
-        return scoped_root
-
-    return _resolve_agent_unscoped_worker_root(
-        agent_name=agent_name,
-        base_storage_path=base_storage_path,
-        config=config,
-        execution_identity=execution_identity,
-    )
+def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:
+    """Return the canonical workspace root for one agent."""
+    return agent_state_root_path(base_storage_path, agent_name) / _AGENT_WORKSPACE_DIRNAME
 
 
 def _bootstrap_marker_path(state_root: Path, target_path: Path) -> Path:
@@ -429,33 +333,24 @@ def resolve_agent_owned_path(
     execution_identity: ToolExecutionIdentity | None = None,
     state_root: Path | None = None,
 ) -> AgentOwnedPath:
-    """Resolve one agent-owned path to the canonical worker-backed location when active."""
+    """Resolve one agent-owned path into the canonical shared agent workspace."""
+    del config, execution_identity, field_name
     source_path = resolve_config_relative_path(path_text)
     if state_root is None:
-        state_root = resolve_agent_owned_state_root(
-            agent_name=agent_name,
-            base_storage_path=base_storage_path,
-            config=config,
-            execution_identity=execution_identity,
-        )
-    if state_root is None:
-        return AgentOwnedPath(
-            resolved_path=source_path,
-            state_root=None,
-            worker_relative_path=None,
-        )
+        state_root = agent_state_root_path(base_storage_path, agent_name)
 
     if Path(path_text).is_absolute():
-        msg = f"Agent '{agent_name}' uses worker-owned execution, so {field_name} must be relative: {path_text}"
-        raise ValueError(msg)
+        return AgentOwnedPath(
+            resolved_path=source_path,
+            state_root=state_root,
+        )
 
-    agent_workspace_root = (state_root / _AGENT_WORKSPACE_DIRNAME / _normalize_worker_dir_part(agent_name)).resolve()
+    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
     target_path = _resolve_agent_workspace_target(path_text, agent_root=agent_workspace_root)
     _bootstrap_missing_path(source_path, target_path, state_root=state_root)
     return AgentOwnedPath(
         resolved_path=target_path,
         state_root=state_root,
-        worker_relative_path=target_path.relative_to(state_root.resolve()).as_posix(),
     )
 
 
@@ -467,12 +362,5 @@ def resolve_agent_state_storage_path(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     """Return the storage path that should back the agent's mutable state."""
-    return (
-        resolve_agent_owned_state_root(
-            agent_name=agent_name,
-            base_storage_path=base_storage_path,
-            config=config,
-            execution_identity=execution_identity,
-        )
-        or base_storage_path
-    )
+    del config, execution_identity
+    return agent_state_root_path(base_storage_path, agent_name)

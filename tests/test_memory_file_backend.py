@@ -24,9 +24,9 @@ from mindroom.memory.functions import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    resolve_worker_key,
+    agent_state_root_path,
+    agent_workspace_root_path,
     tool_execution_identity,
-    worker_root_path,
 )
 from tests.memory_test_support import MockTeamConfig
 
@@ -56,13 +56,16 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
     assert results[0]["memory"] == "User prefers concise responses"
     assert results[0]["id"].startswith("m_")
 
-    memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+    memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
     assert memory_file.exists()
     assert "User prefers concise responses" in memory_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_file_backend_worker_scope_isolates_memory_by_requester(storage_path: Path, config: Config) -> None:
+async def test_file_backend_worker_scope_shares_agent_memory_across_requesters(
+    storage_path: Path,
+    config: Config,
+) -> None:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
@@ -96,16 +99,12 @@ async def test_file_backend_worker_scope_isolates_memory_by_requester(storage_pa
         bob_prompt = await build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
 
     assert any(result.get("memory") == "Alice private memory" for result in alice_results)
-    assert not any(result.get("memory") == "Alice private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice private memory" for result in bob_results)
     assert "Alice private memory" in alice_prompt
-    assert "Alice private memory" not in bob_prompt
+    assert "Alice private memory" in bob_prompt
 
-    alice_worker_key = resolve_worker_key("user", alice_identity)
-    assert alice_worker_key is not None
-    alice_memory_file = (
-        worker_root_path(storage_path, alice_worker_key) / "memory_files" / "agent_general" / "MEMORY.md"
-    )
-    assert alice_memory_file.exists()
+    memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
+    assert memory_file.exists()
 
 
 @pytest.mark.asyncio
@@ -136,7 +135,10 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
 
 
 @pytest.mark.asyncio
-async def test_file_backend_worker_scope_ignores_global_memory_file_path(storage_path: Path, config: Config) -> None:
+async def test_file_backend_worker_scope_ignores_global_memory_file_path(
+    storage_path: Path,
+    config: Config,
+) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "shared-memory")
     config.agents["general"].memory_backend = "file"
@@ -167,19 +169,16 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(storage
     with tool_execution_identity(bob_identity):
         bob_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
 
-    assert not any(result.get("memory") == "Alice private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice private memory" for result in bob_results)
     assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
-
-    alice_worker_key = resolve_worker_key("user", alice_identity)
-    assert alice_worker_key is not None
-    alice_memory_file = (
-        worker_root_path(storage_path, alice_worker_key) / "memory_files" / "agent_general" / "MEMORY.md"
-    )
-    assert alice_memory_file.exists()
+    assert (agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_file_backend_team_conversation_memory_uses_worker_storage(storage_path: Path, config: Config) -> None:
+async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
+    storage_path: Path,
+    config: Config,
+) -> None:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
@@ -221,14 +220,13 @@ async def test_file_backend_team_conversation_memory_uses_worker_storage(storage
         bob_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
 
     assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
-    assert not any(result.get("memory") == "Alice team private memory" for result in bob_results)
-
-    alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    assert alice_worker_key is not None
-    alice_team_memory_file = (
-        worker_root_path(storage_path, alice_worker_key) / "memory_files" / "team_calculator+general" / "MEMORY.md"
-    )
-    assert alice_team_memory_file.exists()
+    assert any(result.get("memory") == "Alice team private memory" for result in bob_results)
+    assert (
+        agent_state_root_path(storage_path, "general") / "memory_files" / "team_calculator+general" / "MEMORY.md"
+    ).exists()
+    assert (
+        agent_state_root_path(storage_path, "calculator") / "memory_files" / "team_calculator+general" / "MEMORY.md"
+    ).exists()
     assert not (storage_path / "memory_files" / "team_calculator+general" / "MEMORY.md").exists()
 
 
@@ -237,7 +235,7 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
 
-    memory_dir = storage_path / "memory-files" / "agent_general"
+    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
 
@@ -256,7 +254,7 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     config.memory.file.path = str(storage_path / "memory-files")
     config.memory.file.max_entrypoint_lines = 10
 
-    memory_dir = storage_path / "memory-files" / "agent_general"
+    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
 
@@ -271,7 +269,7 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
     config.memory.file.path = str(storage_path / "memory-files")
     config.memory.file.max_entrypoint_lines = 2
 
-    memory_dir = storage_path / "memory-files" / "agent_general"
+    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
     memory_dir.mkdir(parents=True, exist_ok=True)
     (memory_dir / "MEMORY.md").write_text(
         "# Memory\nCurated fact.\n- [id=m1] Structured fact.\nTrailing fact.\n",
@@ -316,7 +314,9 @@ async def test_file_backend_search_skips_structured_line_duplicates(storage_path
     memories = await list_all_agent_memories("general", storage_path, config)
     memory_id = memories[0]["id"]
 
-    daily_file = storage_path / "memory-files" / "agent_general" / "memory" / "2026-02-28.md"
+    daily_file = (
+        agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "memory" / "2026-02-28.md"
+    )
     daily_file.parent.mkdir(parents=True, exist_ok=True)
     daily_file.write_text(f"- [id={memory_id}] Project owner is Bas\nProject owner is Bas\n", encoding="utf-8")
 
@@ -368,7 +368,14 @@ async def test_file_backend_store_conversation_memory_with_room(storage_path: Pa
     )
 
     agent_results = await search_agent_memories("requirement", "general", storage_path, config, limit=5)
-    room_results = await search_room_memories("requirement", "!room:server", storage_path, config, limit=5)
+    room_results = await search_room_memories(
+        "requirement",
+        "!room:server",
+        storage_path,
+        config,
+        agent_name="general",
+        limit=5,
+    )
     assert any("Remember this requirement" in result.get("memory", "") for result in agent_results)
     assert any("Remember this requirement" in result.get("memory", "") for result in room_results)
 
@@ -381,9 +388,8 @@ async def test_file_backend_team_scopes_do_not_collide(storage_path: Path, confi
     await store_conversation_memory("Team one memory", ["a_b", "c"], storage_path, "session-one", config)
     await store_conversation_memory("Team two memory", ["a", "b_c"], storage_path, "session-two", config)
 
-    memory_root = storage_path / "memory-files"
-    assert (memory_root / "team_a_b+c" / "MEMORY.md").exists()
-    assert (memory_root / "team_a+b_c" / "MEMORY.md").exists()
+    assert (agent_state_root_path(storage_path, "a_b") / "memory_files" / "team_a_b+c" / "MEMORY.md").exists()
+    assert (agent_state_root_path(storage_path, "a") / "memory_files" / "team_a+b_c" / "MEMORY.md").exists()
 
 
 @pytest.mark.asyncio
@@ -442,7 +448,7 @@ async def test_team_can_crud_member_memory_in_custom_memory_file_path(
 
 
 @pytest.mark.asyncio
-async def test_team_can_crud_member_memory_in_worker_owned_memory_file_path(
+async def test_team_can_crud_member_memory_in_canonical_agent_memory_file_path(
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -495,11 +501,7 @@ async def test_team_can_crud_member_memory_in_worker_owned_memory_file_path(
         await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
         assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
 
-    worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="general")
-    assert worker_key is not None
-    canonical_memory_file = (
-        worker_root_path(storage_path, worker_key) / "workspace" / "general" / "mind_data" / "MEMORY.md"
-    )
+    canonical_memory_file = agent_workspace_root_path(storage_path, "general") / "mind_data" / "MEMORY.md"
     canonical_content = canonical_memory_file.read_text(encoding="utf-8")
     assert "Seeded note." in canonical_content
     assert "Updated worker-owned general note" not in canonical_content
@@ -625,7 +627,7 @@ async def test_relative_memory_file_path_supports_crud(storage_path: Path, confi
 
 
 @pytest.mark.asyncio
-async def test_worker_scoped_memory_file_path_uses_canonical_worker_owned_scope(
+async def test_worker_scoped_memory_file_path_uses_canonical_agent_scope(
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -653,9 +655,7 @@ async def test_worker_scoped_memory_file_path_uses_canonical_worker_owned_scope(
         await add_agent_memory("New worker memory", "general", storage_path, config)
         prompt = await build_memory_enhanced_prompt("worker memory", "general", storage_path, config)
 
-    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    assert worker_key is not None
-    canonical_workspace = worker_root_path(storage_path, worker_key) / "workspace" / "general" / "mind_data"
+    canonical_workspace = agent_workspace_root_path(storage_path, "general") / "mind_data"
     content = (canonical_workspace / "MEMORY.md").read_text(encoding="utf-8")
 
     assert "Existing worker memory." in content
@@ -712,4 +712,6 @@ async def test_memory_file_path_does_not_affect_other_agents(storage_path: Path,
 
     calc_memories = await list_all_agent_memories("calculator", storage_path, config)
     assert any(memory["memory"] == "Default scope memory" for memory in calc_memories)
-    assert (storage_path / "memory-files" / "agent_calculator" / "MEMORY.md").exists()
+    assert (
+        agent_state_root_path(storage_path, "calculator") / "memory_files" / "agent_calculator" / "MEMORY.md"
+    ).exists()

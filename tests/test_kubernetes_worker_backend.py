@@ -192,7 +192,7 @@ def _backend(
 
 
 def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
-    """Ensuring one worker should create a service/deployment pair with a dedicated mounted subpath."""
+    """Ensuring one worker should create a service/deployment pair on shared storage."""
     backend, apps_api, core_api = _backend(owner_deployment_name="mindroom-demo")
 
     handle = backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
@@ -220,10 +220,14 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" in env_names
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
-    assert env_values["VIRTUAL_ENV"] == "/app/worker/venv"
-    assert env_values["PATH"].startswith("/app/worker/venv/bin:")
+    expected_dedicated_root = f"/app/worker/workers/{worker_dir_name('worker-a')}"
+    assert env_values["MINDROOM_STORAGE_PATH"] == "/app/worker"
+    assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
+    assert env_values["HOME"] == expected_dedicated_root
+    assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
+    assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
-    assert container["volumeMounts"][0]["subPath"] == f"workers/{worker_dir_name('worker-a')}"
+    assert "subPath" not in container["volumeMounts"][0]
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )

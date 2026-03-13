@@ -21,6 +21,7 @@ from mindroom.memory.functions import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -49,10 +50,10 @@ class TestMemoryFacade:
     async def test_memory_instance_creation(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Test content", "test_agent", storage_path, config)
-            assert mock_create.call_args[0][0] == storage_path
+            assert mock_create.call_args[0][0] == agent_state_root_path(storage_path, "test_agent")
 
             await search_agent_memories("query", "test_agent", storage_path, config)
-            assert mock_create.call_args[0][0] == storage_path
+            assert mock_create.call_args[0][0] == agent_state_root_path(storage_path, "test_agent")
 
     @pytest.mark.asyncio
     async def test_add_agent_memory(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:
@@ -187,7 +188,8 @@ class TestMemoryFacade:
             result = await get_agent_memory("mem-member", ["helper", "test_agent"], storage_path, config)
 
         assert result is None
-        mock_memory.get.assert_called_once_with("mem-member")
+        assert mock_memory.get.call_count == 2
+        assert all(call.args == ("mem-member",) for call in mock_memory.get.call_args_list)
 
     @pytest.mark.asyncio
     async def test_get_agent_memory_team_context_allows_member_scope_when_enabled(
@@ -415,13 +417,13 @@ class TestMemoryFacade:
                 config,
             )
 
-        assert mock_memory.add.call_count == 1
-        team_call = mock_memory.add.call_args_list[0]
-        assert team_call[1]["user_id"] == "team_calculator+data_analyst+finance"
-        metadata = team_call[1]["metadata"]
-        assert metadata["type"] == "conversation"
-        assert metadata["is_team"] is True
-        assert metadata["team_members"] == team_agents
+        assert mock_memory.add.call_count == len(team_agents)
+        for team_call in mock_memory.add.call_args_list:
+            assert team_call[1]["user_id"] == "team_calculator+data_analyst+finance"
+            metadata = team_call[1]["metadata"]
+            assert metadata["type"] == "conversation"
+            assert metadata["is_team"] is True
+            assert metadata["team_members"] == team_agents
 
     @pytest.mark.asyncio
     async def test_store_conversation_memory_respects_agent_backend_override(
@@ -436,7 +438,7 @@ class TestMemoryFacade:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             await store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", config)
 
-        mock_create.assert_called_once_with(storage_path, config)
+        mock_create.assert_called_once_with(agent_state_root_path(storage_path, "calculator"), config)
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio
@@ -459,8 +461,12 @@ class TestMemoryFacade:
                 config,
             )
 
-        mock_create.assert_called_once_with(storage_path, config)
-        mock_memory.add.assert_called_once()
+        assert mock_create.call_count == 2
+        assert [call.args for call in mock_create.call_args_list] == [
+            (agent_state_root_path(storage_path, "calculator"), config),
+            (agent_state_root_path(storage_path, "finance"), config),
+        ]
+        assert mock_memory.add.call_count == 2
         team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
         assert not team_memory_file.exists()
 
@@ -505,7 +511,7 @@ class TestMemoryFacade:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
         mock_create.assert_not_called()
-        memory_file = storage_path / "memory-files" / "agent_general" / "MEMORY.md"
+        memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
         assert memory_file.exists()
         assert "Remember this" in memory_file.read_text(encoding="utf-8")
 
@@ -522,7 +528,7 @@ class TestMemoryFacade:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
-        mock_create.assert_called_once_with(storage_path, config)
+        mock_create.assert_called_once_with(agent_state_root_path(storage_path, "general"), config)
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio

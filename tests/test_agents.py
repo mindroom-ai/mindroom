@@ -22,6 +22,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
+    agent_workspace_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     tool_execution_identity,
@@ -280,7 +282,7 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Relative memory_file_path should resolve from the config directory, not CWD."""
+    """Relative memory_file_path should bootstrap from config dir into the canonical agent workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = Config.from_yaml()
@@ -291,7 +293,6 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
 
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    expected_workspace = config_dir / "mind_data"
 
     original_cwd = Path.cwd()
     other_cwd = tmp_path / "other"
@@ -299,10 +300,11 @@ def test_create_agent_resolves_relative_memory_file_workspace_from_config_dir(
     os.chdir(other_cwd)
     try:
         with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-            create_agent("general", config=config)
+            create_agent("general", config=config, storage_path=tmp_path)
     finally:
         os.chdir(original_cwd)
 
+    expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
     assert expected_workspace.is_dir()
@@ -500,18 +502,19 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
 
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Tests that session and learning databases are created under the resolved storage path."""
+    """Session and learning databases should live under the canonical agent state root."""
     config = Config.from_yaml()
     create_agent("general", config=config, storage_path=tmp_path)
 
+    agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert tmp_path / "sessions" / "general.db" in db_files
-    assert tmp_path / "learning" / "general.db" in db_files
+    assert agent_root / "sessions" / "general.db" in db_files
+    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Worker-scoped agents should keep session and learning DBs inside the resolved worker root."""
+    """Worker scope should not change the canonical session and learning paths."""
     config = Config.from_yaml()
     config.agents["general"].worker_scope = "user"
     execution_identity = ToolExecutionIdentity(
@@ -529,10 +532,10 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     with tool_execution_identity(execution_identity):
         create_agent("general", config=config, storage_path=tmp_path)
 
-    worker_root = worker_root_path(tmp_path, worker_key)
+    agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert worker_root / "sessions" / "general.db" in db_files
-    assert worker_root / "learning" / "general.db" in db_files
+    assert agent_root / "sessions" / "general.db" in db_files
+    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -541,7 +544,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shared-scope agents should resolve worker-owned state even before a live request context exists."""
+    """Shared scope should still use canonical agent state before a live request context exists."""
     config = Config.from_yaml()
     config.agents["general"].worker_scope = "shared"
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
@@ -562,10 +565,10 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
     assert worker_key is not None
 
-    worker_root = worker_root_path(tmp_path, worker_key)
+    agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert worker_root / "sessions" / "general.db" in db_files
-    assert worker_root / "learning" / "general.db" in db_files
+    assert agent_root / "sessions" / "general.db" in db_files
+    assert agent_root / "learning" / "general.db" in db_files
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -647,12 +650,12 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_bootstraps_worker_owned_context_files_and_reloads_from_canonical_copy(
+def test_create_agent_bootstraps_canonical_context_files_and_reloads_from_agent_root(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Worker-owned context files should seed once, then become the canonical source of truth."""
+    """Context files should seed once into the canonical agent root and stay shared across scopes."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = Config.from_yaml()
@@ -686,9 +689,7 @@ def test_create_agent_bootstraps_worker_owned_context_files_and_reloads_from_can
     ):
         agent = create_agent("general", config=config, storage_path=tmp_path)
 
-    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
-    assert worker_key is not None
-    canonical_workspace = worker_root_path(tmp_path, worker_key) / "workspace" / "general" / "mind_data"
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     canonical_soul = canonical_workspace / "SOUL.md"
 
     assert canonical_soul.read_text(encoding="utf-8") == "Config soul context."
@@ -721,6 +722,25 @@ def test_create_agent_bootstraps_worker_owned_context_files_and_reloads_from_can
     assert "Changed config soul context." not in deleted_agent.role
     assert "Worker-owned soul context." not in deleted_agent.role
 
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-2",
+    )
+    canonical_soul.write_text("Shared canonical soul context.", encoding="utf-8")
+
+    with (
+        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
+        tool_execution_identity(bob_identity),
+    ):
+        bob_agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "Shared canonical soul context." in bob_agent.role
+
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
@@ -730,7 +750,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kubernetes-backed unscoped agents should resolve canonical worker-owned workspaces."""
+    """Kubernetes-backed unscoped agents should still use the canonical agent workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = Config.from_yaml()
@@ -747,15 +767,13 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
         create_agent("general", config=config, storage_path=tmp_path)
 
-    worker_key = resolve_unscoped_worker_key(agent_name="general")
-    worker_root = worker_root_path(tmp_path, worker_key)
+    agent_root = agent_state_root_path(tmp_path, "general")
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert worker_root / "sessions" / "general.db" in db_files
-    assert worker_root / "learning" / "general.db" in db_files
+    assert agent_root / "sessions" / "general.db" in db_files
+    assert agent_root / "learning" / "general.db" in db_files
     assert mock_get_tool_by_name.call_args is not None
-    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {
-        "base_dir": "workspace/general/mind_data",
-    }
+    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -766,7 +784,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dedicated worker pods should use the mounted root directly for canonical agent state."""
+    """Dedicated worker runtime roots should not change the canonical agent-owned paths."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = Config.from_yaml()
@@ -775,25 +793,26 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
 
-    dedicated_root = tmp_path / "dedicated-worker"
+    shared_root = tmp_path / "shared-storage"
+    worker_key = resolve_unscoped_worker_key(agent_name="general")
+    dedicated_root = worker_root_path(shared_root, worker_key)
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    worker_key = resolve_unscoped_worker_key(agent_name="general")
     monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
 
     with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-        create_agent("general", config=config, storage_path=dedicated_root)
+        create_agent("general", config=config, storage_path=shared_root)
 
+    agent_root = agent_state_root_path(shared_root, "general")
+    canonical_workspace = agent_workspace_root_path(shared_root, "general") / "mind_data"
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert dedicated_root / "sessions" / "general.db" in db_files
-    assert dedicated_root / "learning" / "general.db" in db_files
-    assert not any(path.is_relative_to(dedicated_root / "workers") for path in db_files)
+    assert agent_root / "sessions" / "general.db" in db_files
+    assert agent_root / "learning" / "general.db" in db_files
+    assert not any(path.is_relative_to(dedicated_root) for path in db_files)
     assert mock_get_tool_by_name.call_args is not None
-    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {
-        "base_dir": str(dedicated_root / "workspace" / "general" / "mind_data"),
-    }
+    assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
 @patch("mindroom.agents.SqliteDb")

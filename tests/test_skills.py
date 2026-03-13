@@ -26,10 +26,11 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
+    agent_workspace_root_path,
     get_tool_execution_identity,
     resolve_worker_key,
     tool_execution_identity,
-    worker_root_path,
 )
 from tests.conftest import FakeCredentialsManager
 
@@ -365,7 +366,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
-def test_collect_agent_toolkits_uses_runtime_storage_path_for_worker_owned_workspace(
+def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_workspace(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -398,9 +399,7 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_worker_owned_works
         resolved_thread_id=None,
         session_id=None,
     )
-    worker_key = resolve_worker_key("shared", identity, agent_name="code")
-    assert worker_key is not None
-    expected_workspace = worker_root_path(runtime_storage, worker_key) / "workspace" / "code" / "mind_data"
+    expected_workspace = agent_workspace_root_path(runtime_storage, "code") / "mind_data"
 
     monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     with tool_execution_identity(identity):
@@ -432,7 +431,7 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     assert toolkits_by_name["memory"].name == "memory"
     assert toolkits_by_name["delegate"].name == "delegate"
     assert toolkits_by_name["self_config"].name == "self_config"
-    assert toolkits_by_name["memory"]._storage_path == runtime_storage
+    assert toolkits_by_name["memory"]._storage_path == agent_state_root_path(runtime_storage, "code")
     assert toolkits_by_name["delegate"]._storage_path == runtime_storage
 
 

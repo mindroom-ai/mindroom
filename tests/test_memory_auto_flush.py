@@ -19,6 +19,7 @@ from mindroom.memory.auto_flush import (
 from mindroom.memory.functions import add_agent_memory, append_agent_daily_memory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_workspace_root_path,
     resolve_worker_key,
     tool_execution_identity,
     worker_root_path,
@@ -87,8 +88,8 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
 
     state_file = storage_path / "memory_flush_state.json"
     payload = state_file.read_text(encoding="utf-8")
-    assert '"shared:general:s1"' in payload
-    assert '"shared:general:s2"' in payload
+    assert '"general:s1"' in payload
+    assert '"general:s2"' in payload
     assert '"priority_boost_at"' in payload
 
 
@@ -108,7 +109,7 @@ def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config)
     )
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert "shared:general:s1" in payload["sessions"]
+    assert "general:s1" in payload["sessions"]
 
 
 def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config) -> None:
@@ -186,12 +187,12 @@ async def test_worker_respects_batch_limits(
 
 
 @pytest.mark.asyncio
-async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
+async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
     tmp_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker-scoped flushes should keep daily file memory inside the worker root."""
+    """Worker-scoped flushes should reuse the canonical agent-owned memory path."""
     config.agents["general"].worker_scope = "user"
     config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.file.path = str(tmp_path / "shared-memory")
@@ -236,12 +237,8 @@ async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
         worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
         await worker._run_cycle(config)
 
-    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    assert worker_key is not None
     worker_daily_files = list(
-        (worker_root_path(tmp_path, worker_key) / "workspace" / "general" / "custom-agent-memory" / "memory").rglob(
-            "*.md",
-        ),
+        (agent_workspace_root_path(tmp_path, "general") / "custom-agent-memory" / "memory").rglob("*.md"),
     )
     assert len(worker_daily_files) == 1
     assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
@@ -283,7 +280,9 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
         )
 
     assert wrote_memory is True
-    custom_daily_files = list((tmp_path / "custom-agent-memory" / "memory").rglob("*.md"))
+    custom_daily_files = list(
+        (agent_workspace_root_path(tmp_path, "general") / "custom-agent-memory" / "memory").rglob("*.md"),
+    )
     assert len(custom_daily_files) == 1
     assert "important decision" in custom_daily_files[0].read_text(encoding="utf-8")
     assert not list((tmp_path / "shared-memory").rglob("*.md"))
@@ -291,11 +290,11 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
 
 
 @pytest.mark.asyncio
-async def test_existing_memory_context_reads_worker_root_instead_of_shared_custom_path(
+async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
     tmp_path: Path,
     config: Config,
 ) -> None:
-    """Duplicate-avoidance context should read worker-local file memory, not shared custom-path memory."""
+    """Duplicate-avoidance context should reuse the canonical agent-owned memory path."""
     config.agents["general"].worker_scope = "user"
     config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 5
@@ -327,7 +326,7 @@ async def test_existing_memory_context_reads_worker_root_instead_of_shared_custo
         )
 
     assert "Alice isolated memory" in worker_context
-    assert "Shared leaked memory" not in worker_context
+    assert "Shared leaked memory" in worker_context
 
 
 async def _fake_extract_memory_summary(**_: object) -> str:
@@ -393,7 +392,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["shared:general:s1"]
+    session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is True
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
@@ -444,7 +443,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    session_state = payload["sessions"]["shared:general:s1"]
+    session_state = payload["sessions"]["general:s1"]
     assert session_state["dirty"] is False
     assert session_state["in_flight"] is False
     assert session_state["last_flushed_session_updated_at"] == 100
@@ -452,8 +451,8 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     assert append_calls == []
 
 
-def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config) -> None:
-    """Two users with the same session ID should get separate auto-flush entries under worker scope."""
+def test_mark_dirty_coalesces_shared_agent_sessions(tmp_path: Path, config: Config) -> None:
+    """Two runtimes touching the same agent session should share one auto-flush entry."""
     config.agents["general"].worker_scope = "user"
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -494,4 +493,4 @@ def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config)
         )
 
     payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
-    assert len(payload["sessions"]) == 2
+    assert list(payload["sessions"]) == ["general:shared-session-id"]
