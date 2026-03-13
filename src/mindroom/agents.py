@@ -343,6 +343,83 @@ def build_agent_tool_init_overrides(
     )
 
 
+def build_agent_toolkit(
+    tool_name: str,
+    *,
+    agent_name: str,
+    config: Config,
+    storage_path: Path | None = None,
+    worker_tools: list[str] | None = None,
+    tool_init_context: AgentToolInitContext | None = None,
+    memory_storage_path: Path | None = None,
+    delegation_depth: int = 0,
+    config_path: Path | None = None,
+) -> Toolkit | None:
+    """Build one configured toolkit for an agent.
+
+    Returns ``None`` when the configured tool should be skipped, such as an
+    explicit ``delegate`` entry without valid delegation targets.
+    """
+    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    resolved_tool_init_context = tool_init_context or build_agent_tool_init_context(
+        config,
+        agent_name,
+        storage_path=resolved_storage_path,
+    )
+    resolved_worker_tools = worker_tools if worker_tools is not None else config.get_agent_worker_tools(agent_name)
+    resolved_memory_storage_path = memory_storage_path or resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=resolved_storage_path,
+        config=config,
+    )
+    agent_config = config.get_agent(agent_name)
+
+    if tool_name == "memory":
+        from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
+
+        return MemoryTools(
+            agent_name=agent_name,
+            storage_path=resolved_memory_storage_path,
+            config=config,
+        )
+
+    if tool_name == "delegate":
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+        from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
+
+        if not agent_config.delegate_to:
+            logger.warning(
+                f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
+            )
+            return None
+        if delegation_depth >= _MAX_DEPTH:
+            logger.warning(
+                f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
+                f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
+            )
+            return None
+        return DelegateTools(
+            agent_name=agent_name,
+            delegate_to=agent_config.delegate_to,
+            storage_path=resolved_storage_path,
+            config=config,
+            delegation_depth=delegation_depth,
+        )
+
+    if tool_name == "self_config":
+        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+        return SelfConfigTools(agent_name=agent_name, config_path=config_path)
+
+    return get_tool_by_name(
+        tool_name,
+        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=resolved_tool_init_context),
+        worker_tools_override=resolved_worker_tools,
+        worker_scope=resolved_tool_init_context.worker_scope,
+        routing_agent_name=agent_name,
+    )
+
+
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
 _RICH_PROMPTS = {
     "code": agent_prompts.CODE_AGENT_PROMPT,
@@ -600,7 +677,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     tool_names = config.get_agent_tools(agent_name)
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
-    worker_scope = tool_init_context.worker_scope
     memory_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=resolved_storage_path,
@@ -611,53 +687,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     tools: list[Toolkit] = []
     for tool_name in tool_names:
         try:
-            if tool_name == "memory":
-                from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
-
-                tools.append(
-                    MemoryTools(
-                        agent_name=agent_name,
-                        storage_path=memory_storage_path,
-                        config=config,
-                    ),
-                )
-            elif tool_name == "delegate":
-                from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
-                from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
-
-                if not agent_config.delegate_to:
-                    logger.warning(
-                        f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
-                    )
-                elif delegation_depth >= _MAX_DEPTH:
-                    logger.warning(
-                        f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
-                        f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
-                    )
-                else:
-                    tools.append(
-                        DelegateTools(
-                            agent_name=agent_name,
-                            delegate_to=agent_config.delegate_to,
-                            storage_path=resolved_storage_path,
-                            config=config,
-                            delegation_depth=delegation_depth,
-                        ),
-                    )
-            elif tool_name == "self_config":
-                from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-                tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
-            else:
-                tools.append(
-                    get_tool_by_name(
-                        tool_name,
-                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
-                        worker_tools_override=worker_tools,
-                        worker_scope=worker_scope,
-                        routing_agent_name=agent_name,
-                    ),
-                )
+            if toolkit := build_agent_toolkit(
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                storage_path=resolved_storage_path,
+                worker_tools=worker_tools,
+                tool_init_context=tool_init_context,
+                memory_storage_path=memory_storage_path,
+                delegation_depth=delegation_depth,
+                config_path=config_path,
+            ):
+                tools.append(toolkit)
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 

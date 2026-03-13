@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agents import build_agent_tool_init_context, build_agent_tool_init_overrides
+from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
@@ -23,7 +23,6 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
-from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
@@ -217,22 +216,20 @@ def _collect_agent_toolkits(
 ) -> list[tuple[str, Toolkit]]:
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=storage_path)
-    worker_scope = tool_init_context.worker_scope
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in config.get_agent_tools(agent_name):
         try:
-            toolkits.append(
-                (
-                    tool_name,
-                    get_tool_by_name(
-                        tool_name,
-                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
-                        worker_tools_override=worker_tools,
-                        worker_scope=worker_scope,
-                        routing_agent_name=agent_name,
-                    ),
-                ),
+            toolkit = build_agent_toolkit(
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                storage_path=storage_path,
+                worker_tools=worker_tools,
+                tool_init_context=tool_init_context,
             )
+            if toolkit is None:
+                continue
+            toolkits.append((tool_name, toolkit))
         except ValueError as exc:
             logger.warning(
                 "Failed to load tool for skill dispatch",

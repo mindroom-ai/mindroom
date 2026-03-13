@@ -325,6 +325,58 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     assert "worker root" in response.json()["detail"]
 
 
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_tools(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should still run tools that do not declare a base_dir init field."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert '"result": 3' in response.json()["result"]
+
+
+def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown_tool(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker base_dir validation should run before unknown-tool resolution."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "does_not_exist",
+            "function_name": "add",
+            "args": [],
+            "kwargs": {},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)

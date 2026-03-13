@@ -464,7 +464,7 @@ def _resolve_worker_base_dir(
 def _normalize_request_worker_base_dir(
     request: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse | None:
-    """Normalize worker-scoped base_dir overrides before execution starts."""
+    """Validate worker-scoped base_dir overrides before execution starts."""
     if request.worker_key is None:
         return None
 
@@ -474,15 +474,13 @@ def _normalize_request_worker_base_dir(
         return _worker_initialization_failure_response(request.worker_key, exc)
 
     try:
-        resolved_base_dir = _resolve_worker_base_dir(
+        _resolve_worker_base_dir(
             local_worker_state_paths_from_handle(worker_handle),
             request.tool_init_overrides.get("base_dir"),
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    request.tool_init_overrides = dict(request.tool_init_overrides)
-    request.tool_init_overrides["base_dir"] = str(resolved_base_dir)
     return None
 
 
@@ -498,7 +496,7 @@ async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> Sa
             runtime_overrides = {
                 "base_dir": _resolve_worker_base_dir(paths, request.tool_init_overrides.get("base_dir")),
             }
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
     execution_identity: ToolExecutionIdentity | None = None
@@ -558,10 +556,6 @@ def _resolve_subprocess_worker_context(
 
     worker_handle = _prepare_worker(request.worker_key)
     paths = local_worker_state_paths_from_handle(worker_handle)
-    request.tool_init_overrides = dict(request.tool_init_overrides)
-    request.tool_init_overrides["base_dir"] = str(
-        _resolve_worker_base_dir(paths, request.tool_init_overrides.get("base_dir")),
-    )
     return (
         str(paths.venv_dir / "bin" / "python"),
         _worker_subprocess_env(paths),

@@ -708,6 +708,19 @@ def test_create_agent_bootstraps_worker_owned_context_files_and_reloads_from_can
     assert "Worker-owned soul context." in updated_agent.role
     assert "Changed config soul context." not in updated_agent.role
 
+    canonical_soul.unlink()
+
+    with (
+        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
+        tool_execution_identity(execution_identity),
+    ):
+        deleted_agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert not canonical_soul.exists()
+    assert "Config soul context." not in deleted_agent.role
+    assert "Changed config soul context." not in deleted_agent.role
+    assert "Worker-owned soul context." not in deleted_agent.role
+
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")

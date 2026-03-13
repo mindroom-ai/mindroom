@@ -339,24 +339,41 @@ def resolve_agent_owned_state_root(
     )
 
 
-def _bootstrap_missing_path(source_path: Path, target_path: Path) -> None:
-    """Copy config-side starter files into the canonical agent-owned path when missing."""
-    if not source_path.exists():
-        return
+def _bootstrap_marker_path(state_root: Path, target_path: Path) -> Path:
+    relative_target = target_path.relative_to(state_root.resolve())
+    marker_root = state_root / ".mindroom_bootstrap"
+    if target_path.suffix:
+        return marker_root / relative_target.parent / f"{relative_target.name}.seeded"
+    return marker_root / relative_target / ".seeded"
 
+
+def _copy_bootstrap_source(source_path: Path, target_path: Path) -> None:
     if source_path.is_dir():
-        if target_path.exists():
-            return
         target_path.mkdir(parents=True, exist_ok=True)
         for child in source_path.iterdir():
-            _bootstrap_missing_path(child, target_path / child.name)
+            _copy_bootstrap_source(child, target_path / child.name)
+        return
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+
+
+def _bootstrap_missing_path(source_path: Path, target_path: Path, *, state_root: Path) -> None:
+    """Copy config-side starter files into the canonical agent-owned path when missing."""
+    marker_path = _bootstrap_marker_path(state_root, target_path)
+    if marker_path.exists():
         return
 
     if target_path.exists():
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.touch()
         return
 
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, target_path)
+    if not source_path.exists():
+        return
+
+    _copy_bootstrap_source(source_path, target_path)
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.touch()
 
 
 def _resolve_agent_workspace_target(path_text: str, *, agent_root: Path) -> Path:
@@ -402,7 +419,7 @@ def resolve_agent_owned_path(
 
     agent_workspace_root = (state_root / _AGENT_WORKSPACE_DIRNAME / _normalize_worker_dir_part(agent_name)).resolve()
     target_path = _resolve_agent_workspace_target(path_text, agent_root=agent_workspace_root)
-    _bootstrap_missing_path(source_path, target_path)
+    _bootstrap_missing_path(source_path, target_path, state_root=state_root)
     return AgentOwnedPath(
         resolved_path=target_path,
         state_root=state_root,

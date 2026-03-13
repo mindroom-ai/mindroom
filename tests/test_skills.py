@@ -345,7 +345,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
         captured_calls.append((tool_name, dict(kwargs)))
         return object()
 
-    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
 
     workspace = tmp_path / "mind_data"
     config = _base_config(["dispatch"])
@@ -376,7 +376,7 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_worker_owned_works
         captured_calls.append((tool_name, dict(kwargs)))
         return object()
 
-    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
 
     config = _base_config(["dispatch"])
     config.agents["code"].memory_backend = "file"
@@ -409,6 +409,31 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_worker_owned_works
     assert [tool_name for tool_name, _ in toolkits] == ["coding"]
     assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
     assert expected_workspace.is_dir()
+
+
+def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> None:
+    """Skill command dispatch should build the same agent-only toolkits as create_agent()."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].tools = ["memory", "self_config", "delegate"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["memory", "self_config", "delegate"]
+    assert toolkits_by_name["memory"].name == "memory"
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["memory"]._storage_path == runtime_storage
+    assert toolkits_by_name["delegate"]._storage_path == runtime_storage
 
 
 @pytest.mark.asyncio

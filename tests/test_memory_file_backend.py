@@ -403,6 +403,110 @@ async def test_file_backend_team_context_member_scope_toggle(storage_path: Path,
 
 
 @pytest.mark.asyncio
+async def test_team_can_crud_member_memory_in_custom_memory_file_path(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    workspace = storage_path / "general-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.agents["general"].memory_file_path = str(workspace)
+    config.memory.team_reads_member_memory = True
+    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+
+    await add_agent_memory("General private note", "general", storage_path, config)
+    memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+    loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+    assert loaded is not None
+    assert loaded["memory"] == "General private note"
+
+    await update_agent_memory(
+        memory_id,
+        "Updated general private note",
+        ["general", "calculator"],
+        storage_path,
+        config,
+    )
+    updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+    assert updated is not None
+    assert updated["memory"] == "Updated general private note"
+    assert "Updated general private note" in (workspace / "MEMORY.md").read_text(encoding="utf-8")
+
+    await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+    assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
+    assert "Updated general private note" not in (workspace / "MEMORY.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_team_can_crud_member_memory_in_worker_owned_memory_file_path(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.agents["general"].worker_scope = "user_agent"
+    config.agents["calculator"].worker_scope = "user_agent"
+    config.agents["general"].memory_file_path = "./mind_data"
+    config.memory.team_reads_member_memory = True
+    config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
+
+    config_dir = storage_path / "cfg"
+    source_workspace = config_dir / "mind_data"
+    source_workspace.mkdir(parents=True, exist_ok=True)
+    (source_workspace / "MEMORY.md").write_text("# Memory\n\nSeeded note.\n", encoding="utf-8")
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="!room:example.org:$thread",
+    )
+
+    with (
+        patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
+        tool_execution_identity(execution_identity),
+    ):
+        await add_agent_memory("Worker-owned general note", "general", storage_path, config)
+        memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+        loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert loaded is not None
+        assert loaded["memory"] == "Worker-owned general note"
+
+        await update_agent_memory(
+            memory_id,
+            "Updated worker-owned general note",
+            ["general", "calculator"],
+            storage_path,
+            config,
+        )
+        updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated worker-owned general note"
+
+        await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
+
+    worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="general")
+    assert worker_key is not None
+    canonical_memory_file = (
+        worker_root_path(storage_path, worker_key) / "workspace" / "general" / "mind_data" / "MEMORY.md"
+    )
+    canonical_content = canonical_memory_file.read_text(encoding="utf-8")
+    assert "Seeded note." in canonical_content
+    assert "Updated worker-owned general note" not in canonical_content
+    assert "Worker-owned general note" not in canonical_content
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
     storage_path: Path,
     config: Config,

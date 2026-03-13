@@ -58,8 +58,8 @@ def _scope_dir_name(scope_user_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_") or "default"
 
 
-def _resolution_for_caller_context(
-    caller_context: str | list[str],
+def _resolution_for_scope_user_id(
+    scope_user_id: str,
     *,
     original_storage_path: Path,
     resolved_storage_path: Path,
@@ -68,11 +68,11 @@ def _resolution_for_caller_context(
     preserve_resolved_storage_path = (
         original_storage_path.expanduser().resolve() != resolved_storage_path.expanduser().resolve()
     )
-    if isinstance(caller_context, str) and caller_context in config.agents:
+    if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None and agent_name in config.agents:
         return resolve_file_memory_resolution(
             resolved_storage_path,
             config,
-            agent_name=caller_context,
+            agent_name=agent_name,
             preserve_resolved_storage_path=preserve_resolved_storage_path,
         )
     return file_memory_resolution_from_paths(
@@ -439,13 +439,13 @@ def _find_file_anchor_memory_result(
     config: Config,
 ) -> MemoryResult | None:
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        resolution = _resolution_for_caller_context(
-            caller_context,
-            original_storage_path=storage_path,
-            resolved_storage_path=target_storage_path,
-            config=config,
-        )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+            resolution = _resolution_for_scope_user_id(
+                scope_user_id,
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
+                config=config,
+            )
             if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
                 return result
     return None
@@ -480,8 +480,8 @@ def _mutate_file_memory_targets(
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
     for target_storage_path in mutation_target_storage_paths(scope_user_id, caller_context, storage_path, config):
-        resolution = _resolution_for_caller_context(
-            caller_context,
+        resolution = _resolution_for_scope_user_id(
+            scope_user_id,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
             config=config,
@@ -585,13 +585,13 @@ def get_file_agent_memory(
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        resolution = _resolution_for_caller_context(
-            caller_context,
-            original_storage_path=storage_path,
-            resolved_storage_path=target_storage_path,
-            config=config,
-        )
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+            resolution = _resolution_for_scope_user_id(
+                scope_user_id,
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
+                config=config,
+            )
             result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
             if result is not None:
                 return result
@@ -703,8 +703,8 @@ def store_file_conversation_memory(
     room_user_id = room_scope_user_id(room_id) if room_id else None
 
     for target_storage_path in target_storage_paths:
-        resolution = _resolution_for_caller_context(
-            agent_name,
+        resolution = _resolution_for_scope_user_id(
+            scope_user_id,
             original_storage_path=storage_path,
             resolved_storage_path=target_storage_path,
             config=config,
@@ -717,10 +717,16 @@ def store_file_conversation_memory(
             memory_id=team_memory_id,
         )
         if room_user_id is not None:
+            room_resolution = _resolution_for_scope_user_id(
+                room_user_id,
+                original_storage_path=storage_path,
+                resolved_storage_path=target_storage_path,
+                config=config,
+            )
             _append_scope_memory_entry(
                 room_user_id,
                 condensed_prompt,
-                resolution,
+                room_resolution,
                 config,
             )
 
