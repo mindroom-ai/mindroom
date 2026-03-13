@@ -268,8 +268,8 @@ def test_remove_all_persists_progress_when_later_instance_fails(
     assert sorted(saved_registry["instances"]) == ["beta"]
 
 
-def test_get_actual_status_counts_wellknown_as_matrix_running(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Matrix stacks should still show activity if only the wellknown container remains."""
+def test_get_actual_status_does_not_count_wellknown_as_matrix_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The .well-known sidecar alone should not count as a live Matrix stack."""
 
     def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
         assert "docker ps --filter" in cmd
@@ -277,4 +277,4 @@ def test_get_actual_status_counts_wellknown_as_matrix_running(monkeypatch: pytes
 
     monkeypatch.setattr(deploy.subprocess, "run", _run)
 
-    assert deploy.get_actual_status("alpha") == (False, True)
+    assert deploy.get_actual_status("alpha") == (False, False)

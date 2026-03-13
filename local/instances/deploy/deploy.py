@@ -1324,7 +1324,7 @@ def get_actual_status(name: str) -> tuple[bool, bool]:
     running_containers = {line.strip() for line in result.stdout.strip().splitlines() if line.strip()}
 
     mindroom_running = "mindroom" in running_containers
-    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis", "wellknown"])
+    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
 
     return mindroom_running, matrix_running
 
