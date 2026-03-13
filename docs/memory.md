@@ -90,15 +90,18 @@ agents:
 ```
 
 `memory_file_path` is resolved relative to the agent's canonical workspace root, not `config.yaml`.
-When set, the agent uses that workspace directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`.
+When set, the agent uses that workspace directory as its memory scope instead of the default `agents/<agent>/memory_files/agent_<name>/` path inside the canonical agent state root.
 Absolute paths and `..` traversal are rejected.
 
 ### File layout
 
-Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
+Agent file memory is stored under each agent's canonical state root by default:
 
-- `agent_<name>/MEMORY.md`
-- `agent_<name>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
+- `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
+
+Room and team file memory continue to use the shared `memory.file.path` base when configured, or `<storage_path>/memory_files` by default:
+
 - `room_<safe_room_id>/MEMORY.md`
 - `room_<safe_room_id>/memory/YYYY-MM-DD.md`
 - `team_<sorted_members>/MEMORY.md`
