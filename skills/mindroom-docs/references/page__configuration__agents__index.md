@@ -92,7 +92,7 @@ agents:
     # Tools to route through scoped workers via the sandbox proxy (optional, inherits from defaults)
     worker_tools: [shell, file]
 
-    # How proxied tool state is shared (optional, inherits from defaults)
+    # How proxied worker runtimes are reused (optional, inherits from defaults)
     worker_scope: user_agent
 
     # Allow this agent to read and modify its own config at runtime
@@ -139,7 +139,7 @@ agents:
 | `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
 | `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools`                | list   | `null`      | Tool names to route through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent                               |
-| `worker_scope`                | string | `null`      | Worker runtime reuse mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, and `user_agent`                                                                                                                                                                                           |
+| `worker_scope`                | string | `null`      | Worker runtime reuse mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, and `user_agent`. `user` reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary                                                                            |
 | `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
 | `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
@@ -156,10 +156,14 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 The supported `worker_scope` values are:
 
 - `shared`: one shared worker runtime per agent.
-- `user`: one worker runtime per requester.
+- `user`: one worker runtime per requester, potentially reused across multiple agents for that requester.
 - `user_agent`: one worker runtime per requester and agent.
 
 Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the sandbox runner, but they do not get a scoped reusable worker runtime. `worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
+
+### Filesystem Isolation
+
+`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through the worker. This matters most for `worker_scope=user`, because that scope intentionally reuses one runtime per requester across agents. Treat `user` as a per-requester workstation or trust-sharing mode. If you want the clearest per-agent boundary for filesystem-capable tools, prefer `shared` or `user_agent`.
 
 ### State Ownership
 

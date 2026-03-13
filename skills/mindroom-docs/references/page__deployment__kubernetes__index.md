@@ -51,10 +51,10 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. The dedicated-worker provisioning flow is implemented today. Both modes use the same canonical per-agent state model.
 
-| Helm value                     | Behavior                                                                             | Best for                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod                  | Simpler deployments and the current shared-worker model      |
-| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger runtime isolation with shared canonical agent state |
+| Helm value                     | Behavior                                                                             | Best for                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod                  | Simpler deployments and the current shared-worker model                                                        |
+| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger runtime isolation with shared canonical agent state, but not automatic per-agent filesystem isolation |
 
 ### Shared Sidecar Mode
 
@@ -63,6 +63,8 @@ The instance chart supports two worker backend modes for worker-routed tools suc
 ### Dedicated Worker Mode
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. Each worker pod runs the sandbox-runner app and is able to access the same canonical agent state roots used by every other runtime for the same agent. Dedicated workers may still keep worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
+
+> [!WARNING] The current Kubernetes worker backend mounts the shared storage root into each worker pod. That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, a reused `user` worker can potentially reach multiple agent workspaces for that requester. Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode. Prefer `shared` or `user_agent` if you want the clearest per-agent boundary.
 
 Typical Helm values look like:
 
@@ -90,6 +92,7 @@ Important behavior and constraints:
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - Dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
+- Current chart behavior mounts that shared storage root rather than narrowing mounts to one agent root per worker.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

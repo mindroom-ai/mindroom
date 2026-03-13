@@ -97,6 +97,14 @@ Key differences from the primary MindRoom runtime:
 - **Scratch workspace** — a dedicated volume for worker-local runtime files and caches
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the worker-local workspace so the tool registry and cache files have a private runtime home
 
+> [!WARNING]
+> Current worker backends expose the shared storage root to the runner process.
+> For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary.
+> If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime.
+> This matters most for `worker_scope=user`, which intentionally reuses one runtime per requester across agents.
+> Treat `user` as a per-requester workstation or trust-sharing mode.
+> Prefer `shared` or `user_agent` when you want the clearest per-agent boundary.
+
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
 In Kubernetes the shared runner can still run as a second container in the same pod, sharing `localhost` networking.
@@ -319,7 +327,7 @@ The supported values are:
 | Value | Behavior |
 |-------|----------|
 | `shared` | One shared worker runtime per agent |
-| `user` | One worker runtime per requester |
+| `user` | One worker runtime per requester, potentially reused across multiple agents for that requester |
 | `user_agent` | One worker runtime per requester and agent |
 
 If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected.
@@ -327,6 +335,8 @@ If `worker_scope` is unset, proxied tools still use the sandbox runner, but the 
 The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope.
 The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`.
 Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state.
+For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary.
+It is a runtime reuse mode.
 
 ## Without configured worker routing
 

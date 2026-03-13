@@ -698,7 +698,7 @@ agents:
     rooms: [lobby]                 # Optional: Rooms to auto-join
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
-    worker_scope: user_agent       # Optional: Scope proxied tool state per requester+agent
+    worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
@@ -778,7 +778,7 @@ defaults:
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
-  worker_scope: null               # Default: null (shared runtime state unless an agent opts into worker isolation)
+  worker_scope: null               # Default: null (unscoped proxied execution unless an agent opts into reusable worker runtimes)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -993,7 +993,7 @@ agents:
     # Tools to route through scoped workers via the sandbox proxy (optional, inherits from defaults)
     worker_tools: [shell, file]
 
-    # How proxied tool state is shared (optional, inherits from defaults)
+    # How proxied worker runtimes are reused (optional, inherits from defaults)
     worker_scope: user_agent
 
     # Allow this agent to read and modify its own config at runtime
@@ -1040,7 +1040,7 @@ agents:
 | `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
 | `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools`                | list   | `null`      | Tool names to route through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent                               |
-| `worker_scope`                | string | `null`      | Worker runtime reuse mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, and `user_agent`                                                                                                                                                                                           |
+| `worker_scope`                | string | `null`      | Worker runtime reuse mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, and `user_agent`. `user` reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary                                                                            |
 | `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
 | `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
@@ -1057,10 +1057,14 @@ Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survive
 The supported `worker_scope` values are:
 
 - `shared`: one shared worker runtime per agent.
-- `user`: one worker runtime per requester.
+- `user`: one worker runtime per requester, potentially reused across multiple agents for that requester.
 - `user_agent`: one worker runtime per requester and agent.
 
 Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the sandbox runner, but they do not get a scoped reusable worker runtime. `worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
+
+### Filesystem Isolation
+
+`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through the worker. This matters most for `worker_scope=user`, because that scope intentionally reuses one runtime per requester across agents. Treat `user` as a per-requester workstation or trust-sharing mode. If you want the clearest per-agent boundary for filesystem-capable tools, prefer `shared` or `user_agent`.
 
 ### State Ownership
 
@@ -5074,6 +5078,8 @@ Key differences from the primary MindRoom runtime:
 - **Scratch workspace** — a dedicated volume for worker-local runtime files and caches
 - **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the worker-local workspace so the tool registry and cache files have a private runtime home
 
+> [!WARNING] Current worker backends expose the shared storage root to the runner process. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is not a hard security boundary. If one reused worker runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime. This matters most for `worker_scope=user`, which intentionally reuses one runtime per requester across agents. Treat `user` as a per-requester workstation or trust-sharing mode. Prefer `shared` or `user_agent` when you want the clearest per-agent boundary.
+
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
 In Kubernetes the shared runner can still run as a second container in the same pod, sharing `localhost` networking. This is the `workerBackend: static_runner` Helm mode. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The sidecar gets:
@@ -5267,13 +5273,13 @@ agents:
 
 The supported values are:
 
-| Value        | Behavior                                   |
-| ------------ | ------------------------------------------ |
-| `shared`     | One shared worker runtime per agent        |
-| `user`       | One worker runtime per requester           |
-| `user_agent` | One worker runtime per requester and agent |
+| Value        | Behavior                                                                                       |
+| ------------ | ---------------------------------------------------------------------------------------------- |
+| `shared`     | One shared worker runtime per agent                                                            |
+| `user`       | One worker runtime per requester, potentially reused across multiple agents for that requester |
+| `user_agent` | One worker runtime per requester and agent                                                     |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state.
+If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no scoped reusable worker runtime is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The intended model is that `memory_file_path`, `context_files`, file-backed memory, mem0-backed state, sessions, and learning all resolve through the same canonical agent state root regardless of worker scope. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` must treat credentials as runtime-owned worker state. For filesystem-capable tools, `user` is not an agent-level filesystem isolation boundary. It is a runtime reuse mode.
 
 ## Without configured worker routing
 
@@ -5332,10 +5338,10 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. The dedicated-worker provisioning flow is implemented today. Both modes use the same canonical per-agent state model.
 
-| Helm value                     | Behavior                                                                             | Best for                                                     |
-| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod                  | Simpler deployments and the current shared-worker model      |
-| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger runtime isolation with shared canonical agent state |
+| Helm value                     | Behavior                                                                             | Best for                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod                  | Simpler deployments and the current shared-worker model                                                        |
+| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger runtime isolation with shared canonical agent state, but not automatic per-agent filesystem isolation |
 
 ### Shared Sidecar Mode
 
@@ -5344,6 +5350,8 @@ The instance chart supports two worker backend modes for worker-routed tools suc
 ### Dedicated Worker Mode
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. Each worker pod runs the sandbox-runner app and is able to access the same canonical agent state roots used by every other runtime for the same agent. Dedicated workers may still keep worker-local caches and metadata isolated by worker key. Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
+
+> [!WARNING] The current Kubernetes worker backend mounts the shared storage root into each worker pod. That gives the worker access to canonical agent state, but it does not by itself create agent-level filesystem isolation. For filesystem-capable tools such as `shell`, `file`, `python`, and `coding`, a reused `user` worker can potentially reach multiple agent workspaces for that requester. Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode. Prefer `shared` or `user_agent` if you want the clearest per-agent boundary.
 
 Typical Helm values look like:
 
@@ -5371,6 +5379,7 @@ Important behavior and constraints:
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
 - Dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
+- Current chart behavior mounts that shared storage root rather than narrowing mounts to one agent root per worker.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements

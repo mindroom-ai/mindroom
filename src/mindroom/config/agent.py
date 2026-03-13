@@ -90,7 +90,7 @@ class AgentConfig(BaseModel):
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
-        description="Worker scope for routed tools: user, user_agent, or shared",
+        description="Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
     allow_self_config: bool | None = Field(
         default=None,

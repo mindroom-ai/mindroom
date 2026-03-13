@@ -81,11 +81,13 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 ## Scope Semantics
 
 - `shared` means one runtime may be reused by many callers for the same agent, and all of them use that agent's canonical state root.
-- `user` means runtimes are isolated per requester, but those runtimes still read and write the canonical state roots of the agents they execute.
+- `user` means one runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents it executes.
 - `user_agent` means runtimes are isolated per requester and agent, but every runtime for that agent still reads and writes the same canonical agent state root.
 - Unscoped dedicated execution still uses the same canonical agent state root for the addressed agent.
 - `shared`, `user`, `user_agent`, and unscoped dedicated execution differ in runtime isolation and reuse.
 - They do not change which files are authoritative for the agent.
+- `user` is therefore a trust-sharing mode rather than an agent-level filesystem isolation boundary for filesystem-capable worker tools.
+- If one reused runtime can reach multiple agent workspaces, those agents can read or modify each other's files through that runtime.
 
 ## Worker Key Resolution
 
@@ -298,7 +300,8 @@ The local provider should support introspection of active workers and cleanup of
 
 The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
 The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
-The current implementation mounts the same canonical agent state root for the same agent across all scopes, while still keeping worker-specific runtime caches and metadata isolated by worker key.
+The current implementation mounts shared storage so workers can reach the same canonical agent state root for the same agent across all scopes, while still keeping worker-specific runtime caches and metadata isolated by worker key.
+That shared-storage mount is sufficient for correctness, but it is not by itself an agent-level filesystem isolation mechanism.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
 Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical agent state roots it executes against, as well as an authenticated internal endpoint.
