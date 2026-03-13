@@ -11,15 +11,13 @@ from typing import TYPE_CHECKING
 import yaml
 
 from mindroom.tool_system.worker_routing import worker_dir_name, worker_root_path
-from mindroom.workers.backends.docker import (
-    _PROJECTED_CONFIGS_DIRNAME,
-    _WORKER_CONFIG_STATE_DIRNAME,
-    DockerWorkerBackend,
+from mindroom.workers.backends.docker import DockerWorkerBackend, _load_docker_client_and_errors
+from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
-    _load_docker_client_and_errors,
     _read_docker_user,
 )
+from mindroom.workers.backends.docker_projection import _PROJECTED_CONFIGS_DIRNAME, _WORKER_CONFIG_STATE_DIRNAME
 from mindroom.workers.models import WorkerSpec
 
 if TYPE_CHECKING:
