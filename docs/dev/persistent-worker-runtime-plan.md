@@ -49,7 +49,7 @@ This document does not claim a recent dedicated-worker GKE smoke or soak validat
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
-The dashboard does not manage credentials for `user`, `user_agent`, or `room_thread` workers.
+The dashboard does not manage credentials for `user` or `user_agent` workers.
 The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.
 
 ## Product Boundary
@@ -76,7 +76,7 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 - A user can create files in one turn and read them in a later turn.
 - A shared public agent can still exist in a public room.
 - Two users talking to the same agent can land in different workers when the scope requires isolation.
-- Collaborative behavior can still use shared mutable state when the scope is `room_thread` or `shared`.
+- Collaborative behavior can still use shared mutable state when the scope is `shared`.
 - Editable file-backed memory stays consistent across turns because reads and writes come from the same worker-owned state.
 
 ## Non-Goals
@@ -91,11 +91,9 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 
 - `user` means the same requester gets the same worker across all agents that use the `user` scope in the same tenant.
 - `user_agent` means the same requester gets a separate worker for each agent.
-- `room_thread` means all tool execution within the same room thread shares one worker.
 - `shared` means everyone using that agent shares one worker.
 - `user` is the default isolation choice when users need a personal coding environment that survives across agents.
 - `user_agent` is the default isolation choice when agents need separate package or filesystem state.
-- `room_thread` is the default collaborative choice when a thread should accumulate shared runtime state.
 - `shared` is the explicit opt-in mode for globally shared worker state.
 
 ## Worker Key Resolution
@@ -107,7 +105,6 @@ The current canonical shape is versioned and string-based so it can evolve witho
 - `shared` resolves to `v1:<tenant>:shared:<agent>`.
 - `user` resolves to `v1:<tenant>:user:<requester>`.
 - `user_agent` resolves to `v1:<tenant>:user_agent:<requester>:<agent>`.
-- `room_thread` resolves to `v1:<tenant>:room_thread:<room>:<thread>`.
 
 ## Execution Identity
 
@@ -134,10 +131,9 @@ Current `/v1` behavior only allows unscoped agents and agents with `worker_scope
 That restriction is intentional and remains in place until trusted requester identity is solved.
 User-scoped `/v1` workers do not currently ship as a supported product behavior.
 Future `/v1` support should allow additional worker scopes only when a trusted authenticated principal is present.
-One intended final rule is that `shared` and possibly session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
-That `room_thread` expansion is not implemented today and should not be treated as current `/v1` behavior.
+One intended final rule is that `shared` can work without a trusted user principal, while `user` and `user_agent` require one.
 The dashboard also has an authenticated user identity, but that identity is a dashboard principal rather than the Matrix requester identity used by runtime worker routing.
-That means the dashboard must not read or write credentials for `user`, `user_agent`, or `room_thread` workers until there is a deliberate identity-linking model for those scopes.
+That means the dashboard must not read or write credentials for `user` or `user_agent` workers until there is a deliberate identity-linking model for those scopes.
 
 ## Tool Execution Policy
 
@@ -270,7 +266,7 @@ The target credentials model is:
 - Leased credentials never become part of the model prompt or normal tool arguments.
 
 OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user`, `user_agent`, and `room_thread`.
+Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user` and `user_agent`.
 They only support unscoped agents and agents with `worker_scope=shared`.
 The credential-backed `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` tools also stay local even for `worker_scope=shared` rather than being routed through the sandbox runner.
 This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
@@ -361,7 +357,7 @@ The initialization rules are:
 
 - Agents without worker scope keep existing storage untouched.
 - Agents that opt into any worker scope start with fresh worker-owned mutable state.
-- `shared`, `user`, `user_agent`, and `room_thread` all use newly scoped storage rather than automatic migration.
+- `shared`, `user`, and `user_agent` all use newly scoped storage rather than automatic migration.
 - No explicit import flow is part of the current design.
 - No compatibility fallback remains between legacy sandbox config and `worker_tools`.
 
@@ -388,7 +384,7 @@ It is productionization, deferred policy decisions, and operator experience.
 
 1. Trusted `/v1` identity for isolating worker scopes.
    Current `/v1` requests still build execution identity with `requester_id=None`, and the API intentionally only supports unscoped agents and `worker_scope=shared`.
-   Remaining work is to decide the authenticated principal source for `/v1`, decide whether `room_thread` should key from conversation or session identity, and then safely enable additional scopes.
+   Remaining work is to decide the authenticated principal source for `/v1` and then safely enable additional scopes.
 
 2. Finalize explicit credential policy defaults.
    Credentials are already scope-aware and leased to workers, but the long-term default policy by tool class is still not fully codified as a first-class model.
@@ -435,7 +431,7 @@ Integration tests should cover:
 - Session persistence in scoped workers.
 - Learning persistence in scoped workers.
 - Isolation between two users of the same public agent.
-- Shared collaboration in `room_thread` and `shared` scopes.
+- Shared collaboration in the `shared` scope.
 
 System tests should cover:
 
@@ -451,7 +447,7 @@ System tests should cover:
 - File-backed memory edited from tools is visible in later turns from the same worker scope.
 - Session and learning state follow the same worker scope as the tool execution environment.
 - Two users of the same shared agent do not see each other's workspace, credentials, or worker-owned memory when the scope is isolating.
-- Collaborative modes remain possible for `room_thread` and `shared`.
+- Collaborative modes remain possible for `shared`.
 - Tools that require primary-runtime services continue working locally.
 - The routing layer remains generic for any worker-routed tool.
 
@@ -535,6 +531,5 @@ The highest-value targets are richer metrics, dedicated-worker GKE smoke and soa
 
 - Decide the exact authenticated identity source for `/v1` user-scoped workers.
 - Decide the final credential scope defaults for each class of worker-routed tool, with `user` as the current leading default when a trusted requester identity exists.
-- Decide whether `room_thread` on `/v1` should key from conversation ID, session ID, or a distinct thread identifier.
 - Decide the long-term worker retention policy for hosted deployments.
 - Decide whether explicit user-facing worker reset commands should exist in the product.
