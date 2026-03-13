@@ -22,7 +22,7 @@ from mindroom.knowledge.manager import (
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
 )
-from mindroom.knowledge.utils import get_knowledge_for_base
+from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
 
 if TYPE_CHECKING:
@@ -1210,6 +1210,91 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
                 execution_identity=identities[2],
             )
             is not None
+        )
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_request_bound_private_manager_survives_cache_eviction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """An in-flight request should keep using the manager it already ensured."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 1)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                private=AgentPrivateConfig(
+                    per="room_thread",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    context_files=["SOUL.md"],
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="thread-alice",
+        resolved_thread_id="thread-alice",
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="thread-bob",
+        resolved_thread_id="thread-bob",
+        session_id="session-bob",
+    )
+
+    try:
+        alice_managers = await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            tmp_path,
+            execution_identity=alice_identity,
+        )
+        assert private_base_id in alice_managers
+
+        with bound_knowledge_managers(alice_managers):
+            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+            assert (
+                get_knowledge_for_base(
+                    private_base_id,
+                    config=config,
+                    storage_path=tmp_path,
+                    execution_identity=alice_identity,
+                )
+                is not None
+            )
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=alice_identity,
+            )
+            is None
         )
     finally:
         await shutdown_knowledge_managers()

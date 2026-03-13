@@ -47,6 +47,7 @@ class TestUserIdPassthrough:
         bot.config = config
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
+        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
         bot._build_tool_runtime_context = MagicMock(
             return_value=ToolRuntimeContext(
                 agent_name="general",
@@ -103,6 +104,7 @@ class TestUserIdPassthrough:
         bot.storage_path = tmp_path
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
+        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
         bot._build_tool_runtime_context = MagicMock(
             return_value=ToolRuntimeContext(
                 agent_name="general",
