@@ -796,6 +796,46 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     assert "Alice private root context." not in bob_agent.role
 
 
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_template_dir_does_not_imply_context_files(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private template directories should not implicitly load Mind-style context files."""
+    config = Config.from_yaml()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+        },
+    )
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"), tool_execution_identity(identity):
+        agent = create_agent("general", config=config, storage_path=tmp_path)
+
+    assert "Template user." not in agent.role
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):
@@ -1001,12 +1041,11 @@ def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
 
 
 def test_config_private_knowledge_requires_path_without_template_default() -> None:
-    """Private knowledge needs an explicit path when no template default exists."""
+    """Private knowledge needs an explicit path whenever it is enabled."""
     with pytest.raises(
         ValidationError,
         match=re.escape(
-            "agents.<name>.private.knowledge.path is required when private.template_dir is not configured "
-            "and no default private knowledge path is available; invalid agents: mind",
+            "agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: mind",
         ),
     ):
         Config(
@@ -1031,6 +1070,7 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
                 private=AgentPrivateConfig(
                     per="user",
                     template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
                 ),
                 knowledge_bases=["company_docs"],
             ),
@@ -1047,6 +1087,24 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
     assert private_config.path == "memory"
 
 
+def test_template_dir_does_not_imply_private_knowledge() -> None:
+    """Copying from a template directory alone should not create a private knowledge base."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                ),
+            ),
+        },
+    )
+
+    assert config.get_agent_private_knowledge_base_id("mind") is None
+    assert config.get_agent_knowledge_base_ids("mind") == []
+
+
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
     """Synthetic private base IDs should resolve only while private knowledge is actually active."""
     config = Config(
@@ -1056,6 +1114,7 @@ def test_get_private_knowledge_base_agent_requires_active_private_knowledge() ->
                 private=AgentPrivateConfig(
                     per="user",
                     template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
                 ),
             ),
             "assistant": AgentConfig(display_name="Assistant"),

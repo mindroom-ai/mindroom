@@ -90,11 +90,12 @@ agents:
       per: user
       template_dir: ./mind_template
       knowledge:
+        path: memory
         watch: true
     knowledge_bases: [company_docs]
 ```
 
-With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. When `private.template_dir` is set, `memory/` is the default local knowledge path, so you usually do not need to set `private.knowledge.path`. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
+With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. `private.template_dir` only copies files. Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
 
 ### Multiple Knowledge Bases
 

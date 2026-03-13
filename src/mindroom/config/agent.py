@@ -14,15 +14,6 @@ from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
-_DEFAULT_PRIVATE_CONTEXT_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
-_DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory"
 
 
 def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
@@ -34,20 +25,6 @@ def _validate_safe_relative_path(value: str, *, field_name: str) -> str:
         msg = f"{field_name} must stay within the workspace root"
         raise ValueError(msg)
     return value
-
-
-def default_private_context_files(template_dir: str | None) -> tuple[str, ...]:
-    """Return default private context files when a template directory is configured."""
-    if template_dir is not None:
-        return _DEFAULT_PRIVATE_CONTEXT_FILES
-    return ()
-
-
-def default_private_knowledge_path(template_dir: str | None) -> str | None:
-    """Return the default private knowledge path when a template directory is configured."""
-    if template_dir is not None:
-        return _DEFAULT_PRIVATE_KNOWLEDGE_PATH
-    return None
 
 
 class AgentPrivateKnowledgeConfig(BaseModel):
@@ -110,7 +87,7 @@ class AgentPrivateConfig(BaseModel):
     )
     context_files: list[str] | None = Field(
         default=None,
-        description="Optional private-root-relative context files; defaults to the conventional Mind-style files when template_dir is set",
+        description="Optional private-root-relative context files loaded into the agent's role context",
     )
     knowledge: AgentPrivateKnowledgeConfig | None = Field(
         default=None,

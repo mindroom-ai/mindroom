@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.config.agent import default_private_context_files
 from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
@@ -86,11 +85,6 @@ def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWork
     if agent_config is None or agent_config.private is None:
         return None
     private_config = agent_config.private
-    context_files = (
-        tuple(private_config.context_files)
-        if private_config.context_files is not None
-        else default_private_context_files(private_config.template_dir)
-    )
     return _EffectiveAgentWorkspace(
         root_path=_private_root_name(agent_name, config),
         template_dir=(
@@ -98,7 +92,7 @@ def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWork
             if private_config.template_dir is not None
             else None
         ),
-        context_files=context_files,
+        context_files=tuple(private_config.context_files or ()),
         file_memory_path=".",
     )
 

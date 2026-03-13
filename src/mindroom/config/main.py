@@ -11,12 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from mindroom.config.agent import (
-    AgentConfig,
-    CultureConfig,
-    TeamConfig,
-    default_private_knowledge_path,
-)
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
@@ -242,7 +237,7 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_private_knowledge(self) -> Config:
-        """Ensure private knowledge has a path when no template default exists."""
+        """Ensure enabled private knowledge declares an explicit path."""
         invalid_private_knowledge = [
             agent_name
             for agent_name, agent_config in self.agents.items()
@@ -251,15 +246,11 @@ class Config(BaseModel):
                 and agent_config.private.knowledge is not None
                 and agent_config.private.knowledge.enabled
                 and agent_config.private.knowledge.path is None
-                and default_private_knowledge_path(agent_config.private.template_dir) is None
             )
         ]
         if invalid_private_knowledge:
             formatted = ", ".join(sorted(invalid_private_knowledge))
-            msg = (
-                "agents.<name>.private.knowledge.path is required when private.template_dir is not configured "
-                f"and no default private knowledge path is available; invalid agents: {formatted}"
-            )
+            msg = f"agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: {formatted}"
             raise ValueError(msg)
         return self
 
@@ -482,12 +473,8 @@ class Config(BaseModel):
         agent_config = self.get_agent(agent_name)
         if agent_config.private is None:
             return None
-        if agent_config.private.knowledge is not None and not agent_config.private.knowledge.enabled:
-            return None
-        if (
-            agent_config.private.knowledge is None
-            and default_private_knowledge_path(agent_config.private.template_dir) is None
-        ):
+        private_knowledge = agent_config.private.knowledge
+        if private_knowledge is None or not private_knowledge.enabled or private_knowledge.path is None:
             return None
         return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
 
@@ -529,25 +516,21 @@ class Config(BaseModel):
             raise ValueError(msg)
 
         private_knowledge = private_config.knowledge
-        if private_knowledge is not None and not private_knowledge.enabled:
+        if private_knowledge is None or not private_knowledge.enabled:
             msg = f"Knowledge base '{base_id}' is not configured"
             raise ValueError(msg)
 
-        knowledge_path = (
-            private_knowledge.path
-            if private_knowledge is not None and private_knowledge.path is not None
-            else default_private_knowledge_path(private_config.template_dir)
-        )
+        knowledge_path = private_knowledge.path
         if knowledge_path is None:
             msg = f"Knowledge base '{base_id}' is not configured"
             raise ValueError(msg)
 
         return KnowledgeBaseConfig(
             path=knowledge_path,
-            watch=True if private_knowledge is None else private_knowledge.watch,
-            chunk_size=5000 if private_knowledge is None else private_knowledge.chunk_size,
-            chunk_overlap=0 if private_knowledge is None else private_knowledge.chunk_overlap,
-            git=None if private_knowledge is None else private_knowledge.git,
+            watch=private_knowledge.watch,
+            chunk_size=private_knowledge.chunk_size,
+            chunk_overlap=private_knowledge.chunk_overlap,
+            git=private_knowledge.git,
         )
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
