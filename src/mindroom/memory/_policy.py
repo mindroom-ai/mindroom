@@ -37,6 +37,11 @@ def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> boo
 
 
 def _effective_storage_path_for_agent(agent_name: str, storage_path: Path) -> Path:
+    """Return the canonical durable state root for one agent.
+
+    Memory does not split by requester for ``user`` or ``user_agent`` workers.
+    Those scopes isolate runtime execution, not authoritative agent memory/files.
+    """
     return resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
@@ -48,7 +53,7 @@ def resolve_context_storage_path(
     *,
     agent_name: str | None = None,
 ) -> Path:
-    """Resolve the storage root for an agent-aware memory operation."""
+    """Resolve the authoritative storage root for an agent-aware memory operation."""
     if agent_name is None:
         return storage_path
     return _effective_storage_path_for_agent(agent_name, storage_path)

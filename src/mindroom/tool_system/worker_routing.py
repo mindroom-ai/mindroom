@@ -268,7 +268,11 @@ def _copy_bootstrap_source(source_path: Path, target_path: Path) -> None:
 
 
 def _bootstrap_missing_path(source_path: Path, target_path: Path, *, state_root: Path) -> None:
-    """Copy config-side starter files into the canonical agent-owned path when missing."""
+    """Seed config-side starter files into a missing canonical agent-owned path once.
+
+    The copy under ``agents/<agent>/workspace`` is authoritative after bootstrap.
+    Later config edits do not overwrite canonical runtime state automatically.
+    """
     marker_path = _bootstrap_marker_path(state_root, target_path)
     if marker_path.exists():
         return
@@ -319,7 +323,12 @@ def resolve_agent_owned_path(
     base_storage_path: Path,
     state_root: Path | None = None,
 ) -> AgentOwnedPath:
-    """Resolve one agent-owned path into the canonical shared agent workspace."""
+    """Resolve one agent-owned path into the canonical shared agent workspace.
+
+    Durable agent files are shared per agent across all requesters and worker scopes.
+    ``worker_scope`` only changes which runtime executes the tool call, not which
+    workspace copy is authoritative.
+    """
     source_path = resolve_config_relative_path(path_text)
     if state_root is None:
         state_root = agent_state_root_path(base_storage_path, agent_name)
@@ -339,5 +348,9 @@ def resolve_agent_state_storage_path(
     agent_name: str,
     base_storage_path: Path,
 ) -> Path:
-    """Return the storage path that should back the agent's mutable state."""
+    """Return the canonical durable state root for one agent.
+
+    Requester-scoped worker runtimes do not partition file-backed memory, mem0 state,
+    sessions, or learning. All durable agent state lives under one root per agent.
+    """
     return agent_state_root_path(base_storage_path, agent_name)

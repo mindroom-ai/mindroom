@@ -76,7 +76,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
 
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
         await store_conversation_memory(
-            "Alice private memory",
+            "Alice-authored shared memory",
             "general",
             storage_path,
             "session-alice",
@@ -106,10 +106,11 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
 
 
 @pytest.mark.asyncio
-async def test_mem0_team_conversation_memory_reuses_canonical_agent_roots(
+async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_user_scoped_workers(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """User-scoped workers should still share one durable team memory view per agent set."""
     config.memory.backend = "mem0"
     config.agents["general"].worker_scope = "user"
     config.agents["calculator"].worker_scope = "user"
@@ -163,20 +164,32 @@ async def test_mem0_team_conversation_memory_reuses_canonical_agent_roots(
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
         with tool_execution_identity(alice_identity):
             await store_conversation_memory(
-                "Alice team private memory",
+                "Alice-authored shared team memory",
                 ["general", "calculator"],
                 storage_path,
                 "session-alice",
                 config,
                 room_id="!room:example.org",
             )
-            alice_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
+            alice_results = await search_agent_memories(
+                "Alice-authored shared team",
+                "general",
+                storage_path,
+                config,
+                limit=5,
+            )
 
         with tool_execution_identity(bob_identity):
-            bob_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
+            bob_results = await search_agent_memories(
+                "Alice-authored shared team",
+                "general",
+                storage_path,
+                config,
+                limit=5,
+            )
 
-    assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
-    assert any(result.get("memory") == "Alice team private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice-authored shared team memory" for result in alice_results)
+    assert any(result.get("memory") == "Alice-authored shared team memory" for result in bob_results)
 
     assert (agent_state_root_path(storage_path, "general"), "team_calculator+general") in stored_memories
     assert (agent_state_root_path(storage_path, "calculator"), "team_calculator+general") in stored_memories

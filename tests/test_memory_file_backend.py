@@ -74,10 +74,11 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
 
 
 @pytest.mark.asyncio
-async def test_file_backend_worker_scope_shares_agent_memory_across_requesters(
+async def test_file_backend_user_scoped_workers_share_agent_memory_across_requesters(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """Requester-scoped workers still share one durable agent memory root."""
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
@@ -102,18 +103,18 @@ async def test_file_backend_worker_scope_shares_agent_memory_across_requesters(
     )
 
     with tool_execution_identity(alice_identity):
-        await add_agent_memory("Alice private memory", "general", storage_path, config)
-        alice_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+        await add_agent_memory("Alice-authored shared agent memory", "general", storage_path, config)
+        alice_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
         alice_prompt = await build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
 
     with tool_execution_identity(bob_identity):
-        bob_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+        bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
         bob_prompt = await build_memory_enhanced_prompt("What do you remember?", "general", storage_path, config)
 
-    assert any(result.get("memory") == "Alice private memory" for result in alice_results)
-    assert any(result.get("memory") == "Alice private memory" for result in bob_results)
-    assert "Alice private memory" in alice_prompt
-    assert "Alice private memory" in bob_prompt
+    assert any(result.get("memory") == "Alice-authored shared agent memory" for result in alice_results)
+    assert any(result.get("memory") == "Alice-authored shared agent memory" for result in bob_results)
+    assert "Alice-authored shared agent memory" in alice_prompt
+    assert "Alice-authored shared agent memory" in bob_prompt
 
     memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
     assert memory_file.exists()
@@ -151,6 +152,7 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(
     storage_path: Path,
     config: Config,
 ) -> None:
+    """User-scoped workers should still persist file memory under the agent-owned root."""
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "shared-memory")
     config.agents["general"].memory_backend = "file"
@@ -176,12 +178,12 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(
     )
 
     with tool_execution_identity(alice_identity):
-        await add_agent_memory("Alice private memory", "general", storage_path, config)
+        await add_agent_memory("Alice-authored shared memory", "general", storage_path, config)
 
     with tool_execution_identity(bob_identity):
-        bob_results = await search_agent_memories("Alice private", "general", storage_path, config, limit=5)
+        bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
 
-    assert any(result.get("memory") == "Alice private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice-authored shared memory" for result in bob_results)
     assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
     assert (agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md").exists()
 
@@ -219,20 +221,32 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
 
     with tool_execution_identity(alice_identity):
         await store_conversation_memory(
-            "Alice team private memory",
+            "Alice-authored shared team memory",
             ["general", "calculator"],
             storage_path,
             "session-alice",
             config,
             room_id="!room:example.org",
         )
-        alice_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
+        alice_results = await search_agent_memories(
+            "Alice-authored shared team",
+            "general",
+            storage_path,
+            config,
+            limit=5,
+        )
 
     with tool_execution_identity(bob_identity):
-        bob_results = await search_agent_memories("Alice team private", "general", storage_path, config, limit=5)
+        bob_results = await search_agent_memories(
+            "Alice-authored shared team",
+            "general",
+            storage_path,
+            config,
+            limit=5,
+        )
 
-    assert any(result.get("memory") == "Alice team private memory" for result in alice_results)
-    assert any(result.get("memory") == "Alice team private memory" for result in bob_results)
+    assert any(result.get("memory") == "Alice-authored shared team memory" for result in alice_results)
+    assert any(result.get("memory") == "Alice-authored shared team memory" for result in bob_results)
     assert (
         agent_state_root_path(storage_path, "general") / "memory_files" / "team_calculator+general" / "MEMORY.md"
     ).exists()
@@ -496,23 +510,23 @@ async def test_team_can_crud_member_memory_in_canonical_agent_memory_file_path(
         patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"),
         tool_execution_identity(execution_identity),
     ):
-        await add_agent_memory("Worker-owned general note", "general", storage_path, config)
+        await add_agent_memory("Runtime-authored general note", "general", storage_path, config)
         memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
 
         loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
         assert loaded is not None
-        assert loaded["memory"] == "Worker-owned general note"
+        assert loaded["memory"] == "Runtime-authored general note"
 
         await update_agent_memory(
             memory_id,
-            "Updated worker-owned general note",
+            "Updated runtime-authored general note",
             ["general", "calculator"],
             storage_path,
             config,
         )
         updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
         assert updated is not None
-        assert updated["memory"] == "Updated worker-owned general note"
+        assert updated["memory"] == "Updated runtime-authored general note"
 
         await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
         assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
@@ -520,8 +534,8 @@ async def test_team_can_crud_member_memory_in_canonical_agent_memory_file_path(
     canonical_memory_file = agent_workspace_root_path(storage_path, "general") / "mind_data" / "MEMORY.md"
     canonical_content = canonical_memory_file.read_text(encoding="utf-8")
     assert "Seeded note." in canonical_content
-    assert "Updated worker-owned general note" not in canonical_content
-    assert "Worker-owned general note" not in canonical_content
+    assert "Updated runtime-authored general note" not in canonical_content
+    assert "Runtime-authored general note" not in canonical_content
 
 
 @pytest.mark.asyncio
