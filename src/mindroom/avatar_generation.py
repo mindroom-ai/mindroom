@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from google import genai
@@ -138,8 +139,9 @@ class AvatarTarget:
     team_members: tuple[AvatarTeamMember, ...] = ()
 
 
+@cache
 def get_console() -> Console:
-    """Create a Rich console when CLI output is needed."""
+    """Create the shared Rich console used by avatar generation output."""
     return Console()
 
 
@@ -509,7 +511,7 @@ async def _generate_missing_avatars(
         await client.aio.aclose()
 
     failed_targets: list[tuple[AvatarTarget, Exception]] = []
-    for target, result in zip(targets, results, strict=False):
+    for target, result in zip(targets, results, strict=True):
         if isinstance(result, Exception):
             failed_targets.append((target, result))
             logger.error(

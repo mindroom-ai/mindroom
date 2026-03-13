@@ -61,6 +61,11 @@ def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) 
     assert avatar_path.parent.is_dir()
 
 
+def test_get_console_returns_shared_console_instance() -> None:
+    """Avatar generation should reuse one Rich console instance across prints and progress."""
+    assert generate_avatars.get_console() is generate_avatars.get_console()
+
+
 def test_extract_image_bytes_returns_first_inline_image() -> None:
     """Gemini inline image parts should be converted back to raw bytes."""
     response = types.GenerateContentResponse(
