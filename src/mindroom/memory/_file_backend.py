@@ -22,7 +22,6 @@ from ._policy import (
     get_team_ids_for_agent,
     mutation_target_storage_paths,
     resolve_file_memory_resolution,
-    room_scope_user_id,
 )
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
@@ -631,40 +630,11 @@ def delete_file_agent_memory(
     raise MemoryNotFoundError(memory_id)
 
 
-def add_file_room_memory(
-    content: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str | None,
-) -> None:
-    """Append one file-backed memory for a room scope."""
-    resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    _append_scope_memory_entry(room_scope_user_id(room_id), content, resolution, config)
-    logger.debug("File room memory added", room_id=room_id)
-
-
-def search_file_room_memories(
-    query: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str | None,
-    limit: int,
-) -> list[MemoryResult]:
-    """Search file-backed memories stored for a room scope."""
-    resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    return _search_scope_memory_entries(room_scope_user_id(room_id), query, resolution, config, limit=limit)
-
-
 def store_file_conversation_memory(
     prompt: str,
     agent_name: str | list[str],
     storage_path: Path,
     config: Config,
-    room_id: str | None,
 ) -> None:
     """Persist condensed conversation text to file-backed memory scopes."""
     condensed_prompt = " ".join(prompt.strip().split())
@@ -674,7 +644,6 @@ def store_file_conversation_memory(
     target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
     scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
-    room_user_id = room_scope_user_id(room_id) if room_id else None
 
     for target_storage_path in target_storage_paths:
         resolution = file_memory_resolution_from_paths(
@@ -688,13 +657,6 @@ def store_file_conversation_memory(
             config,
             memory_id=team_memory_id,
         )
-        if room_user_id is not None:
-            _append_scope_memory_entry(
-                room_user_id,
-                condensed_prompt,
-                resolution,
-                config,
-            )
 
     if isinstance(agent_name, list):
         logger.info(
@@ -705,6 +667,3 @@ def store_file_conversation_memory(
         )
     else:
         logger.info("File memory added", agent=agent_name)
-
-    if room_id:
-        logger.debug("File room memory added", room_id=room_id, storage_targets=len(target_storage_paths))

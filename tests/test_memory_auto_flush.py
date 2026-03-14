@@ -65,16 +65,12 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
     mark_auto_flush_dirty_session(
         storage_path,
         config,
         agent_name="general",
         session_id="s2",
-        room_id="!room:example",
-        thread_id="t2",
     )
 
     reprioritize_auto_flush_sessions(
@@ -89,6 +85,8 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     assert '"shared:general:s1"' in payload
     assert '"shared:general:s2"' in payload
     assert '"priority_boost_at"' in payload
+    assert '"room_id"' not in payload
+    assert '"thread_id"' not in payload
 
 
 def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config) -> None:
@@ -102,8 +100,6 @@ def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config)
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))
@@ -121,8 +117,6 @@ def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
 
     assert not (storage_path / "memory_flush_state.json").exists()
@@ -141,16 +135,12 @@ async def test_worker_respects_batch_limits(
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
     mark_auto_flush_dirty_session(
         storage_path,
         config,
         agent_name="general",
         session_id="s2",
-        room_id="!room:example",
-        thread_id="t2",
     )
 
     fake_session = _FakeSession(
@@ -211,8 +201,6 @@ async def test_worker_flush_keeps_worker_daily_file_memory_isolated(
             config,
             agent_name="general",
             session_id="session-alice",
-            room_id="!room:example.org",
-            thread_id="$thread",
         )
 
     fake_session = _FakeSession(
@@ -338,8 +326,6 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
 
     def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
@@ -373,8 +359,6 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
             config,
             agent_name=agent_name,
             session_id=session_id,
-            room_id="!room:example",
-            thread_id="t1",
         )
         return True
 
@@ -403,8 +387,6 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         config,
         agent_name="general",
         session_id="s1",
-        room_id="!room:example",
-        thread_id="t1",
     )
 
     def _load_session(_storage: Path, _config: Config, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
@@ -469,8 +451,6 @@ def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config)
             config,
             agent_name="general",
             session_id="shared-session-id",
-            room_id="!room:example.org",
-            thread_id="$thread",
         )
     with tool_execution_identity(bob_identity):
         mark_auto_flush_dirty_session(
@@ -478,9 +458,42 @@ def test_mark_dirty_keeps_worker_scopes_separate(tmp_path: Path, config: Config)
             config,
             agent_name="general",
             session_id="shared-session-id",
-            room_id="!room:example.org",
-            thread_id="$thread",
         )
 
     payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
     assert len(payload["sessions"]) == 2
+
+
+def test_mark_dirty_rewrites_legacy_state_without_room_thread_fields(tmp_path: Path, config: Config) -> None:
+    """Dirty-state rewrites should strip legacy room/thread fields from persisted entries."""
+    state_path = tmp_path / "memory_flush_state.json"
+    legacy_state = {
+        "version": 1,
+        "sessions": {
+            "shared:general:s1": {
+                "agent_name": "general",
+                "session_id": "s1",
+                "worker_key": None,
+                "room_id": "!room:example",
+                "thread_id": "t1",
+                "dirty": True,
+                "in_flight": False,
+                "first_dirty_at": 1,
+                "last_seen_at": 1,
+                "dirty_revision": 1,
+            },
+        },
+    }
+    state_path.write_text(f"{json.dumps(legacy_state)}\n", encoding="utf-8")
+
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="general",
+        session_id="s1",
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    session_state = payload["sessions"]["shared:general:s1"]
+    assert "room_id" not in session_state
+    assert "thread_id" not in session_state

@@ -240,7 +240,6 @@ The final memory rules are:
 - File memory for worker-scoped agents resolves relative to the worker storage root.
 - Shared agent memory outside worker scope remains supported for non-worker-routed agents.
 - Shell and file tools must not directly mutate non-file memory backends.
-- Room memory should only be auto-written into shared scopes when that sharing is intentional.
 
 ## Sessions And Learning
 
