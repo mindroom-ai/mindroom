@@ -11,6 +11,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
 
 _DEFAULT_MODELS = {"default": ModelConfig(provider="openai", id="gpt-4o")}
@@ -397,7 +398,11 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=True)},
         )
         try:
-            agent = create_agent("writer", config=config, config_path=config_path)
+            agent = create_agent(
+                "writer",
+                config=config,
+                runtime_paths=resolve_runtime_paths(config_path=config_path),
+            )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
             assert self_config_tool.config_path == config_path
 
@@ -415,11 +420,36 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["self_config"])},
         )
         try:
-            agent = create_agent("writer", config=config, config_path=config_path)
+            agent = create_agent(
+                "writer",
+                config=config,
+                runtime_paths=resolve_runtime_paths(config_path=config_path),
+            )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
             assert self_config_tool.config_path == config_path
 
             result = self_config_tool.get_own_config()
+            assert "Writer" in result
+            assert "Error" not in result
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    @patch("mindroom.agents.SqliteDb")
+    def test_config_path_threaded_to_config_manager(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
+        """Generic tool loading should thread config_path into config_manager as well."""
+        config, config_path = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["config_manager"])},
+        )
+        try:
+            agent = create_agent(
+                "writer",
+                config=config,
+                runtime_paths=resolve_runtime_paths(config_path=config_path),
+            )
+            config_manager_tool = next(t for t in agent.tools if getattr(t, "name", None) == "config_manager")
+            assert config_manager_tool.config_path == config_path
+
+            result = config_manager_tool.get_info(info_type="agents")
             assert "Writer" in result
             assert "Error" not in result
         finally:

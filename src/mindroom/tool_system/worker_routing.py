@@ -8,18 +8,18 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
-    from mindroom.config.main import Config
-
-WorkerScope = Literal["shared", "user", "user_agent", "room_thread"]
+WorkerScope = Literal["shared", "user", "user_agent"]
+ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
+_AGENT_WORKSPACE_DIRNAME = "workspace"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "google",
@@ -69,6 +69,11 @@ def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[
 
 
 def _normalize_worker_key_part(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
+    return normalized or "default"
+
+
+def _normalize_worker_requester_part(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
 
@@ -80,7 +85,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _normalize_worker_key_part(identity.requester_id)
+        return _normalize_worker_requester_part(identity.requester_id)
     return None
 
 
@@ -133,17 +138,6 @@ def resolve_worker_key(
         if requester_key is None:
             return None
         worker_key = f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
-    elif worker_scope == "room_thread":
-        room_key = identity.room_id
-        if room_key is None:
-            return None
-
-        thread_key = identity.resolved_thread_id or identity.thread_id or room_key
-        worker_key = (
-            f"v1:{tenant_key}:room_thread:"
-            f"{_normalize_worker_key_part(room_key)}:"
-            f"{_normalize_worker_key_part(thread_key)}"
-        )
     else:
         msg = f"Unknown worker scope: {worker_scope}"
         raise ValueError(msg)
@@ -175,6 +169,34 @@ def is_unscoped_worker_key(worker_key: str) -> bool:
     """Return whether a worker key uses the unscoped backend worker form."""
     parts = worker_key.split(":")
     return len(parts) >= 4 and parts[0] == "v1" and parts[2] == "unscoped"
+
+
+def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
+    """Return the parsed scope discriminator for one resolved worker key."""
+    parts = worker_key.split(":")
+    if len(parts) < 4 or parts[0] != "v1":
+        return None
+    scope = parts[2]
+    if scope not in {"shared", "user", "user_agent", "unscoped"}:
+        return None
+    return cast("ResolvedWorkerKeyScope", scope)
+
+
+def worker_key_agent_name(worker_key: str) -> str | None:
+    """Return the encoded agent name for one resolved worker key, when present."""
+    scope = resolved_worker_key_scope(worker_key)
+    if scope is None or scope == "user":
+        return None
+
+    parts = worker_key.split(":")
+    if scope in {"shared", "unscoped"}:
+        if len(parts) < 4:
+            return None
+        return parts[3]
+
+    if len(parts) < 5:
+        return None
+    return parts[-1]
 
 
 def resolve_execution_identity_for_worker_scope(
@@ -212,31 +234,6 @@ def resolve_execution_identity_for_worker_scope(
     )
 
 
-def resolve_agent_worker_key(
-    *,
-    agent_name: str,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> str | None:
-    """Resolve the current worker key for an agent when worker routing is active."""
-    if agent_name not in config.agents:
-        return None
-
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    if worker_scope is None:
-        return None
-
-    identity = resolve_execution_identity_for_worker_scope(
-        worker_scope,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    if identity is None:
-        return None
-
-    return resolve_worker_key(worker_scope, identity, agent_name=agent_name)
-
-
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_dir_part(worker_key)
@@ -249,46 +246,124 @@ def worker_dir_name(worker_key: str) -> str:
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the persistent state root path for a worker key."""
-    resolved_base_path = base_storage_path.expanduser().resolve()
-    workers_dir = (
-        resolved_base_path.parent if resolved_base_path.parent.name == "workers" else resolved_base_path / "workers"
-    )
-    return workers_dir / worker_dir_name(worker_key)
+    resolved_base_path = shared_storage_root(base_storage_path)
+    if _is_resolved_worker_root(resolved_base_path, worker_key):
+        return resolved_base_path
+    return resolved_base_path / "workers" / worker_dir_name(worker_key)
 
 
-def _resolve_agent_worker_root(
+def shared_storage_root(base_storage_path: Path) -> Path:
+    """Return the canonical shared storage root.
+
+    Callers must pass the actual shared storage root, not an `agents/<name>` or
+    `workers/<name>` child path. Security-sensitive path checks should fail closed
+    rather than guess by peeling path segments based only on directory names.
+    """
+    return base_storage_path.expanduser().resolve()
+
+
+def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
+    """Return the canonical shared state root for one agent.
+
+    Agent-state resolution accepts the shared storage root or a pre-resolved
+    canonical agent root.
+    """
+    resolved_base_path = shared_storage_root(base_storage_path)
+    if _is_resolved_agent_state_root(resolved_base_path, agent_name):
+        return resolved_base_path
+    return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
+
+
+def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
+
+
+def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
+
+
+def visible_agent_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
+    """Return the canonical agent-state roots a worker key is allowed to see by default.
+
+    `shared`, `user_agent`, and unscoped dedicated workers are agent-isolated and
+    therefore only see the addressed agent root.
+    `user` is intentionally broader and sees the shared `agents/` tree because it
+    acts as a per-requester multi-agent workstation.
+    """
+    scope = resolved_worker_key_scope(worker_key)
+    if scope is None:
+        return ()
+    if scope == "user":
+        return (shared_storage_root(base_storage_path) / "agents",)
+
+    agent_name = worker_key_agent_name(worker_key)
+    if agent_name is None:
+        return ()
+    return (agent_state_root_path(base_storage_path, agent_name),)
+
+
+def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:
+    """Return the canonical workspace root for one agent."""
+    return agent_state_root_path(base_storage_path, agent_name) / _AGENT_WORKSPACE_DIRNAME
+
+
+def agent_workspace_relative_path(path_text: str) -> Path:
+    """Validate and normalize a path that must live inside an agent workspace."""
+    normalized_text = path_text.strip()
+    if not normalized_text:
+        msg = "Agent-owned paths must not be empty."
+        raise ValueError(msg)
+
+    candidate = Path(normalized_text).expanduser()
+    if candidate.is_absolute():
+        msg = f"Agent-owned paths must be workspace-relative, not absolute: {path_text}"
+        raise ValueError(msg)
+
+    if ".." in candidate.parts:
+        msg = f"Agent-owned paths must stay within the agent workspace: {path_text}"
+        raise ValueError(msg)
+
+    return candidate
+
+
+def _resolve_agent_workspace_target(relative_path: Path, *, agent_root: Path) -> Path:
+    candidate = (agent_root / relative_path).resolve()
+    resolved_root = agent_root.resolve()
+    try:
+        candidate.relative_to(resolved_root)
+    except ValueError as exc:
+        msg = f"Agent-owned paths must stay within {resolved_root}: {relative_path}"
+        raise ValueError(msg) from exc
+    return candidate
+
+
+def resolve_agent_owned_path(
+    path_text: str,
     *,
     agent_name: str,
     base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path | None:
-    """Resolve the current worker root for an agent when worker routing is active."""
-    worker_key = resolve_agent_worker_key(
-        agent_name=agent_name,
-        config=config,
-        execution_identity=execution_identity,
-    )
-    if worker_key is None:
-        return None
+) -> Path:
+    """Resolve one agent-owned path into the canonical shared agent workspace.
 
-    return worker_root_path(base_storage_path, worker_key)
+    Durable agent files are shared per agent across all requesters and worker scopes.
+    ``worker_scope`` only changes which runtime executes the tool call, not which
+    files are authoritative.
+    """
+    relative_target = agent_workspace_relative_path(path_text)
+    agent_workspace_root = agent_workspace_root_path(base_storage_path, agent_name).resolve()
+    return _resolve_agent_workspace_target(relative_target, agent_root=agent_workspace_root)
 
 
 def resolve_agent_state_storage_path(
     *,
     agent_name: str,
     base_storage_path: Path,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
-    """Return the storage path that should back the agent's mutable state."""
-    return (
-        _resolve_agent_worker_root(
-            agent_name=agent_name,
-            base_storage_path=base_storage_path,
-            config=config,
-            execution_identity=execution_identity,
-        )
-        or base_storage_path
-    )
+    """Return the canonical durable state root for one agent.
+
+    Requester-scoped worker runtimes do not partition file-backed memory, mem0 state,
+    sessions, or learning. All durable agent state lives under one root per agent.
+    """
+    return agent_state_root_path(base_storage_path, agent_name)

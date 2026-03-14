@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import pytest
 
@@ -18,23 +18,33 @@ from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSpec
 from tests.conftest import FakeCredentialsManager
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 
 
-def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tool entrypoints should call the sandbox runner API when proxy mode is enabled."""
-    captured: dict[str, Any] = {}
+class _FakeResponse:
+    def __init__(self, payload: dict[str, object] | None = None) -> None:
+        self._payload = payload or {"ok": True, "result": "sandbox-result"}
 
-    class _FakeResponse:
-        def raise_for_status(self) -> None:
-            return
+    def raise_for_status(self) -> None:
+        return
 
-        def json(self) -> dict[str, object]:
-            return {"ok": True, "result": "sandbox-result"}
+    def json(self) -> dict[str, object]:
+        return self._payload
 
+
+def _recording_client_class(
+    *,
+    captured: dict[str, Any] | None = None,
+    captured_calls: list[tuple[str, dict[str, Any]]] | None = None,
+    responder: Callable[[str, dict[str, Any]], dict[str, object]] | None = None,
+) -> type:
     class _FakeClient:
         def __init__(self, *, timeout: float) -> None:
-            captured["timeout"] = timeout
+            if captured is not None:
+                captured["timeout"] = timeout
 
         def __enter__(self) -> Self:
             return self
@@ -43,10 +53,21 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
             return
 
         def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return _FakeResponse()
+            if captured is not None:
+                captured["url"] = url
+                captured["json"] = json
+                captured["headers"] = headers
+            if captured_calls is not None:
+                captured_calls.append((url, json))
+            payload = responder(url, json) if responder is not None else {"ok": True, "result": "sandbox-result"}
+            return _FakeResponse(payload)
+
+    return _FakeClient
+
+
+def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool entrypoints should call the sandbox runner API when proxy mode is enabled."""
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
@@ -54,7 +75,10 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"calculator"})
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured),
+    )
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -96,33 +120,6 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     """Proxy should create and consume a lease when credential sharing policy allows it."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
 
-    class _FakeResponse:
-        def __init__(self, payload: dict[str, object]) -> None:
-            self._payload = payload
-
-        def raise_for_status(self) -> None:
-            return
-
-        def json(self) -> dict[str, object]:
-            return self._payload
-
-    class _FakeClient:
-        def __init__(self, *, timeout: float) -> None:
-            self.timeout = timeout
-
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-            return
-
-        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
-            _ = headers
-            captured_calls.append((url, json))
-            if url.endswith("/leases"):
-                return _FakeResponse({"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1})
-            return _FakeResponse({"ok": True, "result": "proxied"})
-
     fake_credentials = FakeCredentialsManager({"openai": {"api_key": "sk-test", "_source": "ui"}})
 
     monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox-runner:8765")
@@ -131,7 +128,17 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured_calls=captured_calls,
+            responder=lambda url, _json: (
+                {"lease_id": "lease-123", "expires_at": 123.0, "max_uses": 1}
+                if url.endswith("/leases")
+                else {"ok": True, "result": "proxied"}
+            ),
+        ),
+    )
 
     tool = get_tool_by_name("calculator")
     entrypoint = tool.functions["add"].entrypoint
@@ -645,33 +652,15 @@ class TestWorkerToolsOverride:
         """get_tool_by_name should pass worker_tools_override through to the proxy wrapper."""
         captured: dict[str, Any] = {}
 
-        class _FakeResponse:
-            def raise_for_status(self) -> None:
-                return
-
-            def json(self) -> dict[str, object]:
-                return {"ok": True, "result": "sandbox-result"}
-
-        class _FakeClient:
-            def __init__(self, *, timeout: float) -> None:
-                pass
-
-            def __enter__(self) -> Self:
-                return self
-
-            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-                return
-
-            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:  # noqa: ARG002
-                captured["url"] = url
-                return _FakeResponse()
-
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
         monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")  # env says off
         monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
         monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
-        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
 
         # Override says sandbox calculator
         tool = get_tool_by_name("calculator", worker_tools_override=["calculator"])
@@ -685,34 +674,15 @@ class TestWorkerToolsOverride:
         """Proxy execution should preserve non-secret tool init overrides like base_dir."""
         captured: dict[str, Any] = {}
 
-        class _FakeResponse:
-            def raise_for_status(self) -> None:
-                return
-
-            def json(self) -> dict[str, object]:
-                return {"ok": True, "result": "sandbox-result"}
-
-        class _FakeClient:
-            def __init__(self, *, timeout: float) -> None:
-                pass
-
-            def __enter__(self) -> Self:
-                return self
-
-            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-                return
-
-            def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:  # noqa: ARG002
-                captured["url"] = url
-                captured["json"] = json
-                return _FakeResponse()
-
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
         monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
         monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
         monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
         monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
-        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
 
         tool = get_tool_by_name(
             "coding",
@@ -727,3 +697,81 @@ class TestWorkerToolsOverride:
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
         assert captured["json"]["tool_init_overrides"] == {"base_dir": "/workspace/demo"}
+
+    def test_proxy_rewrites_storage_root_base_dir_to_shared_relative_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worker-keyed proxy execution should rewrite canonical agent base_dir paths portably."""
+        captured: dict[str, Any] = {}
+
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+
+        tool = get_tool_by_name(
+            "coding",
+            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
+            worker_tools_override=["coding"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        with tool_execution_identity(execution_identity):
+            result = entrypoint(path=".")
+
+        assert result == "sandbox-result"
+        assert captured["url"].endswith("/api/sandbox-runner/execute")
+        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace/mind_data"}
+
+    def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Unscoped proxied calls must keep absolute canonical paths unchanged."""
+        captured: dict[str, Any] = {}
+
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", "/mindroom_data")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+
+        tool = get_tool_by_name(
+            "coding",
+            tool_init_overrides={"base_dir": "/mindroom_data/agents/general/workspace/mind_data"},
+            worker_tools_override=["coding"],
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+
+        result = entrypoint(path=".")
+
+        assert result == "sandbox-result"
+        assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
+        assert captured["json"]["tool_init_overrides"] == {
+            "base_dir": "/mindroom_data/agents/general/workspace/mind_data",
+        }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from types import SimpleNamespace
@@ -15,9 +16,14 @@ from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
+import mindroom.constants as constants_module
+from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.main import app
+from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.matrix.state import MatrixState
+from mindroom.response_tracker import ResponseTracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -67,15 +73,15 @@ class TestConfigInit:
         assert mind["include_default_tools"] is False
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
-        assert mind["memory_file_path"] == "./mind_data"
+        assert mind["memory_file_path"] == "mind_data"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
-            "./mind_data/SOUL.md",
-            "./mind_data/AGENTS.md",
-            "./mind_data/USER.md",
-            "./mind_data/IDENTITY.md",
-            "./mind_data/TOOLS.md",
-            "./mind_data/HEARTBEAT.md",
+            "mind_data/SOUL.md",
+            "mind_data/AGENTS.md",
+            "mind_data/USER.md",
+            "mind_data/IDENTITY.md",
+            "mind_data/TOOLS.md",
+            "mind_data/HEARTBEAT.md",
         ]
         assert mind["knowledge_bases"] == ["mind_memory"]
         assert mind["tools"] == [
@@ -89,7 +95,9 @@ class TestConfigInit:
             "matrix_message",
         ]
         assert mind["skills"] == ["mindroom-docs"]
-        assert config["knowledge_bases"]["mind_memory"]["path"] == "./mind_data/memory"
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+        )
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
@@ -98,13 +106,16 @@ class TestConfigInit:
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
 
+        env_content = (tmp_path / ".env").read_text()
+        assert f"MINDROOM_STORAGE_PATH={(tmp_path / 'mindroom_data').resolve()}" in env_content
+
     def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
         """Full template should scaffold the required mind_data files."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
 
-        workspace = tmp_path / "mind_data"
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
         assert workspace.exists()
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
@@ -116,6 +127,65 @@ class TestConfigInit:
         assert (workspace / "MEMORY.md").exists()
         assert not (workspace / "BOOT.md").exists()
 
+    def test_init_full_profile_respects_storage_path_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Full template should scaffold the Mind workspace under MINDROOM_STORAGE_PATH when set."""
+        target = tmp_path / "config.yaml"
+        storage_root = tmp_path / "custom-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        workspace = storage_root / "agents" / "mind" / "workspace" / "mind_data"
+        assert workspace.exists()
+        assert (workspace / "memory").exists()
+        assert (workspace / "SOUL.md").exists()
+        assert (workspace / "MEMORY.md").exists()
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+        )
+
+        env_content = (tmp_path / ".env").read_text()
+        assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
+
+    def test_init_full_profile_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The starter Mind profile should follow the active runtime storage root, not the init-time one."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        runtime_storage = tmp_path / "alternate-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
+
+        config = Config.from_yaml(target)
+        resolved_knowledge_path = constants_module.resolve_config_relative_path(
+            config.knowledge_bases["mind_memory"].path,
+            config_path=target,
+        )
+        assert (
+            resolved_knowledge_path
+            == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+        )
+
+        ensure_default_agent_workspaces(config, runtime_storage)
+        runtime_workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+        assert (runtime_workspace / "SOUL.md").exists()
+        assert (runtime_workspace / "AGENTS.md").exists()
+        assert (runtime_workspace / "USER.md").exists()
+        assert (runtime_workspace / "IDENTITY.md").exists()
+        assert (runtime_workspace / "TOOLS.md").exists()
+        assert (runtime_workspace / "HEARTBEAT.md").exists()
+        assert (runtime_workspace / "MEMORY.md").exists()
+
     def test_init_without_path_uses_detected_default_location(
         self,
         tmp_path: Path,
@@ -123,13 +193,40 @@ class TestConfigInit:
     ) -> None:
         """Config init without --path should write to the detected config location."""
         default_cfg = tmp_path / ".mindroom" / "config.yaml"
-        monkeypatch.setattr("mindroom.cli.config.CONFIG_PATH", default_cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.config.get_runtime_paths",
+            lambda: constants_module.resolve_runtime_paths(config_path=default_cfg),
+        )
 
         result = runner.invoke(app, ["config", "init"], input="openai\n")
 
         assert result.exit_code == 0
         assert default_cfg.exists()
         assert (default_cfg.parent / ".env").exists()
+
+    def test_init_preserved_env_without_storage_path_uses_literal_storage_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Preserving an env file without MINDROOM_STORAGE_PATH must not emit a broken placeholder path."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        config = yaml.safe_load(target.read_text())
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "./mindroom_data/agents/mind/workspace/mind_data/memory"
+        )
+        assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
+        assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data").exists()
+        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""
@@ -248,6 +345,65 @@ class TestConfigInit:
         )
         assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
+
+    def test_init_keeps_existing_env_without_storage_root_and_resolves_to_default_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keeping an existing `.env` without MINDROOM_STORAGE_PATH should still produce a working starter config."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
+        assert (workspace / "SOUL.md").exists()
+        config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        resolved_kb_path = constants_module.resolve_config_relative_path(
+            config["knowledge_bases"]["mind_memory"]["path"],
+            config_path=target,
+        )
+        assert resolved_kb_path == workspace / "memory"
+
+    def test_init_keeps_existing_env_storage_root_for_workspace_and_knowledge_base(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keeping an existing `.env` with MINDROOM_STORAGE_PATH should keep starter files under that root."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        custom_root = tmp_path / "custom-root"
+        env_path.write_text(
+            f"MINDROOM_STORAGE_PATH={custom_root}\nOPENAI_API_KEY=sk-existing\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        workspace = custom_root / "agents" / "mind" / "workspace" / "mind_data"
+        assert (workspace / "SOUL.md").exists()
+        config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        resolved_kb_path = constants_module.resolve_config_relative_path(
+            config["knowledge_bases"]["mind_memory"]["path"],
+            config_path=target,
+        )
+        assert resolved_kb_path == workspace / "memory"
+        assert env_path.read_text(encoding="utf-8").startswith(f"MINDROOM_STORAGE_PATH={custom_root}\n")
 
     def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:
         """Config init should overwrite .env when user confirms."""
@@ -618,6 +774,45 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+
+    def test_run_storage_path_updates_runtime_env_and_constants(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should unify `--storage-path` with `MINDROOM_STORAGE_PATH` for runtime code."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        runtime_storage = tmp_path / "runtime-storage"
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        monkeypatch.setattr(constants_module, "STORAGE_PATH", constants_module.STORAGE_PATH)
+        monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", constants_module.STORAGE_PATH_OBJ)
+        monkeypatch.setattr(constants_module, "MATRIX_STATE_FILE", constants_module.MATRIX_STATE_FILE)
+        monkeypatch.setattr(constants_module, "TRACKING_DIR", constants_module.TRACKING_DIR)
+        monkeypatch.setattr(constants_module, "_MEMORY_DIR", constants_module._MEMORY_DIR)
+        monkeypatch.setattr(constants_module, "CREDENTIALS_DIR", constants_module.CREDENTIALS_DIR)
+        monkeypatch.setattr(constants_module, "ENCRYPTION_KEYS_DIR", constants_module.ENCRYPTION_KEYS_DIR)
+
+        async def _fake_main(**kwargs: object) -> None:
+            assert kwargs["storage_path"] == runtime_storage.resolve()
+            assert runtime_storage.resolve() == constants_module.STORAGE_PATH_OBJ
+            assert str(runtime_storage.resolve()) == constants_module.STORAGE_PATH
+            assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
+            assert ResponseTracker("agent").base_path == runtime_storage.resolve() / "tracking"
+            MatrixState().save()
+            assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
+            result = runner.invoke(app, ["run", "--storage-path", str(runtime_storage)])
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
 
 
 class TestAvatarsCommands:

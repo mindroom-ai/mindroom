@@ -13,6 +13,7 @@ from agno.run.agent import ModelRequestCompletedEvent, RunCompletedEvent, RunCon
 from agno.run.base import RunStatus
 
 from mindroom.ai import (
+    _prepare_agent_and_prompt,
     ai_response,
     append_inline_media_fallback_prompt,
     should_retry_without_inline_media,
@@ -22,12 +23,20 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+
+def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=config_path or tmp_path / "config.yaml",
+        storage_path=tmp_path,
+    )
 
 
 class TestUserIdPassthrough:
@@ -173,13 +182,94 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 user_id="@user:localhost",
             )
 
             mock_agent.arun.assert_called_once()
             assert mock_agent.arun.call_args.kwargs["user_id"] == "@user:localhost"
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(self, tmp_path: Path) -> None:
+        """The shared agent-build helper should preserve an explicit orchestrator config path."""
+        config = Config.from_yaml()
+        config_path = tmp_path / "custom-config.yaml"
+        mock_agent = MagicMock()
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.build_prompt_with_thread_history", return_value="enhanced"),
+            patch("mindroom.ai.create_agent", return_value=mock_agent) as mock_create_agent,
+            patch("mindroom.ai._apply_context_window_limit"),
+        ):
+            agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
+                agent_name="general",
+                prompt="test",
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
+                config=config,
+            )
+
+        assert agent is mock_agent
+        assert full_prompt == "enhanced"
+        assert unseen_event_ids == []
+        assert mock_create_agent.call_args.kwargs["runtime_paths"].config_path == config_path
+
+    @pytest.mark.asyncio
+    async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
+        """Non-streaming replies should build agents against the orchestrator-owned config file."""
+        config_path = tmp_path / "custom-config.yaml"
+        mock_agent = MagicMock()
+        mock_run_output = MagicMock()
+        mock_run_output.content = "Response"
+        mock_run_output.tools = None
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._cached_agent_run", new_callable=AsyncMock, return_value=mock_run_output),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            await ai_response(
+                agent_name="general",
+                prompt="test",
+                session_id="session1",
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
+                config=Config.from_yaml(),
+            )
+
+        assert mock_prepare.call_args.args[2].config_path == config_path
+
+    @pytest.mark.asyncio
+    async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
+        """Streaming replies should build agents against the orchestrator-owned config file."""
+        config_path = tmp_path / "custom-config.yaml"
+        mock_agent = MagicMock()
+
+        async def _empty_stream() -> AsyncIterator[str]:
+            if False:
+                yield ""
+
+        mock_agent.arun = MagicMock(return_value=_empty_stream())
+
+        with (
+            patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
+            patch("mindroom.ai._get_cache", return_value=None),
+        ):
+            mock_prepare.return_value = (mock_agent, "test prompt", [])
+
+            _ = [
+                chunk
+                async for chunk in stream_agent_response(
+                    agent_name="general",
+                    prompt="test",
+                    session_id="session1",
+                    runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
+                    config=Config.from_yaml(),
+                )
+            ]
+
+        assert mock_prepare.call_args.args[2].config_path == config_path
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -208,7 +298,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     user_id="@user:localhost",
                 )
@@ -242,7 +332,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[pdf_file, zip_file]),
             )
@@ -278,7 +368,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[pdf_file, zip_file]),
                 )
@@ -326,7 +416,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[document_file]),
             )
@@ -379,7 +469,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[document_file]),
                 )
@@ -447,7 +537,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[document_file]),
             )
@@ -499,7 +589,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[document_file]),
                 )
@@ -538,7 +628,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
             )
 
@@ -572,7 +662,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     show_tool_calls=False,
                 )
@@ -611,7 +701,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 show_tool_calls=False,
                 tool_trace_collector=tool_trace,
@@ -663,7 +753,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             )
@@ -726,7 +816,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             ):
@@ -777,7 +867,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             ):

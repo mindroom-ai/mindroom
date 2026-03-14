@@ -7,12 +7,11 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import uvicorn
 
-from mindroom.agents import get_rooms_for_entity
+from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -44,7 +43,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER
+from .constants import MATRIX_HOMESERVER, RuntimePaths, get_runtime_paths, set_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -74,6 +73,7 @@ from .orchestration.runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
+    from pathlib import Path
 
     from .knowledge.manager import KnowledgeManager
 
@@ -87,7 +87,9 @@ _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
-    storage_path: Path
+    storage_path: Path | None = None
+    config_path: Path | None = None
+    runtime_paths: RuntimePaths | None = None
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
@@ -100,7 +102,24 @@ class MultiAgentOrchestrator:
 
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
-        self.storage_path = self.storage_path.expanduser().resolve()
+        self.runtime_paths = self.runtime_paths or get_runtime_paths(
+            config_path=self.config_path,
+            storage_path=self.storage_path,
+        )
+        self.storage_path = self.runtime_paths.storage_root
+        self.config_path = self.runtime_paths.config_path
+
+    def _require_runtime_paths(self) -> RuntimePaths:
+        assert self.runtime_paths is not None
+        return self.runtime_paths
+
+    def _require_storage_path(self) -> Path:
+        assert self.storage_path is not None
+        return self.storage_path
+
+    def _require_config_path(self) -> Path:
+        assert self.config_path is not None
+        return self.config_path
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
@@ -130,7 +149,7 @@ class MultiAgentOrchestrator:
             return
 
         worker = MemoryAutoFlushWorker(
-            storage_path=self.storage_path,
+            storage_path=self._require_storage_path(),
             config_provider=lambda: self.config,
         )
         self._memory_auto_flush_worker = worker
@@ -181,7 +200,7 @@ class MultiAgentOrchestrator:
         """Initialize or reconfigure knowledge managers for the current config."""
         self.knowledge_managers = await initialize_knowledge_managers(
             config=config,
-            storage_path=self.storage_path,
+            runtime_paths=self._require_runtime_paths(),
             start_watchers=start_watcher,
             reindex_on_create=False,
         )
@@ -340,6 +359,7 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
+        ensure_default_agent_workspaces(config, self._require_storage_path())
         await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
         await self._sync_memory_auto_flush_worker()
 
@@ -351,7 +371,16 @@ class MultiAgentOrchestrator:
     def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
         temp_user = create_temp_user(entity_name, config)
-        bot = cast("AgentBot | TeamBot", create_bot_for_entity(entity_name, temp_user, config, self.storage_path))
+        bot = cast(
+            "AgentBot | TeamBot",
+            create_bot_for_entity(
+                entity_name,
+                temp_user,
+                config,
+                self._require_storage_path(),
+                config_path=self._require_config_path(),
+            ),
+        )
         bot.orchestrator = self
         self.agent_bots[entity_name] = bot
         return bot
@@ -405,8 +434,9 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = Config.from_yaml()
-        load_plugins(config)
+        self.runtime_paths = set_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        config = Config.from_yaml(runtime_paths=self.runtime_paths)
+        load_plugins(config, config_path=self.config_path)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -569,8 +599,9 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        new_config = Config.from_yaml()
-        load_plugins(new_config)
+        self.runtime_paths = set_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        new_config = Config.from_yaml(runtime_paths=self.runtime_paths)
+        load_plugins(new_config, config_path=self.config_path)
 
         if not self.config:
             return await self._load_initial_config(new_config)
@@ -945,11 +976,11 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
+    runtime_paths = set_runtime_paths(storage_path=storage_path)
+    storage_path = runtime_paths.storage_root
+
     # Configure logging before any background tasks or account setup begin.
     setup_logging(level=log_level)
-
-    # Canonicalize once at startup so downstream storage paths are cwd-stable.
-    storage_path = storage_path.expanduser().resolve()
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials()
@@ -957,16 +988,18 @@ async def main(
     # Ensure storage exists before any runtime components try to write into it.
     storage_path.mkdir(parents=True, exist_ok=True)
 
-    config_path = Path(CONFIG_PATH)
-
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
 
     try:
         auxiliary_specs = [
-            ("config watcher", lambda: _watch_config_task(config_path, orchestrator), "config_watcher_supervisor"),
+            (
+                "config watcher",
+                lambda: _watch_config_task(orchestrator._require_config_path(), orchestrator),
+                "config_watcher_supervisor",
+            ),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
         ]
 

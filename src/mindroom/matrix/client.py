@@ -13,8 +13,9 @@ from typing import Any
 import nio
 from nio import crypto
 
+from mindroom import constants
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import ENCRYPTION_KEYS_DIR, MATRIX_SSL_VERIFY
+from mindroom.constants import MATRIX_SSL_VERIFY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
@@ -87,7 +88,7 @@ def _create_matrix_client(
     # Default store path for encryption support
     if store_path is None and user_id:
         safe_user_id = user_id.replace(":", "_").replace("@", "")
-        store_path = str(ENCRYPTION_KEYS_DIR / safe_user_id)
+        store_path = str(constants.ENCRYPTION_KEYS_DIR / safe_user_id)
         # Ensure the directory exists
         Path(store_path).mkdir(parents=True, exist_ok=True)
 

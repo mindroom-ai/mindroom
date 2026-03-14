@@ -34,8 +34,10 @@ class _MemoryFileConfig(BaseModel):
     path: str | None = Field(
         default=None,
         description=(
-            "Directory for file-backed memory. Relative paths resolve from the config "
-            "directory. Defaults to <storage_path>/memory_files when omitted."
+            "Optional fallback root for direct file-memory paths. Relative paths resolve "
+            "from the config directory. Canonical agent and team file memory live under "
+            "agent-owned roots; use agents.<name>.memory_file_path to place an agent's "
+            "file memory inside its workspace."
         ),
     )
     max_entrypoint_lines: int = Field(

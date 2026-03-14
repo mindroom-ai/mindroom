@@ -6,6 +6,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 import mindroom.constants as constants_mod
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -141,6 +142,50 @@ class TestResolveConfigRelativePath:
         resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
         assert resolved == absolute_path.resolve()
 
+    def test_environment_variables_are_expanded_before_resolution(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config path resolution should treat `${MINDROOM_STORAGE_PATH}` as the runtime storage root."""
+        storage_root = tmp_path / "runtime-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+            config_path=tmp_path / "config.yaml",
+        )
+
+        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+
+    def test_config_from_yaml_loads_sibling_env_for_expansion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit config paths should use their sibling `.env` for path expansion."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        custom_storage = tmp_path / "custom-storage"
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={custom_storage}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        Config.from_yaml(config_path)
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/kb",
+            config_path=config_path,
+        )
+        assert resolved == custom_storage.resolve() / "kb"
+
 
 class TestResolveAvatarPath:
     """Tests for resolve_avatar_path()."""
@@ -154,8 +199,7 @@ class TestResolveAvatarPath:
         active_config = tmp_path / "runtime" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir()
 
@@ -171,8 +215,7 @@ class TestResolveAvatarPath:
         explicit_config = tmp_path / "workspace" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir(config_path=explicit_config)
 
@@ -235,8 +278,7 @@ class TestResolveAvatarPath:
         storage_dir = tmp_path / "storage"
         bundled_dir = tmp_path / "bundled"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")

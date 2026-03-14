@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -16,7 +18,9 @@ from mindroom.commands.config_commands import (
     _set_nested_value,
     handle_config_command,
 )
-from mindroom.commands.parsing import CommandType, _CommandParser
+from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.parsing import Command, CommandType, _CommandParser
+from mindroom.constants import resolve_runtime_paths
 
 
 class TestCommandParser:
@@ -215,6 +219,39 @@ class TestValueFormatting:
         """Test formatting empty collections."""
         assert _format_value({}) == "{}"
         assert _format_value([]) == "[]"
+
+
+@pytest.mark.asyncio
+async def test_handle_command_threads_config_path_to_config_commands(tmp_path: Path) -> None:
+    """`!config` dispatch should use the orchestrator-owned config file path."""
+    config_path = tmp_path / "custom-config.yaml"
+    context = CommandHandlerContext(
+        client=AsyncMock(),
+        config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
+        logger=MagicMock(),
+        response_tracker=MagicMock(),
+        derive_conversation_context=AsyncMock(return_value=(False, None, [])),
+        requester_user_id_for_event=MagicMock(return_value="@alice:example.org"),
+        resolve_reply_thread_id=MagicMock(return_value=None),
+        send_response=AsyncMock(return_value=None),
+        send_skill_command_response=AsyncMock(return_value=None),
+    )
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@alice:example.org",
+        event_id="$event",
+        source={"content": {"body": "!config show"}},
+    )
+    command = Command(type=CommandType.CONFIG, args={"args_text": "show"}, raw_text="!config show")
+
+    with patch(
+        "mindroom.commands.handler.handle_config_command",
+        AsyncMock(return_value=("ok", None)),
+    ) as mock_handle_config_command:
+        await handle_command(context=context, room=room, event=event, command=command)
+
+    mock_handle_config_command.assert_awaited_once_with("show", config_path)
 
 
 @pytest.mark.asyncio

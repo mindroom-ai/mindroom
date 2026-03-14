@@ -8,10 +8,11 @@ codebase.
 import os
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 load_dotenv()
 
@@ -25,6 +26,27 @@ _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
+_RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
+
+
+@dataclass(frozen=True)
+class RuntimePaths:
+    """Resolved runtime path contract shared across the process."""
+
+    config_path: Path
+    config_dir: Path
+    env_path: Path
+    storage_root: Path
+
+
+CONFIG_PATH: Path
+STORAGE_PATH: str
+STORAGE_PATH_OBJ: Path
+MATRIX_STATE_FILE: Path
+TRACKING_DIR: Path
+_MEMORY_DIR: Path
+CREDENTIALS_DIR: Path
+ENCRYPTION_KEYS_DIR: Path
 
 
 def config_search_locations() -> list[Path]:
@@ -46,18 +68,115 @@ def config_search_locations() -> list[Path]:
     return locations
 
 
-def _config_base_dir(config_path: Path | None = None) -> Path:
-    """Return the absolute directory containing the active config file."""
-    resolved_config_path = (config_path or CONFIG_PATH).expanduser().resolve()
-    return resolved_config_path.parent
+def _storage_root_from_env_path(env_path: Path) -> Path | None:
+    """Read MINDROOM_STORAGE_PATH from one env file when present."""
+    if not env_path.is_file():
+        return None
+    value = dotenv_values(env_path).get("MINDROOM_STORAGE_PATH")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def resolve_runtime_paths(
+    *,
+    config_path: Path | None = None,
+    storage_path: Path | None = None,
+) -> RuntimePaths:
+    """Resolve the runtime config/env/storage paths for one execution context."""
+    resolved_config_path = Path(config_path or find_config()).expanduser().resolve()
+    config_dir = resolved_config_path.parent
+    env_path = config_dir / ".env"
+
+    if storage_path is not None:
+        resolved_storage_root = Path(storage_path).expanduser().resolve()
+    elif configured_storage_root := os.getenv("MINDROOM_STORAGE_PATH", "").strip():
+        resolved_storage_root = Path(configured_storage_root).expanduser().resolve()
+    elif env_storage_root := _storage_root_from_env_path(env_path):
+        resolved_storage_root = env_storage_root
+    else:
+        resolved_storage_root = (config_dir / "mindroom_data").resolve()
+
+    return RuntimePaths(
+        config_path=resolved_config_path,
+        config_dir=config_dir,
+        env_path=env_path,
+        storage_root=resolved_storage_root,
+    )
+
+
+def load_runtime_env(paths: RuntimePaths, *, sync_path_env: bool = True) -> None:
+    """Load a runtime-adjacent env file without giving it ambient path authority."""
+    if paths.env_path.is_file():
+        for key, value in dotenv_values(paths.env_path).items():
+            if key is None or value is None or key in _RUNTIME_PATH_ENV_KEYS:
+                continue
+            os.environ[key] = value
+    if sync_path_env:
+        os.environ["MINDROOM_CONFIG_PATH"] = str(paths.config_path)
+        os.environ["MINDROOM_STORAGE_PATH"] = str(paths.storage_root)
+
+
+def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
+    """Expand runtime path placeholders against explicit runtime paths first."""
+    expanded = value.replace("${MINDROOM_CONFIG_PATH}", str(paths.config_path))
+    expanded = expanded.replace("$MINDROOM_CONFIG_PATH", str(paths.config_path))
+    expanded = expanded.replace("${MINDROOM_STORAGE_PATH}", str(paths.storage_root))
+    expanded = expanded.replace("$MINDROOM_STORAGE_PATH", str(paths.storage_root))
+    return os.path.expandvars(expanded)
+
+
+def get_runtime_paths(
+    *,
+    config_path: Path | None = None,
+    storage_path: Path | None = None,
+) -> RuntimePaths:
+    """Return the active runtime paths or resolve an explicit temporary context."""
+    if config_path is None and storage_path is None:
+        return _ACTIVE_RUNTIME_PATHS
+    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+
+
+def _set_active_runtime_paths(paths: RuntimePaths) -> RuntimePaths:
+    """Commit one runtime path context as the process-wide source of truth."""
+    global _ACTIVE_RUNTIME_PATHS
+    global CONFIG_PATH, STORAGE_PATH, STORAGE_PATH_OBJ, MATRIX_STATE_FILE, TRACKING_DIR, _MEMORY_DIR, CREDENTIALS_DIR
+    global ENCRYPTION_KEYS_DIR
+
+    _ACTIVE_RUNTIME_PATHS = paths
+    CONFIG_PATH = paths.config_path
+    STORAGE_PATH = str(paths.storage_root)
+    STORAGE_PATH_OBJ = paths.storage_root
+    MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
+    TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
+    _MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
+    CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
+    ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
+    return _ACTIVE_RUNTIME_PATHS
+
+
+def set_runtime_paths(
+    *,
+    config_path: Path | None = None,
+    storage_path: Path | None = None,
+) -> RuntimePaths:
+    """Resolve, load, and commit one runtime path context for the process."""
+    paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+    load_runtime_env(paths, sync_path_env=True)
+    return _set_active_runtime_paths(paths)
 
 
 def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | None = None) -> Path:
-    """Resolve a configured path, treating relative values as config-directory-relative."""
-    unresolved = Path(raw_path).expanduser()
+    """Resolve a configured path, treating relative values as config-directory-relative.
+
+    Environment variables are expanded first so configs can anchor paths to the
+    active runtime storage root via values such as `${MINDROOM_STORAGE_PATH}`.
+    """
+    paths = get_runtime_paths(config_path=config_path)
+    unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), paths)).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
-    return (_config_base_dir(config_path) / unresolved).resolve()
+    return (paths.config_dir / unresolved).resolve()
 
 
 def _docker_container_enabled() -> bool:
@@ -71,7 +190,7 @@ def _use_storage_path_for_workspace_assets(config_path: Path | None = None) -> b
         return False
     if config_path is None:
         return True
-    return config_path.expanduser().resolve() == CONFIG_PATH.expanduser().resolve()
+    return config_path.expanduser().resolve() == get_runtime_paths().config_path
 
 
 def avatars_dir(*, config_path: Path | None = None) -> Path:
@@ -83,9 +202,10 @@ def avatars_dir(*, config_path: Path | None = None) -> Path:
     config-adjacent writes would be ephemeral; in that case, store writable
     overrides under the persistent MindRoom storage root instead.
     """
+    paths = get_runtime_paths(config_path=config_path)
     if _use_storage_path_for_workspace_assets(config_path):
-        return STORAGE_PATH_OBJ / "avatars"
-    return _config_base_dir(config_path) / "avatars"
+        return paths.storage_root / "avatars"
+    return paths.config_dir / "avatars"
 
 
 def bundled_avatars_dir() -> Path:
@@ -142,31 +262,25 @@ def find_config() -> Path:
     return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
-CONFIG_PATH = find_config()
+_ACTIVE_RUNTIME_PATHS = resolve_runtime_paths()
 
-# Also load .env from the config directory so that API keys placed next to the
-# config file (e.g. ~/.mindroom/.env) are picked up even when CWD is elsewhere.
-# override=True makes config-adjacent .env authoritative for runtime config.
-_config_dotenv = CONFIG_PATH.parent / ".env"
-if _config_dotenv.is_file():
-    load_dotenv(_config_dotenv, override=True)
 
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as CONFIG_PATH so the
 # behaviour is unchanged when no overrides are provided.
 _CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE")
-_CONFIG_TEMPLATE_PATH = Path(_CONFIG_TEMPLATE_ENV).expanduser() if _CONFIG_TEMPLATE_ENV else CONFIG_PATH
+_set_active_runtime_paths(_ACTIVE_RUNTIME_PATHS)
+load_runtime_env(get_runtime_paths(), sync_path_env=False)
 
-_STORAGE_PATH_ENV = os.getenv("MINDROOM_STORAGE_PATH")
-STORAGE_PATH = _STORAGE_PATH_ENV or str(CONFIG_PATH.parent / "mindroom_data")
-STORAGE_PATH_OBJ = Path(STORAGE_PATH).expanduser().resolve()
 
-# Specific files and directories
-MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
-TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
-_MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
-CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
-ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
+def set_runtime_storage_path(storage_path: Path) -> Path:
+    """Update the process-wide runtime storage root.
+
+    `mindroom run --storage-path ...` should behave the same as setting
+    `MINDROOM_STORAGE_PATH` before startup, so runtime code only has one
+    storage-root contract to reason about.
+    """
+    return set_runtime_paths(storage_path=storage_path).storage_root
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:
@@ -299,21 +413,24 @@ def ensure_writable_config_path(*, create_minimal: bool = False) -> bool:
 
     Returns whether a config file exists after the call.
     """
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    paths = get_runtime_paths()
+    config_path = paths.config_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if CONFIG_PATH.exists():
+    if config_path.exists():
         return True
 
-    if _CONFIG_TEMPLATE_PATH != CONFIG_PATH and _CONFIG_TEMPLATE_PATH.exists():
-        shutil.copyfile(_CONFIG_TEMPLATE_PATH, CONFIG_PATH)
-        CONFIG_PATH.chmod(0o600)
-        print(f"Seeded config from template {_CONFIG_TEMPLATE_PATH} -> {CONFIG_PATH}")
+    template_path = Path(_CONFIG_TEMPLATE_ENV).expanduser().resolve() if _CONFIG_TEMPLATE_ENV else config_path
+    if template_path != config_path and template_path.exists():
+        shutil.copyfile(template_path, config_path)
+        config_path.chmod(0o600)
+        print(f"Seeded config from template {template_path} -> {config_path}")
         return True
 
     if not create_minimal:
         return False
 
-    CONFIG_PATH.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
-    CONFIG_PATH.chmod(0o600)
-    print(f"Created new config file at {CONFIG_PATH}")
+    config_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+    config_path.chmod(0o600)
+    print(f"Created new config file at {config_path}")
     return True

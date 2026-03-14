@@ -96,7 +96,7 @@ class SelfConfigTools(Toolkit):
             compress_tool_results: Compress tool results in history
             enable_session_summaries: Enable session summaries
             max_tool_calls_from_history: Max tool call messages replayed from history
-            context_files: File paths read at agent init
+            context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
         Returns:
             Success message with changes or an error message.

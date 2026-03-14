@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from mindroom.constants import CREDENTIALS_DIR
+from mindroom import constants
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -202,7 +202,7 @@ def _default_credentials_base_path() -> Path:
     storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
     if storage_path:
         return Path(storage_path).expanduser().resolve() / "credentials"
-    return CREDENTIALS_DIR
+    return constants.CREDENTIALS_DIR
 
 
 def _default_shared_credentials_base_path(base_path: Path) -> Path:

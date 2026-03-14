@@ -18,7 +18,14 @@ from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, Mi
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
-from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
+from mindroom.constants import (
+    MATRIX_HOMESERVER,
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    get_runtime_paths,
+    load_runtime_env,
+    safe_replace,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,
@@ -349,9 +356,16 @@ class Config(BaseModel):
         return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
 
     @classmethod
-    def from_yaml(cls, config_path: Path | None = None) -> Config:
+    def from_yaml(
+        cls,
+        config_path: Path | None = None,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> Config:
         """Create a Config instance from YAML data."""
-        path = config_path or CONFIG_PATH
+        resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
+        path = resolved_runtime_paths.config_path
+        load_runtime_env(resolved_runtime_paths, sync_path_env=False)
 
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
@@ -611,14 +625,17 @@ class Config(BaseModel):
 
         return configured_bots
 
-    def save_to_yaml(self, config_path: Path | None = None) -> None:
+    def save_to_yaml(
+        self,
+        config_path: Path | None = None,
+    ) -> None:
         """Save the config to a YAML file, excluding None values.
 
         Args:
             config_path: Path to save the config to. If None, uses CONFIG_PATH.
 
         """
-        path = config_path or CONFIG_PATH
+        path = config_path or get_runtime_paths().config_path
         config_dict = self.model_dump(exclude_none=True)
         path_obj = Path(path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)

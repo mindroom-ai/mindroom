@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom import constants
 from mindroom.constants import env_flag
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
@@ -22,6 +23,7 @@ from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    shared_storage_root,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -303,6 +305,53 @@ def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str,
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
+def _current_shared_storage_root() -> Path:
+    configured_storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if configured_storage_path:
+        return shared_storage_root(Path(configured_storage_path))
+    return shared_storage_root(constants.STORAGE_PATH_OBJ)
+
+
+def _agent_tree_relative_path(path: Path) -> str | None:
+    """Return a portable path rooted at the shared agents/ tree when possible."""
+    try:
+        agent_index = path.parts.index("agents")
+    except ValueError:
+        return None
+    if agent_index >= len(path.parts) - 1:
+        return None
+    return Path(*path.parts[agent_index:]).as_posix()
+
+
+def _portable_tool_init_overrides(
+    tool_init_overrides: dict[str, object] | None,
+    *,
+    worker_key: str | None,
+) -> dict[str, object] | None:
+    """Rewrite storage-root absolute base_dir values only for worker-keyed requests."""
+    if not tool_init_overrides:
+        return tool_init_overrides
+    if worker_key is None:
+        return tool_init_overrides
+
+    portable_overrides = dict(tool_init_overrides)
+    raw_base_dir = portable_overrides.get("base_dir")
+    if not isinstance(raw_base_dir, str):
+        return portable_overrides
+
+    base_dir = Path(raw_base_dir).expanduser()
+    if not base_dir.is_absolute():
+        return portable_overrides
+
+    shared_root = _current_shared_storage_root().resolve()
+    try:
+        portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
+    except ValueError:
+        if relative_agent_path := _agent_tree_relative_path(base_dir.resolve()):
+            portable_overrides["base_dir"] = relative_agent_path
+    return portable_overrides
+
+
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
@@ -376,8 +425,13 @@ def _call_proxy_sync(
             if worker_handle is not None
             else (f"{_PROXY_URL}{_SANDBOX_PROXY_EXECUTE_PATH}")
         )
-        if tool_init_overrides:
-            payload["tool_init_overrides"] = to_json_compatible(tool_init_overrides)
+        worker_key = worker_payload.get("worker_key")
+        portable_tool_init_overrides = _portable_tool_init_overrides(
+            tool_init_overrides,
+            worker_key=worker_key if isinstance(worker_key, str) else None,
+        )
+        if portable_tool_init_overrides:
+            payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
         lease_url = (
             worker_api_endpoint(worker_handle, "leases")
             if worker_handle is not None
