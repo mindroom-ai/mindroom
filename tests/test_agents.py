@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     tool_execution_identity,
+    visible_agent_state_roots_for_worker_key,
     worker_root_path,
 )
 
@@ -641,6 +642,27 @@ def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Pat
 
     assert resolved.is_relative_to(agent_state_root_path(tmp_path, "general"))
     assert resolved == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+
+
+def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping(tmp_path: Path) -> None:
+    """Worker keys should stay parseable even when tenant/account identifiers contain ':'."""
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant:west",
+    )
+
+    worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
+
+    assert worker_key == "v1:tenant_west:shared:general"
+    assert visible_agent_state_roots_for_worker_key(tmp_path, worker_key) == (
+        agent_state_root_path(tmp_path, "general"),
+    )
 
 
 def test_resolve_agent_owned_path_rejects_absolute_paths(tmp_path: Path) -> None:

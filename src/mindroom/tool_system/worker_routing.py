@@ -69,6 +69,11 @@ def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[
 
 
 def _normalize_worker_key_part(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
+    return normalized or "default"
+
+
+def _normalize_worker_requester_part(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._:@+-]+", "_", value.strip()).strip("_")
     return normalized or "default"
 
@@ -80,7 +85,7 @@ def _normalize_worker_dir_part(value: str) -> str:
 
 def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
-        return _normalize_worker_key_part(identity.requester_id)
+        return _normalize_worker_requester_part(identity.requester_id)
     return None
 
 
@@ -249,7 +254,12 @@ def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
 
 
 def shared_storage_root(base_storage_path: Path) -> Path:
-    """Return the shared storage root even when passed a nested worker/agent path."""
+    """Return the shared storage root for canonical `agents/<name>` or `workers/<name>` paths.
+
+    This helper intentionally peels one `agents/<child>` or `workers/<child>` segment so
+    callers can pass either the shared storage root or one canonical agent/worker root.
+    Paths that merely happen to end in those names are treated as canonical nested roots.
+    """
     resolved_base_path = base_storage_path.expanduser().resolve()
     if resolved_base_path.parent.name in {"workers", "agents"}:
         return resolved_base_path.parent.parent

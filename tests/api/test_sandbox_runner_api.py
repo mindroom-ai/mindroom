@@ -1112,10 +1112,8 @@ def test_dedicated_worker_mode_rejects_mismatched_worker_key(
             "worker_key": "worker-b",
         },
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["ok"] is False
-    assert "Dedicated sandbox worker is pinned" in data["error"]
+    assert response.status_code == 400
+    assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
 
 
 def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(
@@ -1270,11 +1268,10 @@ def test_sandbox_runner_records_worker_initialization_failures(
             },
         )
 
-    assert execute_response.status_code == 200
-    data = execute_response.json()
-    assert data["ok"] is False
-    assert "Failed to initialize worker 'worker-fail'" in data["error"]
-    assert "boom" in data["error"]
+    assert execute_response.status_code == 400
+    detail = execute_response.json()["detail"]
+    assert "Failed to initialize worker 'worker-fail'" in detail
+    assert "boom" in detail
 
     workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
     assert workers_response.status_code == 200

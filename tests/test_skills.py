@@ -26,7 +26,6 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    agent_state_root_path,
     agent_workspace_root_path,
     get_tool_execution_identity,
     resolve_worker_key,
@@ -431,7 +430,7 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     assert toolkits_by_name["memory"].name == "memory"
     assert toolkits_by_name["delegate"].name == "delegate"
     assert toolkits_by_name["self_config"].name == "self_config"
-    assert toolkits_by_name["memory"]._storage_path == agent_state_root_path(runtime_storage, "code")
+    assert toolkits_by_name["memory"]._storage_path == runtime_storage
     assert toolkits_by_name["delegate"]._storage_path == runtime_storage
 
 
@@ -654,6 +653,29 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
         TOOL_METADATA.update(original_metadata)
 
     assert result == "v1:tenant-123:user_agent:@alice:example.org:code"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_threads_config_path_to_self_config(tmp_path: Path) -> None:
+    """Skill-dispatched self_config should use the same config file path as normal agent creation."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["self_config"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].display_name = "Skill Config Writer"
+    config_path = tmp_path / "config.yaml"
+    config.save_to_yaml(config_path)
+
+    result = await _run_skill_command_tool(
+        config=config,
+        storage_path=tmp_path,
+        config_path=config_path,
+        agent_name="code",
+        command_tool="get_own_config",
+        skill_name="dispatch",
+        args_text="",
+    )
+
+    assert "Skill Config Writer" in result
 
 
 @pytest.mark.asyncio

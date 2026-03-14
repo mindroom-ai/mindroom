@@ -15,12 +15,10 @@ from ._policy import (
     agent_scope_user_id,
     build_team_user_id,
     effective_storage_paths_for_context,
-    file_memory_resolution_from_paths,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     mutation_target_storage_paths,
     resolve_file_memory_resolution,
-    storage_paths_match,
 )
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
@@ -58,31 +56,6 @@ def _scope_dir_name(scope_user_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_") or "default"
 
 
-def _resolution_for_scope_user_id(
-    scope_user_id: str,
-    *,
-    original_storage_path: Path,
-    resolved_storage_path: Path,
-    config: Config,
-) -> FileMemoryResolution:
-    preserve_resolved_storage_path = not storage_paths_match(
-        original_storage_path,
-        resolved_storage_path,
-    )
-    if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None and agent_name in config.agents:
-        return resolve_file_memory_resolution(
-            resolved_storage_path,
-            config,
-            agent_name=agent_name,
-            preserve_resolved_storage_path=preserve_resolved_storage_path,
-        )
-    return file_memory_resolution_from_paths(
-        original_storage_path=original_storage_path,
-        resolved_storage_path=resolved_storage_path,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
-    )
-
-
 def _resolve_scope_markdown_path(scope_path: Path, relative_path: str) -> Path | None:
     candidate = (scope_path / relative_path).resolve()
     resolved_scope = scope_path.resolve()
@@ -102,27 +75,11 @@ def _scope_dir(
     *,
     create: bool,
 ) -> Path:
-    agent_name = agent_name_from_scope_user_id(scope_user_id)
-    if resolution.agent_memory_scope_path is not None and agent_name is not None:
+    if resolution.agent_memory_scope_path is not None:
         scope_path = resolution.agent_memory_scope_path
         if create:
             scope_path.mkdir(parents=True, exist_ok=True)
         return scope_path
-
-    if agent_name is not None:
-        agent_config = config.agents.get(agent_name)
-        if (
-            resolution.allow_agent_memory_file_path_override
-            and agent_config is not None
-            and agent_config.memory_file_path is not None
-        ):
-            scope_path = resolution.agent_memory_scope_path
-            if scope_path is None:
-                msg = f"Missing resolved memory path for agent '{agent_name}'."
-                raise ValueError(msg)
-            if create:
-                scope_path.mkdir(parents=True, exist_ok=True)
-            return scope_path
 
     scope_path = _file_memory_root(
         resolution.storage_path,
@@ -441,11 +398,11 @@ def _find_file_anchor_memory_result(
 ) -> MemoryResult | None:
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-            resolution = _resolution_for_scope_user_id(
-                scope_user_id,
+            resolution = resolve_file_memory_resolution(
+                target_storage_path,
+                config,
+                agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
-                resolved_storage_path=target_storage_path,
-                config=config,
             )
             if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
                 return result
@@ -481,11 +438,11 @@ def _mutate_file_memory_targets(
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
     for target_storage_path in mutation_target_storage_paths(scope_user_id, caller_context, storage_path, config):
-        resolution = _resolution_for_scope_user_id(
-            scope_user_id,
+        resolution = resolve_file_memory_resolution(
+            target_storage_path,
+            config,
+            agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
-            resolved_storage_path=target_storage_path,
-            config=config,
         )
         for target_id in dict.fromkeys(
             _file_mutation_target_ids(scope_user_id, memory_id, anchor_result, resolution, config),
@@ -587,11 +544,11 @@ def get_file_agent_memory(
     """Return one file-backed memory visible to the caller."""
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-            resolution = _resolution_for_scope_user_id(
-                scope_user_id,
+            resolution = resolve_file_memory_resolution(
+                target_storage_path,
+                config,
+                agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
-                resolved_storage_path=target_storage_path,
-                config=config,
             )
             result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
             if result is not None:
@@ -674,11 +631,11 @@ def store_file_conversation_memory(
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
 
     for target_storage_path in target_storage_paths:
-        resolution = _resolution_for_scope_user_id(
-            scope_user_id,
+        resolution = resolve_file_memory_resolution(
+            target_storage_path,
+            config,
+            agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
-            resolved_storage_path=target_storage_path,
-            config=config,
         )
         _append_scope_memory_entry(
             scope_user_id,

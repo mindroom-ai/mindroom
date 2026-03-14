@@ -320,7 +320,6 @@ def build_agent_toolkit(
     storage_path: Path,
     worker_tools: list[str],
     tool_init_context: AgentToolInitContext,
-    memory_storage_path: Path | None = None,
     delegation_depth: int = 0,
     config_path: Path | None = None,
 ) -> Toolkit | None:
@@ -329,10 +328,6 @@ def build_agent_toolkit(
     Returns ``None`` when the configured tool should be skipped, such as an
     explicit ``delegate`` entry without valid delegation targets.
     """
-    resolved_memory_storage_path = memory_storage_path or resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
     agent_config = config.get_agent(agent_name)
 
     if tool_name == "memory":
@@ -340,7 +335,7 @@ def build_agent_toolkit(
 
         return MemoryTools(
             agent_name=agent_name,
-            storage_path=resolved_memory_storage_path,
+            storage_path=storage_path,
             config=config,
         )
 
@@ -645,7 +640,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
 
     resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
 
-    # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults
 
@@ -658,11 +652,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     )
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
-    memory_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=resolved_storage_path,
-    )
-
     # Create tools
     tools: list[Toolkit] = []
     for tool_name in tool_names:
@@ -674,7 +663,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 storage_path=resolved_storage_path,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
-                memory_storage_path=memory_storage_path,
                 delegation_depth=delegation_depth,
                 config_path=config_path,
             ):

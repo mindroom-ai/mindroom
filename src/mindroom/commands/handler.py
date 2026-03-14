@@ -58,6 +58,7 @@ class CommandHandlerContext:
     client: nio.AsyncClient
     config: Config
     storage_path: Path
+    config_path: Path | None
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -213,6 +214,7 @@ def _collect_agent_toolkits(
     agent_name: str,
     *,
     storage_path: Path | None = None,
+    config_path: Path | None = None,
 ) -> list[tuple[str, Toolkit]]:
     resolved_storage_path = storage_path or STORAGE_PATH_OBJ
     worker_tools = config.get_agent_worker_tools(agent_name)
@@ -227,6 +229,7 @@ def _collect_agent_toolkits(
                 storage_path=resolved_storage_path,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
+                config_path=config_path,
             )
             if toolkit is None:
                 continue
@@ -360,6 +363,7 @@ async def _run_skill_command_tool(
     *,
     config: Config,
     storage_path: Path | None = None,
+    config_path: Path | None = None,
     agent_name: str,
     command_tool: str,
     skill_name: str,
@@ -385,7 +389,12 @@ async def _run_skill_command_tool(
 
     try:
         with tool_execution_identity(execution_identity):
-            toolkits = _collect_agent_toolkits(config, agent_name, storage_path=storage_path)
+            toolkits = _collect_agent_toolkits(
+                config,
+                agent_name,
+                storage_path=storage_path,
+                config_path=config_path,
+            )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
                 return f"❌ {error}"
@@ -582,6 +591,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                     response_text = await _run_skill_command_tool(
                         config=context.config,
                         storage_path=context.storage_path,
+                        config_path=context.config_path,
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,

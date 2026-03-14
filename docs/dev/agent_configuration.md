@@ -155,8 +155,8 @@ agents:
     knowledge_bases:
       - docs
     context_files:
-      - workspace/SOUL.md
-      - workspace/USER.md
+      - SOUL.md
+      - USER.md
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import (
-    resolve_agent_owned_path,
-    resolve_agent_state_storage_path,
-)
+from mindroom.tool_system.worker_routing import resolve_agent_owned_path, resolve_agent_state_storage_path
 
 from ._shared import FileMemoryResolution
 
@@ -36,35 +33,22 @@ def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> boo
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
-def resolve_context_storage_path(
-    storage_path: Path,
-    *,
-    agent_name: str | None = None,
-) -> Path:
-    """Resolve the authoritative storage root for an agent-aware memory operation.
-
-    Memory does not split by requester for ``user`` or ``user_agent`` workers.
-    Those scopes isolate runtime execution, not authoritative agent memory/files.
-    """
-    if agent_name is None:
-        return storage_path
-    return resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-
-
 def effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
 ) -> list[Path]:
     """Return the distinct storage roots affected by the caller context."""
     if isinstance(caller_context, str):
-        return [resolve_context_storage_path(storage_path, agent_name=caller_context)]
+        return [
+            resolve_agent_state_storage_path(agent_name=caller_context, base_storage_path=storage_path),
+        ]
 
     effective_paths: list[Path] = []
     for agent_name in caller_context:
-        effective_path = resolve_context_storage_path(storage_path, agent_name=agent_name)
+        effective_path = resolve_agent_state_storage_path(
+            agent_name=agent_name,
+            base_storage_path=storage_path,
+        )
         if effective_path not in effective_paths:
             effective_paths.append(effective_path)
     return effective_paths or [storage_path]
@@ -145,7 +129,6 @@ def file_memory_resolution_from_paths(
         return FileMemoryResolution(
             storage_path=resolved_storage_path,
             use_configured_path=False,
-            allow_agent_memory_file_path_override=False,
         )
 
     return FileMemoryResolution(
@@ -167,12 +150,20 @@ def resolve_file_memory_resolution(
     config: Config,
     *,
     agent_name: str | None = None,
+    original_storage_path: Path | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Resolve file-memory storage settings for one caller context."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, agent_name=agent_name)
+    resolved_storage_path = (
+        storage_path
+        if agent_name is None
+        else resolve_agent_state_storage_path(
+            agent_name=agent_name,
+            base_storage_path=storage_path,
+        )
+    )
     resolution = file_memory_resolution_from_paths(
-        original_storage_path=storage_path,
+        original_storage_path=original_storage_path or storage_path,
         resolved_storage_path=resolved_storage_path,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
@@ -191,6 +182,5 @@ def resolve_file_memory_resolution(
     return FileMemoryResolution(
         storage_path=resolution.storage_path,
         use_configured_path=resolution.use_configured_path,
-        allow_agent_memory_file_path_override=resolution.allow_agent_memory_file_path_override,
         agent_memory_scope_path=agent_memory_scope_path,
     )

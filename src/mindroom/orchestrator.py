@@ -88,6 +88,7 @@ class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     storage_path: Path
+    config_path: Path = field(default_factory=lambda: Path(CONFIG_PATH))
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
@@ -101,6 +102,7 @@ class MultiAgentOrchestrator:
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
         self.storage_path = self.storage_path.expanduser().resolve()
+        self.config_path = self.config_path.expanduser().resolve()
 
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
@@ -351,7 +353,16 @@ class MultiAgentOrchestrator:
     def _create_managed_bot(self, entity_name: str, config: Config) -> AgentBot | TeamBot:
         """Create and register one runtime-managed bot."""
         temp_user = create_temp_user(entity_name, config)
-        bot = cast("AgentBot | TeamBot", create_bot_for_entity(entity_name, temp_user, config, self.storage_path))
+        bot = cast(
+            "AgentBot | TeamBot",
+            create_bot_for_entity(
+                entity_name,
+                temp_user,
+                config,
+                self.storage_path,
+                config_path=self.config_path,
+            ),
+        )
         bot.orchestrator = self
         self.agent_bots[entity_name] = bot
         return bot
@@ -960,7 +971,7 @@ async def main(
     config_path = Path(CONFIG_PATH)
 
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path)
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, config_path=config_path)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
 

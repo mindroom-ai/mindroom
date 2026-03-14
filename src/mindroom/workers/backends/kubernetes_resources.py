@@ -643,4 +643,8 @@ class KubernetesResourceManager:
                 "subPath": state_subpath,
             },
         )
+        mount_paths = [str(mount["mountPath"]) for mount in mounts]
+        if len(mount_paths) != len(set(mount_paths)):
+            msg = f"Duplicate Kubernetes mountPath generated for worker key: {worker_key}"
+            raise WorkerBackendError(msg)
         return mounts

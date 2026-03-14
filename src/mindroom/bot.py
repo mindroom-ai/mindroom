@@ -215,6 +215,7 @@ def create_bot_for_entity(
     agent_user: AgentMatrixUser,
     config: Config,
     storage_path: Path,
+    config_path: Path | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -223,6 +224,7 @@ def create_bot_for_entity(
         agent_user: Matrix user for the bot
         config: Configuration object
         storage_path: Path for storing agent data
+        config_path: Path to the YAML config file used by config-aware tools
 
     Returns:
         Bot instance or None if entity not found in config
@@ -233,7 +235,14 @@ def create_bot_for_entity(
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases))
-        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
+        return AgentBot(
+            agent_user,
+            storage_path,
+            config,
+            rooms,
+            config_path=config_path,
+            enable_streaming=enable_streaming,
+        )
 
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
@@ -247,6 +256,7 @@ def create_bot_for_entity(
             storage_path=storage_path,
             config=config,
             rooms=rooms,
+            config_path=config_path,
             team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
@@ -256,7 +266,14 @@ def create_bot_for_entity(
     if entity_name in config.agents:
         agent_config = config.agents[entity_name]
         rooms = resolve_room_aliases(agent_config.rooms)
-        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
+        return AgentBot(
+            agent_user,
+            storage_path,
+            config,
+            rooms,
+            config_path=config_path,
+            enable_streaming=enable_streaming,
+        )
 
     msg = f"Entity '{entity_name}' not found in configuration."
     raise ValueError(msg)
@@ -342,6 +359,7 @@ class AgentBot:
     storage_path: Path
     config: Config
     rooms: list[str] = field(default_factory=list)
+    config_path: Path | None = None
 
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
@@ -432,6 +450,7 @@ class AgentBot:
             config=self.config,
             storage_path=self.storage_path,
             knowledge=knowledge,
+            config_path=self.config_path,
         )
 
     @cached_property
@@ -2745,6 +2764,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             storage_path=self.storage_path,
+            config_path=self.config_path,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

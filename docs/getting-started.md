@@ -149,7 +149,7 @@ agents:
     include_default_tools: true
     rooms: [lobby]
     # Optional: file-based context (OpenClaw-style)
-    # context_files: [workspace/SOUL.md, workspace/USER.md]
+    # context_files: [SOUL.md, USER.md]
 
 models:
   default:
