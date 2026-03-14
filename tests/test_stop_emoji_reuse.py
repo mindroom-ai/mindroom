@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.stop import StopManager
+from tests.conftest import bind_runtime_paths
 
 
 @pytest.mark.asyncio
@@ -184,17 +185,20 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         password="test_password",  # noqa: S106
     )
 
-    config = Config(
-        agents={
-            "test_agent": {
-                "display_name": "Test Agent",
-                "rooms": ["!test:example.com"],
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
-        },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(

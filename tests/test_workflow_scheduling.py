@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
@@ -21,10 +24,16 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
+from tests.conftest import bind_runtime_paths
 
 
 def _mid(name: str) -> MatrixID:
     return MatrixID(username=name, domain="localhost")
+
+
+def _runtime_bound_config(config: Config) -> Config:
+    """Return a runtime-bound workflow config."""
+    return bind_runtime_paths(config, Path(tempfile.mkdtemp()))
 
 
 @pytest.fixture
@@ -300,12 +309,14 @@ class TestExecuteScheduledWorkflow:
     async def test_execute_workflow_with_agents(self) -> None:
         """Test executing a workflow that mentions agents."""
         client = AsyncMock()
-        config = Config(
-            agents={
-                "research": AgentConfig(display_name="Research"),
-                "analyst": AgentConfig(display_name="Analyst"),
-            },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(display_name="Research"),
+                    "analyst": AgentConfig(display_name="Analyst"),
+                },
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
         )
         workflow = ScheduledWorkflow(
             schedule_type="once",
@@ -447,22 +458,18 @@ class TestIntegrationWithScheduling:
             description="Daily AI research",
         )
 
-        # Create a proper config with the research agent configured for the room
-        import nio  # noqa: PLC0415
-
-        from mindroom.config.agent import AgentConfig  # noqa: PLC0415
-        from mindroom.config.main import Config  # noqa: PLC0415
-        from mindroom.config.models import RouterConfig  # noqa: PLC0415
-
-        config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="Research",
-                    role="Research agent",
-                    rooms=["!room:server"],
-                ),
-            },
-            router=RouterConfig(model="default"),
+        # Create a proper config with the research agent configured for the room.
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="Research",
+                        role="Research agent",
+                        rooms=["!room:server"],
+                    ),
+                },
+                router=RouterConfig(model="default"),
+            ),
         )
 
         # Create a mock room with research agent using the correct MatrixID

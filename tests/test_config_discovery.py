@@ -403,6 +403,25 @@ class TestResolveConfigRelativePath:
             == "from-shell"
         )
 
+    def test_config_from_yaml_explicit_path_keeps_exported_storage_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit config loads should still honor exported MINDROOM_STORAGE_PATH."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "custom-storage"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
+
+        config = Config.from_yaml(config_path)
+
+        assert config.runtime_paths is not None
+        assert config.runtime_paths.storage_root == storage_path.resolve()
+
     def test_explicit_runtime_paths_use_process_env_for_non_path_values(
         self,
         tmp_path: Path,
@@ -738,3 +757,11 @@ class TestRuntimeGuardrails:
         """Prevent new direct runtime-varying env reads outside approved modules."""
         violations = _collect_runtime_env_violations()
         assert not violations, "\n".join(violations)
+
+    def test_plain_config_remains_runtime_free(self) -> None:
+        """Plain Config() should not silently acquire runtime bindings in tests."""
+        config = Config()
+
+        assert config.runtime_paths is None
+        with pytest.raises(RuntimeError, match="explicit runtime paths"):
+            config.require_runtime_paths()

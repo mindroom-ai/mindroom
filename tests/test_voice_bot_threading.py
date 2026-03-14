@@ -14,7 +14,7 @@ from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 
 @pytest.fixture
@@ -31,6 +31,7 @@ def mock_home_bot() -> AgentBot:
         agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:server"]}},
         authorization={"default_room_access": True},
     )
+    config = bind_runtime_paths(config)
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()

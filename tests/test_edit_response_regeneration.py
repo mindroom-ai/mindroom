@@ -25,15 +25,6 @@ def _test_config(
     agent_names: tuple[str, ...] = ("test_agent",),
     voice_enabled: bool = False,
 ) -> Config:
-    config_path = tmp_path / "config.yaml"
-    runtime_paths = RuntimePaths(
-        config_path=config_path,
-        config_dir=config_path.parent,
-        env_path=config_path.parent / ".env",
-        storage_root=tmp_path,
-        process_env=MappingProxyType({}),
-        env_file_values=MappingProxyType({"MATRIX_HOMESERVER": "https://example.com"}),
-    )
     config = Config(
         agents={
             name: {
@@ -45,6 +36,20 @@ def _test_config(
         voice={"enabled": voice_enabled},
         authorization={"default_room_access": True, "agent_reply_permissions": {}},
         mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    )
+    return _bind_runtime_paths(config, tmp_path)
+
+
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    """Attach example.com runtime paths to a test config."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = RuntimePaths(
+        config_path=config_path,
+        config_dir=config_path.parent,
+        env_path=config_path.parent / ".env",
+        storage_root=tmp_path,
+        process_env=MappingProxyType({}),
+        env_file_values=MappingProxyType({"MATRIX_HOMESERVER": "https://example.com"}),
     )
     config._runtime_paths = runtime_paths
     return config
@@ -539,17 +544,20 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         password="test_password",  # noqa: S106
     )
 
-    config = Config(
-        agents={
-            "test_agent": {
-                "display_name": "Test Agent",
-                "rooms": ["!test:example.com"],
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
-        },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(
@@ -643,17 +651,20 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         password="test_password",  # noqa: S106
     )
 
-    config = Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "rooms": ["!test:example.com"],
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-        },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(
@@ -923,15 +934,17 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     )
 
     # Create a minimal mock config with authorization
-    config = Config(
-        agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
-        authorization={
-            "global_users": ["@authorized:example.com"],
-            "room_permissions": {},
-            "default_room_access": False,
-        },
+    config = _bind_runtime_paths(
+        Config(
+            agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
+            authorization={
+                "global_users": ["@authorized:example.com"],
+                "room_permissions": {},
+                "default_room_access": False,
+            },
+        ),
+        tmp_path,
     )
-    config.domain = "example.com"
 
     # Create the bot
     bot = AgentBot(

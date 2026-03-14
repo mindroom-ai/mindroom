@@ -18,7 +18,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,14 +38,16 @@ def mock_router_agent() -> AgentMatrixUser:
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config with some agents."""
-    return Config(
-        agents={
-            "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-            "research": AgentConfig(display_name="Research", rooms=["!test:localhost"]),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                "research": AgentConfig(display_name="Research", rooms=["!test:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+        ),
     )
 
 

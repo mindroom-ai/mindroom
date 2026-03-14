@@ -14,15 +14,18 @@ from mindroom.voice_handler import (
     _process_transcription,
     _sanitize_unavailable_mentions,
 )
+from tests.conftest import bind_runtime_paths
 
 
 def _voice_config(agent_display_names: dict[str, str]) -> Config:
-    config = Config(
-        agents={
-            agent_name: AgentConfig(display_name=display_name)
-            for agent_name, display_name in agent_display_names.items()
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                agent_name: AgentConfig(display_name=display_name)
+                for agent_name, display_name in agent_display_names.items()
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
     )
     config.voice.intelligence.model = "test-model"
     return config

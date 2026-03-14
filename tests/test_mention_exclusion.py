@@ -13,21 +13,24 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 
 @pytest.mark.asyncio
 async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent doesn't respond when a user mentions other agents."""
     # Create test config
-    config = Config(
-        agents={
-            "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
-            "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
+                "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        tmp_path,
     )
     domain = config.domain
 
@@ -92,14 +95,17 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
 async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None:  # noqa: ANN001
     """Test that an agent DOES respond when mentioned, even if other agents are also mentioned."""
     # Create test config
-    config = Config(
-        agents={
-            "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
-            "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
+                "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        tmp_path,
     )
     domain = config.domain
 

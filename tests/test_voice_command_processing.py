@@ -9,7 +9,6 @@ import nio
 import pytest
 from agno.media import Audio
 
-from mindroom import constants as constants_mod
 from mindroom.attachments import _attachment_id_for_event, load_attachment
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -22,20 +21,14 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
-    config._runtime_paths = constants_mod.resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path,
-        process_env={},
-    )
-    return config
+    return bind_runtime_paths(config, tmp_path)
 
 
 def _make_voice_event(
@@ -120,7 +113,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=Config(authorization={"default_room_access": True}),
+        config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
     bot.response_tracker = MagicMock()
@@ -740,13 +733,16 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
 @pytest.mark.asyncio
 async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tmp_path) -> None:  # noqa: ANN001
     """Inherited audio-caption mentions should still target the agent when STT omits them."""
-    config = Config(
-        agents={
-            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-        },
-        authorization={"default_room_access": True},
-        voice={"enabled": True},
+    config = _attach_runtime_paths(
+        Config(
+            agents={
+                "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+            },
+            authorization={"default_room_access": True},
+            voice={"enabled": True},
+        ),
+        tmp_path,
     )
 
     room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")

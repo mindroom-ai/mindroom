@@ -1,5 +1,7 @@
 """Test that router only suggests agents configured for the room."""
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from mindroom.authorization import get_available_agents_in_room
@@ -7,6 +9,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import get_configured_agents_for_room
+from tests.conftest import bind_runtime_paths
 
 
 class TestRouterAgentSelection:
@@ -14,24 +17,27 @@ class TestRouterAgentSelection:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="Calculator",
-                    rooms=["#math:localhost", "#general:localhost"],
-                ),
-                "research": AgentConfig(
-                    display_name="Research Assistant",
-                    rooms=["#research:localhost", "#general:localhost"],
-                ),
-                "writer": AgentConfig(
-                    display_name="Writer",
-                    rooms=["#writing:localhost"],  # NOT in general room
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+        self.config = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        rooms=["#math:localhost", "#general:localhost"],
+                    ),
+                    "research": AgentConfig(
+                        display_name="Research Assistant",
+                        rooms=["#research:localhost", "#general:localhost"],
+                    ),
+                    "writer": AgentConfig(
+                        display_name="Writer",
+                        rooms=["#writing:localhost"],  # NOT in general room
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+            Path(tempfile.mkdtemp()),
         )
 
     def test_get_configured_agents_returns_only_configured(self) -> None:
@@ -101,16 +107,19 @@ class TestRouterAgentSelection:
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""
-        config_with_router = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="Calculator",
-                    rooms=["#general:localhost"],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+        config_with_router = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="Calculator",
+                        rooms=["#general:localhost"],
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+            ),
+            Path(tempfile.mkdtemp()),
         )
 
         room = MagicMock()

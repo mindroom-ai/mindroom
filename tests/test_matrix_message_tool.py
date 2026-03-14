@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,9 +19,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import bind_runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +35,8 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
 ) -> ToolRuntimeContext:
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    runtime_root = storage_path or Path(tempfile.mkdtemp())
+    config = bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}), runtime_root)
     client = AsyncMock()
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()

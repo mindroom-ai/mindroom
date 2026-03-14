@@ -15,6 +15,13 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from tests.conftest import bind_runtime_paths
+
+
+def _runtime_bound_config(config: Config) -> Config:
+    """Return a runtime-bound config for voice handler tests."""
+    return bind_runtime_paths(config)
+
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,11 +37,13 @@ class TestVoiceHandler:
 
     def test_voice_handler_enabled_with_config(self) -> None:
         """Test that voice handler is enabled when configured."""
-        config = Config(
-            voice=VoiceConfig(
-                enabled=True,
-                stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
-                intelligence=_VoiceLLMConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                    intelligence=_VoiceLLMConfig(model="default"),
+                ),
             ),
         )
         assert config.voice.enabled
@@ -63,19 +72,21 @@ class TestVoiceHandler:
         """Test basic transcription processing."""
         from mindroom.config.agent import AgentConfig, TeamConfig  # noqa: PLC0415
 
-        config = Config(
-            voice=VoiceConfig(enabled=True),
-            agents={
-                "research": AgentConfig(display_name="ResearchAgent", role="Research agent"),
-                "code": AgentConfig(display_name="CodeAgent", role="Code agent"),
-            },
-            teams={
-                "dev_team": TeamConfig(
-                    display_name="Development Team",
-                    role="Dev team",
-                    agents=["code"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(enabled=True),
+                agents={
+                    "research": AgentConfig(display_name="ResearchAgent", role="Research agent"),
+                    "code": AgentConfig(display_name="CodeAgent", role="Code agent"),
+                },
+                teams={
+                    "dev_team": TeamConfig(
+                        display_name="Development Team",
+                        role="Dev team",
+                        agents=["code"],
+                    ),
+                },
+            ),
         )
 
         # Mock the AI model
@@ -88,12 +99,14 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_voice_handler_uses_room_scoped_entities_for_transcription(self) -> None:
         """Test voice transcription prompt is scoped to entities present in the room."""
-        config = Config(
-            voice=VoiceConfig(enabled=True),
-            agents={
-                "openclaw": AgentConfig(display_name="OpenClaw Agent", role="OpenClaw role"),
-                "code": AgentConfig(display_name="Code Agent", role="Coding role"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(enabled=True),
+                agents={
+                    "openclaw": AgentConfig(display_name="OpenClaw Agent", role="OpenClaw role"),
+                    "code": AgentConfig(display_name="Code Agent", role="Coding role"),
+                },
+            ),
         )
 
         client = AsyncMock()
@@ -125,7 +138,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
         """Test downloading unencrypted audio messages."""
-        Config(voice=VoiceConfig(enabled=True))  # Just to verify it works, not used in test
+        _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
 
         # Mock client and event
         client = AsyncMock()
@@ -148,7 +161,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_download_audio_encrypted(self) -> None:
         """Test downloading and decrypting encrypted audio messages."""
-        Config(voice=VoiceConfig(enabled=True))  # Just to verify it works, not used in test
+        _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
 
         # Mock client and encrypted event
         client = AsyncMock()
@@ -171,7 +184,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
         """Failed normalization should not leave stale in-flight task entries behind."""
-        config = Config(authorization={"default_room_access": True})
+        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"
@@ -207,7 +220,7 @@ class TestVoiceHandler:
         tmp_path: Path,
     ) -> None:
         """Canceling one waiter should not cancel the shared normalization task for others."""
-        config = Config(authorization={"default_room_access": True})
+        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"

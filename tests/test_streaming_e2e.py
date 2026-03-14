@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, orchestrator_runtime_paths
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -388,14 +388,17 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         # Create bot with calculator agent in config
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                ),
-            },
-            router=RouterConfig(model="default"),
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(calc_user, tmp_path, config, rooms=["!test:localhost"], enable_streaming=False)

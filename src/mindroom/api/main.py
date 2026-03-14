@@ -7,6 +7,7 @@ import secrets
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Protocol, cast
 from urllib.parse import quote
@@ -15,7 +16,7 @@ import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from mindroom import constants
 
@@ -127,6 +128,8 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = constants.activate_runtime_paths(_app_runtime_paths(_app))
     _app.state.runtime_paths = runtime_paths
+    constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
+    _load_config_from_file(runtime_paths)
     print(f"Loading config from: {runtime_paths.config_path}")
     print(f"Config exists: {runtime_paths.config_path.exists()}")
 
@@ -238,17 +241,24 @@ def _run_config_write[T](
     save_payload: dict[str, Any] | None = None,
 ) -> T:
     """Mutate config under lock and persist atomically."""
+    global config
     try:
         with config_lock:
+            original_config = deepcopy(config)
             result = mutate()
-            _save_config_to_file(
-                config if save_payload is None else save_payload,
-                runtime_paths=runtime_paths,
-            )
+            candidate_config = config if save_payload is None else save_payload
+            validated_config = Config.validate_with_runtime(candidate_config, runtime_paths)
+            validated_payload = validated_config.model_dump(exclude_none=True)
+            config = validated_payload
+            _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
             return result
     except HTTPException:
         raise
+    except ValidationError as e:
+        config = original_config
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
     except Exception as e:
+        config = original_config
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
 
@@ -579,14 +589,6 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths) -> None:
         print(f"Error loading config: {e}")
 
 
-constants.ensure_writable_config_path(
-    create_minimal=True,
-    runtime_paths=_app_runtime_paths(app),
-)
-
-# Load initial config
-_load_config_from_file(_app_runtime_paths(app))
-
 # Include routers
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
 app.include_router(google_router, dependencies=[Depends(verify_user)])
@@ -669,18 +671,18 @@ async def load_config(_user: Annotated[dict, Depends(verify_user)]) -> dict[str,
 
 
 @app.put("/api/config/save")
-async def save_config(new_config: Config, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
+async def save_config(new_config: dict[str, Any], _user: Annotated[dict, Depends(verify_user)]) -> dict[str, bool]:
     """Save configuration to file."""
-    config_dict = new_config.model_dump(exclude_none=True)
+    runtime_paths = _app_runtime_paths(app)
 
     def mutate() -> None:
-        config.update(config_dict)
+        config.clear()
+        config.update(new_config)
 
     _run_config_write(
         mutate,
-        runtime_paths=_app_runtime_paths(app),
+        runtime_paths=runtime_paths,
         error_prefix="Failed to save configuration",
-        save_payload=config_dict,
     )
     return {"success": True}
 

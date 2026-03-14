@@ -11,6 +11,7 @@ from mindroom import interactive
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from tests.conftest import bind_runtime_paths
 
 
 @pytest.fixture
@@ -26,13 +27,15 @@ class TestInteractiveFunctions:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "test_agent": AgentConfig(display_name="Test Agent", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(display_name="Test Agent", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     def test_should_create_interactive_question(self) -> None:

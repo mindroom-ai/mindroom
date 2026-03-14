@@ -13,22 +13,25 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 
 @pytest.mark.asyncio
 async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response in main room."""
     # Create config
-    config = Config(
-        agents={
-            "router": AgentConfig(
-                display_name="Router",
-                role="Route messages",
-                rooms=["!test:localhost"],
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "router": AgentConfig(
+                    display_name="Router",
+                    role="Route messages",
+                    rooms=["!test:localhost"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
     )
 
     # Create router agent user
@@ -114,15 +117,18 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
 async def test_unknown_command_in_thread(tmp_path: Path) -> None:
     """Test that unknown commands get a helpful error response when in a thread."""
     # Create config
-    config = Config(
-        agents={
-            "router": AgentConfig(
-                display_name="Router",
-                role="Route messages",
-                rooms=["!test:localhost"],
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "router": AgentConfig(
+                    display_name="Router",
+                    role="Route messages",
+                    rooms=["!test:localhost"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
     )
 
     # Create router agent user
@@ -230,15 +236,18 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
 async def test_unknown_command_with_reply(tmp_path: Path) -> None:
     """Test that unknown commands work when replying to another message."""
     # Create config
-    config = Config(
-        agents={
-            "router": AgentConfig(
-                display_name="Router",
-                role="Route messages",
-                rooms=["!test:localhost"],
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "router": AgentConfig(
+                    display_name="Router",
+                    role="Route messages",
+                    rooms=["!test:localhost"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
     )
 
     # Create router agent user

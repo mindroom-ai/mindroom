@@ -285,6 +285,35 @@ async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tmp_path: Path) -> None:
+    """Config previews should validate against the explicit runtime context."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=config_path,
+        process_env={"MINDROOM_NAMESPACE": "prod1"},
+    )
+
+    response, change_info = await handle_config_command(
+        "set mindroom_user.username mindroom_assistant_prod1",
+        runtime_paths=runtime_paths,
+    )
+
+    assert "Invalid configuration" in response
+    assert "mindroom_user.username" in response
+    assert change_info is None
+
+
+@pytest.mark.asyncio
 class TestConfigCommandHandling:
     """Test the config command handler."""
 

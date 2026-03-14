@@ -25,7 +25,7 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -59,15 +59,17 @@ class TestStreamingBehavior:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        self.config = bind_runtime_paths(
+            Config(
+                agents={
+                    "helper": AgentConfig(display_name="HelperAgent", rooms=["!test:localhost"]),
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
 
     @pytest.mark.asyncio

@@ -184,6 +184,46 @@ def test_api_lifespan_syncs_env_credentials_on_startup(monkeypatch: pytest.Monke
     assert watch_calls == ["watch"]
 
 
+def test_api_lifespan_loads_config_from_injected_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Bundled API startup should load config from the runtime injected before lifespan starts."""
+    config_path = tmp_path / "custom-config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"only_alt": {"display_name": "OnlyAlt", "role": "alt", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+    main.app.state.runtime_paths = runtime_paths
+    main.config = {"agents": {"wrong": {"display_name": "Wrong"}}}
+
+    async def _idle_watch_config(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+        await stop_event.wait()
+
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+        await stop_event.wait()
+
+    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
+    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
+    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
+
+    with TestClient(main.app) as client:
+        response = client.post("/api/config/load")
+
+    assert response.status_code == 200
+    assert set(response.json()["agents"]) == {"only_alt"}
+
+
 @pytest.mark.asyncio
 async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Config watching should target the config file itself, not the whole runtime directory."""
@@ -788,13 +828,61 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
     }
 
 
+def test_save_config_rejects_runtime_sensitive_invalid_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """API save should validate against the request runtime before writing to disk."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"MINDROOM_NAMESPACE": "prod1"},
+    )
+    main.app.state.runtime_paths = runtime_paths
+
+    async def _idle_watch_config(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+        await stop_event.wait()
+
+    async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+        await stop_event.wait()
+
+    monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
+    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
+    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
+
+    with TestClient(main.app) as client:
+        response = client.put(
+            "/api/config/save",
+            json={
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+                "mindroom_user": {"username": "mindroom_assistant_prod1", "display_name": "Owner"},
+            },
+        )
+
+    assert response.status_code == 422
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "mindroom_user" not in saved_config
+
+
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
     """Test error handling for non-existent agent."""
     test_client.post("/api/config/load")
 
-    # Note: PUT creates the agent if it doesn't exist (current behavior)
+    # PUT still targets the specific agent ID, but runtime-aware validation now rejects empty payloads.
     response = test_client.put("/api/config/agents/non_existent", json={})
-    assert response.status_code == 200  # Current behavior creates the agent
+    assert response.status_code == 422
 
     # DELETE should return 404 for non-existent agent
     response = test_client.delete("/api/config/agents/really_non_existent")

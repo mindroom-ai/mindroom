@@ -13,11 +13,16 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import get_agents_in_thread
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for team tests."""
+    return bind_runtime_paths(config, runtime_root)
 
 
 # Test fixtures for team agents
@@ -76,16 +81,18 @@ class TestTeamFormation:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -98,10 +105,10 @@ class TestTeamFormation:
     ) -> None:
         """Test that multiple agents tagged in a message form a team."""
         # Create bots
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         research_bot = AgentBot(mock_research_agent, tmp_path, config, rooms=[team_room_id])
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, rooms=[team_room_id])
 
@@ -277,16 +284,18 @@ class TestTeamResponseBehavior:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -468,12 +477,14 @@ class TestRouterTeamFormation:
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "agent1": AgentConfig(display_name="Agent 1", role="First agent"),
-                "agent2": AgentConfig(display_name="Agent 2", role="Second agent"),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "agent1": AgentConfig(display_name="Agent 1", role="First agent"),
+                    "agent2": AgentConfig(display_name="Agent 2", role="Second agent"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
         # Mock room with multiple agents
@@ -528,12 +539,14 @@ class TestRouterTeamFormation:
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", role="Math"),
-                "general": AgentConfig(display_name="General", role="General"),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
         # DM room with multiple agents

@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,12 +30,15 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         agent_name="test",
     )
 
-    config = Config(
-        agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+    config = bind_runtime_paths(
+        Config(
+            agents={"test": AgentConfig(display_name="TestAgent", rooms=["!test:localhost"])},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(

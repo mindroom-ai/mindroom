@@ -14,16 +14,19 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
 def _build_test_config() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
-        },
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+            },
+        ),
     )
 
 

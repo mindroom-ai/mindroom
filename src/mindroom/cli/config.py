@@ -218,11 +218,7 @@ def _activate_cli_runtime(
     """Create the CLI runtime context once and return it for explicit threading."""
     process_env = exported_process_env()
     if path is not None:
-        filtered_process_env = {
-            key: value
-            for key, value in process_env.items()
-            if key not in {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
-        }
+        filtered_process_env = {key: value for key, value in process_env.items() if key != "MINDROOM_CONFIG_PATH"}
         return activate_runtime_paths(
             resolve_primary_runtime_paths(
                 config_path=path.expanduser().resolve(),

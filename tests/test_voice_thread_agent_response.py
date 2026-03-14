@@ -23,7 +23,7 @@ from mindroom.constants import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
 
 
 def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
@@ -44,13 +44,16 @@ def mock_home_bot() -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = Config(
-        agents={
-            "home": AgentConfig(display_name="HomeAssistant", rooms=["!test:server"]),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-    )
     with tempfile.TemporaryDirectory() as tmpdir:
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "home": AgentConfig(display_name="HomeAssistant", rooms=["!test:server"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            Path(tmpdir),
+        )
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()

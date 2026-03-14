@@ -42,6 +42,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import bind_runtime_paths
 
 # ---------------------------------------------------------------------------
 # Config tests
@@ -54,6 +55,11 @@ def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> Runt
         config_path=config_path or base_path / "config.yaml",
         storage_path=base_path,
     )
+
+
+def _runtime_bound_config(config: Config) -> Config:
+    """Return a runtime-bound config for history tests."""
+    return bind_runtime_paths(config)
 
 
 def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -375,9 +381,11 @@ class TestGetUnseenMessages:
 
     def _make_config(self) -> Config:
         """Create a minimal Config for testing."""
-        return Config(
-            agents={"test_agent": AgentConfig(display_name="Test")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        return _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
 
     def test_filters_agent_messages(self) -> None:
@@ -775,9 +783,11 @@ class TestUnseenNotReinjected:
 
     def test_unseen_messages_not_reinjected(self) -> None:
         """Consumed unseen event_ids are excluded from detection on the next turn."""
-        config = Config(
-            agents={"bot": AgentConfig(display_name="Bot")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        config = _runtime_bound_config(
+            Config(
+                agents={"bot": AgentConfig(display_name="Bot")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
 
         thread_history = [
@@ -1002,9 +1012,11 @@ class TestFullScenario:
 
     def test_multi_user_edit_restart(self) -> None:
         """Asserts exact unseen IDs injected each turn and no reinjection."""
-        config = Config(
-            agents={"bot": AgentConfig(display_name="Bot")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        config = _runtime_bound_config(
+            Config(
+                agents={"bot": AgentConfig(display_name="Bot")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
         agent_id = config.ids["bot"].full_id
 
@@ -1054,9 +1066,11 @@ class TestApplyContextWindowLimit:
     @staticmethod
     def _make_config(context_window: int | None = None) -> Config:
         """Create a Config with the given context_window on the default model."""
-        return Config(
-            agents={"test_agent": AgentConfig(display_name="Test")},
-            models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+        return _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+            ),
         )
 
     @staticmethod

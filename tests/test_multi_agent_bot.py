@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,7 +59,24 @@ from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
-    from pathlib import Path
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for bot tests."""
+    runtime_root = runtime_root or Path(tempfile.mkdtemp())
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    config_path = runtime_root / "config.yaml"
+    if not config_path.exists():
+        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_root,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
 
 
 @dataclass
@@ -162,16 +181,19 @@ class TestAgentBot:
     """Test cases for AgentBot class."""
 
     @staticmethod
-    def create_mock_config() -> Config:
+    def create_mock_config(runtime_root: Path | None = None) -> Config:
         """Create a typed config for tests that do not need a runtime-bound YAML load."""
-        return Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-            },
-            teams={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            authorization=AuthorizationConfig(default_room_access=True),
+        return _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                teams={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                authorization=AuthorizationConfig(default_room_access=True),
+            ),
+            runtime_root,
         )
 
     @staticmethod
@@ -184,9 +206,7 @@ class TestAgentBot:
 
     @classmethod
     def _config_for_storage(cls, storage_path: Path) -> Config:
-        config = cls.create_mock_config()
-        config._runtime_paths = cls._runtime_paths(storage_path)
-        return config
+        return cls.create_mock_config(storage_path)
 
     @staticmethod
     def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> MagicMock:
@@ -244,17 +264,21 @@ class TestAgentBot:
         *,
         assigned_bases: list[str] | None,
         knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
+        runtime_root: Path | None = None,
     ) -> Config:
         """Create a real config with one calculator agent for knowledge assignment tests."""
-        return Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    knowledge_bases=assigned_bases or [],
-                ),
-            },
-            knowledge_bases=knowledge_bases or {},
+        return _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        knowledge_bases=assigned_bases or [],
+                    ),
+                },
+                knowledge_bases=knowledge_bases or {},
+            ),
+            runtime_root,
         )
 
     def test_knowledge_for_agent_returns_none_when_unassigned(
@@ -843,14 +867,17 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    tools=["matrix_message"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -890,15 +917,18 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    tools=["openclaw_compat"],
-                    include_default_tools=False,
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["openclaw_compat"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -941,14 +971,17 @@ class TestAgentBot:
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    tools=["matrix_message"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -1071,15 +1104,18 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """openclaw_compat should imply matrix_message availability without explicit config."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    tools=["openclaw_compat"],
-                    include_default_tools=False,
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["openclaw_compat"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
 
@@ -1097,14 +1133,17 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    show_tool_calls=False,
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=False,
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -1157,20 +1196,23 @@ class TestAgentBot:
             if callable(close):
                 close()
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                    show_tool_calls=False,
-                ),
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["!test:localhost"],
-                    show_tool_calls=True,
-                ),
-            },
-            defaults=DefaultsConfig(show_tool_calls=False),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=False,
+                    ),
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=True,
+                    ),
+                },
+                defaults=DefaultsConfig(show_tool_calls=False),
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -1221,13 +1263,16 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Runtime context should include the room object when the client cache has it."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         room_id = "!test:localhost"
@@ -1255,13 +1300,16 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Runtime context should have room=None when the client has no cache entry."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         room_id = "!test:localhost"
@@ -1284,13 +1332,16 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Runtime context should be None when no Matrix client is available."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = None
@@ -1310,13 +1361,16 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Tool runtime context should carry attachment scope and effective thread root."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(
-                    display_name="CalculatorAgent",
-                    rooms=["!test:localhost"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = MagicMock()
@@ -1353,9 +1407,12 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Unauthorized senders should follow the expected per-handler tracking behavior."""
-        config = Config(
-            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-            voice={"enabled": True},
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                voice={"enabled": True},
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -1396,9 +1453,12 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Reply-permission denial should follow the expected per-handler tracking behavior."""
-        config = Config(
-            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-            voice={"enabled": True},
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                voice={"enabled": True},
+            ),
+            tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -2016,11 +2076,14 @@ class TestAgentBot:
             access_token="mock_test_token",  # noqa: S106
         )
 
-        config = Config(
-            agents={
-                "router": AgentConfig(display_name="Router"),
-                "general": AgentConfig(display_name="General", thread_mode="room"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "router": AgentConfig(display_name="Router"),
+                    "general": AgentConfig(display_name="General", thread_mode="room"),
+                },
+            ),
+            tmp_path,
         )
         config.ids = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
@@ -2101,11 +2164,14 @@ class TestAgentBot:
             access_token="mock_test_token",  # noqa: S106
         )
 
-        config = Config(
-            agents={
-                "router": AgentConfig(display_name="Router"),
-                "general": AgentConfig(display_name="General", thread_mode="room"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "router": AgentConfig(display_name="Router"),
+                    "general": AgentConfig(display_name="General", thread_mode="room"),
+                },
+            ),
+            tmp_path,
         )
         config.ids = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
@@ -2162,15 +2228,17 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_multi_agent_file_event_registers_attachment_once(self, tmp_path: Path) -> None:
         """A file event in a multi-agent room should register exactly one attachment."""
-        config = Config(
-            agents={
-                "router": AgentConfig(display_name="Router", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-                "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-            },
-            authorization={"default_room_access": True},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "router": AgentConfig(display_name="Router", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
         )
-        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         config.ids = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -2299,12 +2367,15 @@ class TestAgentBot:
             password=TEST_PASSWORD,
             access_token="mock_test_token",  # noqa: S106
         )
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-            },
-            authorization={"default_room_access": True},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+                },
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -2374,9 +2445,12 @@ class TestAgentBot:
             password=TEST_PASSWORD,
             access_token="mock_test_token",  # noqa: S106
         )
-        config = Config(
-            agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
-            authorization={"default_room_access": True},
+        config = _runtime_bound_config(
+            Config(
+                agents={"calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"])},
+                authorization={"default_room_access": True},
+            ),
+            tmp_path,
         )
         bot = AgentBot(agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -2506,18 +2580,21 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """DM team fallback should only see agents allowed for the requester."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!dm:localhost"]),
-                "general": AgentConfig(display_name="GeneralAgent", rooms=["!dm:localhost"]),
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "calculator": ["@alice:localhost"],
-                    "general": ["@bob:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!dm:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!dm:localhost"]),
                 },
-            },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": ["@alice:localhost"],
+                        "general": ["@bob:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
@@ -2835,20 +2912,22 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_invites_authorized_users(self, tmp_path: Path) -> None:
         """Global users and room-permitted users should be invited to managed rooms."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["!room1:localhost", "!room2:localhost"],
-                ),
-            },
-            authorization={
-                "global_users": ["@alice:localhost"],
-                "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
-                "default_room_access": False,
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost", "!room2:localhost"],
+                    ),
+                },
+                authorization={
+                    "global_users": ["@alice:localhost"],
+                    "room_permissions": {"!room1:localhost": ["@bob:localhost"]},
+                    "default_room_access": False,
+                },
+            ),
+            tmp_path,
         )
-        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
@@ -2886,19 +2965,21 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_skips_non_matrix_authorization_entries(self, tmp_path: Path) -> None:
         """Only concrete Matrix user IDs should be invited from authorization lists."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["!room1:localhost"],
-                ),
-            },
-            authorization={
-                "global_users": ["@alice:localhost", "@admin:*", "alice"],
-                "default_room_access": False,
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                    ),
+                },
+                authorization={
+                    "global_users": ["@alice:localhost", "@admin:*", "alice"],
+                    "default_room_access": False,
+                },
+            ),
+            tmp_path,
         )
-        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
@@ -2927,16 +3008,18 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_ensure_room_invitations_skips_internal_user_when_unconfigured(self, tmp_path: Path) -> None:
         """When mindroom_user is unset, stale internal account credentials must not trigger invites."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["!room1:localhost"],
-                ),
-            },
-            authorization={"default_room_access": False},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["!room1:localhost"],
+                    ),
+                },
+                authorization={"default_room_access": False},
+            ),
+            tmp_path,
         )
-        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
@@ -2966,13 +3049,16 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_skips_internal_user_join_when_unconfigured(self, tmp_path: Path) -> None:
         """When mindroom_user is unset, orchestrator should not attempt internal-user room joins."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["lobby"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["lobby"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
@@ -2999,14 +3085,17 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_setup_rooms_and_memberships_retries_invites_after_router_joins(self, tmp_path: Path) -> None:
         """Invite-only existing rooms should get a second invitation/join pass after router joins."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["lobby"],
-                ),
-            },
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["lobby"],
+                    ),
+                },
+                mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            ),
+            tmp_path,
         )
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
@@ -3044,13 +3133,16 @@ class TestMultiAgentOrchestrator:
         tmp_path: Path,
     ) -> None:
         """Startup should rerun room reconciliation after the router joins existing rooms."""
-        config = Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    rooms=["lobby"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="GeneralAgent",
+                        rooms=["lobby"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
@@ -3122,7 +3214,7 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
         """Initialize should load the exact config file owned by the orchestrator."""
         config_path = tmp_path / "custom-config.yaml"
-        mock_config = Config(router=RouterConfig(model="default"))
+        mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
@@ -3687,33 +3779,39 @@ class TestMultiAgentOrchestrator:
         """Hot reload should retain failed bots and retry them instead of dropping them."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
-        old_config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        old_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
-        new_config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        new_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                    "coach": {
+                        "display_name": "Coach",
+                        "role": "Coaching assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-                "coach": {
-                    "display_name": "Coach",
-                    "role": "Coaching assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
 
         orchestrator.config = old_config
@@ -3762,33 +3860,39 @@ class TestMultiAgentOrchestrator:
         """Hot reload should retain permanently failed bots without scheduling retries."""
         orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
-        old_config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        old_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
-        new_config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        new_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                    "coach": {
+                        "display_name": "Coach",
+                        "role": "Coaching assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-                "coach": {
-                    "display_name": "Coach",
-                    "role": "Coaching assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
 
         orchestrator.config = old_config

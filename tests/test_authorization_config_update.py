@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from mindroom.authorization import is_authorized_sender
 from mindroom.config.main import Config
+from tests.conftest import bind_runtime_paths
 
 
 def test_authorization_check_uses_updated_config() -> None:
@@ -15,20 +16,22 @@ def test_authorization_check_uses_updated_config() -> None:
     the authorization checks will use the new configuration.
     """
     # Create config with alice authorized
-    config = Config(
-        agents={
-            "test_agent": {
-                "display_name": "Test Agent",
-                "role": "Test role",
-                "rooms": ["test_room"],
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "role": "Test role",
+                    "rooms": ["test_room"],
+                },
             },
-        },
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        authorization={
-            "global_users": ["@alice:example.com"],
-            "room_permissions": {},
-            "default_room_access": False,
-        },
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            authorization={
+                "global_users": ["@alice:example.com"],
+                "room_permissions": {},
+                "default_room_access": False,
+            },
+        ),
     )
 
     # Mock the domain property

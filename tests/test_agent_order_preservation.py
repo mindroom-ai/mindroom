@@ -14,47 +14,50 @@ from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
 )
+from tests.conftest import bind_runtime_paths
 
 
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config for testing."""
-    return Config(
-        defaults=DefaultsConfig(),
-        agents={
-            "email": AgentConfig(
-                display_name="EmailAgent",
-                role="Send emails",
-                tools=["email"],
-                instructions=[],
-                rooms=[],
-                model="default",
-            ),
-            "phone": AgentConfig(
-                display_name="PhoneAgent",
-                role="Make phone calls",
-                tools=["phone"],
-                instructions=[],
-                rooms=[],
-                model="default",
-            ),
-            "research": AgentConfig(
-                display_name="ResearchAgent",
-                role="Research information",
-                tools=["search"],
-                instructions=[],
-                rooms=[],
-                model="default",
-            ),
-            "analyst": AgentConfig(
-                display_name="AnalystAgent",
-                role="Analyze data",
-                tools=["calculator"],
-                instructions=[],
-                rooms=[],
-                model="default",
-            ),
-        },
+    return bind_runtime_paths(
+        Config(
+            defaults=DefaultsConfig(),
+            agents={
+                "email": AgentConfig(
+                    display_name="EmailAgent",
+                    role="Send emails",
+                    tools=["email"],
+                    instructions=[],
+                    rooms=[],
+                    model="default",
+                ),
+                "phone": AgentConfig(
+                    display_name="PhoneAgent",
+                    role="Make phone calls",
+                    tools=["phone"],
+                    instructions=[],
+                    rooms=[],
+                    model="default",
+                ),
+                "research": AgentConfig(
+                    display_name="ResearchAgent",
+                    role="Research information",
+                    tools=["search"],
+                    instructions=[],
+                    rooms=[],
+                    model="default",
+                ),
+                "analyst": AgentConfig(
+                    display_name="AnalystAgent",
+                    role="Analyze data",
+                    tools=["calculator"],
+                    instructions=[],
+                    rooms=[],
+                    model="default",
+                ),
+            },
+        ),
     )
 
 

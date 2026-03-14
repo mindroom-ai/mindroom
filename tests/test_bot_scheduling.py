@@ -18,7 +18,12 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, create_mock_room
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, create_mock_room
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound test config."""
+    return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
 
 
 @pytest.fixture
@@ -278,7 +283,7 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = Config()  # Empty config for testing
+            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             # Mock the necessary methods
@@ -317,7 +322,7 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = Config()  # Empty config for testing
+            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
 
             with (
@@ -347,15 +352,17 @@ class TestCommandHandling:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
-                "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
+                    "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -370,7 +377,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
@@ -409,7 +416,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
@@ -449,12 +456,14 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {"router": ["@alice:server"]},
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {"router": ["@alice:server"]},
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -491,22 +500,24 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "code": AgentConfig(
-                    display_name="Code Agent",
-                    rooms=["!test:server"],
-                    skills=["audit"],
-                ),
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "router": ["*"],
-                    "code": ["@alice:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "code": AgentConfig(
+                        display_name="Code Agent",
+                        rooms=["!test:server"],
+                        skills=["audit"],
+                    ),
                 },
-            },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "router": ["*"],
+                        "code": ["@alice:localhost"],
+                    },
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -561,11 +572,13 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -617,7 +630,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
@@ -737,7 +750,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
@@ -800,7 +813,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
@@ -900,7 +913,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
@@ -1007,7 +1020,7 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
         bot.client = AsyncMock()
@@ -1071,9 +1084,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1147,12 +1162,14 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with multiple agents
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1234,12 +1251,14 @@ class TestRouterSkipsSingleAgent:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1311,9 +1330,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1371,9 +1392,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1431,9 +1454,11 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -1508,12 +1533,14 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with two agents
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),

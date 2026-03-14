@@ -119,9 +119,7 @@ def _resolve_runtime_paths_for_config_load(
         return resolve_primary_runtime_paths(process_env=process_env)
 
     resolved_config_path = Path(config_path).expanduser().resolve()
-    filtered_process_env = {
-        key: value for key, value in process_env.items() if key not in {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
-    }
+    filtered_process_env = {key: value for key, value in process_env.items() if key != "MINDROOM_CONFIG_PATH"}
     return resolve_runtime_paths(
         config_path=resolved_config_path,
         process_env=filtered_process_env,
@@ -421,6 +419,17 @@ class Config(BaseModel):
         return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
 
     @classmethod
+    def validate_with_runtime(
+        cls,
+        data: object,
+        runtime_paths: RuntimePaths,
+    ) -> Config:
+        """Validate config data against one explicit runtime context."""
+        config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
+        config._runtime_paths = runtime_paths
+        return config
+
+    @classmethod
     def from_yaml(
         cls,
         config_path: Path | None = None,
@@ -447,8 +456,7 @@ class Config(BaseModel):
 
         _normalize_optional_config_sections(data)
 
-        config = cls.model_validate(data, context={"runtime_paths": resolved_runtime_paths})
-        config._runtime_paths = resolved_runtime_paths
+        config = cls.validate_with_runtime(data, resolved_runtime_paths)
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config

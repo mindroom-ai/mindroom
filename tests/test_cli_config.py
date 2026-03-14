@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.cli.config import _activate_cli_runtime
 from mindroom.cli.main import app
 from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
@@ -61,6 +62,24 @@ def _invoke_with_runtime(
     if env:
         command_env.update(env)
     return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
+
+
+def test_activate_cli_runtime_explicit_path_keeps_exported_storage_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit CLI config paths should still honor exported MINDROOM_STORAGE_PATH."""
+    config_path = tmp_path / "config.yaml"
+    storage_path = tmp_path / "custom-storage"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
+
+    runtime_paths = _activate_cli_runtime(config_path)
+
+    assert runtime_paths.storage_root == storage_path.resolve()
 
 
 # ---------------------------------------------------------------------------
