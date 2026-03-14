@@ -6,9 +6,11 @@ import hashlib
 import importlib
 import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -47,6 +49,7 @@ _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -449,8 +452,8 @@ class KubernetesResourceManager:
                     "imagePullPolicy": self.config.image_pull_policy,
                     "command": ["/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
-                    "env": self._worker_env(worker_key),
-                    "volumeMounts": self._volume_mounts(state_subpath),
+                    "env": self._worker_env(worker_key, state_subpath),
+                    "volumeMounts": self._volume_mounts(worker_key, state_subpath),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
                         "periodSeconds": 5,
@@ -496,22 +499,24 @@ class KubernetesResourceManager:
             },
         }
 
-    def _worker_env(self, worker_key: str) -> list[dict[str, object]]:
-        venv_path = f"{self.config.storage_mount_path}/venv"
+    def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+        dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
+        venv_path = f"{dedicated_root}/venv"
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
-            {"name": "MINDROOM_STORAGE_PATH", "value": self.config.storage_mount_path},
+            {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
+            {"name": _SHARED_STORAGE_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "VIRTUAL_ENV", "value": venv_path},
             {"name": "PATH", "value": f"{venv_path}/bin:{_DEFAULT_CONTAINER_PATH}"},
             {
                 "name": SHARED_CREDENTIALS_PATH_ENV,
-                "value": f"{self.config.storage_mount_path}/.shared_credentials",
+                "value": f"{dedicated_root}/.shared_credentials",
             },
             {"name": _DEDICATED_WORKER_KEY_ENV, "value": worker_key},
-            {"name": _DEDICATED_WORKER_ROOT_ENV, "value": self.config.storage_mount_path},
-            {"name": "HOME", "value": self.config.storage_mount_path},
+            {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
+            {"name": "HOME", "value": dedicated_root},
         ]
         if self.config.config_map_name is not None:
             env.append({"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path})
@@ -537,14 +542,8 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
-    def _volume_mounts(self, state_subpath: str) -> list[dict[str, object]]:
-        mounts: list[dict[str, object]] = [
-            {
-                "name": "worker-storage",
-                "mountPath": self.config.storage_mount_path,
-                "subPath": state_subpath,
-            },
-        ]
+    def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+        mounts = self._scoped_storage_mounts(worker_key, state_subpath)
         if self.config.config_map_name is not None:
             mounts.append(
                 {
@@ -623,3 +622,31 @@ class KubernetesResourceManager:
         }
         self._owner_reference_loaded = True
         return self._owner_reference
+
+    def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+        storage_root = Path(self.config.storage_mount_path)
+        visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
+        if not visible_agent_roots:
+            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
+            raise WorkerBackendError(msg)
+
+        mounts: list[dict[str, object]] = [
+            {
+                "name": "worker-storage",
+                "mountPath": str(agent_root),
+                "subPath": str(agent_root.relative_to(storage_root)),
+            }
+            for agent_root in visible_agent_roots
+        ]
+        mounts.append(
+            {
+                "name": "worker-storage",
+                "mountPath": f"{self.config.storage_mount_path}/{state_subpath}",
+                "subPath": state_subpath,
+            },
+        )
+        mount_paths = [str(mount["mountPath"]) for mount in mounts]
+        if len(mount_paths) != len(set(mount_paths)):
+            msg = f"Duplicate Kubernetes mountPath generated for worker key: {worker_key}"
+            raise WorkerBackendError(msg)
+        return mounts

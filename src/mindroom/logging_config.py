@@ -6,11 +6,10 @@ import hashlib
 import logging
 import logging.config
 from datetime import UTC, datetime
-from pathlib import Path
 
 import structlog
 
-from mindroom.constants import STORAGE_PATH
+from mindroom import constants
 
 __all__ = ["emoji", "get_logger", "setup_logging"]
 
@@ -84,7 +83,7 @@ def setup_logging(level: str = "INFO") -> None:
 
     """
     # Create logs directory if it doesn't exist
-    logs_dir = Path(STORAGE_PATH) / "logs"
+    logs_dir = constants.STORAGE_PATH_OBJ / "logs"
     logs_dir.mkdir(exist_ok=True, parents=True)
 
     # Create timestamped log file

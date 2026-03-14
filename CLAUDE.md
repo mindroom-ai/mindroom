@@ -272,6 +272,7 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 ### Refactor Policy
 
 - Default to the smallest correct change.
+- Never add a production branch, wrapper, or fallback whose only purpose is to preserve an old test expectation.
 - Use larger refactors when they provide clear immediate maintenance ROI, not hypothetical future value.
 - A larger refactor is justified only if it:
   - Removes active duplication in current code paths.

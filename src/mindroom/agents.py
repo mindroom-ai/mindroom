@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
@@ -15,18 +16,20 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom import agent_prompts
+from mindroom import agent_prompts, constants
 from mindroom import tools as _tools_module  # noqa: F401
-from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ, resolve_config_relative_path
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
+    resolve_agent_owned_path,
+    resolve_agent_state_storage_path,
+)
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
@@ -34,12 +37,32 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 _MAX_INSTRUCTION_LENGTH = 100
+_DEFAULT_MIND_AGENT_NAME = "mind"
+_DEFAULT_MIND_WORKSPACE_DIRNAME = "mind_data"
+_DEFAULT_MIND_CONTEXT_FILES = (
+    "mind_data/SOUL.md",
+    "mind_data/AGENTS.md",
+    "mind_data/USER.md",
+    "mind_data/IDENTITY.md",
+    "mind_data/TOOLS.md",
+    "mind_data/HEARTBEAT.md",
+)
+_DEFAULT_MIND_TEMPLATE_FILENAMES = (
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+)
+_DEFAULT_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+_DEFAULT_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
 @dataclass
@@ -73,11 +96,43 @@ class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
-    worker_routed_tools: frozenset[str]
     worker_scope: WorkerScope | None
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
+
+
+def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
+    return (
+        agent_name == _DEFAULT_MIND_AGENT_NAME
+        and agent_config.memory_backend == "file"
+        and agent_config.memory_file_path == _DEFAULT_MIND_WORKSPACE_DIRNAME
+        and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
+    )
+
+
+def _ensure_default_mind_workspace(storage_path: Path) -> None:
+    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME) / _DEFAULT_MIND_WORKSPACE_DIRNAME
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+    for filename in _DEFAULT_MIND_TEMPLATE_FILENAMES:
+        source_path = _DEFAULT_MIND_TEMPLATE_DIR / filename
+        target_path = workspace_path / filename
+        if target_path.exists():
+            continue
+        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    memory_path = workspace_path / "MEMORY.md"
+    if not memory_path.exists():
+        memory_path.write_text(_DEFAULT_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+
+
+def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
+    """Materialize built-in starter workspaces under the active runtime storage root."""
+    for agent_name, agent_config in config.agents.items():
+        if _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+            _ensure_default_mind_workspace(storage_path)
 
 
 def _get_datetime_context(timezone_str: str) -> str:
@@ -104,11 +159,20 @@ The current time is {time_str} ({timezone_str} timezone).
 """
 
 
-def _load_context_files(context_files: list[str]) -> list[_AdditionalContextChunk]:
+def _load_context_files(
+    context_files: list[str],
+    *,
+    agent_name: str,
+    storage_path: Path,
+) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
-        resolved_path = resolve_config_relative_path(raw_path)
+        resolved_path = resolve_agent_owned_path(
+            raw_path,
+            agent_name=agent_name,
+            base_storage_path=storage_path,
+        )
         if resolved_path.is_file():
             loaded_parts.append(
                 _AdditionalContextChunk(
@@ -209,17 +273,26 @@ def _apply_preload_cap(personality_chunks: list[_AdditionalContextChunk], max_pr
 
 
 def _build_additional_context(
+    agent_name: str,
     agent_config: AgentConfig,
     max_preload_chars: int,
+    *,
+    storage_path: Path,
 ) -> str:
     """Build additional role context from configured files/directories.
 
-    This is evaluated when the agent is created (and re-created on config
-    reload), so file content snapshots update on agent hot-reload.
+    This is evaluated each time one agent instance is created.
+    The normal Matrix and OpenAI-compatible request paths build fresh agent
+    instances per reply/request, so edits in the canonical agent workspace are
+    reflected on the next reply without a process restart.
     """
     personality_chunks: list[_AdditionalContextChunk] = []
     if agent_config.context_files:
-        personality_chunks = _load_context_files(agent_config.context_files)
+        personality_chunks = _load_context_files(
+            agent_config.context_files,
+            agent_name=agent_name,
+            storage_path=storage_path,
+        )
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
     if omitted_chars > 0:
@@ -231,12 +304,23 @@ def _build_additional_context(
     return additional_context
 
 
-def _resolve_agent_workspace_path(agent_config: AgentConfig) -> Path | None:
-    """Return the agent workspace directory when one is explicitly configured."""
+def _resolve_agent_workspace_path(
+    agent_name: str,
+    agent_config: AgentConfig,
+    *,
+    storage_path: Path,
+) -> Path:
+    """Return the canonical workspace path for one agent."""
     if agent_config.memory_file_path is None:
-        return None
+        workspace_path = agent_workspace_root_path(storage_path, agent_name)
+        workspace_path.mkdir(parents=True, exist_ok=True)
+        return workspace_path
 
-    workspace_path = resolve_config_relative_path(agent_config.memory_file_path)
+    workspace_path = resolve_agent_owned_path(
+        agent_config.memory_file_path,
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+    )
     workspace_path.mkdir(parents=True, exist_ok=True)
     return workspace_path
 
@@ -249,43 +333,135 @@ def _tool_supports_base_dir(tool_name: str) -> bool:
     return any(field.name == "base_dir" for field in metadata.config_fields)
 
 
-def _tool_init_overrides(
+def _tool_base_dir_override(
     tool_name: str,
     *,
     workspace_path: Path | None,
-    worker_routed_tools: frozenset[str],
-    worker_scope: str | None,
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
     if workspace_path is None or not _tool_supports_base_dir(tool_name):
         return None
-    if worker_scope is not None and tool_name in worker_routed_tools:
-        return None
     return {"base_dir": str(workspace_path)}
 
 
-def build_agent_tool_init_context(config: Config, agent_name: str) -> AgentToolInitContext:
+def build_agent_tool_init_context(
+    config: Config,
+    agent_name: str,
+    *,
+    storage_path: Path | None = None,
+) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
+    resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
+    workspace_path = None
+    if agent_config.memory_file_path is not None:
+        workspace_path = _resolve_agent_workspace_path(
+            agent_name,
+            agent_config,
+            storage_path=resolved_storage_path,
+        )
     return AgentToolInitContext(
-        workspace_path=_resolve_agent_workspace_path(agent_config),
-        worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name)),
+        workspace_path=workspace_path,
         worker_scope=config.get_agent_worker_scope(agent_name),
     )
 
 
-def build_agent_tool_init_overrides(
+def build_agent_toolkit(
     tool_name: str,
     *,
-    context: AgentToolInitContext,
-) -> dict[str, object] | None:
-    """Resolve safe per-tool init overrides for one agent tool."""
-    return _tool_init_overrides(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    worker_tools: list[str],
+    tool_init_context: AgentToolInitContext,
+    delegation_depth: int = 0,
+) -> Toolkit | None:
+    """Build one configured toolkit for an agent.
+
+    Returns ``None`` when the configured tool should be skipped, such as an
+    explicit ``delegate`` entry without valid delegation targets.
+    """
+    agent_config = config.get_agent(agent_name)
+    storage_path = runtime_paths.storage_root
+    config_path = runtime_paths.config_path
+
+    if tool_name == "memory":
+        from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
+
+        # MemoryTools resolves the canonical per-agent storage roots internally via the
+        # shared memory facade, so it should receive the caller-visible runtime root here.
+        return MemoryTools(
+            agent_name=agent_name,
+            storage_path=storage_path,
+            config=config,
+        )
+
+    if tool_name == "delegate":
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+        from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
+
+        if not agent_config.delegate_to:
+            logger.warning(
+                f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
+            )
+            return None
+        if delegation_depth >= _MAX_DEPTH:
+            logger.warning(
+                f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
+                f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
+            )
+            return None
+        return DelegateTools(
+            agent_name=agent_name,
+            delegate_to=agent_config.delegate_to,
+            runtime_paths=runtime_paths,
+            config=config,
+            delegation_depth=delegation_depth,
+        )
+
+    if tool_name == "self_config":
+        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+        return SelfConfigTools(agent_name=agent_name, config_path=config_path)
+
+    return get_tool_by_name(
         tool_name,
-        workspace_path=context.workspace_path,
-        worker_routed_tools=context.worker_routed_tools,
-        worker_scope=context.worker_scope,
+        tool_init_overrides=_tool_base_dir_override(
+            tool_name,
+            workspace_path=tool_init_context.workspace_path,
+        ),
+        runtime_overrides={"config_path": config_path},
+        worker_tools_override=worker_tools,
+        worker_scope=tool_init_context.worker_scope,
+        routing_agent_name=agent_name,
     )
+
+
+def get_agent_toolkit_names(
+    agent_name: str,
+    config: Config,
+    *,
+    delegation_depth: int = 0,
+) -> list[str]:
+    """Return the complete ordered toolkit list for an agent runtime."""
+    tool_names = list(config.get_agent_tools(agent_name))
+    agent_config = config.get_agent(agent_name)
+
+    if agent_config.delegate_to and "delegate" not in tool_names:
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+
+        if delegation_depth < _MAX_DEPTH:
+            tool_names.append("delegate")
+
+    allow_self_config = (
+        agent_config.allow_self_config
+        if agent_config.allow_self_config is not None
+        else config.defaults.allow_self_config
+    )
+    if allow_self_config and "self_config" not in tool_names:
+        tool_names.append("self_config")
+
+    return tool_names
 
 
 # Rich prompt mapping - agents that use detailed prompts instead of simple roles
@@ -330,54 +506,40 @@ def _resolve_agent_learning(
 def create_session_storage(
     agent_name: str,
     storage_path: Path,
-    config: Config,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
     return _create_agent_state_db(
         agent_name,
         storage_path,
-        config,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
-        execution_identity=execution_identity,
     )
 
 
 def _create_learning_storage(
     agent_name: str,
     storage_path: Path,
-    config: Config,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent learning storage for an agent."""
     return _create_agent_state_db(
         agent_name,
         storage_path,
-        config,
         subdir="learning",
         session_table=f"{agent_name}_learning_sessions",
-        execution_identity=execution_identity,
     )
 
 
 def _create_agent_state_db(
     agent_name: str,
     storage_path: Path,
-    config: Config,
     *,
     subdir: str,
     session_table: str,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
-    """Create a scope-aware SQLite database for one agent state category."""
+    """Create a persistent SQLite database for one agent state category."""
     state_storage_path = resolve_agent_state_storage_path(
         agent_name=agent_name,
         base_storage_path=storage_path,
-        config=config,
-        execution_identity=execution_identity,
     )
     db_dir = state_storage_path / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
@@ -502,28 +664,23 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     *,
-    storage_path: Path | None = None,
+    runtime_paths: constants.RuntimePaths | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
-    config_path: Path | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         config: Application configuration
-        storage_path: Runtime storage path. Falls back to the
-            module-level ``STORAGE_PATH_OBJ`` when *None*.
+        runtime_paths: Explicit runtime path context for config/storage resolution.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
-        config_path: Path to the YAML config file used by tools that
-            read/write config at runtime (e.g. ``self_config``).  Falls back
-            to the module-level ``CONFIG_PATH`` when *None*.
 
     Returns:
         Configured Agent instance
@@ -534,104 +691,46 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    resolved_runtime_paths = runtime_paths or constants.get_runtime_paths()
+    resolved_storage_path = resolved_runtime_paths.storage_root
 
-    # Use passed config (config_path is deprecated)
     agent_config = config.get_agent(agent_name)
+    ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config)
+    load_plugins(config, config_path=resolved_runtime_paths.config_path)
 
-    tool_names = config.get_agent_tools(agent_name)
-    worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name)
-    worker_scope = tool_init_context.worker_scope
-    memory_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=resolved_storage_path,
-        config=config,
+    tool_names = get_agent_toolkit_names(
+        agent_name,
+        config,
+        delegation_depth=delegation_depth,
     )
-
+    worker_tools = config.get_agent_worker_tools(agent_name)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        storage_path=resolved_storage_path,
+    )
     # Create tools
     tools: list[Toolkit] = []
     for tool_name in tool_names:
         try:
-            if tool_name == "memory":
-                from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
-
-                tools.append(
-                    MemoryTools(
-                        agent_name=agent_name,
-                        storage_path=memory_storage_path,
-                        config=config,
-                    ),
-                )
-            elif tool_name == "delegate":
-                from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
-                from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
-
-                if not agent_config.delegate_to:
-                    logger.warning(
-                        f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
-                    )
-                elif delegation_depth >= _MAX_DEPTH:
-                    logger.warning(
-                        f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
-                        f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
-                    )
-                else:
-                    tools.append(
-                        DelegateTools(
-                            agent_name=agent_name,
-                            delegate_to=agent_config.delegate_to,
-                            storage_path=resolved_storage_path,
-                            config=config,
-                            delegation_depth=delegation_depth,
-                        ),
-                    )
-            elif tool_name == "self_config":
-                from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-                tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
-            else:
-                tools.append(
-                    get_tool_by_name(
-                        tool_name,
-                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
-                        worker_tools_override=worker_tools,
-                        worker_scope=worker_scope,
-                        routing_agent_name=agent_name,
-                    ),
-                )
+            if toolkit := build_agent_toolkit(
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=resolved_runtime_paths,
+                worker_tools=worker_tools,
+                tool_init_context=tool_init_context,
+                delegation_depth=delegation_depth,
+            ):
+                tools.append(toolkit)
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    # Auto-inject delegation tool when delegate_to is configured
-    from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools  # noqa: PLC0415
-
-    if agent_config.delegate_to and "delegate" not in tool_names and delegation_depth < MAX_DELEGATION_DEPTH:
-        tools.append(
-            DelegateTools(
-                agent_name=agent_name,
-                delegate_to=agent_config.delegate_to,
-                storage_path=resolved_storage_path,
-                config=config,
-                delegation_depth=delegation_depth,
-            ),
-        )
-
-    # Auto-inject self-config tool when allow_self_config is enabled
-    allow_self_config = (
-        agent_config.allow_self_config if agent_config.allow_self_config is not None else defaults.allow_self_config
-    )
-    if allow_self_config and not any(tool.name == "self_config" for tool in tools):
-        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-        tools.append(SelfConfigTools(agent_name=agent_name, config_path=config_path))
-
-    storage = create_session_storage(agent_name, resolved_storage_path, config)
+    storage = create_session_storage(agent_name, resolved_storage_path)
     learning_storage = (
-        _create_learning_storage(agent_name, resolved_storage_path, config)
+        _create_learning_storage(agent_name, resolved_storage_path)
         if _is_learning_enabled(agent_config, defaults)
         else None
     )
@@ -662,8 +761,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     full_context = identity_context + datetime_context
 
     full_context += _build_additional_context(
+        agent_name,
         agent_config,
         config.defaults.max_preload_chars,
+        storage_path=resolved_storage_path,
     )
 
     # Use rich prompt if available, otherwise use YAML config

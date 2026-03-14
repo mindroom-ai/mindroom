@@ -14,10 +14,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.constants as constants_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    agent_workspace_root_path,
+    resolve_worker_key,
+    worker_dir_name,
+)
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
 
@@ -102,6 +108,23 @@ def test_sandbox_runner_applies_tool_init_overrides(
     data = response.json()
     assert data["ok"] is True
     assert "USER.md" in data["result"]
+
+
+def test_resolve_worker_base_dir_does_not_create_directories_during_validation(tmp_path: Path) -> None:
+    """Worker base-dir validation should not leave empty directories behind."""
+    storage_root = tmp_path / "mindroom_data"
+    worker_root = tmp_path / "workers" / "worker-state"
+    requested_base_dir = "agents/general/workspace/mind_data"
+
+    resolved = sandbox_runner_module._resolve_worker_base_dir(
+        SimpleNamespace(root=worker_root, workspace=worker_root / "workspace"),
+        storage_root,
+        "v1:default:shared:general",
+        requested_base_dir,
+    )
+
+    assert resolved == (storage_root / requested_base_dir).resolve()
+    assert not resolved.exists()
 
 
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
@@ -300,6 +323,248 @@ def test_sandbox_runner_subprocess_rejects_invalid_base_dir_override_type(
     assert "base_dir" in response.json()["detail"]
 
 
+def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should reject base_dir overrides that escape the worker root."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": str(tmp_path / "outside-worker-root")},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "worker root" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_agent_root(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped workers should reject base_dir overrides outside their visible agent roots."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "worker_key": "v1:tenant-123:shared:general",
+            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "allowed agent roots" in response.json()["detail"]
+
+
+def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_paths(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should resolve relative agent roots against the shared storage env."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared"
+    worker_root = shared_root / "sandbox-workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    saved_file = shared_root / "agents" / "general" / "workspace" / "mind_data" / "note.txt"
+    assert saved_file.read_text(encoding="utf-8") == "hello"
+
+
+def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-scoped workers intentionally allow base_dir anywhere under the shared agents tree."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": "v1:tenant-123:user:@alice:example.org",
+            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (storage_root / "agents" / "other" / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
+
+
+def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Malformed worker keys must not gain shared-storage base_dir access."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "coding",
+            "function_name": "ls",
+            "args": [],
+            "kwargs": {"path": "."},
+            "worker_key": "legacy-worker",
+            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "visible agent roots" in response.json()["detail"]
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_tools(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should still run tools that do not declare a base_dir init field."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [1, 2],
+            "kwargs": {},
+            "worker_key": "worker-a",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert '"result": 3' in response.json()["result"]
+
+
+def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown_tool(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker base_dir validation should run before unknown-tool resolution."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "does_not_exist",
+            "function_name": "add",
+            "args": [],
+            "kwargs": {},
+            "worker_key": "worker-a",
+            "tool_init_overrides": {"base_dir": {"bad": "value"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "base_dir" in response.json()["detail"]
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker request validation should reuse the prepared worker for parent dispatch."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    storage_root = tmp_path / "storage"
+    worker_key = "v1:tenant-123:shared:general"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    prepare_calls = 0
+    original_prepare = sandbox_runner_module._prepare_worker
+
+    def _counting_prepare(worker_key: str) -> object:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        return original_prepare(worker_key)
+
+    async def _fake_execute_request_subprocess(
+        request: sandbox_runner_module.SandboxRunnerExecuteRequest,
+        prepared_worker: object | None = None,
+    ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
+        assert request.worker_key == worker_key
+        assert prepared_worker is not None
+        return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+
+    monkeypatch.setattr(sandbox_runner_module, "_prepare_worker", _counting_prepare)
+    monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "result": "ok", "error": None}
+    assert prepare_calls == 1
+
+
 def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential leases should be consumed after one execution by default."""
     _set_sandbox_token(monkeypatch)
@@ -493,6 +758,148 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
 
     worker_file = worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should honor a forwarded canonical base_dir inside shared agent storage."""
+    _set_sandbox_token(monkeypatch)
+    worker_root = tmp_path / "workers"
+    storage_root = tmp_path / "storage"
+    worker_key = "v1:tenant-123:shared:general"
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from canonical workspace", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = agent_workspace_root_path(storage_root, "general") / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from canonical workspace"
+    assert not (worker_root / worker_dir_name(worker_key) / "workspace" / "note.txt").exists()
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_unset(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker requests should validate canonical agent roots against the default storage root."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "default-storage"
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
+    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
+    monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", storage_root)
+
+    canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from default storage root fallback", "note.txt"],
+            "kwargs": {},
+            "worker_key": "v1:tenant-123:shared:general",
+            "tool_init_overrides": {"base_dir": str(canonical_base_dir)},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_storage(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should still resolve relative agent paths from shared storage roots."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from dedicated worker canonical workspace", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
+    assert not (worker_root / "workspace" / "note.txt").exists()
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_worker_prefix(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should recover the shared root even with nested worker prefixes."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "nested" / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.delenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", raising=False)
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX", "nested/workers")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from nested worker prefix", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from nested worker prefix"
+    assert not (worker_root / "workspace" / "note.txt").exists()
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
@@ -795,10 +1202,8 @@ def test_dedicated_worker_mode_rejects_mismatched_worker_key(
             "worker_key": "worker-b",
         },
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["ok"] is False
-    assert "Dedicated sandbox worker is pinned" in data["error"]
+    assert response.status_code == 400
+    assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
 
 
 def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(
@@ -953,11 +1358,10 @@ def test_sandbox_runner_records_worker_initialization_failures(
             },
         )
 
-    assert execute_response.status_code == 200
-    data = execute_response.json()
-    assert data["ok"] is False
-    assert "Failed to initialize worker 'worker-fail'" in data["error"]
-    assert "boom" in data["error"]
+    assert execute_response.status_code == 400
+    detail = execute_response.json()["detail"]
+    assert "Failed to initialize worker 'worker-fail'" in detail
+    assert "boom" in detail
 
     workers_response = runner_client.get("/api/sandbox-runner/workers", headers=SANDBOX_HEADERS)
     assert workers_response.status_code == 200

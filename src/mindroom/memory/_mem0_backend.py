@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
 from ._policy import (
     agent_scope_user_id,
@@ -15,7 +16,6 @@ from ._policy import (
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
     mutation_target_storage_paths,
-    resolve_context_storage_path,
 )
 from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
@@ -120,7 +120,7 @@ async def _find_mem0_anchor_memory_result(
     *,
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         memory = await create_memory(target_storage_path, config)
         if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
             return result
@@ -202,7 +202,10 @@ async def add_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> None:
     """Add one mem0 memory for an agent scope."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
+    resolved_storage_path = resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+    )
     memory = await create_memory(resolved_storage_path, config)
     metadata = dict(metadata or {})
     metadata["agent"] = agent_name
@@ -225,7 +228,10 @@ async def search_mem0_agent_memories(
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """Search mem0 memories visible to an agent."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
+    resolved_storage_path = resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+    )
     memory = await create_memory(resolved_storage_path, config)
 
     results = _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
@@ -251,7 +257,10 @@ async def list_mem0_agent_memories(
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """List mem0 memories stored for an agent."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
+    resolved_storage_path = resolve_agent_state_storage_path(
+        agent_name=agent_name,
+        base_storage_path=storage_path,
+    )
     result = await create_memory(resolved_storage_path, config)
     return _mem0_results(await result.get_all(user_id=agent_scope_user_id(agent_name), limit=limit))
 
@@ -265,7 +274,7 @@ async def get_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
     """Return one mem0 memory visible to the caller."""
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         memory = await create_memory(target_storage_path, config)
         result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
         if result is not None:
@@ -357,7 +366,7 @@ async def store_mem0_conversation_memory(
     create_memory: _MemoryFactory,
 ) -> None:
     """Persist conversation messages to mem0-backed memory scopes."""
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
+    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path)
 
     if isinstance(agent_name, list):
         scope_user_id = build_team_user_id(agent_name)

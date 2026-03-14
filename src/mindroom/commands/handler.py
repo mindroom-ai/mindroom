@@ -7,12 +7,12 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom.agents import build_agent_tool_init_context, build_agent_tool_init_overrides
+from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
@@ -23,7 +23,6 @@ from mindroom.scheduling import (
     schedule_task,
 )
 from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
-from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.skills import resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
 
@@ -57,6 +57,7 @@ class CommandHandlerContext:
 
     client: nio.AsyncClient
     config: Config
+    runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -207,26 +208,29 @@ def _resolve_skill_command_agent(  # noqa: C901
     )
 
 
-def _collect_agent_toolkits(config: Config, agent_name: str) -> list[tuple[str, Toolkit]]:
+def _collect_agent_toolkits(
+    config: Config,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+) -> list[tuple[str, Toolkit]]:
+    resolved_storage_path = runtime_paths.storage_root
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name)
-    worker_scope = tool_init_context.worker_scope
+    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     toolkits: list[tuple[str, Toolkit]] = []
-    for tool_name in config.get_agent_tools(agent_name):
+    for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
-            toolkits.append(
-                (
-                    tool_name,
-                    get_tool_by_name(
-                        tool_name,
-                        tool_init_overrides=build_agent_tool_init_overrides(tool_name, context=tool_init_context),
-                        worker_tools_override=worker_tools,
-                        worker_scope=worker_scope,
-                        routing_agent_name=agent_name,
-                    ),
-                ),
+            toolkit = build_agent_toolkit(
+                tool_name,
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                worker_tools=worker_tools,
+                tool_init_context=tool_init_context,
             )
-        except ValueError as exc:
+            if toolkit is None:
+                continue
+            toolkits.append((tool_name, toolkit))
+        except (ImportError, ValueError) as exc:
             logger.warning(
                 "Failed to load tool for skill dispatch",
                 tool=tool_name,
@@ -354,6 +358,7 @@ async def _maybe_await(value: object) -> object:
 async def _run_skill_command_tool(
     *,
     config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     command_tool: str,
     skill_name: str,
@@ -379,7 +384,11 @@ async def _run_skill_command_tool(
 
     try:
         with tool_execution_identity(execution_identity):
-            toolkits = _collect_agent_toolkits(config, agent_name)
+            toolkits = _collect_agent_toolkits(
+                config,
+                agent_name,
+                runtime_paths,
+            )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
                 return f"❌ {error}"
@@ -506,7 +515,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.CONFIG:
         # Handle config command
         args_text = command.args.get("args_text", "")
-        response_text, change_info = await handle_config_command(args_text)
+        response_text, change_info = await handle_config_command(args_text, context.runtime_paths.config_path)
 
         # If we have change_info, this is a config set that needs confirmation
         if change_info:
@@ -575,6 +584,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif spec.dispatch and spec.dispatch.kind == "tool":
                     response_text = await _run_skill_command_tool(
                         config=context.config,
+                        runtime_paths=context.runtime_paths,
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,

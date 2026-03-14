@@ -17,11 +17,9 @@ from anthropic import APIStatusError
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
+from mindroom import constants
 from mindroom.constants import (
-    CONFIG_PATH,
-    MATRIX_HOMESERVER,
     MATRIX_SSL_VERIFY,
-    STORAGE_PATH,
     env_key_for_provider,
 )
 from mindroom.embeddings import create_sentence_transformers_embedder
@@ -48,7 +46,7 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    config_path = Path(CONFIG_PATH)
+    config_path = constants.runtime_config_path()
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -578,23 +576,24 @@ def _validate_sentence_transformers_embedder(model: str) -> tuple[bool, str]:
 
 def _check_matrix_homeserver() -> tuple[int, int, int]:
     """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
-    url = matrix_versions_url(MATRIX_HOMESERVER)
+    homeserver = constants.runtime_matrix_homeserver()
+    url = matrix_versions_url(homeserver)
     try:
         response = httpx.get(url, timeout=5, verify=MATRIX_SSL_VERIFY)
     except httpx.TransportError as exc:
-        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {MATRIX_HOMESERVER} ({exc})")
+        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {homeserver} ({exc})")
         return 0, 1, 0
     if response_has_matrix_versions(response):
-        console.print(f"[green]✓[/green] Matrix homeserver: {MATRIX_HOMESERVER}")
+        console.print(f"[green]✓[/green] Matrix homeserver: {homeserver}")
         return 1, 0, 0
     detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
-    console.print(f"[red]✗[/red] Matrix homeserver {detail}: {MATRIX_HOMESERVER}")
+    console.print(f"[red]✗[/red] Matrix homeserver {detail}: {homeserver}")
     return 0, 1, 0
 
 
 def _check_storage_writable() -> tuple[int, int, int]:
     """Check storage directory is writable. Returns (passed, failed, warnings)."""
-    storage = Path(STORAGE_PATH)
+    storage = constants.get_runtime_paths().storage_root
     try:
         storage.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=storage)

@@ -15,19 +15,21 @@ from typing import Literal
 
 import typer
 import yaml
+from dotenv import dotenv_values
 from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
 from mindroom.config.main import Config
 from mindroom.constants import (
-    CONFIG_PATH,
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
     config_search_locations,
     env_key_for_provider,
+    get_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 console = Console()
 
@@ -77,6 +79,72 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
+def _configured_storage_root_override() -> Path | None:
+    """Return the active storage-root override from the environment, if any."""
+    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if not configured_root:
+        return None
+    return Path(configured_root).expanduser().resolve()
+
+
+def _storage_root_for_config(config_dir: Path) -> Path:
+    """Return the runtime storage root implied by env overrides or config location."""
+    if configured_root := _configured_storage_root_override():
+        return configured_root
+    return (config_dir / "mindroom_data").resolve()
+
+
+def _storage_root_from_env_file(env_path: Path) -> Path | None:
+    """Return MINDROOM_STORAGE_PATH from one env file when it is defined."""
+    if not env_path.is_file():
+        return None
+    configured_root = dotenv_values(env_path).get("MINDROOM_STORAGE_PATH")
+    if not isinstance(configured_root, str) or not configured_root.strip():
+        return None
+    return Path(configured_root).expanduser().resolve()
+
+
+def _config_init_storage_plan(
+    config_dir: Path,
+    env_path: Path,
+    *,
+    write_env_file: bool,
+) -> tuple[Path, bool]:
+    """Return the storage root and whether the starter config can use the env placeholder."""
+    if write_env_file:
+        return _storage_root_for_config(config_dir), True
+    if preserved_storage_root := _storage_root_from_env_file(env_path):
+        return preserved_storage_root, True
+    return _storage_root_for_config(config_dir), False
+
+
+def _default_mind_workspace(storage_root: Path) -> Path:
+    """Return the starter Mind workspace inside the canonical agent workspace."""
+    return agent_workspace_root_path(storage_root, "mind") / "mind_data"
+
+
+def _path_string_for_config(path: Path, config_dir: Path) -> str:
+    """Render one filesystem path for config.yaml, preferring config-relative paths when possible."""
+    resolved_path = path.expanduser().resolve()
+    try:
+        relative_path = resolved_path.relative_to(config_dir.resolve())
+    except ValueError:
+        return str(resolved_path)
+    return f"./{relative_path.as_posix()}"
+
+
+def _default_mind_knowledge_base_path(
+    config_dir: Path,
+    *,
+    storage_root: Path,
+    use_storage_env_placeholder: bool,
+) -> str:
+    """Return the starter knowledge-base path anchored to the chosen runtime storage root."""
+    if use_storage_env_placeholder:
+        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+    return _path_string_for_config(_default_mind_workspace(storage_root) / "memory", config_dir)
+
+
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
     """Create the default Mind workspace files used by the full/public templates."""
     workspace_path.mkdir(parents=True, exist_ok=True)
@@ -99,21 +167,28 @@ def _write_env_file(
     selected_profile: _ConfigInitProfile,
     selected_preset: _ProviderPreset,
     *,
-    force: bool,
+    storage_root: Path,
+    replace_existing: bool,
 ) -> bool:
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
-        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+        env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
         return True
 
-    should_overwrite = force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
-    if not should_overwrite:
+    if not replace_existing:
         return False
 
-    env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+    env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
     return True
+
+
+def _should_write_env_file(env_path: Path, *, force: bool) -> bool:
+    """Return whether config init should create or overwrite the env file."""
+    if not env_path.exists():
+        return True
+    return force or typer.confirm(f"Overwrite existing .env file ({env_path})?", default=False)
 
 
 def _config_init_env_hint(selected_profile: _ConfigInitProfile, selected_preset: _ProviderPreset) -> str:
@@ -153,7 +228,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return Path(CONFIG_PATH).resolve()
+    return get_runtime_paths().config_path.resolve()
 
 
 def _get_editor() -> str:
@@ -229,6 +304,7 @@ def config_init(
     Generates a YAML config with starter agents, one model, and sensible defaults.
     """
     target = _resolve_config_path(path)
+    env_path = target.parent / ".env"
 
     if target.exists() and not force:
         console.print(f"[yellow]Config file already exists:[/yellow] {target}")
@@ -241,21 +317,38 @@ def config_init(
         minimal=minimal,
         provider=provider,
     )
+    write_env_file = _should_write_env_file(env_path, force=force)
+    storage_root, use_storage_env_placeholder = _config_init_storage_plan(
+        target.parent,
+        env_path,
+        write_env_file=write_env_file,
+    )
 
     if selected_profile == "minimal":
         content = _minimal_template(selected_preset)
     else:
         full_profile: Literal["full", "public"] = "public" if selected_profile == "public" else "full"
-        content = _full_template(selected_preset, profile=full_profile)
+        content = _full_template(
+            selected_preset,
+            target.parent,
+            storage_root=storage_root,
+            use_storage_env_placeholder=use_storage_env_placeholder,
+            profile=full_profile,
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
     if selected_profile != "minimal":
-        _ensure_mind_workspace(target.parent / "mind_data", force=force)
+        _ensure_mind_workspace(_default_mind_workspace(storage_root), force=force)
 
-    env_path = target.parent / ".env"
-    env_created = _write_env_file(env_path, selected_profile, selected_preset, force=force)
+    env_created = _write_env_file(
+        env_path,
+        selected_profile,
+        selected_preset,
+        storage_root=storage_root,
+        replace_existing=write_env_file,
+    )
 
     console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
@@ -539,9 +632,21 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
     return textwrap.indent("\n".join(lines), "    ")
 
 
-def _full_template(provider_preset: _ProviderPreset, *, profile: Literal["full", "public"] = "full") -> str:
+def _full_template(
+    provider_preset: _ProviderPreset,
+    config_dir: Path,
+    *,
+    storage_root: Path,
+    use_storage_env_placeholder: bool,
+    profile: Literal["full", "public"] = "full",
+) -> str:
     """Return a provider-aware starter config."""
     model_block = _model_template_block(provider_preset)
+    mind_memory_knowledge_path = _default_mind_knowledge_base_path(
+        config_dir,
+        storage_root=storage_root,
+        use_storage_env_placeholder=use_storage_env_placeholder,
+    )
 
     if profile == "public":
         mindroom_user_block = ""
@@ -581,16 +686,16 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: ./mind_data
+    memory_file_path: mind_data
     rooms:
       - personal
     context_files:
-      - ./mind_data/SOUL.md
-      - ./mind_data/AGENTS.md
-      - ./mind_data/USER.md
-      - ./mind_data/IDENTITY.md
-      - ./mind_data/TOOLS.md
-      - ./mind_data/HEARTBEAT.md
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
     knowledge_bases:
       - mind_memory
     tools:
@@ -627,7 +732,7 @@ matrix_space:
 
 knowledge_bases:
   mind_memory:
-    path: ./mind_data/memory
+    path: {mind_memory_knowledge_path}
     watch: true
 
 # File-based memory requires no external LLM, and starter configs use a local embedder for knowledge indexing.
@@ -659,7 +764,11 @@ defaults:
 """
 
 
-def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset) -> str:
+def _env_template(
+    profile: _ConfigInitProfile,
+    provider_preset: _ProviderPreset,
+    storage_root: Path,
+) -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
@@ -683,6 +792,10 @@ def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset)
         )
 
     provider_lines_text = _provider_env_template(provider_preset)
+    storage_root_block = (
+        "# Runtime storage root for canonical agent state, sessions, logs, and credentials\n"
+        f"MINDROOM_STORAGE_PATH={storage_root.expanduser().resolve()}\n\n"
+    )
 
     return f"""\
 # Matrix homeserver (must allow open registration for agent accounts)
@@ -690,7 +803,7 @@ MATRIX_HOMESERVER={matrix_homeserver}
 # MATRIX_SSL_VERIFY=false
 {extra_matrix.rstrip()}
 
-{provider_lines_text}
+{storage_root_block}{provider_lines_text}
 
 # Dashboard API key — protects the /api/* dashboard endpoints.
 # When set, all dashboard requests require: Authorization: Bearer <key>

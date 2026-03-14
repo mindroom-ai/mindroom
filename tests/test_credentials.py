@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import mindroom.constants as constants_mod
 import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
@@ -555,6 +556,7 @@ class TestGlobalCredentialsManager:
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
         mindroom.credentials._credentials_manager = None
+        mindroom.credentials._credentials_manager_signature = None
 
     def test_get_credentials_manager_singleton(self) -> None:
         """Test that get_credentials_manager returns the same instance."""
@@ -573,8 +575,14 @@ class TestGlobalCredentialsManager:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers should be able to configure a distinct shared credential mirror path."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
         storage_path = (tmp_path / "worker-root").resolve()
         shared_path = storage_path / ".shared_credentials"
+        constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
         monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(shared_path))
 
@@ -582,6 +590,26 @@ class TestGlobalCredentialsManager:
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
+
+    def test_global_manager_rebuilds_when_runtime_storage_root_changes(self, tmp_path: Path) -> None:
+        """Changing the active runtime storage root should invalidate the cached manager."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        first_root = tmp_path / "one"
+        second_root = tmp_path / "two"
+
+        constants_mod.set_runtime_paths(config_path=config_path, storage_path=first_root)
+        manager_one = get_credentials_manager()
+
+        constants_mod.set_runtime_paths(config_path=config_path, storage_path=second_root)
+        manager_two = get_credentials_manager()
+
+        assert manager_one.base_path == first_root / "credentials"
+        assert manager_two.base_path == second_root / "credentials"
+        assert manager_one is not manager_two
 
     def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
         self,
