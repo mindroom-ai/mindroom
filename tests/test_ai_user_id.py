@@ -23,12 +23,20 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+
+def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=config_path or tmp_path / "config.yaml",
+        storage_path=tmp_path,
+    )
 
 
 class TestUserIdPassthrough:
@@ -174,7 +182,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 user_id="@user:localhost",
             )
@@ -198,15 +206,14 @@ class TestUserIdPassthrough:
             agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
                 agent_name="general",
                 prompt="test",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=config,
-                config_path=config_path,
             )
 
         assert agent is mock_agent
         assert full_prompt == "enhanced"
         assert unseen_event_ids == []
-        assert mock_create_agent.call_args.kwargs["config_path"] == config_path
+        assert mock_create_agent.call_args.kwargs["runtime_paths"].config_path == config_path
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -227,12 +234,11 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                 config=Config.from_yaml(),
-                config_path=config_path,
             )
 
-        assert mock_prepare.call_args.kwargs["config_path"] == config_path
+        assert mock_prepare.call_args.args[2].config_path == config_path
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -258,13 +264,12 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
                     config=Config.from_yaml(),
-                    config_path=config_path,
                 )
             ]
 
-        assert mock_prepare.call_args.kwargs["config_path"] == config_path
+        assert mock_prepare.call_args.args[2].config_path == config_path
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_user_id_to_agent_arun(self, tmp_path: Path) -> None:
@@ -293,7 +298,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     user_id="@user:localhost",
                 )
@@ -327,7 +332,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[pdf_file, zip_file]),
             )
@@ -363,7 +368,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[pdf_file, zip_file]),
                 )
@@ -411,7 +416,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[document_file]),
             )
@@ -464,7 +469,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[document_file]),
                 )
@@ -532,7 +537,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 media=MediaInputs(files=[document_file]),
             )
@@ -584,7 +589,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     media=MediaInputs(files=[document_file]),
                 )
@@ -623,7 +628,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
             )
 
@@ -657,7 +662,7 @@ class TestUserIdPassthrough:
                     agent_name="general",
                     prompt="test",
                     session_id="session1",
-                    storage_path=tmp_path,
+                    runtime_paths=_runtime_paths(tmp_path),
                     config=Config.from_yaml(),
                     show_tool_calls=False,
                 )
@@ -696,7 +701,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=Config.from_yaml(),
                 show_tool_calls=False,
                 tool_trace_collector=tool_trace,
@@ -748,7 +753,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             )
@@ -811,7 +816,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             ):
@@ -862,7 +867,7 @@ class TestUserIdPassthrough:
                 agent_name="general",
                 prompt="test",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 run_metadata_collector=run_metadata,
             ):

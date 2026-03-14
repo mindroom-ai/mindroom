@@ -104,6 +104,8 @@ from .constants import (
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    RuntimePaths,
+    get_runtime_paths,
     resolve_avatar_path,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
@@ -382,6 +384,14 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
+    @property
+    def runtime_paths(self) -> RuntimePaths:
+        """Return the active runtime paths for this bot instance."""
+        return get_runtime_paths(
+            config_path=self.config_path,
+            storage_path=self.storage_path,
+        )
+
     def _resolve_reply_thread_id(
         self,
         thread_id: str | None,
@@ -448,9 +458,8 @@ class AgentBot:
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
-            storage_path=self.storage_path,
+            runtime_paths=self.runtime_paths,
             knowledge=knowledge,
-            config_path=self.config_path,
         )
 
     @cached_property
@@ -1952,7 +1961,7 @@ class AgentBot:
                         agent_name=self.agent_name,
                         prompt=model_prompt,
                         session_id=session_id,
-                        storage_path=self.storage_path,
+                        runtime_paths=self.runtime_paths,
                         config=self.config,
                         thread_history=thread_history,
                         room_id=room_id,
@@ -1963,7 +1972,6 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
-                        config_path=self.config_path,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -2075,7 +2083,7 @@ class AgentBot:
                     agent_name=agent_name,
                     prompt=model_prompt,
                     session_id=session_id,
-                    storage_path=self.storage_path,
+                    runtime_paths=self.runtime_paths,
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
@@ -2084,7 +2092,6 @@ class AgentBot:
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
-                    config_path=self.config_path,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -2241,7 +2248,7 @@ class AgentBot:
                         agent_name=self.agent_name,
                         prompt=model_prompt,
                         session_id=session_id,
-                        storage_path=self.storage_path,
+                        runtime_paths=self.runtime_paths,
                         config=self.config,
                         thread_history=thread_history,
                         room_id=room_id,
@@ -2251,7 +2258,6 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
-                        config_path=self.config_path,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -2763,8 +2769,7 @@ class AgentBot:
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
-            storage_path=self.storage_path,
-            config_path=self.config_path,
+            runtime_paths=self.runtime_paths,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

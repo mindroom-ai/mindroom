@@ -13,6 +13,7 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
@@ -37,6 +38,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.skills import Skills
+
+
+def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=config_path or storage_path / "config.yaml",
+        storage_path=storage_path,
+    )
 
 
 def _write_skill(
@@ -357,7 +365,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     config.agents["code"].worker_scope = "user"
     config.agents["code"].worker_tools = ["coding"]
 
-    toolkits = _collect_agent_toolkits(config, "code", storage_path=tmp_path)
+    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(tmp_path))
 
     assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
@@ -402,7 +410,11 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
 
     monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     with tool_execution_identity(identity):
-        toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+        toolkits = _collect_agent_toolkits(
+            config,
+            "code",
+            _runtime_paths(runtime_storage, config_path=config_dir / "config.yaml"),
+        )
 
     assert [tool_name for tool_name, _ in toolkits] == ["coding"]
     assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
@@ -423,7 +435,7 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     )
 
     runtime_storage = tmp_path / "runtime-storage"
-    toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
 
     toolkits_by_name = dict(toolkits)
     assert [tool_name for tool_name, _ in toolkits] == ["memory", "self_config", "delegate"]
@@ -431,7 +443,7 @@ def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> 
     assert toolkits_by_name["delegate"].name == "delegate"
     assert toolkits_by_name["self_config"].name == "self_config"
     assert toolkits_by_name["memory"]._storage_path == runtime_storage
-    assert toolkits_by_name["delegate"]._storage_path == runtime_storage
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
 
 
 def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: Path) -> None:
@@ -448,13 +460,13 @@ def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: 
     )
 
     runtime_storage = tmp_path / "runtime-storage"
-    toolkits = _collect_agent_toolkits(config, "code", storage_path=runtime_storage)
+    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
 
     toolkits_by_name = dict(toolkits)
     assert [tool_name for tool_name, _ in toolkits] == ["delegate", "self_config"]
     assert toolkits_by_name["delegate"].name == "delegate"
     assert toolkits_by_name["self_config"].name == "self_config"
-    assert toolkits_by_name["delegate"]._storage_path == runtime_storage
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
 
 
 @pytest.mark.asyncio
@@ -486,6 +498,7 @@ async def test_skill_command_tool_dispatch() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -530,6 +543,7 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -580,6 +594,7 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -638,6 +653,7 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
             monkeypatch.setenv("ACCOUNT_ID", "account-456")
             result = await _run_skill_command_tool(
                 config=config,
+                runtime_paths=resolve_runtime_paths(),
                 agent_name="code",
                 command_tool="demo",
                 skill_name="dispatch",
@@ -667,8 +683,7 @@ async def test_skill_command_tool_dispatch_threads_config_path_to_self_config(tm
 
     result = await _run_skill_command_tool(
         config=config,
-        storage_path=tmp_path,
-        config_path=config_path,
+        runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
         agent_name="code",
         command_tool="get_own_config",
         skill_name="dispatch",
@@ -753,6 +768,7 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="lookup",
             skill_name="dispatch",

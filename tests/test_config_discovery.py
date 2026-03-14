@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from typing import TYPE_CHECKING
 
 import mindroom.constants as constants_mod
@@ -164,7 +163,7 @@ class TestResolveConfigRelativePath:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Explicit config paths should load their sibling `.env` before path expansion."""
+        """Explicit config paths should use their sibling `.env` for path expansion."""
         config_dir = tmp_path / "cfg"
         config_dir.mkdir(parents=True, exist_ok=True)
         custom_storage = tmp_path / "custom-storage"
@@ -181,7 +180,6 @@ class TestResolveConfigRelativePath:
 
         Config.from_yaml(config_path)
 
-        assert os.getenv("MINDROOM_STORAGE_PATH") == str(custom_storage.resolve())
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/kb",
             config_path=config_path,
@@ -201,8 +199,7 @@ class TestResolveAvatarPath:
         active_config = tmp_path / "runtime" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir()
 
@@ -218,8 +215,7 @@ class TestResolveAvatarPath:
         explicit_config = tmp_path / "workspace" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir(config_path=explicit_config)
 
@@ -282,8 +278,7 @@ class TestResolveAvatarPath:
         storage_dir = tmp_path / "storage"
         bundled_dir = tmp_path / "bundled"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")

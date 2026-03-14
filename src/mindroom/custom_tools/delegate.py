@@ -17,9 +17,8 @@ from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -33,17 +32,15 @@ class DelegateTools(Toolkit):
         self,
         agent_name: str,
         delegate_to: list[str],
-        storage_path: Path,
+        runtime_paths: RuntimePaths,
         config: Config,
         delegation_depth: int = 0,
-        config_path: Path | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
-        self._storage_path = storage_path
+        self._runtime_paths = runtime_paths
         self._config = config
         self._delegation_depth = delegation_depth
-        self._config_path = config_path
 
         super().__init__(
             name="delegate",
@@ -95,11 +92,10 @@ class DelegateTools(Toolkit):
             agent = create_agent(
                 agent_name,
                 self._config,
-                storage_path=self._storage_path,
+                runtime_paths=self._runtime_paths,
                 knowledge=knowledge,
                 include_interactive_questions=False,
                 delegation_depth=self._delegation_depth + 1,
-                config_path=self._config_path,
             )
             logger.info(
                 "Delegating task",

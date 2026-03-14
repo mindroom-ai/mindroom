@@ -193,13 +193,40 @@ class TestConfigInit:
     ) -> None:
         """Config init without --path should write to the detected config location."""
         default_cfg = tmp_path / ".mindroom" / "config.yaml"
-        monkeypatch.setattr("mindroom.cli.config.CONFIG_PATH", default_cfg)
+        monkeypatch.setattr(
+            "mindroom.cli.config.get_runtime_paths",
+            lambda: constants_module.resolve_runtime_paths(config_path=default_cfg),
+        )
 
         result = runner.invoke(app, ["config", "init"], input="openai\n")
 
         assert result.exit_code == 0
         assert default_cfg.exists()
         assert (default_cfg.parent / ".env").exists()
+
+    def test_init_preserved_env_without_storage_path_uses_literal_storage_root(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Preserving an env file without MINDROOM_STORAGE_PATH must not emit a broken placeholder path."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("ANTHROPIC_API_KEY=sk-existing\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        config = yaml.safe_load(target.read_text())
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "./mindroom_data/agents/mind/workspace/mind_data/memory"
+        )
+        assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
+        assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data").exists()
+        assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
     def test_init_minimal(self, tmp_path: Path) -> None:
         """Config init --minimal creates a bare-minimum config."""

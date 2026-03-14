@@ -405,7 +405,11 @@ def register_tool_with_metadata(
     return decorator
 
 
-def ensure_tool_registry_loaded(config: Config | None = None, *, config_path: Path | None = None) -> None:
+def ensure_tool_registry_loaded(
+    config: Config | None = None,
+    *,
+    config_path: Path | None = None,
+) -> None:
     """Ensure core and plugin tools are registered in the metadata registry."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 

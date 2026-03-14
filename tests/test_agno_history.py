@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -37,16 +38,22 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 # ---------------------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------------------
+
+
+def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> RuntimePaths:
+    base_path = Path(str(tmp_path))
+    return resolve_runtime_paths(
+        config_path=config_path or base_path / "config.yaml",
+        storage_path=base_path,
+    )
 
 
 def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -495,7 +502,7 @@ class TestPrepareAgentAndPrompt:
             _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -524,7 +531,7 @@ class TestPrepareAgentAndPrompt:
             _agent, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -553,7 +560,7 @@ class TestPrepareAgentAndPrompt:
             _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -575,7 +582,7 @@ class TestPrepareAgentAndPrompt:
             _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id=None,
@@ -608,7 +615,7 @@ class TestPrepareAgentAndPrompt:
             first_agent, first_prompt, first_unseen = await _prepare_agent_and_prompt(
                 "general",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 session_id=None,
             )
@@ -618,7 +625,7 @@ class TestPrepareAgentAndPrompt:
             second_agent, second_prompt, second_unseen = await _prepare_agent_and_prompt(
                 "general",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 session_id=None,
             )
@@ -652,7 +659,7 @@ class TestPrepareAgentAndPrompt:
             _, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -681,7 +688,7 @@ class TestPrepareAgentAndPrompt:
             _, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -719,7 +726,7 @@ class TestMetadataPassing:
                 agent_name="calculator",
                 prompt="test",
                 session_id="sid",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 reply_to_event_id="$trigger",
             )
@@ -749,7 +756,7 @@ class TestMetadataPassing:
                 agent_name="calculator",
                 prompt="test",
                 session_id="sid",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
             )
 

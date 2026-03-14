@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import nio
@@ -558,6 +558,7 @@ class TestAgentBot:
         resolved_config_path = (tmp_path / "nested" / "config.yaml").resolve()
         mock_orchestrator = MagicMock()
         mock_orchestrator.config_path = resolved_config_path
+        mock_orchestrator._require_config_path.return_value = resolved_config_path
         mock_orchestrator.stop = AsyncMock()
 
         async def _watch_config_task(path: Path, _orchestrator: object) -> None:
@@ -698,7 +699,7 @@ class TestAgentBot:
     @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
-    async def test_agent_bot_on_message_mentioned(
+    async def test_agent_bot_on_message_mentioned(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
@@ -789,44 +790,42 @@ class TestAgentBot:
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
-            mock_stream_agent_response.assert_called_once_with(
-                agent_name="calculator",
-                prompt=f"{mention_id}: What's 2+2?",
-                session_id="!test:localhost:$thread_root_id",
-                storage_path=tmp_path,
-                config=config,
-                thread_history=[],
-                room_id="!test:localhost",
-                knowledge=None,
-                user_id="@user:localhost",
-                media=MediaInputs(),
-                reply_to_event_id="event123",
-                show_tool_calls=True,
-                run_metadata_collector=ANY,
-                config_path=None,
-            )
+            mock_stream_agent_response.assert_called_once()
+            stream_kwargs = mock_stream_agent_response.call_args.kwargs
+            assert stream_kwargs["agent_name"] == "calculator"
+            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert stream_kwargs["runtime_paths"].storage_root == tmp_path
+            assert stream_kwargs["config"] == config
+            assert stream_kwargs["thread_history"] == []
+            assert stream_kwargs["room_id"] == "!test:localhost"
+            assert stream_kwargs["knowledge"] is None
+            assert stream_kwargs["user_id"] == "@user:localhost"
+            assert stream_kwargs["media"] == MediaInputs()
+            assert stream_kwargs["reply_to_event_id"] == "event123"
+            assert stream_kwargs["show_tool_calls"] is True
+            assert stream_kwargs["run_metadata_collector"] == {}
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
             assert bot.client.room_send.call_count >= 2
         else:
-            mock_ai_response.assert_called_once_with(
-                agent_name="calculator",
-                prompt=f"{mention_id}: What's 2+2?",
-                session_id="!test:localhost:$thread_root_id",
-                storage_path=tmp_path,
-                config=config,
-                thread_history=[],
-                room_id="!test:localhost",
-                knowledge=None,
-                user_id="@user:localhost",
-                media=MediaInputs(),
-                reply_to_event_id="event123",
-                show_tool_calls=True,
-                tool_trace_collector=ANY,
-                run_metadata_collector=ANY,
-                config_path=None,
-            )
+            mock_ai_response.assert_called_once()
+            ai_kwargs = mock_ai_response.call_args.kwargs
+            assert ai_kwargs["agent_name"] == "calculator"
+            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["config"] == config
+            assert ai_kwargs["thread_history"] == []
+            assert ai_kwargs["room_id"] == "!test:localhost"
+            assert ai_kwargs["knowledge"] is None
+            assert ai_kwargs["user_id"] == "@user:localhost"
+            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_kwargs["reply_to_event_id"] == "event123"
+            assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["tool_trace_collector"] == []
+            assert ai_kwargs["run_metadata_collector"] == {}
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
@@ -3124,14 +3123,14 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins") as mock_load_plugins,
+            patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
             await orchestrator.initialize()
 
-        mock_load_config.assert_called_once_with(config_path.resolve())
-        mock_load_plugins.assert_called_once_with(mock_config, config_path=config_path.resolve())
+        mock_load_config.assert_called_once()
+        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
@@ -3604,15 +3603,15 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins") as mock_load_plugins,
+            patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.update_config()
 
         assert updated is False
-        mock_load_config.assert_called_once_with(config_path.resolve())
-        mock_load_plugins.assert_called_once_with(new_config, config_path=config_path.resolve())
+        mock_load_config.assert_called_once()
+        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
@@ -163,6 +164,10 @@ def _make_git_config(
     )
 
 
+def _runtime_paths(config_path: Path, storage_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+
+
 @pytest.fixture
 def dummy_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KnowledgeManager:
     """Build a KnowledgeManager with lightweight fakes for vector operations."""
@@ -171,7 +176,11 @@ def dummy_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KnowledgeM
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     config = _make_config(tmp_path / "knowledge")
-    return KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+    return KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
 
 
 def test_knowledge_base_relative_path_resolves_from_config_dir(
@@ -184,7 +193,7 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
+    runtime_paths = _runtime_paths(config_dir / "config.yaml", tmp_path / "storage")
 
     config = Config(
         agents={},
@@ -193,12 +202,7 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
             "research": KnowledgeBaseConfig(path="knowledge", watch=False),
         },
     )
-    manager = KnowledgeManager(
-        base_id="research",
-        config=config,
-        storage_path=tmp_path / "storage",
-        config_path=config_path,
-    )
+    manager = KnowledgeManager(base_id="research", config=config, runtime_paths=runtime_paths)
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
 
@@ -213,13 +217,14 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     storage_path = tmp_path / "storage"
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", storage_path)
     config_1536 = _make_config(tmp_path / "knowledge", embedder_dimensions=1536)
     config_3072 = _make_config(tmp_path / "knowledge", embedder_dimensions=3072)
 
-    manager = KnowledgeManager(base_id="research", config=config_1536, storage_path=storage_path)
+    manager = KnowledgeManager(base_id="research", config=config_1536, runtime_paths=runtime_paths)
 
-    assert not manager.matches(config_3072, storage_path)
-    assert manager.needs_full_reindex(config_3072, storage_path)
+    assert not manager.matches(config_3072, runtime_paths)
+    assert manager.needs_full_reindex(config_3072, runtime_paths)
 
 
 def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
@@ -264,10 +269,11 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
         },
     )
 
-    manager = KnowledgeManager(base_id="research", config=implicit_default, storage_path=storage_path)
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", storage_path)
+    manager = KnowledgeManager(base_id="research", config=implicit_default, runtime_paths=runtime_paths)
 
-    assert manager.matches(explicit_default, storage_path)
-    assert not manager.needs_full_reindex(explicit_default, storage_path)
+    assert manager.matches(explicit_default, runtime_paths)
+    assert not manager.needs_full_reindex(explicit_default, runtime_paths)
 
 
 def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,7 +361,11 @@ async def test_index_file_uses_configured_chunk_settings(
             ),
         },
     )
-    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
     file_path = manager.knowledge_path / "doc.md"
     file_path.write_text("test", encoding="utf-8")
 
@@ -553,8 +563,9 @@ async def test_initialize_knowledge_managers_maintains_registry(
             "legal": KnowledgeBaseConfig(path=str(tmp_path / "legal"), watch=False),
         },
     )
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research", "legal"}
     assert get_knowledge_manager("research") is managers["research"]
 
@@ -566,7 +577,7 @@ async def test_initialize_knowledge_managers_maintains_registry(
         },
     )
 
-    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research"}
     assert get_knowledge_manager("legal") is None
 
@@ -590,8 +601,9 @@ async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
             "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
         },
     )
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     original_manager = managers["research"]
 
     # Change chunk_size to trigger an index-affecting settings mismatch.
@@ -612,7 +624,7 @@ async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
     monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
     monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
 
-    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     new_manager = managers["research"]
     assert new_manager is not original_manager
     initialize.assert_awaited_once()
@@ -638,8 +650,9 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
             "research": KnowledgeBaseConfig(path=str(tmp_path / "research"), watch=False),
         },
     )
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     original_manager = managers["research"]
 
     updated_config = Config(
@@ -655,7 +668,7 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
     monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
 
-    managers = await initialize_knowledge_managers(updated_config, tmp_path / "storage", reindex_on_create=False)
+    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     new_manager = managers["research"]
     assert new_manager is not original_manager
     initialize.assert_not_awaited()
@@ -677,7 +690,7 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
     manager = KnowledgeManager(
         base_id="research",
         config=_make_git_config(tmp_path / "knowledge"),
-        storage_path=tmp_path / "storage",
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
     )
 
     async def _sync_once(_git_config: object) -> tuple[set[str], set[str], bool]:
@@ -798,7 +811,7 @@ def test_list_files_skips_hidden_paths_when_git_skip_hidden_enabled(
     manager = KnowledgeManager(
         base_id="research",
         config=_make_git_config(tmp_path / "knowledge"),
-        storage_path=tmp_path / "storage",
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
     )
 
     (manager.knowledge_path / "public").mkdir(parents=True, exist_ok=True)
@@ -827,7 +840,7 @@ def test_list_files_respects_include_and_exclude_patterns(
             include_patterns=["content/post/*/index.md"],
             exclude_patterns=["content/post/draft-*/index.md"],
         ),
-        storage_path=tmp_path / "storage",
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
     )
 
     (manager.knowledge_path / "content" / "post" / "hello" / "index.md").parent.mkdir(parents=True, exist_ok=True)
@@ -864,7 +877,7 @@ async def test_start_watcher_starts_git_sync_even_when_file_watch_disabled(
     manager = KnowledgeManager(
         base_id="research",
         config=_make_git_config(tmp_path / "knowledge"),
-        storage_path=tmp_path / "storage",
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
     )
 
     async def fake_git_sync_loop() -> None:

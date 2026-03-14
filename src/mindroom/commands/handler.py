@@ -7,13 +7,12 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from mindroom import constants
 from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
 from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
@@ -29,7 +28,6 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_exec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
-    from pathlib import Path
 
     import nio
     import structlog
@@ -37,6 +35,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
 
@@ -58,8 +57,7 @@ class CommandHandlerContext:
 
     client: nio.AsyncClient
     config: Config
-    storage_path: Path
-    config_path: Path | None
+    runtime_paths: RuntimePaths
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -213,11 +211,9 @@ def _resolve_skill_command_agent(  # noqa: C901
 def _collect_agent_toolkits(
     config: Config,
     agent_name: str,
-    *,
-    storage_path: Path | None = None,
-    config_path: Path | None = None,
+    runtime_paths: RuntimePaths,
 ) -> list[tuple[str, Toolkit]]:
-    resolved_storage_path = storage_path or constants.STORAGE_PATH_OBJ
+    resolved_storage_path = runtime_paths.storage_root
     worker_tools = config.get_agent_worker_tools(agent_name)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     toolkits: list[tuple[str, Toolkit]] = []
@@ -227,10 +223,9 @@ def _collect_agent_toolkits(
                 tool_name,
                 agent_name=agent_name,
                 config=config,
-                storage_path=resolved_storage_path,
+                runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
-                config_path=config_path,
             )
             if toolkit is None:
                 continue
@@ -363,8 +358,7 @@ async def _maybe_await(value: object) -> object:
 async def _run_skill_command_tool(
     *,
     config: Config,
-    storage_path: Path | None = None,
-    config_path: Path | None = None,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     command_tool: str,
     skill_name: str,
@@ -393,8 +387,7 @@ async def _run_skill_command_tool(
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,
-                storage_path=storage_path,
-                config_path=config_path,
+                runtime_paths,
             )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
@@ -522,7 +515,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.CONFIG:
         # Handle config command
         args_text = command.args.get("args_text", "")
-        response_text, change_info = await handle_config_command(args_text, context.config_path)
+        response_text, change_info = await handle_config_command(args_text, context.runtime_paths.config_path)
 
         # If we have change_info, this is a config set that needs confirmation
         if change_info:
@@ -591,8 +584,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 elif spec.dispatch and spec.dispatch.kind == "tool":
                     response_text = await _run_skill_command_tool(
                         config=context.config,
-                        storage_path=context.storage_path,
-                        config_path=context.config_path,
+                        runtime_paths=context.runtime_paths,
                         agent_name=target_agent,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,

@@ -17,8 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
-# Import routers
 from mindroom import constants
+
+# Import routers
 from mindroom.api.credentials import router as credentials_router
 from mindroom.api.google_integration import router as google_router
 from mindroom.api.homeassistant_integration import router as homeassistant_router
@@ -31,7 +32,6 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
 from mindroom.config.main import Config
-from mindroom.constants import ensure_writable_config_path, safe_replace
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -98,18 +98,19 @@ async def _watch_config(stop_event: asyncio.Event) -> None:
     """Watch config.yaml for changes."""
 
     async def _on_config_change() -> None:
-        logger.info("Config file changed", path=str(constants.runtime_config_path()))
+        config_path = constants.get_runtime_paths().config_path
+        logger.info("Config file changed", path=str(config_path))
         _load_config_from_file()
 
-    await watch_file(constants.runtime_config_path(), _on_config_change, stop_event=stop_event)
+    await watch_file(constants.get_runtime_paths().config_path, _on_config_change, stop_event=stop_event)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
-    config_path = constants.runtime_config_path()
-    print(f"Loading config from: {config_path}")
-    print(f"Config exists: {config_path.exists()}")
+    runtime_paths = constants.get_runtime_paths()
+    print(f"Loading config from: {runtime_paths.config_path}")
+    print(f"Config exists: {runtime_paths.config_path.exists()}")
 
     # Sync API keys from environment to CredentialsManager
     print("Syncing API keys from environment to CredentialsManager...")
@@ -156,7 +157,7 @@ _PLATFORM_LOGIN_URL = os.getenv("MINDROOM_PLATFORM_LOGIN_URL")
 
 def load_runtime_config() -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
-    config_path = constants.runtime_config_path()
+    config_path = constants.get_runtime_paths().config_path
     return Config.from_yaml(config_path), config_path
 
 
@@ -188,7 +189,7 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
 
 def _save_config_to_file(config: dict[str, Any]) -> None:
     """Save config to YAML file with deterministic ordering."""
-    config_path = constants.runtime_config_path()
+    config_path = constants.get_runtime_paths().config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         yaml.dump(
@@ -198,7 +199,7 @@ def _save_config_to_file(config: dict[str, Any]) -> None:
             sort_keys=True,
             allow_unicode=True,
         )
-    safe_replace(tmp_path, config_path)
+    constants.safe_replace(tmp_path, config_path)
 
 
 # Global variable to store current config
@@ -385,7 +386,7 @@ def _sanitize_next_path(next_path: str | None) -> str:
 def _render_standalone_login_page(next_path: str) -> str:
     """Return the standalone dashboard login page."""
     escaped_next_path = html.escape(next_path, quote=True)
-    env_path = html.escape(str(constants.runtime_config_path().parent / ".env"))
+    env_path = html.escape(str(constants.get_runtime_paths().env_path))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -539,15 +540,16 @@ async def verify_user(
 def _load_config_from_file() -> None:
     """Load config from YAML file."""
     global config
+    config_path = constants.get_runtime_paths().config_path
     try:
-        with constants.runtime_config_path().open() as f, config_lock:
+        with config_path.open() as f, config_lock:
             config = yaml.safe_load(f)
         print("Config loaded successfully")
     except Exception as e:
         print(f"Error loading config: {e}")
 
 
-ensure_writable_config_path(create_minimal=True)
+constants.ensure_writable_config_path(create_minimal=True)
 
 # Load initial config
 _load_config_from_file()

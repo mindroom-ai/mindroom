@@ -353,15 +353,13 @@ def build_agent_tool_init_context(
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
     resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
-    workspace_path = (
-        _resolve_agent_workspace_path(
+    workspace_path = None
+    if agent_config.memory_file_path is not None:
+        workspace_path = _resolve_agent_workspace_path(
             agent_name,
             agent_config,
             storage_path=resolved_storage_path,
         )
-        if agent_config.memory_file_path is not None
-        else None
-    )
     return AgentToolInitContext(
         workspace_path=workspace_path,
         worker_scope=config.get_agent_worker_scope(agent_name),
@@ -373,11 +371,10 @@ def build_agent_toolkit(
     *,
     agent_name: str,
     config: Config,
-    storage_path: Path,
+    runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_init_context: AgentToolInitContext,
     delegation_depth: int = 0,
-    config_path: Path | None = None,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -385,6 +382,8 @@ def build_agent_toolkit(
     explicit ``delegate`` entry without valid delegation targets.
     """
     agent_config = config.get_agent(agent_name)
+    storage_path = runtime_paths.storage_root
+    config_path = runtime_paths.config_path
 
     if tool_name == "memory":
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
@@ -415,10 +414,9 @@ def build_agent_toolkit(
         return DelegateTools(
             agent_name=agent_name,
             delegate_to=agent_config.delegate_to,
-            storage_path=storage_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=delegation_depth,
-            config_path=config_path,
         )
 
     if tool_name == "self_config":
@@ -666,28 +664,23 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     *,
-    storage_path: Path | None = None,
+    runtime_paths: constants.RuntimePaths | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
-    config_path: Path | None = None,
 ) -> Agent:
     """Create an agent instance from configuration.
 
     Args:
         agent_name: Name of the agent to create
         config: Application configuration
-        storage_path: Runtime storage path. Falls back to the
-            module-level ``STORAGE_PATH_OBJ`` when *None*.
+        runtime_paths: Explicit runtime path context for config/storage resolution.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
         delegation_depth: Current delegation nesting depth. Used to prevent
             infinite recursion when agents delegate to each other.
-        config_path: Path to the YAML config file used by tools that
-            read/write config at runtime (e.g. ``self_config``).  Falls back
-            to the module-level ``CONFIG_PATH`` when *None*.
 
     Returns:
         Configured Agent instance
@@ -698,13 +691,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
+    resolved_runtime_paths = runtime_paths or constants.get_runtime_paths()
+    resolved_storage_path = resolved_runtime_paths.storage_root
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config, config_path=config_path)
+    load_plugins(config, config_path=resolved_runtime_paths.config_path)
 
     tool_names = get_agent_toolkit_names(
         agent_name,
@@ -712,7 +706,11 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         delegation_depth=delegation_depth,
     )
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        storage_path=resolved_storage_path,
+    )
     # Create tools
     tools: list[Toolkit] = []
     for tool_name in tool_names:
@@ -721,11 +719,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_name,
                 agent_name=agent_name,
                 config=config,
-                storage_path=resolved_storage_path,
+                runtime_paths=resolved_runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
                 delegation_depth=delegation_depth,
-                config_path=config_path,
             ):
                 tools.append(toolkit)
         except (ValueError, ImportError) as e:

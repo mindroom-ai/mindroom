@@ -27,7 +27,12 @@ from mindroom.api.openai_compat import (
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
+
+
+def _runtime_paths() -> object:
+    return resolve_runtime_paths(config_path=Path(__file__))
 
 
 @pytest.fixture
@@ -68,7 +73,7 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
     app.include_router(router)
 
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
         patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
     ):
         yield TestClient(app)
@@ -85,7 +90,7 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
     app.include_router(router)
 
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+        patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
         patch.dict("os.environ", {"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"}),
     ):
         yield TestClient(app)
@@ -103,11 +108,12 @@ def test_load_config_uses_dynamic_runtime_config_path(
         "router:\n  model: default\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(constants, "CONFIG_PATH", config_path)
+    runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
+    monkeypatch.setattr(constants, "_ACTIVE_RUNTIME_PATHS", runtime_paths)
 
-    config, resolved_path = openai_compat._load_config()
+    config, resolved_runtime_paths = openai_compat._load_config()
 
-    assert resolved_path == config_path.resolve()
+    assert resolved_runtime_paths.config_path == config_path.resolve()
     assert "only_alt" in config.agents
 
 
@@ -161,7 +167,7 @@ class TestListModels:
         app.include_router(router)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -187,7 +193,7 @@ class TestListModels:
         app.include_router(router)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -236,7 +242,7 @@ class TestListModels:
             router=RouterConfig(model="default"),
         )
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -387,7 +393,7 @@ class TestChatCompletions:
         app.include_router(router)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -424,7 +430,7 @@ class TestChatCompletions:
         app.include_router(router)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -455,7 +461,7 @@ class TestChatCompletions:
         app.include_router(router)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             client = TestClient(app)
@@ -1036,7 +1042,7 @@ class TestAuthentication:
         app = FastAPI()
         app.include_router(router)
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(test_config, _runtime_paths())),
             patch.dict(
                 "os.environ",
                 {
@@ -1524,7 +1530,7 @@ class TestAutoRouting:
             router=RouterConfig(model="default"),
         )
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(empty_config, _runtime_paths())),
             patch("mindroom.api.openai_compat.suggest_agent", new_callable=AsyncMock) as mock_route,
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
@@ -1632,7 +1638,7 @@ def team_app_client(team_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, Path(__file__))),
+        patch("mindroom.api.openai_compat._load_config", return_value=(team_config, _runtime_paths())),
         patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
     ):
         yield TestClient(app)
@@ -2258,7 +2264,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("collab_team", collaborate_config)
+            _build_team("collab_team", collaborate_config, _runtime_paths())
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -2288,7 +2294,7 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config)
+            _build_team("coord_team", config, _runtime_paths())
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
@@ -2332,7 +2338,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config)
+            _build_team("team_with_kb", config, _runtime_paths())
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs
@@ -2381,7 +2387,7 @@ def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))),
+        patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, _runtime_paths())),
         patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
     ):
         yield TestClient(app)
@@ -2529,7 +2535,7 @@ class TestKnowledgeIntegration:
             return {"docs": mock_manager_docs, "wiki": mock_manager_wiki}.get(base_id)
 
         with (
-            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, Path(__file__))),
+            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, _runtime_paths())),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),

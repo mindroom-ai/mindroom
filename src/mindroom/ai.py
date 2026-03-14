@@ -33,7 +33,7 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
@@ -852,14 +852,13 @@ async def _cached_agent_run(
 async def _prepare_agent_and_prompt(
     agent_name: str,
     prompt: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
     include_interactive_questions: bool = True,
     session_id: str | None = None,
     reply_to_event_id: str | None = None,
-    config_path: Path | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -869,6 +868,7 @@ async def _prepare_agent_and_prompt(
         (empty when using the fallback path).
 
     """
+    storage_path = runtime_paths.storage_root
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config)
 
     unseen_event_ids: list[str] = []
@@ -901,10 +901,9 @@ async def _prepare_agent_and_prompt(
     agent = create_agent(
         agent_name,
         config,
-        storage_path=storage_path,
+        runtime_paths=runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
-        config_path=config_path,
     )
     _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path, session=session)
     return agent, full_prompt, unseen_event_ids
@@ -914,7 +913,7 @@ async def ai_response(
     agent_name: str,
     prompt: str,
     session_id: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
@@ -926,7 +925,6 @@ async def ai_response(
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
-    config_path: Path | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -934,7 +932,7 @@ async def ai_response(
         agent_name: Name of the agent to use
         prompt: User prompt
         session_id: Session ID for conversation tracking
-        storage_path: Path for storing agent data
+        runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
@@ -951,8 +949,6 @@ async def ai_response(
             entries from this run.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
-        config_path: Optional explicit YAML config path used by config-aware tools
-            such as `self_config`.
 
     Returns:
         Agent response string
@@ -960,20 +956,20 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
-            storage_path,
+            runtime_paths,
             config,
             thread_history,
             knowledge,
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
-            config_path=config_path,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1122,7 +1118,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
@@ -1133,7 +1129,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
-    config_path: Path | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1144,7 +1139,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         agent_name: Name of the agent to use
         prompt: User prompt
         session_id: Session ID for conversation tracking
-        storage_path: Path for storing agent data
+        runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
@@ -1159,8 +1154,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         show_tool_calls: Whether to include tool call details inline in the streamed response.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
-        config_path: Optional explicit YAML config path used by config-aware tools
-            such as `self_config`.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1168,20 +1161,20 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     """
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
-            storage_path,
+            runtime_paths,
             config,
             thread_history,
             knowledge,
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
-            config_path=config_path,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)

@@ -109,6 +109,22 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_runtime_paths() -> Generator[None, None, None]:
+    """Restore the process-wide runtime path context after each test."""
+    from mindroom import constants  # noqa: PLC0415
+
+    original = constants.get_runtime_paths()
+    original_path_env = {key: os.environ.get(key) for key in ("MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH")}
+    yield
+    constants._set_active_runtime_paths(original)
+    for key, value in original_path_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
 def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """Bypass authorization checks in tests by default.
 

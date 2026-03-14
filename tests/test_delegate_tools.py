@@ -12,6 +12,7 @@ from mindroom.agents import create_agent, describe_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
 
@@ -61,10 +62,14 @@ class TestDelegateTools:
     @pytest.fixture
     def tools(self, storage_path: Path, config: Config) -> DelegateTools:
         """Create a DelegateTools instance for testing."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_path / "config.yaml",
+            storage_path=storage_path,
+        )
         return DelegateTools(
             agent_name="leader",
             delegate_to=["code", "research"],
-            storage_path=storage_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=0,
         )
@@ -122,11 +127,10 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 tools._config,
-                storage_path=tools._storage_path,
+                runtime_paths=tools._runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
-                config_path=None,
             )
             mock_agent.arun.assert_called_once_with("Write a hello world program")
             assert result == "Here is the generated code: print('hello')"
@@ -158,10 +162,14 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegation_depth_increments(self, storage_path: Path, config: Config) -> None:
         """Verify that delegation_depth is passed through correctly."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_path / "config.yaml",
+            storage_path=storage_path,
+        )
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["code"],
-            storage_path=storage_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=1,
         )
@@ -176,11 +184,10 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
-                storage_path=storage_path,
+                runtime_paths=runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=2,
-                config_path=None,
             )
 
     @pytest.mark.asyncio
@@ -193,13 +200,13 @@ class TestDelegateTools:
         """Delegated agents should inherit the orchestrator-owned config path."""
         config.agents["code"].tools = ["self_config"]
         config_path = tmp_path / "custom-config.yaml"
+        runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["code"],
-            storage_path=storage_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=0,
-            config_path=config_path,
         )
 
         mock_response = MagicMock()
@@ -212,11 +219,10 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
-                storage_path=storage_path,
+                runtime_paths=runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
-                config_path=config_path,
             )
 
 
@@ -242,10 +248,11 @@ class TestDelegateKnowledge:
             models={"default": ModelConfig(provider="openai", id="gpt-4")},
             knowledge_bases={"docs": {"path": "./docs"}},
         )
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["researcher"],
-            storage_path=tmp_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=0,
         )
@@ -269,11 +276,10 @@ class TestDelegateKnowledge:
             mock_create.assert_called_once_with(
                 "researcher",
                 config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths,
                 knowledge=mock_knowledge,
                 include_interactive_questions=False,
                 delegation_depth=1,
-                config_path=None,
             )
             assert result == "Found relevant docs"
 
@@ -290,10 +296,11 @@ class TestDelegateKnowledge:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
             delegate_to=["worker"],
-            storage_path=tmp_path,
+            runtime_paths=runtime_paths,
             config=config,
             delegation_depth=0,
         )
@@ -308,11 +315,10 @@ class TestDelegateKnowledge:
             mock_create.assert_called_once_with(
                 "worker",
                 config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
-                config_path=None,
             )
 
 

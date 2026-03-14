@@ -154,8 +154,8 @@ def test_ensure_writable_config_path_seeds_from_template(
     template_config = tmp_path / "template.yaml"
     template_config.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
 
-    monkeypatch.setattr(constants, "CONFIG_PATH", writable_config)
-    monkeypatch.setattr(constants, "_CONFIG_TEMPLATE_PATH", template_config)
+    constants.set_runtime_paths(config_path=writable_config)
+    monkeypatch.setattr(constants, "_CONFIG_TEMPLATE_ENV", str(template_config))
 
     assert constants.ensure_writable_config_path() is True
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
@@ -197,7 +197,7 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
         await callback()
         stop_event.set()
 
-    monkeypatch.setattr(constants, "CONFIG_PATH", config_path)
+    constants.set_runtime_paths(config_path=config_path)
     monkeypatch.setattr(main, "watch_file", _fake_watch_file)
     monkeypatch.setattr(main, "_load_config_from_file", lambda: watched_paths.append(Path("loaded")))
 
@@ -378,26 +378,8 @@ def test_get_agents(test_client: TestClient) -> None:
     agent = agents[0]
     assert "id" in agent
     assert "display_name" in agent
-
-
-def test_load_runtime_config_uses_dynamic_runtime_config_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runtime config loading should follow the active runtime config path."""
-    config_path = tmp_path / "alt-config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
-        "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
-        "router:\n  model: default\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(constants, "CONFIG_PATH", config_path)
-
-    config, resolved_path = main.load_runtime_config()
-
-    assert resolved_path == config_path.resolve()
-    assert "only_alt" in config.agents
+    assert "tools" in agent
+    assert "rooms" in agent
 
 
 def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
@@ -1170,7 +1152,7 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    monkeypatch.setattr(constants, "CONFIG_PATH", temp_config_file)
+    constants.set_runtime_paths(config_path=temp_config_file)
     monkeypatch.setattr(main, "_MINDROOM_API_KEY", "test-key")
     main._load_config_from_file()
     return TestClient(main.app)

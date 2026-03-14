@@ -20,6 +20,7 @@ from mindroom.commands.config_commands import (
 )
 from mindroom.commands.handler import CommandHandlerContext, handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
+from mindroom.constants import resolve_runtime_paths
 
 
 class TestCommandParser:
@@ -227,8 +228,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
     context = CommandHandlerContext(
         client=AsyncMock(),
         config=MagicMock(),
-        storage_path=tmp_path,
-        config_path=config_path,
+        runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
         logger=MagicMock(),
         response_tracker=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),
