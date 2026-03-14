@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -25,6 +26,29 @@ class TestConsolidatedConfigManager:
         assert any(tool.__name__ == "get_info" for tool in cm.tools)
         assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
         assert any(tool.__name__ == "manage_team" for tool in cm.tools)
+
+    def test_init_uses_active_runtime_config_path(self, tmp_path: Path) -> None:
+        """Default initialization should follow the active runtime config path."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            config = Config(agents={})
+            config.agents["test"] = AgentConfig(
+                display_name="Test Agent",
+                role="Test role",
+                tools=["googlesearch"],
+                model="default",
+            )
+            config.save_to_yaml(config_path)
+
+        try:
+            constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+
+            cm = ConfigManagerTools()
+
+            assert cm.config_path == config_path.resolve()
+            assert "Test Agent" in cm.get_info(info_type="agents")
+        finally:
+            config_path.unlink(missing_ok=True)
 
     def test_get_info_agents(self) -> None:
         """Test get_info with agents info type."""
@@ -671,9 +695,9 @@ class TestGetAgentWorkerTools:
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
         config = Config(
-            defaults=DefaultsConfig(worker_scope="room_thread"),
+            defaults=DefaultsConfig(worker_scope="user"),
             agents={
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_scope("code") == "room_thread"
+        assert config.get_agent_worker_scope("code") == "user"

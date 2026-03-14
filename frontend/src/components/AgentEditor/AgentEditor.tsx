@@ -373,7 +373,7 @@ export function AgentEditor() {
       {/* Memory File Path */}
       <FieldGroup
         label="Memory File Path"
-        helperText="Optional directory for this agent's file-memory scope. Used only when effective backend is file."
+        helperText="Optional workspace-relative directory for this agent's file memory. Used only when the effective backend is file."
         htmlFor="memory_file_path"
       >
         <Controller
@@ -383,7 +383,7 @@ export function AgentEditor() {
             <Input
               id="memory_file_path"
               value={field.value ?? ''}
-              placeholder="./openclaw_data"
+              placeholder="mind_data"
               disabled={effectiveMemoryBackend !== 'file'}
               onChange={e => {
                 const resolved = e.target.value === '' ? undefined : e.target.value;
@@ -461,7 +461,7 @@ export function AgentEditor() {
       {/* Context Files */}
       <FieldGroup
         label="Context Files"
-        helperText="File paths read at agent init and prepended to role context"
+        helperText="Workspace-relative files loaded into each freshly built agent instance and prepended to its role context."
         actions={
           <Button variant="outline" size="sm" onClick={handleAddContextFile} className="h-9 px-3">
             <Plus className="h-4 w-4 sm:mr-1" />
@@ -484,7 +484,7 @@ export function AgentEditor() {
                       field.onChange(updated);
                       handleFieldChange('context_files', updated);
                     }}
-                    placeholder="./path/to/file.md"
+                    placeholder="mind_data/SOUL.md"
                     className="min-h-[40px]"
                   />
                   <Button

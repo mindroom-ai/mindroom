@@ -57,12 +57,8 @@ export function Integrations() {
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => agent.worker_scope != null && agent.worker_scope !== 'room_thread')
+        .filter(agent => agent.worker_scope != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [agents]
-  );
-  const roomThreadAgents = useMemo(
-    () => agents.filter(agent => agent.worker_scope === 'room_thread'),
     [agents]
   );
   const selectedScopeAgent = useMemo(
@@ -730,14 +726,6 @@ export function Integrations() {
                 } worker scope).`
               : 'Connect external services to enable agent capabilities'}
           </p>
-          {roomThreadAgents.length > 0 && (
-            <Alert className="mt-3">
-              <AlertDescription>
-                Room-thread scoped agents are not configurable here because their worker is selected
-                at runtime from a room and thread.
-              </AlertDescription>
-            </Alert>
-          )}
           {hidesSharedOnlyIntegrations && (
             <Alert className="mt-3">
               <AlertDescription>

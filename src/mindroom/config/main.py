@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -18,7 +18,13 @@ from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, Mi
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
-from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
+from mindroom.constants import (
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    get_runtime_paths,
+    runtime_matrix_homeserver,
+    safe_replace,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,
@@ -117,6 +123,7 @@ class Config(BaseModel):
     """Complete configuration from YAML."""
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
+    _runtime_paths: RuntimePaths | None = PrivateAttr(default=None)
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -349,7 +356,9 @@ class Config(BaseModel):
         """Extract the domain from the MATRIX_HOMESERVER."""
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        return extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        return extract_server_name_from_homeserver(
+            runtime_matrix_homeserver(runtime_paths=self._runtime_paths),
+        )
 
     @cached_property
     def ids(self) -> dict[str, MatrixID]:
@@ -384,9 +393,15 @@ class Config(BaseModel):
         return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
 
     @classmethod
-    def from_yaml(cls, config_path: Path | None = None) -> Config:
+    def from_yaml(
+        cls,
+        config_path: Path | None = None,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> Config:
         """Create a Config instance from YAML data."""
-        path = config_path or CONFIG_PATH
+        resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
+        path = resolved_runtime_paths.config_path
 
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
@@ -412,6 +427,7 @@ class Config(BaseModel):
             data["matrix_space"] = {}
 
         config = cls(**data)
+        config._runtime_paths = resolved_runtime_paths
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config
@@ -713,14 +729,17 @@ class Config(BaseModel):
 
         return configured_bots
 
-    def save_to_yaml(self, config_path: Path | None = None) -> None:
+    def save_to_yaml(
+        self,
+        config_path: Path | None = None,
+    ) -> None:
         """Save the config to a YAML file, excluding None values.
 
         Args:
             config_path: Path to save the config to. If None, uses CONFIG_PATH.
 
         """
-        path = config_path or CONFIG_PATH
+        path = config_path or get_runtime_paths().config_path
         config_dict = self.model_dump(exclude_none=True)
         path_obj = Path(path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)

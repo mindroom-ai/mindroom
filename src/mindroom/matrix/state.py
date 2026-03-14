@@ -6,7 +6,7 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, Field, field_serializer
 
-from mindroom.constants import MATRIX_STATE_FILE
+from mindroom import constants
 
 
 class _MatrixAccount(BaseModel):
@@ -40,10 +40,10 @@ class MatrixState(BaseModel):
     @classmethod
     def load(cls) -> Self:
         """Load state from file."""
-        if not MATRIX_STATE_FILE.exists():
+        if not constants.MATRIX_STATE_FILE.exists():
             return cls()
 
-        with MATRIX_STATE_FILE.open() as f:
+        with constants.MATRIX_STATE_FILE.open() as f:
             data = yaml.safe_load(f) or {}
 
         return cls.model_validate(data)
@@ -53,8 +53,8 @@ class MatrixState(BaseModel):
         # Use Pydantic's model_dump with custom serializer for datetime
         data = self.model_dump(mode="json")
 
-        MATRIX_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with MATRIX_STATE_FILE.open("w") as f:
+        constants.MATRIX_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with constants.MATRIX_STATE_FILE.open("w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     def get_account(self, key: str) -> _MatrixAccount | None:

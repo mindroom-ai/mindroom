@@ -32,7 +32,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
 
     # Create a minimal mock config
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_agent_knowledge_base_ids.return_value = []
@@ -183,7 +183,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
 
     # Create a minimal mock config
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_agent_knowledge_base_ids.return_value = []
@@ -279,8 +279,8 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     # Create a minimal mock config with multiple agents
     config = Mock()
     config.agents = {
-        "test_agent": Mock(knowledge_bases=[]),
-        "helper_agent": Mock(knowledge_bases=[]),
+        "test_agent": Mock(knowledge_bases=[], private=None),
+        "helper_agent": Mock(knowledge_bases=[], private=None),
     }
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
@@ -448,7 +448,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
 
     # Create a minimal mock config
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.authorization = Mock()
     config.authorization.is_authorized = Mock(return_value=True)
@@ -726,7 +726,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
 
     # Create a minimal mock config with voice enabled
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_agent_knowledge_base_ids.return_value = []
@@ -835,7 +835,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
     # Create a minimal mock config with voice enabled
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
     config.get_agent_knowledge_base_ids.return_value = []
@@ -1027,7 +1027,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
 
     # Create a minimal mock config with voice enabled
     config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
+    config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
     config.domain = "example.com"
     config.ids = {}
     config.get_agent_knowledge_base_ids.return_value = []

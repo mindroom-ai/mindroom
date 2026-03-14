@@ -6,6 +6,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 import mindroom.constants as constants_mod
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,7 +21,10 @@ def _patch_config_globals(
     search_paths: list[Path] | None = None,
 ) -> None:
     """Patch module-level config globals used by find_config / config_search_locations."""
-    monkeypatch.setattr(constants_mod, "_CONFIG_PATH_ENV", env)
+    if env is None:
+        monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", env)
     if search_paths is not None:
         monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
 
@@ -141,6 +145,147 @@ class TestResolveConfigRelativePath:
         resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
         assert resolved == absolute_path.resolve()
 
+    def test_environment_variables_are_expanded_before_resolution(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config path resolution should treat `${MINDROOM_STORAGE_PATH}` as the runtime storage root."""
+        storage_root = tmp_path / "runtime-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+            config_path=tmp_path / "config.yaml",
+        )
+
+        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+
+    def test_config_from_yaml_loads_sibling_env_for_expansion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit config paths should use their sibling `.env` for path expansion."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        custom_storage = tmp_path / "custom-storage"
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={custom_storage}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        Config.from_yaml(config_path)
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/kb",
+            config_path=config_path,
+        )
+        assert resolved == custom_storage.resolve() / "kb"
+
+    def test_explicit_config_path_uses_its_own_sibling_env_over_active_runtime_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Alternate config loads must not inherit the active runtime storage root."""
+        active_dir = tmp_path / "active"
+        other_dir = tmp_path / "other"
+        active_dir.mkdir(parents=True, exist_ok=True)
+        other_dir.mkdir(parents=True, exist_ok=True)
+        active_config = active_dir / "config.yaml"
+        other_config = other_dir / "config.yaml"
+        for path in (active_config, other_config):
+            path.write_text(
+                "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+                encoding="utf-8",
+            )
+        (active_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={active_dir / 'storage-active'}\n",
+            encoding="utf-8",
+        )
+        (other_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={other_dir / 'storage-other'}\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.set_runtime_paths(config_path=active_config)
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/kb",
+            config_path=other_config,
+        )
+
+        assert resolved == (other_dir / "storage-other" / "kb").resolve()
+
+    def test_config_from_yaml_does_not_override_existing_shell_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config loads should not mutate already-exported process env values."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            "OPENAI_API_KEY=from-file\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "from-shell")
+
+        Config.from_yaml(config_path)
+
+        assert constants_mod.runtime_env_value("OPENAI_API_KEY") == "from-shell"
+
+    def test_config_domain_uses_sibling_env_matrix_homeserver(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config.domain should resolve MATRIX_HOMESERVER from the explicit config's sibling `.env`."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            "MATRIX_HOMESERVER=https://example.org\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+
+        config = Config.from_yaml(config_path)
+
+        assert config.domain == "example.org"
+
+    def test_ensure_writable_config_path_uses_active_runtime_template_env(self, tmp_path: Path) -> None:
+        """Template seeding should honor MINDROOM_CONFIG_TEMPLATE from the active runtime `.env`."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        template_path = tmp_path / "template.yaml"
+        template_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_CONFIG_TEMPLATE={template_path}\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.set_runtime_paths(config_path=config_path)
+
+        assert constants_mod.ensure_writable_config_path() is True
+        assert config_path.read_text(encoding="utf-8") == "agents: {}\nmodels: {}\n"
+
 
 class TestResolveAvatarPath:
     """Tests for resolve_avatar_path()."""
@@ -154,8 +299,7 @@ class TestResolveAvatarPath:
         active_config = tmp_path / "runtime" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir()
 
@@ -171,8 +315,7 @@ class TestResolveAvatarPath:
         explicit_config = tmp_path / "workspace" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir(config_path=explicit_config)
 
@@ -235,8 +378,7 @@ class TestResolveAvatarPath:
         storage_dir = tmp_path / "storage"
         bundled_dir = tmp_path / "bundled"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        monkeypatch.setattr(constants_mod, "CONFIG_PATH", active_config)
-        monkeypatch.setattr(constants_mod, "STORAGE_PATH_OBJ", storage_dir)
+        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")

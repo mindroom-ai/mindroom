@@ -11,6 +11,8 @@ from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
+    resolve_worker_key,
+    worker_root_path,
 )
 
 if TYPE_CHECKING:
@@ -83,7 +85,12 @@ def _private_root_name(agent_name: str, config: Config) -> str:
     return agent_config.private.root
 
 
-def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWorkspace | None:
+def _effective_workspace(
+    agent_name: str,
+    config: Config,
+    *,
+    config_path: Path | None = None,
+) -> _EffectiveAgentWorkspace | None:
     agent_config = config.agents.get(agent_name)
     if agent_config is None or agent_config.private is None:
         return None
@@ -91,7 +98,7 @@ def _effective_workspace(agent_name: str, config: Config) -> _EffectiveAgentWork
     return _EffectiveAgentWorkspace(
         root_path=_private_root_name(agent_name, config),
         template_dir=(
-            resolve_config_relative_path(private_config.template_dir)
+            resolve_config_relative_path(private_config.template_dir, config_path=config_path)
             if private_config.template_dir is not None
             else None
         ),
@@ -121,6 +128,41 @@ def _resolve_workspace_execution_identity(
     return resolved_identity
 
 
+def resolve_agent_private_state_storage_path(
+    agent_name: str,
+    config: Config,
+    *,
+    base_storage_path: Path,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Path:
+    """Return the requester-scoped state root for one private agent instance."""
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_config.private is None:
+        return resolve_agent_state_storage_path(
+            agent_name=agent_name,
+            base_storage_path=base_storage_path,
+        ).resolve()
+
+    resolved_identity = _resolve_workspace_execution_identity(
+        agent_name,
+        config,
+        execution_identity,
+    )
+    if resolved_identity is None:
+        msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+        raise ValueError(msg)
+
+    worker_key = resolve_worker_key(
+        agent_config.private.per,
+        resolved_identity,
+        agent_name=agent_name,
+    )
+    if worker_key is None:
+        msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{agent_config.private.per}'"
+        raise ValueError(msg)
+    return worker_root_path(base_storage_path, worker_key).resolve()
+
+
 def _resolve_workspace(
     agent_name: str,
     config: Config,
@@ -128,16 +170,17 @@ def _resolve_workspace(
     state_storage_path: Path,
     use_state_storage_path: bool,
     create: bool,
+    config_path: Path | None = None,
 ) -> ResolvedAgentWorkspace | None:
     agent_config = config.agents.get(agent_name)
     if agent_config is None:
         return None
 
-    workspace = _effective_workspace(agent_name, config)
+    workspace = _effective_workspace(agent_name, config, config_path=config_path)
     if workspace is None:
         if agent_config.memory_file_path is None:
             return None
-        legacy_root = resolve_config_relative_path(agent_config.memory_file_path)
+        legacy_root = resolve_config_relative_path(agent_config.memory_file_path, config_path=config_path)
         if create:
             legacy_root.mkdir(parents=True, exist_ok=True)
         return ResolvedAgentWorkspace(
@@ -175,26 +218,24 @@ def resolve_agent_workspace(
     base_storage_path: Path | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
+    config_path: Path | None = None,
 ) -> ResolvedAgentWorkspace | None:
     """Resolve one agent's effective workspace for the current execution scope."""
     resolved_base_storage_path = (base_storage_path or STORAGE_PATH_OBJ).expanduser().resolve()
-    resolved_execution_identity = _resolve_workspace_execution_identity(
+    state_storage_path = resolve_agent_private_state_storage_path(
         agent_name,
         config,
-        execution_identity,
-    )
-    state_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
         base_storage_path=resolved_base_storage_path,
-        config=config,
-        execution_identity=resolved_execution_identity,
-    ).resolve()
+        execution_identity=execution_identity,
+    )
+    agent_config = config.agents.get(agent_name)
     return _resolve_workspace(
         agent_name,
         config,
         state_storage_path=state_storage_path,
-        use_state_storage_path=state_storage_path != resolved_base_storage_path,
+        use_state_storage_path=agent_config is not None and agent_config.private is not None,
         create=create,
+        config_path=config_path,
     )
 
 
@@ -205,6 +246,7 @@ def resolve_agent_workspace_from_state_path(
     state_storage_path: Path,
     use_state_storage_path: bool,
     create: bool = False,
+    config_path: Path | None = None,
 ) -> ResolvedAgentWorkspace | None:
     """Resolve one agent workspace when the caller already knows the state root."""
     return _resolve_workspace(
@@ -213,6 +255,7 @@ def resolve_agent_workspace_from_state_path(
         state_storage_path=state_storage_path.expanduser().resolve(),
         use_state_storage_path=use_state_storage_path,
         create=create,
+        config_path=config_path,
     )
 
 

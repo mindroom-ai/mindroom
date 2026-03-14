@@ -22,6 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
+from mindroom import constants
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolInitOverrideError,
@@ -34,6 +35,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     tool_execution_identity,
+    visible_agent_state_roots_for_worker_key,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -62,6 +64,9 @@ _RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
+_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
@@ -182,6 +187,17 @@ class SandboxWorkerCleanupResponse(BaseModel):
 
     idle_timeout_seconds: float
     cleaned_workers: list[SandboxWorkerResponse]
+
+
+@dataclass(frozen=True)
+class _PreparedWorkerRequest:
+    handle: WorkerHandle
+    paths: LocalWorkerStatePaths
+    runtime_overrides: dict[str, object]
+
+
+class _WorkerRequestPreparationError(ValueError):
+    """Raised when one worker-backed execute request cannot be prepared."""
 
 
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
@@ -318,6 +334,61 @@ def _runner_dedicated_worker_root() -> Path | None:
     return None
 
 
+def _runner_shared_storage_root() -> Path | None:
+    shared_root = os.getenv(_SHARED_STORAGE_ROOT_ENV, "").strip()
+    if shared_root:
+        return Path(shared_root).expanduser().resolve()
+
+    dedicated_root = _runner_dedicated_worker_root()
+    worker_key = _runner_dedicated_worker_key()
+    if dedicated_root is None or worker_key is None:
+        return None
+
+    storage_subpath_prefix = (
+        os.getenv(
+            _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
+            _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
+        ).strip()
+        or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
+    )
+    return _shared_root_from_dedicated_worker_root(
+        dedicated_root=dedicated_root,
+        worker_key=worker_key,
+        storage_subpath_prefix=storage_subpath_prefix,
+    )
+
+
+def _shared_root_from_dedicated_worker_root(
+    *,
+    dedicated_root: Path,
+    worker_key: str,
+    storage_subpath_prefix: str,
+) -> Path | None:
+    """Recover the shared storage root from `<shared>/<prefix>/<worker-dir>`."""
+    resolved_dedicated_root = dedicated_root.expanduser().resolve()
+    if resolved_dedicated_root.name != worker_dir_name(worker_key):
+        return None
+
+    prefix_parts = tuple(Path(storage_subpath_prefix.strip("/")).parts)
+    parent = resolved_dedicated_root.parent
+    for expected_part in reversed(prefix_parts):
+        if parent.name != expected_part:
+            return None
+        parent = parent.parent
+    return parent.resolve()
+
+
+def _runner_storage_root() -> Path:
+    if shared_root := _runner_shared_storage_root():
+        return shared_root
+
+    storage_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if storage_root:
+        return Path(storage_root).expanduser().resolve()
+
+    return constants.STORAGE_PATH_OBJ.resolve()
+
+
 def _runner_uses_dedicated_worker() -> bool:
     return _runner_dedicated_worker_key() is not None
 
@@ -344,7 +415,8 @@ def _current_runtime_site_packages() -> list[str]:
 def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
-    env["MINDROOM_STORAGE_PATH"] = str(paths.storage_dir)
+    current_storage_root = env.get("MINDROOM_STORAGE_PATH", "").strip()
+    env["MINDROOM_STORAGE_PATH"] = current_storage_root or str(_runner_storage_root())
     env[LOCAL_WORKER_ROOT_ENV] = str(paths.root.parent)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
@@ -422,14 +494,6 @@ def _prepare_worker(worker_key: str) -> WorkerHandle:
     return get_local_worker_manager().ensure_worker(WorkerSpec(worker_key))
 
 
-def _worker_initialization_failure_response(
-    worker_key: str,
-    exc: WorkerBackendError,
-) -> SandboxRunnerExecuteResponse:
-    logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
-    return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
-
-
 def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteRequest:
     """Fill in the pinned worker key for dedicated worker pods when omitted."""
     dedicated_worker_key = _runner_dedicated_worker_key()
@@ -438,15 +502,101 @@ def _normalize_request_worker_key(request: SandboxRunnerExecuteRequest) -> Sandb
     return request
 
 
-async def _execute_request_inprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    runtime_overrides: dict[str, object] | None = None
-    if request.worker_key is not None:
-        try:
-            worker_handle = _prepare_worker(request.worker_key)
-        except WorkerBackendError as exc:
-            return _worker_initialization_failure_response(request.worker_key, exc)
-        runtime_overrides = {"base_dir": local_worker_state_paths_from_handle(worker_handle).workspace}
+def _resolve_worker_base_dir(
+    paths: LocalWorkerStatePaths,
+    storage_root: Path,
+    worker_key: str,
+    requested_base_dir: object | None,
+) -> Path:
+    """Resolve the effective base_dir inside shared storage or the worker root."""
+    shared_root = storage_root.resolve()
+    if requested_base_dir is None:
+        return paths.workspace.resolve()
+    if not isinstance(requested_base_dir, str):
+        msg = "base_dir must be a string path."
+        raise TypeError(msg)
 
+    visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
+    raw_path = Path(requested_base_dir).expanduser()
+    if raw_path.is_absolute():
+        candidate = raw_path.resolve()
+    elif visible_agent_roots:
+        candidate = (shared_root / raw_path).resolve()
+    else:
+        msg = f"base_dir requires a resolved worker key with visible agent roots: {worker_key}"
+        raise ValueError(msg)
+
+    allowed_roots = (paths.root.resolve(), *visible_agent_roots)
+    if not any(candidate.is_relative_to(root) for root in allowed_roots):
+        msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
+        raise ValueError(msg)
+
+    return candidate
+
+
+def _ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
+    if runtime_overrides is None:
+        return None
+
+    base_dir = runtime_overrides.get("base_dir")
+    if isinstance(base_dir, Path):
+        base_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_overrides
+
+
+def _prepare_worker_request(
+    request: SandboxRunnerExecuteRequest,
+) -> _PreparedWorkerRequest:
+    """Prepare one worker-backed request for execution."""
+    if request.worker_key is None:
+        msg = "worker_key is required for worker-backed sandbox execution."
+        raise _WorkerRequestPreparationError(msg)
+
+    try:
+        worker_handle = _prepare_worker(request.worker_key)
+    except WorkerBackendError as exc:
+        logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=request.worker_key)
+        raise _WorkerRequestPreparationError(str(exc)) from exc
+
+    paths = local_worker_state_paths_from_handle(worker_handle)
+    storage_root = _runner_storage_root()
+    try:
+        runtime_overrides = {
+            "base_dir": _resolve_worker_base_dir(
+                paths,
+                storage_root,
+                request.worker_key,
+                request.tool_init_overrides.get("base_dir"),
+            ),
+        }
+    except (TypeError, ValueError) as exc:
+        raise _WorkerRequestPreparationError(str(exc)) from exc
+
+    return _PreparedWorkerRequest(
+        handle=worker_handle,
+        paths=paths,
+        runtime_overrides=runtime_overrides,
+    )
+
+
+def _resolve_prepared_worker_request(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None,
+) -> _PreparedWorkerRequest | None:
+    if request.worker_key is None:
+        return None
+    return prepared_worker or _prepare_worker_request(request)
+
+
+async def _execute_request_inprocess(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
+    try:
+        prepared = _resolve_prepared_worker_request(request, prepared_worker)
+    except _WorkerRequestPreparationError as exc:
+        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+    runtime_overrides = _ready_runtime_overrides(prepared.runtime_overrides if prepared is not None else None)
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
@@ -497,13 +647,12 @@ def _subprocess_failure_response(
 
 
 def _resolve_subprocess_worker_context(
-    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None,
 ) -> tuple[str | None, dict[str, str] | None, str | None]:
-    if request.worker_key is None:
+    if prepared_worker is None:
         return None, None, None
 
-    worker_handle = _prepare_worker(request.worker_key)
-    paths = local_worker_state_paths_from_handle(worker_handle)
+    paths = prepared_worker.paths
     return (
         str(paths.venv_dir / "bin" / "python"),
         _worker_subprocess_env(paths),
@@ -536,14 +685,16 @@ def _parse_subprocess_response(
     return _subprocess_failure_response(request, "Sandbox subprocess returned an invalid response.")
 
 
-def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
+def _execute_request_subprocess_sync(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
     try:
-        python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(request)
-    except WorkerBackendError as exc:
-        if request.worker_key is None:
-            msg = "Worker initialization failed without a worker key."
-            raise RuntimeError(msg) from exc
-        return _worker_initialization_failure_response(request.worker_key, exc)
+        prepared = _resolve_prepared_worker_request(request, prepared_worker)
+    except _WorkerRequestPreparationError as exc:
+        return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
+
+    python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared)
 
     try:
         completed = subprocess.run(
@@ -564,8 +715,11 @@ def _execute_request_subprocess_sync(request: SandboxRunnerExecuteRequest) -> Sa
     return _parse_subprocess_response(request, completed)
 
 
-async def _execute_request_subprocess(request: SandboxRunnerExecuteRequest) -> SandboxRunnerExecuteResponse:
-    return await asyncio.to_thread(_execute_request_subprocess_sync, request)
+async def _execute_request_subprocess(
+    request: SandboxRunnerExecuteRequest,
+    prepared_worker: _PreparedWorkerRequest | None = None,
+) -> SandboxRunnerExecuteResponse:
+    return await asyncio.to_thread(_execute_request_subprocess_sync, request, prepared_worker)
 
 
 def _run_subprocess_worker() -> int:
@@ -672,14 +826,20 @@ async def execute_tool_call(
         )
 
     request.credential_overrides = credential_overrides
+    prepared_worker: _PreparedWorkerRequest | None = None
+    if request.worker_key is not None:
+        try:
+            prepared_worker = _prepare_worker_request(request)
+        except _WorkerRequestPreparationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if _runner_uses_subprocess():
-        return await _execute_request_subprocess(request)
+        return await _execute_request_subprocess(request, prepared_worker)
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
     if request.worker_key is not None:
-        return await _execute_request_subprocess(request)
-    return await _execute_request_inprocess(request)
+        return await _execute_request_subprocess(request, prepared_worker)
+    return await _execute_request_inprocess(request, prepared_worker)
 
 
 if __name__ == "__main__":
