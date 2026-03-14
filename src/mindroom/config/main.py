@@ -22,7 +22,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     exported_process_env,
-    process_env_value,
+    resolve_primary_runtime_paths,
     resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
@@ -116,17 +116,9 @@ def _resolve_runtime_paths_for_config_load(
 
     process_env = exported_process_env()
     if config_path is None:
-        return resolve_runtime_paths(process_env=process_env)
+        return resolve_primary_runtime_paths(process_env=process_env)
 
     resolved_config_path = Path(config_path).expanduser().resolve()
-    configured_config_path = (process_env_value("MINDROOM_CONFIG_PATH") or "").strip()
-    if configured_config_path and Path(configured_config_path).expanduser().resolve() == resolved_config_path:
-        filtered_process_env = dict(process_env)
-        configured_storage_path = (process_env_value("MINDROOM_STORAGE_PATH") or "").strip()
-        if configured_storage_path:
-            filtered_process_env["MINDROOM_STORAGE_PATH"] = configured_storage_path
-        return resolve_runtime_paths(config_path=resolved_config_path, process_env=filtered_process_env)
-
     filtered_process_env = {
         key: value for key, value in process_env.items() if key not in {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
     }
@@ -731,7 +723,7 @@ class Config(BaseModel):
         """Save the config to a YAML file, excluding None values.
 
         Args:
-            config_path: Path to save the config to. If None, uses CONFIG_PATH.
+            config_path: Path to save the config to. If None, uses the bound runtime config path.
 
         """
         path = config_path or (self._runtime_paths.config_path if self._runtime_paths is not None else None)

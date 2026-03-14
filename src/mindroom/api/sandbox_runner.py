@@ -75,11 +75,11 @@ _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 def _load_config_from_env() -> tuple[Config | None, Path | None]:
     """Read runner config path from environment variables."""
     from mindroom.config.main import Config as _Config  # noqa: PLC0415
-    from mindroom.constants import find_config  # noqa: PLC0415
+    from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
 
-    config_path = find_config()
-    if config_path.exists():
-        return _Config.from_yaml(config_path), config_path
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    if runtime_paths.config_path.exists():
+        return _Config.from_yaml(runtime_paths=runtime_paths), runtime_paths.config_path
     return None, None
 
 
@@ -386,7 +386,7 @@ def _runner_storage_root() -> Path:
     if storage_root:
         return Path(storage_root).expanduser().resolve()
 
-    return constants.resolve_runtime_paths(process_env=dict(os.environ)).storage_root
+    return constants.resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
 
 
 def _runner_uses_dedicated_worker() -> bool:

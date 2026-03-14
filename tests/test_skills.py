@@ -408,7 +408,6 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
     )
     expected_workspace = agent_workspace_root_path(runtime_storage, "code") / "mind_data"
 
-    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     with tool_execution_identity(identity):
         toolkits = _collect_agent_toolkits(
             config,

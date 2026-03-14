@@ -72,16 +72,6 @@ class RuntimePaths:
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-CONFIG_PATH: Path
-STORAGE_PATH: str
-STORAGE_PATH_OBJ: Path
-MATRIX_STATE_FILE: Path
-TRACKING_DIR: Path
-_MEMORY_DIR: Path
-CREDENTIALS_DIR: Path
-ENCRYPTION_KEYS_DIR: Path
-
-
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
     if process_env is not None:
         return dict(process_env)
@@ -141,10 +131,6 @@ def _storage_root_from_env_path(env_path: Path) -> Path | None:
     return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path))
 
 
-def _active_runtime_paths_or_none() -> RuntimePaths | None:
-    return globals().get("_ACTIVE_RUNTIME_PATHS")
-
-
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -180,6 +166,39 @@ def resolve_runtime_paths(
         storage_root=resolved_storage_root,
         process_env=cast("Mapping[str, str]", MappingProxyType(resolved_process_env)),
         env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+    )
+
+
+def _with_primary_runtime_env(paths: RuntimePaths) -> RuntimePaths:
+    """Return one runtime context whose process env snapshot carries its path contract."""
+    normalized_process_env = dict(paths.process_env)
+    normalized_process_env["MINDROOM_CONFIG_PATH"] = str(paths.config_path)
+    normalized_process_env["MINDROOM_STORAGE_PATH"] = str(paths.storage_root)
+    if normalized_process_env == dict(paths.process_env):
+        return paths
+    return RuntimePaths(
+        config_path=paths.config_path,
+        config_dir=paths.config_dir,
+        env_path=paths.env_path,
+        storage_root=paths.storage_root,
+        process_env=cast("Mapping[str, str]", MappingProxyType(normalized_process_env)),
+        env_file_values=paths.env_file_values,
+    )
+
+
+def resolve_primary_runtime_paths(
+    *,
+    config_path: Path | None = None,
+    storage_path: Path | None = None,
+    process_env: dict[str, str] | None = None,
+) -> RuntimePaths:
+    """Resolve the primary runtime context for one top-level execution boundary."""
+    return _with_primary_runtime_env(
+        resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env=process_env,
+        ),
     )
 
 
@@ -256,16 +275,6 @@ def runtime_config_path(
     raise ValueError(msg)
 
 
-def exported_env_value(name: str, *, default: str | None = None) -> str | None:
-    """Read one currently exported env value, excluding runtime-synced injections."""
-    return _copy_process_env().get(name, default)
-
-
-def process_env_value(name: str, *, default: str | None = None) -> str | None:
-    """Read one raw process env value, including runtime-synced injections."""
-    return os.environ.get(name, default)
-
-
 def exported_process_env() -> dict[str, str]:
     """Return the currently exported env snapshot, excluding runtime-synced injections."""
     return _copy_process_env()
@@ -330,19 +339,6 @@ def runtime_ai_cache_enabled(runtime_paths: RuntimePaths) -> bool:
     return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
 
 
-def get_runtime_paths(
-    *,
-    config_path: Path | None = None,
-    storage_path: Path | None = None,
-    process_env: dict[str, str] | None = None,
-) -> RuntimePaths:
-    """Resolve one explicit runtime context."""
-    if config_path is None and storage_path is None and process_env is None:
-        msg = "get_runtime_paths() requires explicit config_path, storage_path, or process_env"
-        raise ValueError(msg)
-    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env=process_env)
-
-
 def runtime_storage_root(runtime_paths: RuntimePaths) -> Path:
     """Return the storage root for one explicit runtime context."""
     return runtime_paths.storage_root
@@ -373,48 +369,11 @@ def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "encryption_keys"
 
 
-def _set_active_runtime_paths(paths: RuntimePaths) -> RuntimePaths:
-    """Commit one runtime path context as the process-wide source of truth."""
-    global _ACTIVE_RUNTIME_PATHS
-    global CONFIG_PATH, STORAGE_PATH, STORAGE_PATH_OBJ, MATRIX_STATE_FILE, TRACKING_DIR, _MEMORY_DIR, CREDENTIALS_DIR
-    global ENCRYPTION_KEYS_DIR
-
-    _ACTIVE_RUNTIME_PATHS = paths
-    CONFIG_PATH = paths.config_path
-    STORAGE_PATH = str(paths.storage_root)
-    STORAGE_PATH_OBJ = paths.storage_root
-    MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
-    TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
-    _MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
-    CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
-    ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
-    return _ACTIVE_RUNTIME_PATHS
-
-
-def activate_runtime_paths(
-    runtime_paths: RuntimePaths | None = None,
-    *,
-    config_path: Path | None = None,
-    storage_path: Path | None = None,
-) -> RuntimePaths:
-    """Resolve, sync, and commit one runtime path context for the process."""
-    if runtime_paths is not None and (config_path is not None or storage_path is not None):
-        msg = "Pass either runtime_paths or raw config/storage args to activate_runtime_paths(), not both"
-        raise ValueError(msg)
-
-    if runtime_paths is not None:
-        sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
-        return _set_active_runtime_paths(runtime_paths)
-
-    if config_path is None:
-        msg = "activate_runtime_paths() requires explicit runtime_paths or config_path"
-        raise ValueError(msg)
-    paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=storage_path,
-    )
-    sync_runtime_env_to_process(paths, sync_path_env=True)
-    return _set_active_runtime_paths(paths)
+def activate_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
+    """Sync one explicit runtime context into process env for compatibility."""
+    primary_runtime_paths = _with_primary_runtime_env(runtime_paths)
+    sync_runtime_env_to_process(primary_runtime_paths, sync_path_env=True)
+    return primary_runtime_paths
 
 
 def resolve_config_relative_path(
@@ -441,13 +400,14 @@ def _use_storage_path_for_workspace_assets(runtime_paths: RuntimePaths) -> bool:
     """Return whether writable workspace assets should live under persistent storage."""
     if not _docker_container_enabled():
         return False
-    active_runtime_paths = _active_runtime_paths_or_none()
-    if active_runtime_paths is not None and runtime_paths == active_runtime_paths:
-        return True
-    exported_config_path = exported_env_value("MINDROOM_CONFIG_PATH")
-    if exported_config_path is None:
+    configured_config_path = runtime_paths.process_env.get("MINDROOM_CONFIG_PATH")
+    configured_storage_path = runtime_paths.process_env.get("MINDROOM_STORAGE_PATH")
+    if configured_config_path is None or configured_storage_path is None:
         return False
-    return runtime_paths.config_path == Path(exported_config_path).expanduser().resolve()
+    return (
+        Path(configured_config_path).expanduser().resolve() == runtime_paths.config_path
+        and Path(configured_storage_path).expanduser().resolve() == runtime_paths.storage_root
+    )
 
 
 def avatars_dir(runtime_paths: RuntimePaths) -> Path:
@@ -509,8 +469,7 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
-    so that derived paths like STORAGE_PATH stay relative and display
-    cleanly in CLI help text.
+    so CLI-facing defaults still display cleanly.
     """
     if configured_path := _configured_config_path(_copy_process_env(process_env)):
         return configured_path
@@ -520,9 +479,6 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
     return _CONFIG_SEARCH_PATHS[-1]  # default to ~/.mindroom/config.yaml for creation
 
 
-_ACTIVE_RUNTIME_PATHS = _set_active_runtime_paths(resolve_runtime_paths())
-
-
 def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
     """Update the process-wide runtime storage root.
 
@@ -530,12 +486,12 @@ def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) ->
     `MINDROOM_STORAGE_PATH` before startup, so runtime code only has one
     storage-root contract to reason about.
     """
-    updated_runtime_paths = resolve_runtime_paths(
+    updated_runtime_paths = resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=storage_path,
         process_env=dict(runtime_paths.process_env),
     )
-    return activate_runtime_paths(runtime_paths=updated_runtime_paths).storage_root
+    return activate_runtime_paths(updated_runtime_paths).storage_root
 
 
 def set_runtime_paths(
@@ -544,7 +500,12 @@ def set_runtime_paths(
     storage_path: Path | None = None,
 ) -> RuntimePaths:
     """Compatibility wrapper for the explicit runtime activation path."""
-    return activate_runtime_paths(config_path=config_path, storage_path=storage_path)
+    return activate_runtime_paths(
+        resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+        ),
+    )
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:

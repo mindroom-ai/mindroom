@@ -125,7 +125,8 @@ async def _watch_config(
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
-    runtime_paths = _app_runtime_paths(_app)
+    runtime_paths = constants.activate_runtime_paths(_app_runtime_paths(_app))
+    _app.state.runtime_paths = runtime_paths
     print(f"Loading config from: {runtime_paths.config_path}")
     print(f"Config exists: {runtime_paths.config_path.exists()}")
 
@@ -149,7 +150,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
-app.state.runtime_paths = constants.resolve_runtime_paths(process_env=constants.exported_process_env())
+app.state.runtime_paths = constants.resolve_primary_runtime_paths(process_env=constants.exported_process_env())
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(

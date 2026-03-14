@@ -145,26 +145,16 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_paths(tmp_path_factory: pytest.TempPathFactory) -> Generator[None, None, None]:
-    """Restore the process-wide runtime path context after each test."""
+def _reset_runtime_paths() -> Generator[None, None, None]:
+    """Restore runtime-synced process env after each test."""
     from mindroom import constants  # noqa: PLC0415
 
-    original = constants._active_runtime_paths_or_none()
-    assert original is not None
     original_env = os.environ.copy()
-    runtime_root = tmp_path_factory.mktemp("runtime-context")
-    config_path = runtime_root / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    isolated_runtime_paths = constants.resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=runtime_root / "mindroom_data",
-        process_env={},
-    )
-    constants.activate_runtime_paths(runtime_paths=isolated_runtime_paths)
+    original_synced_env = dict(constants._RUNTIME_SYNCED_ENV_VALUES)
     yield
-    constants.activate_runtime_paths(runtime_paths=original)
     os.environ.clear()
     os.environ.update(original_env)
+    constants._replace_runtime_synced_env(original_synced_env)
 
 
 @pytest.fixture(autouse=True)

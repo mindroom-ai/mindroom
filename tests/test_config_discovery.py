@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,6 @@ from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
 
 _RUNTIME_GLOBAL_NAMES = {
-    "CONFIG_PATH",
-    "STORAGE_PATH_OBJ",
     "MATRIX_HOMESERVER",
     "MATRIX_SERVER_NAME",
     "MATRIX_SSL_VERIFY",
@@ -466,8 +465,8 @@ class TestResolveConfigRelativePath:
         with pytest.raises(ValueError, match="either runtime_paths or config_path"):
             Config.from_yaml(config_path, runtime_paths=runtime_paths)
 
-    def test_config_from_yaml_preserves_active_runtime_storage_override(self, tmp_path: Path) -> None:
-        """Reloading the active config by path should keep the active runtime storage root."""
+    def test_config_from_yaml_explicit_path_does_not_inherit_activated_runtime_storage(self, tmp_path: Path) -> None:
+        """Explicit path loads should stay local unless the caller passes runtime_paths."""
         config_path = tmp_path / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.write_text(
@@ -475,18 +474,18 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        constants_mod.activate_runtime_paths(config_path=config_path, storage_path=storage_path)
+        constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
 
         config = Config.from_yaml(config_path)
 
         assert config.runtime_paths is not None
-        assert config.runtime_paths.storage_root == storage_path.resolve()
+        assert config.runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
-    def test_activate_runtime_paths_rejects_storage_only_override_without_runtime_context(
+    def test_activate_runtime_paths_promotes_runtime_path_env_contract(
         self,
         tmp_path: Path,
     ) -> None:
-        """Storage-only activation should fail instead of silently reusing ambient runtime state."""
+        """Activation should return a runtime object that carries the resolved path env values."""
         config_path = tmp_path / "custom" / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,11 +494,13 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        first = constants_mod.activate_runtime_paths(config_path=config_path, storage_path=storage_path)
-        with pytest.raises(ValueError, match="explicit runtime_paths or config_path"):
-            constants_mod.activate_runtime_paths(storage_path=storage_path)
+        explicit_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+        activated = constants_mod.activate_runtime_paths(explicit_runtime_paths)
 
-        assert first.config_path == config_path.resolve()
+        assert activated.config_path == config_path.resolve()
+        assert activated.storage_root == storage_path.resolve()
+        assert activated.process_env["MINDROOM_CONFIG_PATH"] == str(config_path.resolve())
+        assert activated.process_env["MINDROOM_STORAGE_PATH"] == str(storage_path.resolve())
 
     def test_ensure_writable_config_path_uses_active_runtime_template_env(self, tmp_path: Path) -> None:
         """Template seeding should honor MINDROOM_CONFIG_TEMPLATE from the active runtime `.env`."""
@@ -619,14 +620,14 @@ class TestResolveAvatarPath:
 
 
 class TestStoragePathResolution:
-    """Tests for STORAGE_PATH_OBJ import-time canonicalization."""
+    """Tests for primary runtime storage-root canonicalization."""
 
     def test_storage_path_obj_from_env_is_absolute_and_cwd_stable(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Relative MINDROOM_STORAGE_PATH is anchored at import time and stays stable after cwd changes."""
+        """Relative MINDROOM_STORAGE_PATH is anchored when the runtime object is created."""
         first_cwd = tmp_path / "first"
         first_cwd.mkdir(parents=True)
         second_cwd = tmp_path / "second"
@@ -635,18 +636,14 @@ class TestStoragePathResolution:
         with monkeypatch.context() as m:
             m.chdir(first_cwd)
             m.setenv("MINDROOM_STORAGE_PATH", "mindroom_data")
-
-            importlib.reload(constants_mod)
+            runtime_paths = constants_mod.resolve_primary_runtime_paths(process_env=dict(os.environ))
             expected_storage_path = (first_cwd / "mindroom_data").resolve()
 
-            assert expected_storage_path == constants_mod.STORAGE_PATH_OBJ
-            assert constants_mod.STORAGE_PATH_OBJ.is_absolute()
+            assert expected_storage_path == runtime_paths.storage_root
+            assert runtime_paths.storage_root.is_absolute()
 
             m.chdir(second_cwd)
-            assert expected_storage_path == constants_mod.STORAGE_PATH_OBJ
-
-        # Restore module globals to environment defaults for subsequent tests.
-        importlib.reload(constants_mod)
+            assert expected_storage_path == runtime_paths.storage_root
 
 
 class TestRuntimeContextConsumers:
@@ -672,7 +669,7 @@ class TestRuntimeContextConsumers:
             encoding="utf-8",
         )
 
-        first_runtime_paths = constants_mod.activate_runtime_paths(config_path=first_config)
+        first_runtime_paths = constants_mod.set_runtime_paths(config_path=first_config)
         assert (
             identity_mod.agent_username_localpart("general", runtime_paths=first_runtime_paths)
             == "mindroom_general_alpha1234"
@@ -685,7 +682,7 @@ class TestRuntimeContextConsumers:
             == "alpha.example"
         )
 
-        second_runtime_paths = constants_mod.activate_runtime_paths(config_path=second_config)
+        second_runtime_paths = constants_mod.set_runtime_paths(config_path=second_config)
         assert (
             identity_mod.agent_username_localpart("general", runtime_paths=second_runtime_paths)
             == "mindroom_general_beta1234"
@@ -709,14 +706,14 @@ class TestRuntimeContextConsumers:
         first_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         second_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
 
-        first_runtime_paths = constants_mod.activate_runtime_paths(config_path=first_config, storage_path=first_storage)
+        first_runtime_paths = constants_mod.set_runtime_paths(config_path=first_config, storage_path=first_storage)
         tracker_a = ResponseTracker("general", base_path=first_storage / "tracking")
         MatrixState().save(runtime_paths=first_runtime_paths)
         assert tracker_a.base_path == first_storage / "tracking"
         assert tracker_a._responses_file == first_storage / "tracking" / "general_responded.json"
         assert constants_mod.matrix_state_file(runtime_paths=first_runtime_paths) == first_storage / "matrix_state.yaml"
 
-        second_runtime_paths = constants_mod.activate_runtime_paths(
+        second_runtime_paths = constants_mod.set_runtime_paths(
             config_path=second_config,
             storage_path=second_storage,
         )

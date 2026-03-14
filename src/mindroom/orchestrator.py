@@ -987,7 +987,7 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
-    constants.activate_runtime_paths(runtime_paths=runtime_paths)
+    runtime_paths = constants.activate_runtime_paths(runtime_paths)
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.

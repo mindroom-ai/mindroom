@@ -811,7 +811,7 @@ class TestRunApiFlags:
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
 
-    def test_run_storage_path_updates_runtime_env_and_constants(
+    def test_run_storage_path_updates_runtime_env_and_runtime_paths(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -826,20 +826,14 @@ class TestRunApiFlags:
         )
         runtime_storage = tmp_path / "runtime-storage"
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
-        monkeypatch.setattr(constants_module, "STORAGE_PATH", constants_module.STORAGE_PATH)
-        monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", constants_module.STORAGE_PATH_OBJ)
-        monkeypatch.setattr(constants_module, "MATRIX_STATE_FILE", constants_module.MATRIX_STATE_FILE)
-        monkeypatch.setattr(constants_module, "TRACKING_DIR", constants_module.TRACKING_DIR)
-        monkeypatch.setattr(constants_module, "_MEMORY_DIR", constants_module._MEMORY_DIR)
-        monkeypatch.setattr(constants_module, "CREDENTIALS_DIR", constants_module.CREDENTIALS_DIR)
-        monkeypatch.setattr(constants_module, "ENCRYPTION_KEYS_DIR", constants_module.ENCRYPTION_KEYS_DIR)
 
         async def _fake_main(**kwargs: object) -> None:
             runtime_paths = kwargs["runtime_paths"]
             assert isinstance(runtime_paths, constants_module.RuntimePaths)
             assert runtime_paths.storage_root == runtime_storage.resolve()
-            assert runtime_storage.resolve() == constants_module.STORAGE_PATH_OBJ
-            assert str(runtime_storage.resolve()) == constants_module.STORAGE_PATH
+            assert constants_module.runtime_storage_root(runtime_paths) == runtime_storage.resolve()
+            assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
+            assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
             assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
             assert (
                 ResponseTracker("agent", base_path=runtime_storage.resolve() / "tracking").base_path

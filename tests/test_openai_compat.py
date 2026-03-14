@@ -98,7 +98,6 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
 
 def test_load_config_uses_dynamic_runtime_config_path(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """OpenAI-compatible config loading should follow the active runtime config path."""
     config_path = tmp_path / "alt-config.yaml"
@@ -109,7 +108,6 @@ def test_load_config_uses_dynamic_runtime_config_path(
         encoding="utf-8",
     )
     runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-    monkeypatch.setattr(constants, "_ACTIVE_RUNTIME_PATHS", runtime_paths)
     request = Request(
         {
             "type": "http",

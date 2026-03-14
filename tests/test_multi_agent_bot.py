@@ -20,7 +20,6 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
-import mindroom.constants as constants_module
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
@@ -607,14 +606,12 @@ class TestAgentBot:
 
         def _capture_logging(*, level: str, runtime_paths: RuntimePaths) -> None:
             del level
-            del runtime_paths
             nonlocal observed_logging_root
-            observed_logging_root = constants_module.STORAGE_PATH_OBJ
+            observed_logging_root = runtime_paths.storage_root
 
         def _capture_credentials_sync(*, runtime_paths: RuntimePaths) -> None:
-            del runtime_paths
             nonlocal observed_credentials_root
-            observed_credentials_root = constants_module.STORAGE_PATH_OBJ
+            observed_credentials_root = runtime_paths.storage_root
 
         with (
             patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),

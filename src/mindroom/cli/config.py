@@ -28,6 +28,7 @@ from mindroom.constants import (
     config_search_locations,
     env_key_for_provider,
     exported_process_env,
+    resolve_primary_runtime_paths,
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
@@ -206,7 +207,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return resolve_runtime_paths(process_env=exported_process_env()).config_path.resolve()
+    return resolve_primary_runtime_paths(process_env=exported_process_env()).config_path.resolve()
 
 
 def _activate_cli_runtime(
@@ -223,7 +224,7 @@ def _activate_cli_runtime(
             if key not in {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
         }
         return activate_runtime_paths(
-            resolve_runtime_paths(
+            resolve_primary_runtime_paths(
                 config_path=path.expanduser().resolve(),
                 storage_path=storage_path,
                 process_env=filtered_process_env,
@@ -231,7 +232,7 @@ def _activate_cli_runtime(
         )
 
     return activate_runtime_paths(
-        resolve_runtime_paths(
+        resolve_primary_runtime_paths(
             storage_path=storage_path,
             process_env=process_env,
         ),

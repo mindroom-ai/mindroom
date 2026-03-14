@@ -152,7 +152,6 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
@@ -185,42 +184,40 @@ class TestUserAccountManagement:
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with internal user account
-        config_file = tmp_path / "matrix_state.yaml"
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
 
-        with patch("mindroom.constants.MATRIX_STATE_FILE", config_file):
-            runtime_paths = _runtime_paths(tmp_path)
-            state.save(runtime_paths=runtime_paths)
+        runtime_paths = _runtime_paths(tmp_path)
+        state.save(runtime_paths=runtime_paths)
 
-            mock_client.login.return_value = nio.LoginResponse(
-                user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
-                device_id="TEST_DEVICE",
-                access_token=TEST_ACCESS_TOKEN,
+        mock_client.login.return_value = nio.LoginResponse(
+            user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+
+        with (
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+        ):
+            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            _config = Config(
+                mindroom_user={
+                    "username": DEFAULT_INTERNAL_USERNAME,
+                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
+                },
             )
-            mock_client.set_displayname.return_value = AsyncMock()
+            await orchestrator._ensure_user_account(_config)
 
-            with (
-                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-                patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            ):
-                orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-                _config = Config(
-                    mindroom_user={
-                        "username": DEFAULT_INTERNAL_USERNAME,
-                        "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                    },
-                )
-                await orchestrator._ensure_user_account(_config)
+            # Should use existing account
+            result_config = MatrixState.load(runtime_paths=runtime_paths)
+            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
+            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
 
-                # Should use existing account
-                result_config = MatrixState.load(runtime_paths=runtime_paths)
-                assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-                assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
-
-                mock_client.register.assert_not_called()
-                mock_client.login.assert_called_once_with("existing_password")
-                mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
+            mock_client.register.assert_not_called()
+            mock_client.login.assert_called_once_with("existing_password")
+            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_recreates_account_when_stored_login_fails(
@@ -232,52 +229,50 @@ class TestUserAccountManagement:
         mock_context, mock_client = mock_matrix_client
 
         # Create existing config with invalid credentials
-        config_file = tmp_path / "matrix_state.yaml"
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "wrong_password")
 
-        with patch("mindroom.constants.MATRIX_STATE_FILE", config_file):
-            runtime_paths = _runtime_paths(tmp_path)
-            state.save(runtime_paths=runtime_paths)
+        runtime_paths = _runtime_paths(tmp_path)
+        state.save(runtime_paths=runtime_paths)
 
-            # Mock failed login
-            mock_client.login.return_value = nio.LoginError(
-                message="Invalid username or password",
-                status_code="M_FORBIDDEN",
+        # Mock failed login
+        mock_client.login.return_value = nio.LoginError(
+            message="Invalid username or password",
+            status_code="M_FORBIDDEN",
+        )
+
+        # Mock successful registration for the recreated account.
+        mock_client.register.return_value = nio.RegisterResponse(
+            user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
+            device_id="TEST_DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        mock_client.set_displayname.return_value = AsyncMock()
+
+        with (
+            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
+        ):
+            orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            _config = Config(
+                mindroom_user={
+                    "username": DEFAULT_INTERNAL_USERNAME,
+                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
+                },
             )
+            await orchestrator._ensure_user_account(_config)
 
-            # Mock successful registration for the recreated account.
-            mock_client.register.return_value = nio.RegisterResponse(
-                user_id=f"@{DEFAULT_INTERNAL_USERNAME}:localhost",
-                device_id="TEST_DEVICE",
-                access_token=TEST_ACCESS_TOKEN,
-            )
-            mock_client.set_displayname.return_value = AsyncMock()
+            # Should have kept the existing account credentials
+            # (create_agent_user doesn't regenerate passwords on login failure)
+            result_config = MatrixState.load(runtime_paths=runtime_paths)
+            assert INTERNAL_USER_ACCOUNT_KEY in result_config.accounts
+            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
+            # Password stays the same - create_agent_user reuses existing credentials
+            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
 
-            with (
-                patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-                patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-            ):
-                orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-                _config = Config(
-                    mindroom_user={
-                        "username": DEFAULT_INTERNAL_USERNAME,
-                        "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                    },
-                )
-                await orchestrator._ensure_user_account(_config)
-
-                # Should have kept the existing account credentials
-                # (create_agent_user doesn't regenerate passwords on login failure)
-                result_config = MatrixState.load(runtime_paths=runtime_paths)
-                assert INTERNAL_USER_ACCOUNT_KEY in result_config.accounts
-                assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-                # Password stays the same - create_agent_user reuses existing credentials
-                assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
-
-                mock_client.login.assert_called_once_with("wrong_password")
-                mock_client.register.assert_called_once()
-                mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
+            mock_client.login.assert_called_once_with("wrong_password")
+            mock_client.register.assert_called_once()
+            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
 
     @pytest.mark.asyncio
     async def test_ensure_user_account_uses_configured_identity(
@@ -298,7 +293,6 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
         ):
             runtime_paths = _runtime_paths(tmp_path)
@@ -323,18 +317,14 @@ class TestUserAccountManagement:
         tmp_path: Path,
     ) -> None:
         """Internal username cannot be changed after initial account bootstrap."""
-        config_file = tmp_path / "matrix_state.yaml"
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
 
         custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
 
-        with (
-            patch("mindroom.constants.MATRIX_STATE_FILE", config_file),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            runtime_paths = _runtime_paths(tmp_path)
-            state.save(runtime_paths=runtime_paths)
+        runtime_paths = _runtime_paths(tmp_path)
+        state.save(runtime_paths=runtime_paths)
+        with patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"):
             orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
 
             with pytest.raises(ValueError, match="cannot be changed"):

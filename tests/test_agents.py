@@ -946,8 +946,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
 
-    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-        create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
+    create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(tmp_path, "general")
     canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
@@ -985,8 +984,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
     runtime_paths = _runtime_paths(shared_root, config_path=config_dir / "config.yaml")
 
-    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
-        create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
+    create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(shared_root, "general")
     canonical_workspace = agent_workspace_root_path(shared_root, "general") / "mind_data"
