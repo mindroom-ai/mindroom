@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import threading
 import time
 import venv
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._metadata_store import (
+    list_worker_state_paths,
+    load_worker_metadata,
+    save_worker_metadata,
+)
 from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
@@ -308,32 +312,16 @@ class _LocalWorkerBackend:
         _ensure_local_worker_state(paths)
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
-        if not self.worker_root.exists():
-            return []
-
-        return [
-            _local_worker_state_paths_for_root(metadata_file.parents[1])
-            for metadata_file in sorted(self.worker_root.glob("*/metadata/worker.json"))
-        ]
+        return list_worker_state_paths(
+            self.worker_root,
+            state_paths_from_root=local_worker_state_paths_for_root,
+        )
 
     def _load_metadata(self, paths: LocalWorkerStatePaths) -> _LocalWorkerMetadata | None:
-        if not paths.metadata_file.exists():
-            return None
-        try:
-            with paths.metadata_file.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            return None
-
-        try:
-            return _LocalWorkerMetadata(**data)
-        except TypeError:
-            return None
+        return load_worker_metadata(paths, metadata_type=_LocalWorkerMetadata)
 
     def _save_metadata(self, paths: LocalWorkerStatePaths, metadata: _LocalWorkerMetadata) -> None:
-        paths.metadata_dir.mkdir(parents=True, exist_ok=True)
-        with paths.metadata_file.open("w", encoding="utf-8") as f:
-            json.dump(asdict(metadata), f, sort_keys=True)
+        save_worker_metadata(paths, metadata)
 
     def _effective_status(self, metadata: _LocalWorkerMetadata, now: float) -> WorkerStatus:
         if metadata.status == "ready" and now - metadata.last_used_at >= self.idle_timeout_seconds:

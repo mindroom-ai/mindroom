@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 import mindroom.constants as constants_mod
-import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
@@ -21,6 +20,7 @@ from mindroom.credentials import (
     load_scoped_credentials,
     merge_scoped_credentials,
     save_scoped_credentials,
+    set_primary_credentials_storage_path,
     sync_shared_credentials_to_worker,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -555,8 +555,7 @@ class TestGlobalCredentialsManager:
     @pytest.fixture(autouse=True)
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
-        mindroom.credentials._credentials_manager = None
-        mindroom.credentials._credentials_manager_signature = None
+        set_primary_credentials_storage_path(None)
 
     def test_get_credentials_manager_singleton(self) -> None:
         """Test that get_credentials_manager returns the same instance."""
@@ -590,6 +589,39 @@ class TestGlobalCredentialsManager:
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
+
+    def test_global_manager_uses_runtime_storage_override(self, tmp_path: Path) -> None:
+        """The primary runtime should be able to override the default credentials root."""
+        runtime_storage = (tmp_path / "runtime-storage").resolve()
+
+        set_primary_credentials_storage_path(runtime_storage)
+        manager = get_credentials_manager()
+
+        assert manager.base_path == runtime_storage / "credentials"
+        assert manager.storage_root == runtime_storage
+
+    def test_resetting_to_default_rebuilds_cached_global_manager(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Resetting to the default path should clear the cached manager."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        override_storage = (tmp_path / "override-runtime").resolve()
+        second_storage = (tmp_path / "runtime-b").resolve()
+
+        set_primary_credentials_storage_path(override_storage)
+        first_manager = get_credentials_manager()
+
+        constants_mod.set_runtime_paths(config_path=config_path, storage_path=second_storage)
+        set_primary_credentials_storage_path(None)
+        second_manager = get_credentials_manager()
+
+        assert second_manager is not first_manager
+        assert second_manager.base_path == second_storage / "credentials"
 
     def test_global_manager_rebuilds_when_runtime_storage_root_changes(self, tmp_path: Path) -> None:
         """Changing the active runtime storage root should invalidate the cached manager."""
@@ -637,7 +669,7 @@ class TestGlobalCredentialsManager:
 
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
         monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
-        mindroom.credentials._credentials_manager = None
+        set_primary_credentials_storage_path(None)
 
         manager = get_credentials_manager()
         loaded_credentials = load_scoped_credentials(

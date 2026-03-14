@@ -150,7 +150,7 @@ Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it surv
 
 ## Worker Routing
 
-`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime. Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime files. Config-adjacent `.env` files are intentionally masked inside those Docker workers. `worker_scope` controls how sandbox runtimes are reused between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`. The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
 The supported `worker_scope` values are:
 
@@ -158,7 +158,7 @@ The supported `worker_scope` values are:
 - `user`: one runtime per user, shared across that user's agents.
 - `user_agent`: one runtime per user+agent pair.
 
-Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
+Leave `worker_scope` unset for unscoped execution. Calls still run in the sandbox. With `MINDROOM_WORKER_BACKEND=static_runner`, no dedicated worker-specific storage root is selected. With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, MindRoom still provisions one unscoped worker per agent and tenant/account. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 ### Filesystem Isolation
 
@@ -202,7 +202,7 @@ MindRoom loads the files when it builds an agent instance. The normal Matrix and
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent — no need to include `"delegate"` in the `tools` list.
+Agents can delegate tasks to other agents using the `delegate_to` field. When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
 The delegated agent runs as a fresh, one-shot instance with no shared session or history. It executes the task and returns its response as the tool result.
 

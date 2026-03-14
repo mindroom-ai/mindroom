@@ -15,6 +15,7 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.credentials import set_primary_credentials_storage_path
 from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
@@ -41,6 +42,7 @@ from mindroom.runtime_state import (
 )
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.runtime import set_primary_worker_storage_path
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
@@ -979,22 +981,25 @@ async def main(
     """Main entry point for the multi-agent bot system."""
     runtime_paths = set_runtime_paths(storage_path=storage_path)
     storage_path = runtime_paths.storage_root
-
-    # Configure logging before any background tasks or account setup begin.
-    setup_logging(level=log_level)
-
-    logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
-
-    # Ensure storage exists before any runtime components try to write into it.
-    storage_path.mkdir(parents=True, exist_ok=True)
-
-    logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
+    orchestrator: MultiAgentOrchestrator | None = None
 
     try:
+        set_primary_credentials_storage_path(storage_path)
+        set_primary_worker_storage_path(storage_path)
+
+        # Configure logging before any background tasks or account setup begin.
+        setup_logging(level=log_level)
+
+        logger.info("Syncing API keys from environment to CredentialsManager...")
+        sync_env_to_credentials()
+
+        # Ensure storage exists before any runtime components try to write into it.
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Starting orchestrator...")
+        orchestrator = MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        set_runtime_starting()
         auxiliary_specs = [
             (
                 "config watcher",
@@ -1033,5 +1038,8 @@ async def main(
         for task in auxiliary_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        await orchestrator.stop()
+        if orchestrator is not None:
+            await orchestrator.stop()
         reset_runtime_state()
+        set_primary_credentials_storage_path(None)
+        set_primary_worker_storage_path(None)

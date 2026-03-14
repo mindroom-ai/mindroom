@@ -16,7 +16,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
@@ -349,6 +349,103 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     }
 
 
+def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dedicated worker routing should always reconcile through ensure_worker before use."""
+
+    class _FakeWorkerManager:
+        def __init__(self, ensured_handle: WorkerHandle) -> None:
+            self.ensured_handle = ensured_handle
+            self.ensure_calls: list[str] = []
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+            _ = worker_key, now
+            msg = "Dedicated worker routing should reconcile via ensure_worker, not reuse cached handles directly"
+            raise AssertionError(msg)
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+            _ = now
+            self.ensure_calls.append(spec.worker_key)
+            return self.ensured_handle
+
+    refreshed_handle = WorkerHandle(
+        worker_id="worker-a",
+        worker_key="worker-a",
+        endpoint="http://sandbox-runner:8765/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=20.0,
+        created_at=10.0,
+    )
+    fake_manager = _FakeWorkerManager(refreshed_handle)
+    monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+    monkeypatch.setattr(sandbox_proxy_module, "primary_worker_backend_is_dedicated", lambda: True)
+
+    payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_scope=None,
+        routing_agent_name="code",
+    )
+
+    assert payload["worker_key"] == "v1:default:unscoped:code"
+    assert worker_handle is refreshed_handle
+    assert fake_manager.ensure_calls == ["v1:default:unscoped:code"]
+
+
+def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dedicated worker reconciliation should pass the resolved worker key through unchanged."""
+
+    class _FakeWorkerManager:
+        def __init__(self, ensured_handle: WorkerHandle) -> None:
+            self.ensured_handle = ensured_handle
+            self.ensure_calls: list[str] = []
+
+        def get_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
+            _ = worker_key, now
+            msg = "Dedicated worker routing should not bypass ensure_worker"
+            raise AssertionError(msg)
+
+        def ensure_worker(self, spec: WorkerSpec, *, now: float | None = None) -> WorkerHandle:
+            _ = now
+            self.ensure_calls.append(spec.worker_key)
+            return self.ensured_handle
+
+    ensured_handle = WorkerHandle(
+        worker_id="worker-b",
+        worker_key="worker-b",
+        endpoint="http://sandbox-runner:8765/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="idle",
+        backend_name="docker",
+        last_used_at=15.0,
+        created_at=10.0,
+    )
+    fake_manager = _FakeWorkerManager(ensured_handle)
+    monkeypatch.setattr(sandbox_proxy_module, "_get_worker_manager", lambda: fake_manager)
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with tool_execution_identity(execution_identity):
+        payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_scope="user",
+            routing_agent_name="code",
+        )
+
+    assert payload["worker_key"] == "v1:default:user:@alice:example.org"
+    assert worker_handle is ensured_handle
+    assert fake_manager.ensure_calls == ["v1:default:user:@alice:example.org"]
+
+
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     """The current shared sandbox-runner provider should return stable handle identity per worker key."""
     backend = StaticSandboxRunnerBackend(
@@ -436,6 +533,62 @@ def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytes
     assert init_count == 1
     assert len(managers) == 2
     assert managers[0] is managers[1]
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing the runtime storage path should rebuild the Docker worker manager with the new root."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    built_storage_paths: list[Path] = []
+
+    class _FakeDockerBackend:
+        backend_name = "docker"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_env(cls, *, auth_token: str | None, storage_path: Path | None = None) -> _FakeDockerBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_path is not None
+            built_storage_paths.append(storage_path)
+            return cls()
+
+    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "docker_backend_config_signature",
+        lambda *, auth_token, storage_path=None: ("docker", auth_token or "", str(storage_path)),
+    )
+
+    first_storage_path = (tmp_path / "runtime-a").resolve()
+    second_storage_path = (tmp_path / "runtime-b").resolve()
+
+    workers_runtime_module.set_primary_worker_storage_path(first_storage_path)
+    first_manager = workers_runtime_module.get_primary_worker_manager(proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
+
+    workers_runtime_module.set_primary_worker_storage_path(second_storage_path)
+    second_manager = workers_runtime_module.get_primary_worker_manager(proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
+
+    assert built_storage_paths == [first_storage_path, second_storage_path]
+    assert first_manager is not second_manager
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_set_primary_worker_storage_path_none_resets_default_runtime_manager() -> None:
+    """Resetting to the default storage path should still clear the cached manager."""
+    workers_runtime_module._reset_primary_worker_manager()
+    workers_runtime_module._PRIMARY_WORKER_MANAGER = object()
+    workers_runtime_module._PRIMARY_WORKER_MANAGER_CONFIG = ("docker", "cached")
+
+    workers_runtime_module.set_primary_worker_storage_path(None)
+
+    assert workers_runtime_module._PRIMARY_WORKER_MANAGER is None
+    assert workers_runtime_module._PRIMARY_WORKER_MANAGER_CONFIG is None
     workers_runtime_module._reset_primary_worker_manager()
 
 
@@ -537,6 +690,74 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
     assert entrypoint is not None
 
     with pytest.raises(WorkerBackendError, match="MINDROOM_KUBERNETES_WORKER_IMAGE"):
+        entrypoint("pwd")
+
+
+def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker-routed tools should stay proxy-enabled when the Docker backend provides worker handles directly."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    assert (
+        sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
+            "shell",
+            worker_tools_override=["shell"],
+            worker_scope="shared",
+        )
+        is True
+    )
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=None) is False
+
+
+def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unscoped agents should still route through dedicated workers on the Docker backend."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "selective")
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOOLS", {"shell"})
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_scope=None) is True
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("calculator", worker_scope=None) is False
+
+
+def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker routing should stay enabled so misconfiguration fails closed at call time."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+
+    assert sandbox_proxy_module._sandbox_proxy_enabled_for_tool("shell", worker_tools_override=["shell"]) is True
+
+
+def test_docker_backend_misconfiguration_raises_instead_of_running_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Misconfigured Docker worker routing should raise rather than executing in the primary runtime."""
+    monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", None)
+    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+    monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.delenv("MINDROOM_DOCKER_WORKER_IMAGE", raising=False)
+
+    tool = get_tool_by_name("shell", worker_tools_override=["shell"], worker_scope=None, routing_agent_name="code")
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_IMAGE"):
         entrypoint("pwd")
 
 

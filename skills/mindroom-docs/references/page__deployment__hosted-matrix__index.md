@@ -69,6 +69,10 @@ MindRoom then:
 1. Joins/creates configured rooms
 1. Starts processing messages
 
+## Optional: Docker worker isolation
+
+If you want worker-routed tools to run in dedicated Docker workers instead of the main `uvx mindroom run` process, follow [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). That especially includes `shell`, `file`, and `python`, plus other worker-safe tools that only need worker state or config-referenced filesystem assets. Dedicated Docker workers do not inherit `~/.mindroom/.env`, and they do not get a bind mount of the whole `~/.mindroom` tree. Use credential leases or `MINDROOM_DOCKER_WORKER_ENV_JSON` for worker-specific env vars. Use `worker_scope: shared` when you want one persistent container per agent. Use `worker_scope: user_agent` when each requester should get separate per-agent containers.
+
 ## Credential Model (Important)
 
 `mindroom connect` returns local provisioning credentials:

@@ -550,6 +550,75 @@ class TestAgentBot:
         assert state.detail is None
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_sets_and_resets_runtime_storage_paths(self, tmp_path: Path) -> None:
+        """The orchestrator should scope runtime storage helpers to the active storage root."""
+        reset_runtime_state()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock(side_effect=KeyboardInterrupt())
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.running = False
+        worker_storage_path_calls: list[Path | None] = []
+        credentials_storage_path_calls: list[Path | None] = []
+
+        async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
+            patch(
+                "mindroom.orchestrator.set_primary_worker_storage_path",
+                side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),
+            ),
+            patch(
+                "mindroom.orchestrator.set_primary_credentials_storage_path",
+                side_effect=lambda storage_path: credentials_storage_path_calls.append(storage_path),
+            ),
+        ):
+            await main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
+            )
+
+        assert worker_storage_path_calls == [tmp_path.resolve(), None]
+        assert credentials_storage_path_calls == [tmp_path.resolve(), None]
+        mock_orchestrator.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_resets_runtime_storage_paths_when_env_sync_fails(self, tmp_path: Path) -> None:
+        """Startup failures before orchestrator creation should still clear runtime storage helpers."""
+        reset_runtime_state()
+        worker_storage_path_calls: list[Path | None] = []
+        credentials_storage_path_calls: list[Path | None] = []
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=RuntimeError("boom")),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator") as mock_orchestrator_cls,
+            patch(
+                "mindroom.orchestrator.set_primary_worker_storage_path",
+                side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),
+            ),
+            patch(
+                "mindroom.orchestrator.set_primary_credentials_storage_path",
+                side_effect=lambda storage_path: credentials_storage_path_calls.append(storage_path),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await main(
+                log_level="INFO",
+                storage_path=tmp_path,
+                api=False,
+            )
+
+        assert worker_storage_path_calls == [tmp_path.resolve(), None]
+        assert credentials_storage_path_calls == [tmp_path.resolve(), None]
+        mock_orchestrator_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_orchestrator_main_watches_resolved_config_path(self, tmp_path: Path) -> None:
         """The top-level config watcher should follow the orchestrator's canonical config path."""
         reset_runtime_state()

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, get_credentials_manager, set_primary_credentials_storage_path
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
@@ -16,6 +16,11 @@ from mindroom.credentials_sync import (
 
 class TestCredentialsSync:
     """Test the credentials sync functionality."""
+
+    @pytest.fixture(autouse=True)
+    def reset_runtime_credentials_path(self) -> None:
+        """Reset the primary runtime credentials override before each test."""
+        set_primary_credentials_storage_path(None)
 
     @pytest.fixture
     def temp_credentials_dir(self, tmp_path: Path) -> Path:
@@ -146,6 +151,22 @@ class TestCredentialsSync:
             # Verify only valid key was synced
             assert cm.get_api_key("openai") == "valid-key"
             assert cm.get_api_key("anthropic") is None
+
+    def test_sync_env_to_credentials_uses_runtime_storage_override(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Primary-runtime env sync should respect the active runtime storage root."""
+        runtime_storage = (tmp_path / "runtime-storage").resolve()
+        monkeypatch.setenv("OPENAI_API_KEY", "runtime-key")
+
+        set_primary_credentials_storage_path(runtime_storage)
+        sync_env_to_credentials()
+
+        manager = get_credentials_manager()
+        assert manager.base_path == runtime_storage / "credentials"
+        assert manager.get_api_key("openai") == "runtime-key"
 
     def test_sync_env_seeds_github_private_from_github_token(
         self,

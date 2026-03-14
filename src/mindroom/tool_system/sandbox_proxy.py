@@ -30,6 +30,7 @@ from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoin
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
     primary_worker_backend_available,
+    primary_worker_backend_is_dedicated,
     primary_worker_backend_name,
 )
 
@@ -242,7 +243,7 @@ def _build_worker_routing_payload(
     routing_agent_name: str | None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     if worker_scope is None:
-        if primary_worker_backend_name() != "kubernetes":
+        if not primary_worker_backend_is_dedicated():
             return {}, None
 
         effective_agent_name = routing_agent_name
@@ -252,7 +253,7 @@ def _build_worker_routing_payload(
         if effective_agent_name is None:
             msg = (
                 f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
-                "when using the Kubernetes worker backend."
+                "when using a dedicated worker backend."
             )
             raise RuntimeError(msg)
 
@@ -372,7 +373,7 @@ def _sandbox_proxy_enabled_for_tool(
 
     # Dedicated-worker backends must fail closed when routing is intended but the
     # provider config is incomplete; otherwise tools silently execute locally.
-    return backend_name == "kubernetes"
+    return primary_worker_backend_is_dedicated()
 
 
 def _call_proxy_sync(
