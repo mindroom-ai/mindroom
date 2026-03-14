@@ -273,8 +273,8 @@ def exported_process_env() -> dict[str, str]:
 
 def runtime_env_value(
     name: str,
-    *,
     runtime_paths: RuntimePaths,
+    *,
     default: str | None = None,
 ) -> str | None:
     """Resolve one runtime env value from the runtime context contract."""
@@ -283,9 +283,9 @@ def runtime_env_value(
 
 def runtime_env_flag(
     name: str,
+    runtime_paths: RuntimePaths,
     *,
     default: bool = False,
-    runtime_paths: RuntimePaths,
 ) -> bool:
     """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
     value = runtime_env_value(name, runtime_paths=runtime_paths)
@@ -294,7 +294,7 @@ def runtime_env_flag(
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths) -> str:
+def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
     return (
         runtime_env_value(
@@ -306,17 +306,17 @@ def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths) -> str:
     )
 
 
-def runtime_matrix_ssl_verify(*, runtime_paths: RuntimePaths) -> bool:
+def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
     """Return whether Matrix HTTPS requests should verify certificates."""
     return runtime_env_flag("MATRIX_SSL_VERIFY", default=True, runtime_paths=runtime_paths)
 
 
-def runtime_matrix_server_name(*, runtime_paths: RuntimePaths) -> str | None:
+def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional Matrix server-name override for one runtime context."""
     return runtime_env_value("MATRIX_SERVER_NAME", runtime_paths=runtime_paths)
 
 
-def runtime_mindroom_namespace(*, runtime_paths: RuntimePaths) -> str | None:
+def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional installation namespace for one runtime context."""
     value = runtime_env_value("MINDROOM_NAMESPACE", runtime_paths=runtime_paths)
     if value is None:
@@ -325,7 +325,7 @@ def runtime_mindroom_namespace(*, runtime_paths: RuntimePaths) -> str | None:
     return normalized or None
 
 
-def runtime_ai_cache_enabled(*, runtime_paths: RuntimePaths) -> bool:
+def runtime_ai_cache_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether the AI response cache is enabled for one runtime context."""
     return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
 
@@ -343,32 +343,32 @@ def get_runtime_paths(
     return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env=process_env)
 
 
-def runtime_storage_root(*, runtime_paths: RuntimePaths) -> Path:
+def runtime_storage_root(runtime_paths: RuntimePaths) -> Path:
     """Return the storage root for one explicit runtime context."""
     return runtime_paths.storage_root
 
 
-def matrix_state_file(*, runtime_paths: RuntimePaths) -> Path:
+def matrix_state_file(runtime_paths: RuntimePaths) -> Path:
     """Return the matrix-state file for one runtime context."""
     return runtime_paths.storage_root / "matrix_state.yaml"
 
 
-def tracking_dir(*, runtime_paths: RuntimePaths) -> Path:
+def tracking_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the tracking directory for one runtime context."""
     return runtime_paths.storage_root / "tracking"
 
 
-def memory_dir(*, runtime_paths: RuntimePaths) -> Path:
+def memory_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the shared memory directory for one runtime context."""
     return runtime_paths.storage_root / "memory"
 
 
-def credentials_dir(*, runtime_paths: RuntimePaths) -> Path:
+def credentials_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the credentials directory for one runtime context."""
     return runtime_paths.storage_root / "credentials"
 
 
-def encryption_keys_dir(*, runtime_paths: RuntimePaths) -> Path:
+def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
 
@@ -558,7 +558,7 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
 _ACTIVE_RUNTIME_PATHS = _set_active_runtime_paths(resolve_runtime_paths())
 
 
-def set_runtime_storage_path(storage_path: Path, *, runtime_paths: RuntimePaths) -> Path:
+def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
     """Update the process-wide runtime storage root.
 
     `mindroom run --storage-path ...` should behave the same as setting

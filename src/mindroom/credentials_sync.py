@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
-def get_secret_from_env(name: str, *, runtime_paths: RuntimePaths) -> str | None:
+def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     """Read a secret from NAME or NAME_FILE.
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
@@ -40,7 +40,7 @@ def get_secret_from_env(name: str, *, runtime_paths: RuntimePaths) -> str | None
     return None
 
 
-def _sync_github_private_credentials(*, runtime_paths: RuntimePaths) -> bool:
+def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
     github_token = get_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
     if not github_token:
@@ -73,7 +73,7 @@ def _sync_github_private_credentials(*, runtime_paths: RuntimePaths) -> bool:
     return True
 
 
-def sync_env_to_credentials(*, runtime_paths: RuntimePaths) -> None:
+def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     """Sync API keys from environment variables into CredentialsManager.
 
     - If no credential file exists for a service, seed it from .env.
@@ -131,7 +131,7 @@ def sync_env_to_credentials(*, runtime_paths: RuntimePaths) -> None:
         logger.debug("No credentials to sync from environment")
 
 
-def get_api_key_for_provider(provider: str, *, runtime_paths: RuntimePaths) -> str | None:
+def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str | None:
     """Get API key for a provider, checking CredentialsManager first.
 
     Since we sync from .env to CredentialsManager on startup,
@@ -158,7 +158,7 @@ def get_api_key_for_provider(provider: str, *, runtime_paths: RuntimePaths) -> s
     return creds_manager.get_api_key(provider)
 
 
-def get_ollama_host(*, runtime_paths: RuntimePaths) -> str | None:
+def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
     """Get Ollama host configuration.
 
     Returns:

@@ -28,14 +28,14 @@ def _normalize_namespace(namespace: str | None) -> str | None:
     return normalized
 
 
-def mindroom_namespace(*, runtime_paths: RuntimePaths | None = None) -> str | None:
+def mindroom_namespace(runtime_paths: RuntimePaths | None = None) -> str | None:
     """Return the configured installation namespace for one explicit runtime context."""
     if runtime_paths is None:
         return None
     return _normalize_namespace(runtime_mindroom_namespace(runtime_paths=runtime_paths))
 
 
-def _strip_agent_namespace_suffix(agent_identifier: str, *, runtime_paths: RuntimePaths | None = None) -> str | None:
+def _strip_agent_namespace_suffix(agent_identifier: str, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Return the agent name without namespace suffix, or None if namespace mismatches."""
     namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if not namespace:
@@ -53,7 +53,7 @@ def _runtime_paths_from_config(config: Config) -> RuntimePaths | None:
     return config.runtime_paths
 
 
-def managed_room_alias_localpart(room_key: str, *, runtime_paths: RuntimePaths | None = None) -> str:
+def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths | None = None) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if not namespace:
@@ -61,7 +61,7 @@ def managed_room_alias_localpart(room_key: str, *, runtime_paths: RuntimePaths |
     return f"{room_key}_{namespace}"
 
 
-def managed_space_alias_localpart(*, runtime_paths: RuntimePaths | None = None) -> str:
+def managed_space_alias_localpart(runtime_paths: RuntimePaths | None = None) -> str:
     """Build the reserved alias localpart for the root MindRoom Space."""
     return managed_room_alias_localpart("_mindroom_root_space", runtime_paths=runtime_paths)
 
@@ -210,7 +210,7 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
     return mid.agent_name(config)
 
 
-def agent_username_localpart(agent_name: str, *, runtime_paths: RuntimePaths | None = None) -> str:
+def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths | None = None) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
     namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if namespace:

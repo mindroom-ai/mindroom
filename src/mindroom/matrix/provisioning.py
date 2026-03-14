@@ -11,13 +11,13 @@ from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.matrix.client import matrix_startup_error
 
 
-def provisioning_url_from_env(*, runtime_paths: RuntimePaths) -> str | None:
+def provisioning_url_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get hosted provisioning API base URL from environment if configured."""
     url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
     return url.rstrip("/") or None
 
 
-def registration_token_from_env(*, runtime_paths: RuntimePaths) -> str | None:
+def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
     token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
     return token or None

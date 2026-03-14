@@ -38,7 +38,7 @@ class MatrixState(BaseModel):
     space_room_id: str | None = None
 
     @classmethod
-    def load(cls, *, runtime_paths: constants.RuntimePaths) -> Self:
+    def load(cls, runtime_paths: constants.RuntimePaths) -> Self:
         """Load state from file."""
         state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
         if not state_file.exists():
@@ -49,7 +49,7 @@ class MatrixState(BaseModel):
 
         return cls.model_validate(data)
 
-    def save(self, *, runtime_paths: constants.RuntimePaths) -> None:
+    def save(self, runtime_paths: constants.RuntimePaths) -> None:
         """Save state to file."""
         # Use Pydantic's model_dump with custom serializer for datetime
         data = self.model_dump(mode="json")

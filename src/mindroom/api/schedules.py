@@ -83,13 +83,13 @@ IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedule
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
 
 
-def _resolve_room_id(room_id_or_alias: str, *, runtime_paths: RuntimePaths) -> str:
+def _resolve_room_id(room_id_or_alias: str, runtime_paths: RuntimePaths) -> str:
     """Resolve room aliases (e.g. lobby) to room IDs when available."""
     resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)
     return resolved[0] if resolved else room_id_or_alias
 
 
-def _configured_room_ids(runtime_config: Config, *, runtime_paths: RuntimePaths) -> list[str]:
+def _configured_room_ids(runtime_config: Config, runtime_paths: RuntimePaths) -> list[str]:
     """Return configured rooms resolved to Matrix room IDs."""
     configured_rooms = sorted(runtime_config.get_all_configured_rooms())
     resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)

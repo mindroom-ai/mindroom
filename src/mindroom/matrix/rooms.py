@@ -144,7 +144,7 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def load_rooms(*, runtime_paths: RuntimePaths | None = None) -> dict[str, MatrixRoom]:
+def load_rooms(runtime_paths: RuntimePaths | None = None) -> dict[str, MatrixRoom]:
     """Load room state from YAML file."""
     if runtime_paths is None:
         return {}
@@ -152,7 +152,7 @@ def load_rooms(*, runtime_paths: RuntimePaths | None = None) -> dict[str, Matrix
     return state.rooms
 
 
-def _get_room_aliases(*, runtime_paths: RuntimePaths | None = None) -> dict[str, str]:
+def _get_room_aliases(runtime_paths: RuntimePaths | None = None) -> dict[str, str]:
     """Get mapping of room aliases to room IDs."""
     if runtime_paths is None:
         return {}
@@ -160,7 +160,7 @@ def _get_room_aliases(*, runtime_paths: RuntimePaths | None = None) -> dict[str,
     return state.get_room_aliases()
 
 
-def get_room_id(room_key: str, *, runtime_paths: RuntimePaths | None = None) -> str | None:
+def get_room_id(room_key: str, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Get room ID for a given room key/alias."""
     if runtime_paths is None:
         return None
@@ -183,7 +183,7 @@ def _add_room(
     state.save(runtime_paths=runtime_paths)
 
 
-def _remove_room(room_key: str, *, runtime_paths: RuntimePaths | None = None) -> bool:
+def _remove_room(room_key: str, runtime_paths: RuntimePaths | None = None) -> bool:
     """Remove a room from the state."""
     if runtime_paths is None:
         return False
@@ -216,7 +216,7 @@ def resolve_room_aliases(
     return [room_aliases.get(room, room) for room in room_list]
 
 
-def get_room_alias_from_id(room_id: str, *, runtime_paths: RuntimePaths | None = None) -> str | None:
+def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Get room alias from room ID (reverse lookup).
 
     Args:

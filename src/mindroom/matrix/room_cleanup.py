@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_usernames(*, runtime_paths: RuntimePaths | None = None) -> set[str]:
+def _get_all_known_bot_usernames(runtime_paths: RuntimePaths | None = None) -> set[str]:
     """Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:

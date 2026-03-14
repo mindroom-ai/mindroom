@@ -600,7 +600,7 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
     return aliases.get(profile.strip().lower())
 
 
-def _check_env_keys(config: Config, *, runtime_paths: RuntimePaths) -> None:
+def _check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
     missing = _find_missing_env_keys(config, runtime_paths=runtime_paths)
     if missing:

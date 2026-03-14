@@ -493,7 +493,7 @@ def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
-def _set_api_key_env_var(provider: str, *, runtime_paths: RuntimePaths) -> None:
+def _set_api_key_env_var(provider: str, runtime_paths: RuntimePaths) -> None:
     """Set environment variable for a provider from CredentialsManager.
 
     Since we sync from .env to CredentialsManager on startup,
