@@ -2107,8 +2107,6 @@ class AgentBot:
                 self.config,
                 agent_name=agent_name,
                 session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
                 execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
@@ -2384,8 +2382,6 @@ class AgentBot:
                 self.config,
                 agent_name=self.agent_name,
                 session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
                 execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":

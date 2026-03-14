@@ -39,11 +39,10 @@ from ._policy import (
     use_file_memory_backend,
 )
 from ._prompting import (
-    build_file_prompt_with_memory_context,
+    _format_memories_as_context,
     build_memory_messages,
-    build_prompt_with_memories,
 )
-from ._shared import FileMemoryResolution, MemoryResult, new_memory_id
+from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -204,36 +203,26 @@ async def build_memory_enhanced_prompt(
     config: Config,
 ) -> str:
     """Build a prompt enhanced with relevant memories."""
-    resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
     logger.debug("Building enhanced prompt", agent=agent_name)
-    if use_file_memory_backend(config, agent_name=agent_name):
-        return await _build_file_memory_enhanced_prompt(prompt, agent_name, storage_path, resolution, config)
-
     agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    return build_prompt_with_memories(
-        prompt,
-        agent_memories=agent_memories,
-    )
+    if use_file_memory_backend(config, agent_name=agent_name):
+        resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
+        agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
+        context_chunks: list[str] = []
+        if agent_entrypoint:
+            context_chunks.append(f"[File memory entrypoint (agent)]\n{agent_entrypoint}")
+        if agent_memories:
+            context_chunks.append(_format_memories_as_context(agent_memories, "agent file"))
+        if context_chunks:
+            return f"{'\n\n'.join(context_chunks)}\n\n{prompt}"
+        return prompt
 
-
-async def _build_file_memory_enhanced_prompt(
-    prompt: str,
-    agent_name: str,
-    base_storage_path: Path,
-    resolution: FileMemoryResolution,
-    config: Config,
-) -> str:
-    agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
-    agent_memories = await search_agent_memories(prompt, agent_name, base_storage_path, config)
-
-    return build_file_prompt_with_memory_context(
-        prompt,
-        agent_entrypoint=agent_entrypoint,
-        agent_memories=agent_memories,
-    )
+    if not agent_memories:
+        return prompt
+    return f"{_format_memories_as_context(agent_memories, 'agent')}\n\n{prompt}"
 
 
 async def store_conversation_memory(
@@ -251,7 +240,6 @@ async def store_conversation_memory(
         return
 
     with tool_execution_identity(execution_identity or get_tool_execution_identity()):
-        messages = build_memory_messages(prompt, thread_history, user_id)
         use_file_backend = (
             use_file_memory_backend(config, agent_name=agent_name)
             if isinstance(agent_name, str)
@@ -261,6 +249,7 @@ async def store_conversation_memory(
             store_file_conversation_memory(prompt, agent_name, storage_path, config)
             return
 
+        messages = build_memory_messages(prompt, thread_history, user_id)
         await store_mem0_conversation_memory(
             messages,
             agent_name,
