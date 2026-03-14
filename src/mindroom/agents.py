@@ -362,6 +362,7 @@ def build_agent_toolkit(
             storage_path=storage_path,
             config=config,
             delegation_depth=delegation_depth,
+            config_path=config_path,
         )
 
     if tool_name == "self_config":

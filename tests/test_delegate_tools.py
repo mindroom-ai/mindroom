@@ -181,6 +181,42 @@ class TestDelegateTools:
                 delegation_depth=2,
             )
 
+    @pytest.mark.asyncio
+    async def test_delegate_threads_explicit_config_path(
+        self,
+        storage_path: Path,
+        config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """Delegated agents should inherit the orchestrator-owned config path."""
+        config.agents["code"].tools = ["self_config"]
+        config_path = tmp_path / "custom-config.yaml"
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["code"],
+            storage_path=storage_path,
+            config=config,
+            delegation_depth=0,
+            config_path=config_path,
+        )
+
+        mock_response = MagicMock()
+        mock_response.content = "done"
+        mock_agent = AsyncMock()
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+
+        with patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create:
+            await tools.delegate_task("code", "update yourself")
+            mock_create.assert_called_once_with(
+                "code",
+                config,
+                storage_path=storage_path,
+                knowledge=None,
+                include_interactive_questions=False,
+                delegation_depth=1,
+                config_path=config_path,
+            )
+
 
 class TestDelegateKnowledge:
     """Test that delegated agents receive their configured knowledge bases."""
