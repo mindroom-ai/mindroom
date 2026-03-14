@@ -333,6 +333,8 @@ def build_agent_toolkit(
     if tool_name == "memory":
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
 
+        # MemoryTools resolves the canonical per-agent storage roots internally via the
+        # shared memory facade, so it should receive the caller-visible runtime root here.
         return MemoryTools(
             agent_name=agent_name,
             storage_path=storage_path,

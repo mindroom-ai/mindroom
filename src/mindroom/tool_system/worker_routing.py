@@ -19,6 +19,7 @@ ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
+_WORKER_DIRNAME_PATTERN = re.compile(r"^[a-zA-Z0-9._@+-]+-[0-9a-f]{16}$")
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
@@ -247,28 +248,54 @@ def worker_dir_name(worker_key: str) -> str:
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
     """Return the persistent state root path for a worker key."""
     resolved_base_path = shared_storage_root(base_storage_path)
-    workers_dir = (
-        resolved_base_path.parent if resolved_base_path.parent.name == "workers" else resolved_base_path / "workers"
-    )
-    return workers_dir / worker_dir_name(worker_key)
+    if _is_resolved_worker_root(resolved_base_path, worker_key):
+        return resolved_base_path
+    return resolved_base_path / "workers" / worker_dir_name(worker_key)
 
 
 def shared_storage_root(base_storage_path: Path) -> Path:
-    """Return the shared storage root for canonical `agents/<name>` or `workers/<name>` paths.
+    """Return the canonical shared storage root.
 
-    This helper intentionally peels one `agents/<child>` or `workers/<child>` segment so
-    callers can pass either the shared storage root or one canonical agent/worker root.
-    Paths that merely happen to end in those names are treated as canonical nested roots.
+    Callers must pass the actual shared storage root, not an `agents/<name>` or
+    `workers/<name>` child path. Security-sensitive path checks should fail closed
+    rather than guess by peeling path segments based only on directory names.
     """
-    resolved_base_path = base_storage_path.expanduser().resolve()
-    if resolved_base_path.parent.name in {"workers", "agents"}:
+    return base_storage_path.expanduser().resolve()
+
+
+def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
+    """Return the canonical shared state root for one agent.
+
+    Agent-state resolution accepts the shared storage root, a pre-resolved
+    canonical agent root, or a canonical worker root and normalizes them onto
+    the authoritative shared agent tree.
+    """
+    resolved_base_path = _agent_state_owner_root(base_storage_path)
+    if _is_resolved_agent_state_root(resolved_base_path, agent_name):
+        return resolved_base_path
+    return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
+
+
+def _agent_state_owner_root(base_storage_path: Path) -> Path:
+    resolved_base_path = shared_storage_root(base_storage_path)
+    if _looks_like_resolved_worker_root(resolved_base_path):
         return resolved_base_path.parent.parent
     return resolved_base_path
 
 
-def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
-    """Return the canonical shared state root for one agent."""
-    return shared_storage_root(base_storage_path) / "agents" / _normalize_worker_dir_part(agent_name)
+def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
+
+
+def _looks_like_resolved_worker_root(path: Path) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == "workers" and bool(_WORKER_DIRNAME_PATTERN.fullmatch(resolved_path.name))
+
+
+def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
 def visible_agent_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:

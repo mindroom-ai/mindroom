@@ -1944,27 +1944,45 @@ class AgentBot:
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
-
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
                 with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
-                    response_text = await ai_response(
-                        agent_name=self.agent_name,
-                        prompt=model_prompt,
-                        session_id=session_id,
-                        storage_path=self.storage_path,
-                        config=self.config,
-                        thread_history=thread_history,
-                        room_id=room_id,
-                        knowledge=knowledge,
-                        user_id=user_id,
-                        media=media_inputs,
-                        reply_to_event_id=reply_to_event_id,
-                        show_tool_calls=self.show_tool_calls,
-                        tool_trace_collector=tool_trace,
-                        run_metadata_collector=run_metadata_content,
-                    )
+                    if self.config_path is None:
+                        response_text = await ai_response(
+                            agent_name=self.agent_name,
+                            prompt=model_prompt,
+                            session_id=session_id,
+                            storage_path=self.storage_path,
+                            config=self.config,
+                            thread_history=thread_history,
+                            room_id=room_id,
+                            knowledge=knowledge,
+                            user_id=user_id,
+                            media=media_inputs,
+                            reply_to_event_id=reply_to_event_id,
+                            show_tool_calls=self.show_tool_calls,
+                            tool_trace_collector=tool_trace,
+                            run_metadata_collector=run_metadata_content,
+                        )
+                    else:
+                        response_text = await ai_response(
+                            agent_name=self.agent_name,
+                            prompt=model_prompt,
+                            session_id=session_id,
+                            storage_path=self.storage_path,
+                            config=self.config,
+                            thread_history=thread_history,
+                            room_id=room_id,
+                            knowledge=knowledge,
+                            user_id=user_id,
+                            media=media_inputs,
+                            reply_to_event_id=reply_to_event_id,
+                            show_tool_calls=self.show_tool_calls,
+                            tool_trace_collector=tool_trace,
+                            run_metadata_collector=run_metadata_content,
+                            config_path=self.config_path,
+                        )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
             self.logger.info("Non-streaming response cancelled by user", message_id=existing_event_id)
@@ -2069,23 +2087,39 @@ class AgentBot:
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
-
         async with typing_indicator(self.client, room_id):
             with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
-                response_text = await ai_response(
-                    agent_name=agent_name,
-                    prompt=model_prompt,
-                    session_id=session_id,
-                    storage_path=self.storage_path,
-                    config=self.config,
-                    thread_history=thread_history,
-                    room_id=room_id,
-                    knowledge=knowledge,
-                    reply_to_event_id=reply_to_event_id,
-                    show_tool_calls=show_tool_calls,
-                    tool_trace_collector=tool_trace,
-                    run_metadata_collector=run_metadata_content,
-                )
+                if self.config_path is None:
+                    response_text = await ai_response(
+                        agent_name=agent_name,
+                        prompt=model_prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        reply_to_event_id=reply_to_event_id,
+                        show_tool_calls=show_tool_calls,
+                        tool_trace_collector=tool_trace,
+                        run_metadata_collector=run_metadata_content,
+                    )
+                else:
+                    response_text = await ai_response(
+                        agent_name=agent_name,
+                        prompt=model_prompt,
+                        session_id=session_id,
+                        storage_path=self.storage_path,
+                        config=self.config,
+                        thread_history=thread_history,
+                        room_id=room_id,
+                        knowledge=knowledge,
+                        reply_to_event_id=reply_to_event_id,
+                        show_tool_calls=show_tool_calls,
+                        tool_trace_collector=tool_trace,
+                        run_metadata_collector=run_metadata_content,
+                        config_path=self.config_path,
+                    )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
         event_id = await self._send_response(
@@ -2233,26 +2267,43 @@ class AgentBot:
             session_id=session_id,
         )
         run_metadata_content: dict[str, Any] = {}
-
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
                 with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
-                    response_stream = stream_agent_response(
-                        agent_name=self.agent_name,
-                        prompt=model_prompt,
-                        session_id=session_id,
-                        storage_path=self.storage_path,
-                        config=self.config,
-                        thread_history=thread_history,
-                        room_id=room_id,
-                        knowledge=knowledge,
-                        user_id=user_id,
-                        media=media_inputs,
-                        reply_to_event_id=reply_to_event_id,
-                        show_tool_calls=self.show_tool_calls,
-                        run_metadata_collector=run_metadata_content,
-                    )
+                    if self.config_path is None:
+                        response_stream = stream_agent_response(
+                            agent_name=self.agent_name,
+                            prompt=model_prompt,
+                            session_id=session_id,
+                            storage_path=self.storage_path,
+                            config=self.config,
+                            thread_history=thread_history,
+                            room_id=room_id,
+                            knowledge=knowledge,
+                            user_id=user_id,
+                            media=media_inputs,
+                            reply_to_event_id=reply_to_event_id,
+                            show_tool_calls=self.show_tool_calls,
+                            run_metadata_collector=run_metadata_content,
+                        )
+                    else:
+                        response_stream = stream_agent_response(
+                            agent_name=self.agent_name,
+                            prompt=model_prompt,
+                            session_id=session_id,
+                            storage_path=self.storage_path,
+                            config=self.config,
+                            thread_history=thread_history,
+                            room_id=room_id,
+                            knowledge=knowledge,
+                            user_id=user_id,
+                            media=media_inputs,
+                            reply_to_event_id=reply_to_event_id,
+                            show_tool_calls=self.show_tool_calls,
+                            run_metadata_collector=run_metadata_content,
+                            config_path=self.config_path,
+                        )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
                     event_id, accumulated = await send_streaming_response(

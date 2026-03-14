@@ -25,8 +25,10 @@ from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
     agent_workspace_root_path,
     resolve_agent_owned_path,
+    resolve_agent_state_storage_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    shared_storage_root,
     tool_execution_identity,
     visible_agent_state_roots_for_worker_key,
     worker_root_path,
@@ -662,6 +664,34 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     assert worker_key == "v1:tenant_west:shared:general"
     assert visible_agent_state_roots_for_worker_key(tmp_path, worker_key) == (
         agent_state_root_path(tmp_path, "general"),
+    )
+
+
+def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
+    """A storage root nested under a directory named `agents` should remain unchanged."""
+    storage_root = tmp_path / "agents" / "mindroom_data"
+
+    assert shared_storage_root(storage_root) == storage_root.resolve()
+
+
+def test_resolve_agent_state_storage_path_accepts_pre_resolved_agent_root(tmp_path: Path) -> None:
+    """Already-resolved canonical agent roots should not gain an extra `agents/<name>` layer."""
+    agent_root = agent_state_root_path(tmp_path, "general")
+
+    assert resolve_agent_state_storage_path(agent_name="general", base_storage_path=agent_root) == agent_root
+
+
+def test_resolve_agent_state_storage_path_accepts_pre_resolved_worker_root(tmp_path: Path) -> None:
+    """Worker roots should still resolve agent-owned state back onto the shared agent tree."""
+    worker_key = "v1:tenant-123:shared:general"
+    worker_root = worker_root_path(tmp_path, worker_key)
+
+    assert resolve_agent_state_storage_path(
+        agent_name="general",
+        base_storage_path=worker_root,
+    ) == agent_state_root_path(
+        tmp_path,
+        "general",
     )
 
 

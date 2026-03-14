@@ -501,17 +501,29 @@ def search_file_agent_memories(
     limit: int,
 ) -> list[MemoryResult]:
     """Search file-backed memories visible to an agent."""
-    resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
-    results = _search_scope_memory_entries(agent_scope_user_id(agent_name), query, resolution, config, limit=limit)
+    agent_resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
+    results = _search_scope_memory_entries(
+        agent_scope_user_id(agent_name),
+        query,
+        agent_resolution,
+        config,
+        limit=limit,
+    )
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        team_results = _search_scope_memory_entries(team_id, query, resolution, config, limit=limit)
-        for memory in team_results:
-            memory_text = memory.get("memory", "")
-            if memory_text in existing_memories:
-                continue
-            existing_memories.add(memory_text)
-            results.append(memory)
+        for target_storage_path in mutation_target_storage_paths(team_id, agent_name, storage_path, config):
+            team_resolution = resolve_file_memory_resolution(
+                target_storage_path,
+                config,
+                original_storage_path=storage_path,
+            )
+            team_results = _search_scope_memory_entries(team_id, query, team_resolution, config, limit=limit)
+            for memory in team_results:
+                memory_text = memory.get("memory", "")
+                if memory_text in existing_memories:
+                    continue
+                existing_memories.add(memory_text)
+                results.append(memory)
     results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
     return results[:limit]
 

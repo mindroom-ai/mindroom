@@ -242,6 +242,42 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_team_search_ignores_agent_memory_file_path_override(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Team memory should stay visible even when one member stores personal memory in a workspace subdir."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "mind_data"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    await store_conversation_memory(
+        "Team note remains shared",
+        ["general", "calculator"],
+        storage_path,
+        "session-team",
+        config,
+    )
+
+    general_results = await search_agent_memories("Team note remains shared", "general", storage_path, config, limit=5)
+    calculator_results = await search_agent_memories(
+        "Team note remains shared",
+        "calculator",
+        storage_path,
+        config,
+        limit=5,
+    )
+
+    assert any(result.get("memory") == "Team note remains shared" for result in general_results)
+    assert any(result.get("memory") == "Team note remains shared" for result in calculator_results)
+    assert (
+        agent_state_root_path(storage_path, "general") / "memory_files" / "team_calculator+general" / "MEMORY.md"
+    ).exists()
+
+
+@pytest.mark.asyncio
 async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")

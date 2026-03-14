@@ -859,6 +859,7 @@ async def _prepare_agent_and_prompt(
     include_interactive_questions: bool = True,
     session_id: str | None = None,
     reply_to_event_id: str | None = None,
+    config_path: Path | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -903,6 +904,7 @@ async def _prepare_agent_and_prompt(
         storage_path=storage_path,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
+        config_path=config_path,
     )
     _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path, session=session)
     return agent, full_prompt, unseen_event_ids
@@ -924,6 +926,7 @@ async def ai_response(
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
+    config_path: Path | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -948,6 +951,8 @@ async def ai_response(
             entries from this run.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
+        config_path: Optional explicit YAML config path used by config-aware tools
+            such as `self_config`.
 
     Returns:
         Agent response string
@@ -968,6 +973,7 @@ async def ai_response(
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
+            config_path=config_path,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1127,6 +1133,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
+    config_path: Path | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1152,6 +1159,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         show_tool_calls: Whether to include tool call details inline in the streamed response.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
+        config_path: Optional explicit YAML config path used by config-aware tools
+            such as `self_config`.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1172,6 +1181,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
+            config_path=config_path,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)

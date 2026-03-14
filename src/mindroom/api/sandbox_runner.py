@@ -34,7 +34,6 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_j
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
-    shared_storage_root,
     tool_execution_identity,
     visible_agent_state_roots_for_worker_key,
     worker_dir_name,
@@ -66,6 +65,8 @@ _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SEC
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
+_KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
+_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
@@ -333,19 +334,39 @@ def _runner_dedicated_worker_root() -> Path | None:
     return None
 
 
-def _runner_storage_root() -> Path:
+def _runner_shared_storage_root() -> Path | None:
     shared_root = os.getenv(_SHARED_STORAGE_ROOT_ENV, "").strip()
     if shared_root:
         return Path(shared_root).expanduser().resolve()
 
+    dedicated_root = _runner_dedicated_worker_root()
+    worker_key = _runner_dedicated_worker_key()
+    if dedicated_root is None or worker_key is None:
+        return None
+
+    storage_subpath_prefix = (
+        os.getenv(
+            _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
+            _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
+        ).strip()
+        or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
+    )
+    if dedicated_root.name != worker_dir_name(worker_key):
+        return None
+    if dedicated_root.parent.name != storage_subpath_prefix:
+        return None
+    return dedicated_root.parent.parent.resolve()
+
+
+def _runner_storage_root() -> Path:
+    if shared_root := _runner_shared_storage_root():
+        return shared_root
+
     storage_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
     if storage_root:
-        return shared_storage_root(Path(storage_root).expanduser().resolve())
+        return Path(storage_root).expanduser().resolve()
 
-    if dedicated_root := _runner_dedicated_worker_root():
-        return shared_storage_root(dedicated_root)
-
-    return shared_storage_root(STORAGE_PATH_OBJ.resolve())
+    return STORAGE_PATH_OBJ.resolve()
 
 
 def _runner_uses_dedicated_worker() -> bool:
@@ -490,8 +511,17 @@ def _resolve_worker_base_dir(
         msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
         raise ValueError(msg)
 
-    candidate.mkdir(parents=True, exist_ok=True)
     return candidate
+
+
+def _ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
+    if runtime_overrides is None:
+        return None
+
+    base_dir = runtime_overrides.get("base_dir")
+    if isinstance(base_dir, Path):
+        base_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_overrides
 
 
 def _prepare_worker_request(
@@ -546,7 +576,7 @@ async def _execute_request_inprocess(
         prepared = _resolve_prepared_worker_request(request, prepared_worker)
     except _WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
-    runtime_overrides = prepared.runtime_overrides if prepared is not None else None
+    runtime_overrides = _ready_runtime_overrides(prepared.runtime_overrides if prepared is not None else None)
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)

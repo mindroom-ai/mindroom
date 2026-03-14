@@ -109,6 +109,23 @@ def test_sandbox_runner_applies_tool_init_overrides(
     assert "USER.md" in data["result"]
 
 
+def test_resolve_worker_base_dir_does_not_create_directories_during_validation(tmp_path: Path) -> None:
+    """Worker base-dir validation should not leave empty directories behind."""
+    storage_root = tmp_path / "mindroom_data"
+    worker_root = tmp_path / "workers" / "worker-state"
+    requested_base_dir = "agents/general/workspace/mind_data"
+
+    resolved = sandbox_runner_module._resolve_worker_base_dir(
+        SimpleNamespace(root=worker_root, workspace=worker_root / "workspace"),
+        storage_root,
+        "v1:default:shared:general",
+        requested_base_dir,
+    )
+
+    assert resolved == (storage_root / requested_base_dir).resolve()
+    assert not resolved.exists()
+
+
 def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
     """Sandbox runner should expose a minimal unauthenticated health endpoint."""
     response = runner_client.get("/healthz")
