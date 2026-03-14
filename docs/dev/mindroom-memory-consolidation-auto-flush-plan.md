@@ -19,7 +19,7 @@ Last updated: 2026-02-27
 
 ## File Model
 
-Per memory scope (agent/room/team), keep:
+Per memory scope (agent/team), keep:
 
 - `MEMORY.md` for curated long-term memory.
 - `daily/YYYY-MM-DD.md` for short-term append logs.

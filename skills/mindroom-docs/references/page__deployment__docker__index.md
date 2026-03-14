@@ -130,7 +130,7 @@ MindRoom stores data in the `mindroom_data` directory:
 
 - `sessions/` - Per-agent conversation history (SQLite)
 - `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `chroma/` - ChromaDB vector store for agent/room memories
+- `chroma/` - ChromaDB vector store for agent/team memories
 - `knowledge_db/` - Knowledge base vector stores
 - `culture/` - Shared culture state
 - `tracking/` - Response tracking to avoid duplicates
