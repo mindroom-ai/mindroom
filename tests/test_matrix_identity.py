@@ -82,7 +82,7 @@ class TestMatrixID:
 
     def test_namespaced_agent_localpart_and_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Agent IDs should use and require configured namespace suffixes."""
-        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
+        monkeypatch.setattr(matrix_identity, "runtime_mindroom_namespace", lambda **_kwargs: "a1b2c3d4")
         domain = self.config.domain
 
         assert agent_username_localpart("calculator") == "mindroom_calculator_a1b2c3d4"

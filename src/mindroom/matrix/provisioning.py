@@ -8,7 +8,7 @@ from typing import Literal
 
 import httpx
 
-from mindroom.constants import MATRIX_SSL_VERIFY
+from mindroom.constants import runtime_matrix_ssl_verify
 from mindroom.matrix.client import matrix_startup_error
 
 
@@ -90,7 +90,7 @@ async def register_user_via_provisioning_service(
         "display_name": display_name,
     }
     try:
-        async with httpx.AsyncClient(timeout=10, verify=MATRIX_SSL_VERIFY) as client:
+        async with httpx.AsyncClient(timeout=10, verify=runtime_matrix_ssl_verify()) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"

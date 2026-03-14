@@ -386,7 +386,7 @@ def _runner_storage_root() -> Path:
     if storage_root:
         return Path(storage_root).expanduser().resolve()
 
-    return constants.STORAGE_PATH_OBJ.resolve()
+    return constants.runtime_storage_root().resolve()
 
 
 def _runner_uses_dedicated_worker() -> bool:

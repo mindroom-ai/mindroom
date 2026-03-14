@@ -95,7 +95,8 @@ Generate the topic:"""
             full_prompt=prompt,
             session_id=session_id,
             agent_name="TopicGenerator",
-            storage_path=constants.STORAGE_PATH_OBJ,
+            storage_path=constants.get_runtime_paths().storage_root,
+            runtime_paths=constants.get_runtime_paths(),
         )
     except Exception:
         logger.exception(f"Error generating topic for room {room_key}")

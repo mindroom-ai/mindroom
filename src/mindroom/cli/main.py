@@ -18,7 +18,6 @@ from pydantic import ValidationError
 import mindroom.cli.connect as cli_connect
 from mindroom import __version__, constants
 from mindroom.constants import (
-    MATRIX_SSL_VERIFY,
     config_search_locations,
     ensure_writable_config_path,
     set_runtime_storage_path,
@@ -282,7 +281,7 @@ def connect(
             pair_code=normalized_pair_code,
             client_name=normalized_client_name,
             client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
-            matrix_ssl_verify=MATRIX_SSL_VERIFY,
+            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(),
             post_request=httpx.post,
         )
     except (TypeError, ValueError) as exc:

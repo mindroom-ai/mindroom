@@ -19,7 +19,6 @@ from pydantic import ValidationError
 
 from mindroom import constants
 from mindroom.constants import (
-    MATRIX_SSL_VERIFY,
     env_key_for_provider,
 )
 from mindroom.embeddings import create_sentence_transformers_embedder
@@ -579,7 +578,7 @@ def _check_matrix_homeserver() -> tuple[int, int, int]:
     homeserver = constants.runtime_matrix_homeserver()
     url = matrix_versions_url(homeserver)
     try:
-        response = httpx.get(url, timeout=5, verify=MATRIX_SSL_VERIFY)
+        response = httpx.get(url, timeout=5, verify=constants.runtime_matrix_ssl_verify())
     except httpx.TransportError as exc:
         console.print(f"[red]✗[/red] Matrix homeserver unreachable: {homeserver} ({exc})")
         return 0, 1, 0

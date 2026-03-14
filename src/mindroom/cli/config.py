@@ -15,7 +15,6 @@ from typing import Literal
 
 import typer
 import yaml
-from dotenv import dotenv_values
 from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
@@ -27,6 +26,7 @@ from mindroom.constants import (
     config_search_locations,
     env_key_for_provider,
     get_runtime_paths,
+    resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -79,31 +79,6 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
-def _configured_storage_root_override() -> Path | None:
-    """Return the active storage-root override from the environment, if any."""
-    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if not configured_root:
-        return None
-    return Path(configured_root).expanduser().resolve()
-
-
-def _storage_root_for_config(config_dir: Path) -> Path:
-    """Return the runtime storage root implied by env overrides or config location."""
-    if configured_root := _configured_storage_root_override():
-        return configured_root
-    return (config_dir / "mindroom_data").resolve()
-
-
-def _storage_root_from_env_file(env_path: Path) -> Path | None:
-    """Return MINDROOM_STORAGE_PATH from one env file when it is defined."""
-    if not env_path.is_file():
-        return None
-    configured_root = dotenv_values(env_path).get("MINDROOM_STORAGE_PATH")
-    if not isinstance(configured_root, str) or not configured_root.strip():
-        return None
-    return Path(configured_root).expanduser().resolve()
-
-
 def _config_init_storage_plan(
     config_dir: Path,
     env_path: Path,
@@ -111,11 +86,12 @@ def _config_init_storage_plan(
     write_env_file: bool,
 ) -> tuple[Path, bool]:
     """Return the storage root and whether the starter config can use the env placeholder."""
+    runtime_paths = resolve_runtime_paths(config_path=config_dir / "config.yaml")
     if write_env_file:
-        return _storage_root_for_config(config_dir), True
-    if preserved_storage_root := _storage_root_from_env_file(env_path):
-        return preserved_storage_root, True
-    return _storage_root_for_config(config_dir), False
+        return runtime_paths.storage_root, True
+    if "MINDROOM_STORAGE_PATH" in runtime_paths.env_file_values and env_path.is_file():
+        return runtime_paths.storage_root, True
+    return runtime_paths.storage_root, False
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:

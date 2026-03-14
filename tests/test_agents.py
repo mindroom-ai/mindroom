@@ -363,6 +363,14 @@ def test_create_agent_rejects_env_var_context_files() -> None:
         config.agents["general"].context_files = ["${MINDROOM_STORAGE_PATH}/SOUL.md"]
 
 
+def test_create_agent_rejects_bare_env_var_context_files() -> None:
+    """Agent-owned paths should reject bare `$NAME/...` forms too."""
+    config = Config.from_yaml()
+
+    with pytest.raises(ValidationError, match="env-variable references"):
+        config.agents["general"].context_files = ["$MINDROOM_STORAGE_PATH/SOUL.md"]
+
+
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
 def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_tools(
@@ -711,6 +719,28 @@ def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Pat
 
     assert resolved.is_relative_to(agent_state_root_path(tmp_path, "general"))
     assert resolved == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+
+
+def test_agent_owned_validation_matches_runtime_resolution(tmp_path: Path) -> None:
+    """Validation and runtime resolution should share the same normalization contract."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "./mind_data"
+    config.agents["general"].context_files = ["./mind_data/SOUL.md"]
+
+    validated_workspace = config.agents["general"].memory_file_path
+    validated_context = config.agents["general"].context_files[0]
+
+    assert validated_workspace == "mind_data"
+    assert validated_context == "mind_data/SOUL.md"
+    assert (
+        resolve_agent_owned_path(
+            validated_context,
+            agent_name="general",
+            base_storage_path=tmp_path,
+        )
+        == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+    )
 
 
 def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping(tmp_path: Path) -> None:

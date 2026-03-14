@@ -62,7 +62,7 @@ class TestMentionParsing:
 
     def test_parse_with_namespaced_full_mention(self, monkeypatch: MonkeyPatch) -> None:
         """Full localparts that include namespace suffix should resolve to configured agents."""
-        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
+        monkeypatch.setattr(matrix_identity, "runtime_mindroom_namespace", lambda **_kwargs: "a1b2c3d4")
         config = Config.from_yaml()
 
         text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"

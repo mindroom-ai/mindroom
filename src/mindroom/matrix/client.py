@@ -15,7 +15,7 @@ from nio import crypto
 
 from mindroom import constants
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import MATRIX_SSL_VERIFY
+from mindroom.constants import runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
@@ -53,7 +53,7 @@ def matrix_startup_error(
 
 def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if not MATRIX_SSL_VERIFY:
+        if not runtime_matrix_ssl_verify():
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -88,7 +88,7 @@ def _create_matrix_client(
     # Default store path for encryption support
     if store_path is None and user_id:
         safe_user_id = user_id.replace(":", "_").replace("@", "")
-        store_path = str(constants.ENCRYPTION_KEYS_DIR / safe_user_id)
+        store_path = str(constants.encryption_keys_dir() / safe_user_id)
         # Ensure the directory exists
         Path(store_path).mkdir(parents=True, exist_ok=True)
 

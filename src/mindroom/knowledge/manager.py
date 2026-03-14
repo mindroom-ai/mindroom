@@ -56,7 +56,7 @@ def _resolve_knowledge_path(
     path: str,
     runtime_paths: RuntimePaths,
 ) -> Path:
-    return resolve_config_relative_path(path, config_path=runtime_paths.config_path)
+    return resolve_config_relative_path(path, runtime_paths=runtime_paths)
 
 
 def _safe_identifier(value: str) -> str:

@@ -1819,7 +1819,7 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         _set_cli_runtime_paths(cfg)
-        monkeypatch.setattr("mindroom.cli.main.MATRIX_SSL_VERIFY", False)
+        monkeypatch.setattr("mindroom.cli.main.constants.runtime_matrix_ssl_verify", lambda: False)
 
         called: dict[str, object] = {}
 

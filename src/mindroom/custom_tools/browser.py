@@ -189,7 +189,7 @@ class BrowserTools(Toolkit):
         super().__init__(name="browser", tools=[self.browser])
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
-        self._output_dir = constants.STORAGE_PATH_OBJ / "browser"
+        self._output_dir = constants.get_runtime_paths().storage_root / "browser"
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
 

@@ -32,7 +32,7 @@ class ResponseTracker:
     """Track which event IDs have been responded to by an agent."""
 
     agent_name: str
-    base_path: Path = field(default_factory=lambda: constants.TRACKING_DIR)
+    base_path: Path = field(default_factory=constants.tracking_dir)
     _responses: dict[str, _ResponseRecord] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
     _thread_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -281,14 +281,21 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_internal_user_username_not_reserved(self) -> Config:
+    def validate_internal_user_username_not_reserved(self, info: ValidationInfo) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         if self.mindroom_user is None:
             return self
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         reserved_localparts = {
-            agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
-            **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
-            **{agent_username_localpart(team_name): f"team '{team_name}'" for team_name in self.teams},
+            agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths=runtime_paths): f"router '{ROUTER_AGENT_NAME}'",
+            **{
+                agent_username_localpart(agent_name, runtime_paths=runtime_paths): f"agent '{agent_name}'"
+                for agent_name in self.agents
+            },
+            **{
+                agent_username_localpart(team_name, runtime_paths=runtime_paths): f"team '{team_name}'"
+                for team_name in self.teams
+            },
         }
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
@@ -297,16 +304,17 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_root_space_alias_does_not_collide_with_managed_rooms(self) -> Config:
+    def validate_root_space_alias_does_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
         """Ensure no managed room key maps to the reserved root Space alias."""
         if not self.matrix_space.enabled:
             return self
-        reserved_alias_localpart = managed_space_alias_localpart()
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
         colliding_rooms = sorted(
             room_key
             for room_key in self.get_all_configured_rooms()
             if not room_key.startswith(("!", "#"))
-            and managed_room_alias_localpart(room_key) == reserved_alias_localpart
+            and managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
         )
         if colliding_rooms:
             formatted = ", ".join(colliding_rooms)
@@ -324,6 +332,7 @@ class Config(BaseModel):
 
         return extract_server_name_from_homeserver(
             runtime_matrix_homeserver(runtime_paths=self._runtime_paths),
+            runtime_paths=self._runtime_paths,
         )
 
     @cached_property
@@ -340,14 +349,18 @@ class Config(BaseModel):
 
         # Add all agents
         for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain)
+            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain, runtime_paths=self._runtime_paths)
 
         # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain)
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(
+            ROUTER_AGENT_NAME,
+            self.domain,
+            runtime_paths=self._runtime_paths,
+        )
 
         # Add all teams
         for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
+            mapping[team_name] = MatrixID.from_agent(team_name, self.domain, runtime_paths=self._runtime_paths)
         return mapping
 
     def get_mindroom_user_id(self) -> str | None:
@@ -392,7 +405,7 @@ class Config(BaseModel):
         if data.get("matrix_space") is None:
             data["matrix_space"] = {}
 
-        config = cls(**data)
+        config = cls.model_validate(data, context={"runtime_paths": resolved_runtime_paths})
         config._runtime_paths = resolved_runtime_paths
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")

@@ -352,7 +352,7 @@ def build_agent_tool_init_context(
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
-    resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
+    resolved_storage_path = storage_path if storage_path is not None else constants.get_runtime_paths().storage_root
     workspace_path = None
     if agent_config.memory_file_path is not None:
         workspace_path = _resolve_agent_workspace_path(

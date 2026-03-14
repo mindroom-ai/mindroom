@@ -8,7 +8,7 @@ import httpx
 import nio
 
 from mindroom.config.main import Config
-from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
 from mindroom.matrix.client import (
@@ -97,7 +97,7 @@ async def _homeserver_requires_registration_token(homeserver: str) -> bool:
     """Check whether the homeserver advertises registration-token flow."""
     url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
     try:
-        async with httpx.AsyncClient(timeout=5, verify=MATRIX_SSL_VERIFY) as client:
+        async with httpx.AsyncClient(timeout=5, verify=runtime_matrix_ssl_verify()) as client:
             response = await client.post(url, json={})
             data = response.json()
     except (httpx.HTTPError, ValueError):
@@ -162,7 +162,7 @@ async def _register_user_with_token(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10, verify=MATRIX_SSL_VERIFY) as client:
+        async with httpx.AsyncClient(timeout=10, verify=runtime_matrix_ssl_verify()) as client:
             response = await client.post(register_url, json=request_payload)
     except httpx.HTTPError as exc:
         msg = f"Could not reach Matrix homeserver ({homeserver}) during registration: {exc}"

@@ -33,7 +33,13 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    PROVIDER_ENV_KEYS,
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    runtime_ai_cache_enabled,
+)
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
@@ -482,9 +488,9 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
 
 
 @functools.cache
-def _get_cache(storage_path: Path) -> diskcache.Cache | None:
+def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
-    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_AI_CACHE else None
+    return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
 def _set_api_key_env_var(provider: str) -> None:
@@ -812,6 +818,7 @@ async def _cached_agent_run(
     session_id: str,
     agent_name: str,
     storage_path: Path,
+    runtime_paths: RuntimePaths | None = None,
     user_id: str | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
@@ -820,7 +827,11 @@ async def _cached_agent_run(
     media_inputs = media or MediaInputs()
     # Skip cache when media is present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
-    cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)
+    cache = (
+        None
+        if (media_inputs.has_any() or agent.add_history_to_context)
+        else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
+    )
     if cache is None:
         return await agent.arun(
             full_prompt,
@@ -985,6 +996,7 @@ async def ai_response(
             session_id,
             agent_name,
             storage_path,
+            runtime_paths=runtime_paths,
             user_id=user_id,
             media=media_inputs,
             metadata=metadata,
@@ -1004,6 +1016,7 @@ async def ai_response(
                     session_id,
                     agent_name,
                     storage_path,
+                    runtime_paths=runtime_paths,
                     user_id=user_id,
                     media=MediaInputs(),
                     metadata=metadata,
@@ -1184,7 +1197,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Check cache (skip when media is present or history is enabled)
-    cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)
+    cache = (
+        None
+        if (media_inputs.has_any() or agent.add_history_to_context)
+        else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
+    )
     if cache is not None:
         model = agent.model
         assert model is not None

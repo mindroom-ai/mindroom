@@ -44,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import RuntimePaths, get_runtime_paths, set_runtime_paths
+from .constants import RuntimePaths, activate_runtime_paths, get_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -435,7 +435,7 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        self.runtime_paths = set_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        self.runtime_paths = activate_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
         config = Config.from_yaml(runtime_paths=self.runtime_paths)
         load_plugins(config, config_path=self.config_path)
         await self._prepare_user_account(config, update_runtime_state=True)
@@ -600,7 +600,7 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        self.runtime_paths = set_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        self.runtime_paths = activate_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
         new_config = Config.from_yaml(runtime_paths=self.runtime_paths)
         load_plugins(new_config, config_path=self.config_path)
 
@@ -977,7 +977,7 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
-    runtime_paths = set_runtime_paths(storage_path=storage_path)
+    runtime_paths = activate_runtime_paths(storage_path=storage_path)
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.

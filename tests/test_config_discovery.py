@@ -2,16 +2,155 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
-from typing import TYPE_CHECKING
+from pathlib import Path
+
+import pytest
 
 import mindroom.constants as constants_mod
 from mindroom.config.main import Config
+from mindroom.matrix.state import MatrixState
+from mindroom.response_tracker import ResponseTracker
 
-if TYPE_CHECKING:
-    from pathlib import Path
+_RUNTIME_GLOBAL_NAMES = {
+    "CONFIG_PATH",
+    "STORAGE_PATH_OBJ",
+    "MATRIX_HOMESERVER",
+    "MATRIX_SERVER_NAME",
+    "MATRIX_SSL_VERIFY",
+    "MINDROOM_NAMESPACE",
+    "ENABLE_AI_CACHE",
+}
+_RUNTIME_ENV_KEYS = {
+    "MINDROOM_CONFIG_PATH",
+    "MINDROOM_STORAGE_PATH",
+    "MINDROOM_CONFIG_TEMPLATE",
+    "MATRIX_HOMESERVER",
+    "MATRIX_SERVER_NAME",
+    "MATRIX_SSL_VERIFY",
+    "MINDROOM_NAMESPACE",
+    "MINDROOM_ENABLE_AI_CACHE",
+}
+_RUNTIME_GLOBAL_ALLOWLIST = {"src/mindroom/constants.py"}
+_RUNTIME_ENV_ALLOWLIST = {
+    "src/mindroom/constants.py",
+    "src/mindroom/api/sandbox_runner.py",
+    "src/mindroom/workers/backends/local.py",
+}
 
-    import pytest
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _runtime_source_files() -> list[Path]:
+    return sorted((_repo_root() / "src" / "mindroom").rglob("*.py"))
+
+
+def _runtime_constant_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            if alias.name == "mindroom.constants":
+                aliases.add(alias.asname or alias.name.split(".")[-1])
+    return aliases
+
+
+def _runtime_global_import_violations(tree: ast.AST, relative_path: str) -> list[str]:
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module_name = node.module or ""
+        if not module_name.endswith("constants"):
+            continue
+        violations.extend(
+            f"{relative_path}:{node.lineno} imports {alias.name}"
+            for alias in node.names
+            if alias.name in _RUNTIME_GLOBAL_NAMES
+        )
+    return violations
+
+
+def _runtime_global_attr_violations(tree: ast.AST, relative_path: str, constant_aliases: set[str]) -> list[str]:
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in constant_aliases
+            and node.attr in _RUNTIME_GLOBAL_NAMES
+        ):
+            continue
+        violations.append(f"{relative_path}:{node.lineno} uses constants.{node.attr}")
+    return violations
+
+
+def _collect_runtime_global_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        if relative_path in _RUNTIME_GLOBAL_ALLOWLIST:
+            continue
+
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        constant_aliases = _runtime_constant_aliases(tree)
+        violations.extend(_runtime_global_import_violations(tree, relative_path))
+        violations.extend(_runtime_global_attr_violations(tree, relative_path, constant_aliases))
+
+    return sorted(set(violations))
+
+
+def _collect_runtime_env_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        if relative_path in _RUNTIME_ENV_ALLOWLIST:
+            continue
+
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr == "getenv"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in _RUNTIME_ENV_KEYS
+            ):
+                violations.append(f"{relative_path}:{node.lineno} reads os.getenv({node.args[0].value!r})")
+
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "os"
+                and node.value.attr == "environ"
+                and isinstance(node.slice, ast.Constant)
+                and node.slice.value in _RUNTIME_ENV_KEYS
+            ):
+                violations.append(f"{relative_path}:{node.lineno} reads os.environ[{node.slice.value!r}]")
+
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "os"
+                and node.func.value.attr == "environ"
+                and node.func.attr == "get"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in _RUNTIME_ENV_KEYS
+            ):
+                violations.append(f"{relative_path}:{node.lineno} reads os.environ.get({node.args[0].value!r})")
+
+    return sorted(set(violations))
 
 
 def _patch_config_globals(
@@ -160,6 +299,11 @@ class TestResolveConfigRelativePath:
         )
 
         assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+
+    def test_rejects_non_runtime_placeholders(self, tmp_path: Path) -> None:
+        """Config-relative paths should fail closed for unsupported env placeholders."""
+        with pytest.raises(ValueError, match="only support"):
+            constants_mod.resolve_config_relative_path("${HOME}/kb", config_path=tmp_path / "config.yaml")
 
     def test_config_from_yaml_loads_sibling_env_for_expansion(
         self,
@@ -415,3 +559,74 @@ class TestStoragePathResolution:
 
         # Restore module globals to environment defaults for subsequent tests.
         importlib.reload(constants_mod)
+
+
+class TestRuntimeContextConsumers:
+    """Regression tests for modules that follow the active runtime context."""
+
+    def test_imported_modules_follow_runtime_context_changes_without_reload(self, tmp_path: Path) -> None:
+        """Modules imported before activation should use the new runtime context after activation changes."""
+        identity_mod = importlib.import_module("mindroom.matrix.identity")
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        first_dir.mkdir(parents=True)
+        second_dir.mkdir(parents=True)
+        first_config = first_dir / "config.yaml"
+        second_config = second_dir / "config.yaml"
+        first_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        second_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        (first_dir / ".env").write_text(
+            "MINDROOM_NAMESPACE=alpha1234\nMATRIX_SERVER_NAME=alpha.example\n",
+            encoding="utf-8",
+        )
+        (second_dir / ".env").write_text(
+            "MINDROOM_NAMESPACE=beta1234\nMATRIX_SERVER_NAME=beta.example\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.activate_runtime_paths(config_path=first_config)
+        assert identity_mod.agent_username_localpart("general") == "mindroom_general_alpha1234"
+        assert identity_mod.extract_server_name_from_homeserver("http://localhost:8008") == "alpha.example"
+
+        constants_mod.activate_runtime_paths(config_path=second_config)
+        assert identity_mod.agent_username_localpart("general") == "mindroom_general_beta1234"
+        assert identity_mod.extract_server_name_from_homeserver("http://localhost:8008") == "beta.example"
+
+    def test_runtime_path_consumers_follow_activated_runtime_paths(self, tmp_path: Path) -> None:
+        """Runtime consumers should switch roots when activation changes the runtime context."""
+        first_config = tmp_path / "first" / "config.yaml"
+        second_config = tmp_path / "second" / "config.yaml"
+        first_storage = tmp_path / "storage-a"
+        second_storage = tmp_path / "storage-b"
+        first_config.parent.mkdir(parents=True)
+        second_config.parent.mkdir(parents=True)
+        first_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        second_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+
+        constants_mod.activate_runtime_paths(config_path=first_config, storage_path=first_storage)
+        tracker_a = ResponseTracker("general")
+        MatrixState().save()
+        assert tracker_a.base_path == first_storage / "tracking"
+        assert tracker_a._responses_file == first_storage / "tracking" / "general_responded.json"
+        assert constants_mod.matrix_state_file() == first_storage / "matrix_state.yaml"
+
+        constants_mod.activate_runtime_paths(config_path=second_config, storage_path=second_storage)
+        tracker_b = ResponseTracker("general")
+        MatrixState().save()
+        assert tracker_b.base_path == second_storage / "tracking"
+        assert tracker_b._responses_file == second_storage / "tracking" / "general_responded.json"
+        assert constants_mod.matrix_state_file() == second_storage / "matrix_state.yaml"
+
+
+class TestRuntimeGuardrails:
+    """Lint-style tests that keep runtime-path access centralized."""
+
+    def test_no_new_import_time_runtime_global_usage_outside_allowlist(self) -> None:
+        """Prevent new imports or attribute reads of mutable runtime globals."""
+        violations = _collect_runtime_global_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_no_new_direct_runtime_env_reads_outside_allowlist(self) -> None:
+        """Prevent new direct runtime-varying env reads outside approved modules."""
+        violations = _collect_runtime_env_violations()
+        assert not violations, "\n".join(violations)

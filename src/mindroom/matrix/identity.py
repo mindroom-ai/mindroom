@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
-from mindroom.constants import MATRIX_SERVER_NAME, MINDROOM_NAMESPACE, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -28,17 +28,14 @@ def _normalize_namespace(namespace: str | None) -> str | None:
     return normalized
 
 
-_ACTIVE_NAMESPACE = _normalize_namespace(MINDROOM_NAMESPACE)
-
-
-def mindroom_namespace() -> str | None:
+def mindroom_namespace(*, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Return the configured installation namespace, if any."""
-    return _ACTIVE_NAMESPACE
+    return _normalize_namespace(runtime_mindroom_namespace(runtime_paths=runtime_paths))
 
 
-def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
+def _strip_agent_namespace_suffix(agent_identifier: str, *, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Return the agent name without namespace suffix, or None if namespace mismatches."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if not namespace:
         return agent_identifier
 
@@ -50,22 +47,43 @@ def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
     return stripped or None
 
 
-def managed_room_alias_localpart(room_key: str) -> str:
+def _config_contains_entity(container: object, entity_name: str) -> bool:
+    contains = getattr(container, "__contains__", None)
+    if contains is None:
+        return False
+    try:
+        return bool(contains(entity_name))
+    except TypeError:
+        return False
+
+
+def _runtime_paths_from_config(config: object) -> RuntimePaths | None:
+    runtime_paths = getattr(config, "_runtime_paths", None)
+    if isinstance(runtime_paths, RuntimePaths):
+        return runtime_paths
+    return None
+
+
+def managed_room_alias_localpart(room_key: str, *, runtime_paths: RuntimePaths | None = None) -> str:
     """Build the managed room alias localpart for a room key."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if not namespace:
         return room_key
     return f"{room_key}_{namespace}"
 
 
-def managed_space_alias_localpart() -> str:
+def managed_space_alias_localpart(*, runtime_paths: RuntimePaths | None = None) -> str:
     """Build the reserved alias localpart for the root MindRoom Space."""
-    return managed_room_alias_localpart("_mindroom_root_space")
+    return managed_room_alias_localpart("_mindroom_root_space", runtime_paths=runtime_paths)
 
 
-def managed_room_key_from_alias_localpart(alias_localpart: str) -> str | None:
+def managed_room_key_from_alias_localpart(
+    alias_localpart: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> str | None:
     """Extract the configured managed room key from an alias localpart."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if not namespace:
         return alias_localpart
 
@@ -91,9 +109,15 @@ class MatrixID:
         return _parse_matrix_id(matrix_id)
 
     @classmethod
-    def from_agent(cls, agent_name: str, domain: str) -> MatrixID:
+    def from_agent(
+        cls,
+        agent_name: str,
+        domain: str,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ) -> MatrixID:
         """Create a MatrixID for an agent."""
-        return cls(username=agent_username_localpart(agent_name), domain=domain)
+        return cls(username=agent_username_localpart(agent_name, runtime_paths=runtime_paths), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -117,16 +141,21 @@ class MatrixID:
 
         # Remove prefix
         agent_identifier = self.username[len(self.AGENT_PREFIX) :]
-        name = _strip_agent_namespace_suffix(agent_identifier)
+        name = _strip_agent_namespace_suffix(
+            agent_identifier,
+            runtime_paths=_runtime_paths_from_config(config),
+        )
         if name is None:
             return None
 
+        agents = getattr(config, "agents", {})
+        teams = getattr(config, "teams", {})
         # Special check for the router agent:
         # The router is a built-in agent that handles command routing and doesn't
         # appear in config.agents. Without this check, extract_agent_name() would
         # return None for router messages, causing other agents to incorrectly
         # respond to router's error messages (e.g., when schedule parsing fails).
-        if name == ROUTER_AGENT_NAME or name in config.agents or name in config.teams:
+        if name == ROUTER_AGENT_NAME or _config_contains_entity(agents, name) or _config_contains_entity(teams, name):
             return name
         return None
 
@@ -194,9 +223,9 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
     return mid.agent_name(config)
 
 
-def agent_username_localpart(agent_name: str) -> str:
+def agent_username_localpart(agent_name: str, *, runtime_paths: RuntimePaths | None = None) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths=runtime_paths)
     if namespace:
         return f"{MatrixID.AGENT_PREFIX}{agent_name}_{namespace}"
     return f"{MatrixID.AGENT_PREFIX}{agent_name}"
@@ -209,7 +238,11 @@ def room_alias_localpart(room_alias: str) -> str | None:
     return room_alias[1:].split(":", 1)[0]
 
 
-def extract_server_name_from_homeserver(homeserver: str) -> str:
+def extract_server_name_from_homeserver(
+    homeserver: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> str:
     """Extract server name from a homeserver URL like "http://localhost:8008".
 
     If MATRIX_SERVER_NAME environment variable is set, use that instead.
@@ -217,8 +250,8 @@ def extract_server_name_from_homeserver(homeserver: str) -> str:
     from the actual Matrix server name.
     """
     # Check for explicit server name override (for federation/docker setups)
-    if MATRIX_SERVER_NAME:
-        return MATRIX_SERVER_NAME
+    if server_name := runtime_matrix_server_name(runtime_paths=runtime_paths):
+        return server_name
 
     # Otherwise extract from homeserver URL
     # Remove protocol

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom import constants
-from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -159,7 +159,7 @@ async def wait_for_matrix_homeserver(
         timeout_seconds=timeout_seconds,
     )
 
-    async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=MATRIX_SSL_VERIFY) as client:
+    async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=runtime_matrix_ssl_verify()) as client:
         while deadline is None or loop.time() < deadline:
             attempt += 1
             try:

@@ -83,7 +83,7 @@ def setup_logging(level: str = "INFO") -> None:
 
     """
     # Create logs directory if it doesn't exist
-    logs_dir = constants.STORAGE_PATH_OBJ / "logs"
+    logs_dir = constants.get_runtime_paths().storage_root / "logs"
     logs_dir.mkdir(exist_ok=True, parents=True)
 
     # Create timestamped log file
