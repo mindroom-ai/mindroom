@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "pyyaml", "jinja2"]
+# dependencies = ["typer", "rich", "pydantic", "jinja2"]
 # ///
 """Docker MindRoom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -14,15 +14,16 @@ import json
 import os
 import platform as plat
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import typer
-import yaml
 from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -36,13 +37,16 @@ console = Console()
 
 # Get the script's directory to ensure paths are relative to it
 SCRIPT_DIR = Path(__file__).parent.absolute()
+REPO_ROOT = SCRIPT_DIR.parents[2]
 REGISTRY_FILE = SCRIPT_DIR / "instances.json"
 ENV_DIR = SCRIPT_DIR / "envs"
 ENV_TEMPLATE = SCRIPT_DIR / ".env.template"
 DEFAULT_REGISTRY = "ghcr.io/mindroom-ai"
-
-# Ensure env directory exists
-ENV_DIR.mkdir(exist_ok=True)
+EXTERNAL_NETWORK = "mynetwork"
+DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
+DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
+DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
+PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 
 
 # Pydantic Models
@@ -102,6 +106,15 @@ class Registry(BaseModel):
     instances: dict[str, Instance] = Field(default_factory=dict)
     allocated_ports: AllocatedPorts = Field(default_factory=AllocatedPorts)
     defaults: RegistryDefaults = Field(default_factory=RegistryDefaults)
+
+
+@dataclass(frozen=True)
+class TraefikSettings:
+    """Traefik labels that the instance publishes."""
+
+    web_entrypoint: str = DEFAULT_TRAEFIK_WEB_ENTRYPOINT
+    matrix_entrypoint: str = DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT
+    certresolver: str = DEFAULT_TRAEFIK_CERTRESOLVER
 
 
 def load_registry() -> Registry:
@@ -244,22 +257,160 @@ def _prepare_matrix_config(
             shutil.copy(file, target_dir / file.name)
 
 
-def _get_docker_compose_files(instance: Instance, name: str, project_root: Path) -> str:
+def _ensure_env_dir() -> None:
+    """Create the env directory lazily when generated files are needed."""
+    ENV_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _get_docker_compose_files(instance: Instance) -> str:
     """Get the docker-compose command with appropriate files based on matrix and auth type."""
-    env_file_relative = f"deploy/envs/{name}.env"
-    base_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.yml"
+    env_file = ENV_DIR / f"{instance.name}.env"
+    compose_files = [SCRIPT_DIR / "docker-compose.yml"]
 
     # Add Matrix server compose file if configured
     if instance.matrix_type == MatrixType.TUWUNEL:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.tuwunel.yml"
+        compose_files.extend(
+            [
+                SCRIPT_DIR / "docker-compose.tuwunel.yml",
+                SCRIPT_DIR / "docker-compose.wellknown.yml",
+            ],
+        )
     elif instance.matrix_type == MatrixType.SYNAPSE:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.synapse.yml"
+        compose_files.extend(
+            [
+                SCRIPT_DIR / "docker-compose.synapse.yml",
+                SCRIPT_DIR / "docker-compose.wellknown.yml",
+            ],
+        )
+    matrix_host_override = _matrix_host_override_path(instance.name)
+    if matrix_host_override.exists():
+        compose_files.append(matrix_host_override)
 
     # Add Authelia compose file if configured
     if instance.auth_type == AuthType.AUTHELIA:
-        base_cmd = f"{base_cmd} -f deploy/docker-compose.authelia.yml"
+        compose_files.append(SCRIPT_DIR / "docker-compose.authelia.yml")
 
-    return base_cmd
+    compose_args = " ".join(f"-f {shlex.quote(str(compose_file))}" for compose_file in compose_files)
+    return f"cd {shlex.quote(str(REPO_ROOT))} && docker compose --env-file {shlex.quote(str(env_file))} {compose_args}"
+
+
+def _get_docker_compose_down_command(name: str, *, remove_volumes: bool = False) -> str:
+    """Return a teardown command that still works when config files are missing."""
+    volume_flag = " -v" if remove_volumes else ""
+    return f"docker compose -p {shlex.quote(name)} down{volume_flag}"
+
+
+def _ensure_instance_env_file_reference(env_file: Path) -> None:
+    """Ensure the per-instance env file can also be mounted into the container."""
+    reference = f"INSTANCE_ENV_FILE={env_file}"
+    if not env_file.exists():
+        return
+
+    content = env_file.read_text()
+    if "INSTANCE_ENV_FILE=" in content:
+        return
+
+    suffix = "" if not content or content.endswith("\n") else "\n"
+    with env_file.open("a") as f:
+        f.write(f"{suffix}{reference}\n")
+
+
+def _require_instance_env_file(name: str) -> Path:
+    """Return the per-instance env file or exit with a consistent error."""
+    env_file = ENV_DIR / f"{name}.env"
+    if env_file.exists():
+        return env_file
+
+    console.print(f"[red]✗[/red] Environment file {env_file} not found!")
+    raise typer.Exit(1)
+
+
+def _load_traefik_settings(env_file: Path) -> TraefikSettings:
+    """Read optional Traefik label overrides from the instance env file."""
+    values: dict[str, str] = {}
+    if env_file.exists():
+        for raw_line in env_file.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip("'\"")
+
+    return TraefikSettings(
+        web_entrypoint=values.get("TRAEFIK_WEB_ENTRYPOINT", DEFAULT_TRAEFIK_WEB_ENTRYPOINT),
+        matrix_entrypoint=values.get("TRAEFIK_MATRIX_ENTRYPOINT", DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT),
+        certresolver=values.get("TRAEFIK_CERTRESOLVER", DEFAULT_TRAEFIK_CERTRESOLVER),
+    )
+
+
+def _matrix_host_override_path(name: str) -> Path:
+    """Return the generated compose override that adds peer Matrix host mappings."""
+    return ENV_DIR / f"{name}.matrix-hosts.yml"
+
+
+def _matrix_peer_domains(instances: dict[str, Instance], *, exclude_name: str) -> list[str]:
+    """Return peer Matrix domains that should resolve to the host gateway."""
+    return sorted(
+        {
+            f"m-{instance.domain}"
+            for name, instance in instances.items()
+            if instance.matrix_type is not None and name != exclude_name
+        },
+    )
+
+
+def _write_matrix_host_override(instance: Instance, instances: dict[str, Instance]) -> None:
+    """Write a compose override that maps peer Matrix domains to the host gateway."""
+    override_path = _matrix_host_override_path(instance.name)
+    if instance.matrix_type is None:
+        override_path.unlink(missing_ok=True)
+        return
+
+    peer_domains = _matrix_peer_domains(instances, exclude_name=instance.name)
+    if not peer_domains:
+        override_path.unlink(missing_ok=True)
+        return
+
+    _ensure_env_dir()
+    service_name = instance.matrix_type.value
+    lines = [
+        "services:",
+        f"  {service_name}:",
+        "    extra_hosts:",
+    ]
+    lines.extend(f'      - "{domain}:host-gateway"' for domain in peer_domains)
+    override_path.write_text("\n".join(lines) + "\n")
+
+
+def _sync_matrix_host_overrides(instances: dict[str, Instance]) -> None:
+    """Regenerate peer host-mapping overrides for every managed Matrix instance."""
+    for instance in instances.values():
+        _write_matrix_host_override(instance, instances)
+
+
+def _running_matrix_peer_names(instances: dict[str, Instance], *, exclude_name: str) -> list[str]:
+    """Return currently running Matrix peers excluding the named instance."""
+    running_peers = []
+    for name, instance in instances.items():
+        if name == exclude_name or instance.matrix_type is None:
+            continue
+        _mindroom_running, matrix_running = get_actual_status(name)
+        if matrix_running:
+            running_peers.append(name)
+    return sorted(running_peers)
+
+
+def _print_matrix_restart_hint(peer_names: list[str]) -> None:
+    """Tell the user which running Matrix peers still need a manual restart."""
+    if not peer_names:
+        return
+
+    peers = ", ".join(peer_names)
+    console.print(
+        "[yellow]i[/yellow] Restart running Matrix peers to pick up the new federation host mappings:"
+        f" [cyan]{peers}[/cyan]",
+    )
+    console.print("  [dim]Use ./deploy.py restart --only-matrix <name> when convenient.[/dim]")
 
 
 def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str:
@@ -274,9 +425,9 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
     services = ["mindroom"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
-        services.extend(["postgres", "redis", "synapse"])
+        services.extend(["postgres", "redis", "synapse", "wellknown"])
     elif instance.matrix_type == MatrixType.TUWUNEL:
-        services.append("tuwunel")
+        services.extend(["tuwunel", "wellknown"])
 
     if instance.auth_type == AuthType.AUTHELIA:
         services.append("authelia")
@@ -287,16 +438,9 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
 def _get_matrix_services(matrix_type: MatrixType | None) -> str:
     """Get the list of services to start based on matrix type."""
     if matrix_type == MatrixType.SYNAPSE:
-        return " postgres redis synapse"
+        return " postgres redis synapse wellknown"
     if matrix_type == MatrixType.TUWUNEL:
-        return " tuwunel"
-    return ""
-
-
-def _get_auth_services(auth_type: AuthType | None) -> str:
-    """Get the list of services to start based on auth type."""
-    if auth_type == AuthType.AUTHELIA:
-        return " authelia"  # Redis removed - using in-memory sessions
+        return " tuwunel wellknown"
     return ""
 
 
@@ -330,6 +474,7 @@ def _pull_images_from_registry(registry_url: str, console: Console) -> None:
 
 def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixType | None) -> None:
     """Create and configure the environment file for an instance."""
+    _ensure_env_dir()
     env_file = ENV_DIR / f"{name}.env"
     if ENV_TEMPLATE.exists():
         shutil.copy(ENV_TEMPLATE, env_file)
@@ -343,6 +488,7 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
 
     with env_file.open("a") as f:
         f.write("\n# Instance configuration\n")
+        f.write(f"INSTANCE_ENV_FILE={env_file}\n")
         f.write(f"INSTANCE_NAME={name}\n")
         f.write(f"MINDROOM_PORT={instance.mindroom_port}\n")
         f.write(f"DATA_DIR={abs_data_dir}\n")
@@ -362,68 +508,192 @@ def _create_environment_file(instance: Instance, name: str, matrix_type: MatrixT
                 f.write("SYNAPSE_ALLOW_PUBLIC_ROOMS=true\n")
 
 
-def _verify_extra_hosts_for_federation(matrix_type: MatrixType | None, instances: dict[str, Instance]) -> None:
-    """Verify that docker-compose files have required extra_hosts entries for federation."""
-    if not matrix_type:
+def _ensure_external_network(name: str) -> bool:
+    """Create an external Docker network when the stack expects it."""
+    inspect_cmd = f"docker network inspect {shlex.quote(name)}"
+    result = subprocess.run(inspect_cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        return False
+
+    create_cmd = f"docker network create {shlex.quote(name)}"
+    result = subprocess.run(create_cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Failed to create Docker network '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
+    console.print(f"  [dim]Created external Docker network '{name}'[/dim]")
+    return True
+
+
+def _traefik_proxy_names(network_name: str) -> list[str]:
+    """Return running Traefik container names attached to the external network."""
+    cmd = f"docker ps --filter network={shlex.quote(network_name)} --format '{{{{.Image}}}}\t{{{{.Names}}}}'"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return []
+
+    proxies = set()
+    for line in result.stdout.strip().splitlines():
+        image, _, name = line.partition("\t")
+        if "traefik" in image.lower() or "traefik" in name.lower():
+            proxies.add(name or image)
+    return sorted(proxies)
+
+
+def _auth_url(instance: Instance) -> str:
+    """Return the external Authelia URL for an instance domain."""
+    return f"https://auth-{instance.domain}"
+
+
+def _print_traefik_label_requirements(instance: Instance, settings: TraefikSettings) -> None:
+    """Print the Traefik settings that must match this instance's labels."""
+    requirements = [f"web={settings.web_entrypoint}", f"resolver={settings.certresolver}"]
+    if instance.matrix_type is not None:
+        requirements.append(f"matrix={settings.matrix_entrypoint}")
+
+    console.print(
+        f"  [dim]Match Traefik entrypoints/certresolver to envs/{instance.name}.env: {', '.join(requirements)}[/dim]",
+    )
+
+
+def _print_missing_traefik_warning(
+    instance: Instance,
+    settings: TraefikSettings,
+    *,
+    only_matrix: bool,
+) -> None:
+    """Explain that only direct localhost access is available without Traefik."""
+    blocked_features = ["HTTPS domain routes"]
+    if not only_matrix and instance.auth_type is not None:
+        blocked_features.append("Authelia")
+    if instance.matrix_type is not None:
+        blocked_features.append("Matrix .well-known routes and domain-based federation")
+
+    console.print(f"[yellow]i[/yellow] No Traefik container detected on Docker network '{EXTERNAL_NETWORK}'.")
+    console.print("  [dim]Use the localhost ports above for direct access.[/dim]")
+    console.print(
+        f"  [dim]{', '.join(blocked_features)} remain unavailable until Traefik joins that network.[/dim]",
+    )
+    _print_traefik_label_requirements(instance, settings)
+    console.print(
+        f"  [dim]Attach Traefik with: docker network connect {EXTERNAL_NETWORK} <traefik-container>[/dim]",
+    )
+
+
+def _print_running_instance_access(
+    instance: Instance,
+    *,
+    only_matrix: bool,
+    traefik_proxies: list[str],
+    traefik_settings: TraefikSettings,
+) -> None:
+    """Print the endpoints that are actually usable for the running instance."""
+    if only_matrix:
+        console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
+    else:
+        console.print(f"  [dim]MindRoom local:[/dim] http://localhost:{instance.mindroom_port}")
+        if instance.matrix_type is not None:
+            console.print(f"  [dim]Matrix local:[/dim] http://localhost:{instance.matrix_port}")
+
+    if not traefik_proxies:
+        _print_missing_traefik_warning(instance, traefik_settings, only_matrix=only_matrix)
         return
 
-    # Get all active Matrix domains that need to be in extra_hosts
-    required_domains = set()
-    for inst in instances.values():
-        if inst.matrix_type:
-            required_domains.add(f"m-{inst.domain}")
+    console.print(f"  [dim]Traefik detected:[/dim] {', '.join(traefik_proxies)} on {EXTERNAL_NETWORK}")
+    console.print(
+        "  [dim]HTTPS/domain routes below are published through Traefik labels and only work after the proxy"
+        " matches this instance's entrypoint and certresolver names.[/dim]",
+    )
+    _print_traefik_label_requirements(instance, traefik_settings)
+    if not only_matrix:
+        console.print(f"  [dim]Configured MindRoom domain:[/dim] https://{instance.domain}")
+    if instance.matrix_type is not None:
+        console.print(f"  [dim]Configured Matrix domain:[/dim] https://m-{instance.domain}")
+    if not only_matrix and instance.auth_type is not None:
+        console.print(f"  [dim]Configured Auth URL:[/dim] {_auth_url(instance)}")
 
-    if not required_domains:
-        return
 
-    # Check the appropriate docker-compose file
-    compose_file = SCRIPT_DIR / f"docker-compose.{matrix_type.value}.yml"
-    if not compose_file.exists():
-        return
+def _get_build_flag(
+    *,
+    use_registry: bool,
+    registry_url: str,
+    no_build: bool,
+) -> str:
+    """Resolve the docker compose build flag, pulling registry images when requested."""
+    if use_registry:
+        _pull_images_from_registry(registry_url, console)
+        return ""
+    if no_build:
+        return ""
+    return "--build"
 
-    # Parse the YAML file
-    with compose_file.open() as f:
-        compose_data = yaml.safe_load(f)
 
-    # Get the service name (tuwunel or synapse)
-    service_name = matrix_type.value
+def _bring_up_instance(
+    name: str,
+    instance: Instance,
+    registry: Registry,
+    *,
+    only_matrix: bool,
+    use_registry: bool,
+    registry_url: str,
+    no_build: bool,
+    status_message: str,
+    success_verb: str,
+    show_peer_restart_hint: bool = False,
+    force_recreate: bool = False,
+) -> None:
+    """Start or restart an instance using one shared compose-up path."""
+    env_file = _require_instance_env_file(name)
+    _sync_matrix_host_overrides(registry.instances)
+    _ensure_instance_env_file_reference(env_file)
 
-    # Check if the service exists and has extra_hosts
-    if not compose_data.get("services", {}).get(service_name):
-        console.print(f"[yellow]⚠️  Warning:[/yellow] Service '{service_name}' not found in {compose_file.name}")
-        return
+    compose_files = _get_docker_compose_files(instance)
+    try:
+        services = _get_services_to_start(instance, only_matrix)
+    except ValueError as e:
+        console.print(f"[red]✗[/red] {e}")
+        raise typer.Exit(1) from e
 
-    service_config = compose_data["services"][service_name]
-    extra_hosts = service_config.get("extra_hosts", [])
+    build_flag = _get_build_flag(
+        use_registry=use_registry,
+        registry_url=registry_url,
+        no_build=no_build,
+    )
 
-    # Parse existing extra_hosts entries
-    existing_domains = set()
-    for entry in extra_hosts:
-        if ":" in entry:
-            domain, _ = entry.split(":", 1)
-            existing_domains.add(domain.strip('"').strip("'"))
+    _ensure_external_network(EXTERNAL_NETWORK)
+    traefik_proxies = _traefik_proxy_names(EXTERNAL_NETWORK)
+    traefik_settings = _load_traefik_settings(env_file)
+    up_flags = [flag for flag in [build_flag, "--force-recreate" if force_recreate else ""] if flag]
+    up_options = f" {' '.join(up_flags)}" if up_flags else ""
+    cmd = f"{compose_files} -p {name} up -d{up_options} {services}"
 
-    # Find missing domains
-    missing_domains = required_domains - existing_domains
+    with console.status(f"[yellow]{status_message}[/yellow]"):
+        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
 
-    if not extra_hosts:
-        console.print("[yellow]⚠️  Federation Warning:[/yellow] Missing extra_hosts configuration")
-        console.print(f"[dim]Add the following to {compose_file.name} under the {service_name} service:[/dim]")
-        console.print("\n    extra_hosts:")
-        for domain in sorted(required_domains):
-            console.print(f'      - "{domain}:172.20.0.1"')
-        console.print(
-            "\n[dim]To find your gateway IP: docker network inspect mynetwork | jq '.[0].IPAM.Config[0].Gateway'[/dim]",
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Failed to start instance '{name}'")
+        if result.stderr:
+            console.print(f"[dim]{result.stderr}[/dim]")
+        raise typer.Exit(1)
+
+    registry.instances[name].status = InstanceStatus.PARTIAL if only_matrix else InstanceStatus.RUNNING
+    save_registry(registry)
+
+    if only_matrix:
+        console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' {success_verb} successfully!")
+    else:
+        console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' {success_verb} successfully!")
+    _print_running_instance_access(
+        instance,
+        only_matrix=only_matrix,
+        traefik_proxies=traefik_proxies,
+        traefik_settings=traefik_settings,
+    )
+    if show_peer_restart_hint and instance.matrix_type is not None:
+        _print_matrix_restart_hint(
+            _running_matrix_peer_names(registry.instances, exclude_name=name),
         )
-        raise typer.Exit(1)
-
-    if missing_domains:
-        console.print(f"[yellow]⚠️  Federation Warning:[/yellow] Missing domains in extra_hosts for {compose_file.name}")
-        console.print("[dim]Add these entries to the extra_hosts section:[/dim]")
-        for domain in sorted(missing_domains):
-            console.print(f'      - "{domain}:172.20.0.1"')
-        console.print("\n[dim]This is required for local federation to work properly.[/dim]")
-        raise typer.Exit(1)
 
 
 def _create_directory_with_permissions(path: Path, uid: int = 1000, gid: int = 1000) -> None:
@@ -455,7 +725,7 @@ def _copy_credentials_to_instance(instance: Instance) -> None:
 
 def _copy_config_to_instance(instance: Instance) -> None:
     """Copy config.yaml from the main mindroom directory to instance config directory."""
-    source_config = SCRIPT_DIR.parent / "config.yaml"
+    source_config = REPO_ROOT / "config.yaml"
     if not source_config.exists():
         console.print("[yellow]Warning:[/yellow] config.yaml not found in mindroom directory")
         return
@@ -519,7 +789,8 @@ def _setup_tuwunel_directory(instance: Instance, env_file: Path) -> None:
                     break
 
         # If server name changed, clear the database (safe - Tuwunel recreates it)
-        if current_server_name and current_server_name != instance.domain:
+        expected_server_name = f"m-{instance.domain}"
+        if current_server_name and current_server_name != expected_server_name:
             console.print("[yellow]i[/yellow] Clearing Tuwunel database due to server name change")
             shutil.rmtree(tuwunel_dir)
 
@@ -622,6 +893,7 @@ def _update_registry(registry: Registry, instance: Instance, matrix_type: Matrix
     registry.allocated_ports.mindroom.append(instance.mindroom_port)
     if matrix_type and instance.matrix_port:
         registry.allocated_ports.matrix.append(instance.matrix_port)
+    _sync_matrix_host_overrides(registry.instances)
     save_registry(registry)
 
 
@@ -637,18 +909,15 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
     if matrix_type:
         matrix_name = "Tuwunel (lightweight)" if matrix_type == MatrixType.TUWUNEL else "Synapse (full)"
         console.print(f"  [dim]Matrix:[/dim] [green]{matrix_name}[/green]")
+        console.print(
+            f"  [dim]Matrix domain:[/dim] https://m-{instance.domain} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
+        )
     if auth_type:
         console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
         console.print("    [yellow]Default login:[/yellow] admin / mindroom")
-        # Determine auth URL based on domain type
-        domain_parts = instance.domain.split(".")
-        if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
-            root_domain = ".".join(domain_parts[-2:])
-            subdomain = domain_parts[0]
-            auth_url = f"https://auth-{subdomain}.{root_domain}"
-        else:
-            auth_url = f"https://auth-{instance.domain}"
-        console.print(f"    [dim]Auth URL:[/dim] {auth_url}")
+        console.print(
+            f"    [dim]Auth URL:[/dim] {_auth_url(instance)} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
+        )
 
 
 @app.command()
@@ -737,7 +1006,7 @@ def create(
 
 
 @app.command()
-def start(  # noqa: PLR0912, PLR0915
+def start(
     name: str = typer.Argument("default", help="Instance name to start"),
     only_matrix: bool = typer.Option(
         False,
@@ -754,15 +1023,9 @@ def start(  # noqa: PLR0912, PLR0915
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    env_file = ENV_DIR / f"{name}.env"
-    if not env_file.exists():
-        console.print(f"[red]✗[/red] Environment file {env_file} not found!")
-        raise typer.Exit(1)
-
-    # Verify federation configuration if Matrix is enabled
     instance = registry.instances[name]
-    if instance.matrix_type:
-        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
+    previous_status = instance.status
+    env_file = _require_instance_env_file(name)
 
     # Create data directories with proper permissions
     _create_instance_directories(instance)
@@ -785,66 +1048,21 @@ def start(  # noqa: PLR0912, PLR0915
                 synapse_dir,
             )
 
-    # Start with docker compose (modern syntax) - run from parent directory for build context
-    # Get the parent directory (project root)
-    project_root = SCRIPT_DIR.parent
-
-    # Build the docker compose command using helper
-    compose_files = _get_docker_compose_files(instance, name, project_root)
-
-    # Determine which services to start based on flags
-    try:
-        services = _get_services_to_start(instance, only_matrix)
-    except ValueError as e:
-        console.print(f"[red]✗[/red] {e}")
-        raise typer.Exit(1) from e
-
-    status_msg = f"Starting Matrix server for '{name}'..." if only_matrix else f"Starting instance '{name}'..."
     if only_matrix:
         console.print("[yellow]ℹ[/yellow] Starting only Matrix server (no MindRoom runtime)")  # noqa: RUF001
 
-    # Pull images from registry if requested
-    if use_registry:
-        _pull_images_from_registry(registry_url, console)
-        build_flag = ""
-    elif no_build:
-        build_flag = ""
-    else:
-        build_flag = "--build"
-
-    cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
-
-    with console.status(f"[yellow]{status_msg}[/yellow]"):
-        result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
-
-    # If Matrix is enabled, also start the well-known service for federation
-    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
-        env_file_relative = f"deploy/envs/{name}.env"
-        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
-        with console.status(f"[yellow]Starting federation well-known service for '{name}'...[/yellow]"):
-            wellknown_result = subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
-            if wellknown_result.returncode != 0:
-                console.print("[yellow]ℹ[/yellow] Well-known service start skipped (optional for federation)")  # noqa: RUF001
-
-    if result.returncode == 0:
-        # Update status to reflect what's actually running
-        if only_matrix:
-            registry.instances[name].status = InstanceStatus.PARTIAL
-        else:
-            registry.instances[name].status = InstanceStatus.RUNNING
-        save_registry(registry)
-
-        if only_matrix:
-            console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' started successfully!")
-            matrix_url = f"https://m-{instance.domain}"
-            console.print(f"  [dim]Matrix:[/dim] {matrix_url}")
-        else:
-            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' started successfully!")
-    else:
-        console.print(f"[red]✗[/red] Failed to start instance '{name}'")
-        if result.stderr:
-            console.print(f"[dim]{result.stderr}[/dim]")
-        raise typer.Exit(1)
+    _bring_up_instance(
+        name,
+        instance,
+        registry,
+        only_matrix=only_matrix,
+        use_registry=use_registry,
+        registry_url=registry_url,
+        no_build=no_build,
+        status_message=f"Starting Matrix server for '{name}'..." if only_matrix else f"Starting instance '{name}'...",
+        success_verb="started",
+        show_peer_restart_hint=instance.matrix_type is not None and previous_status == InstanceStatus.CREATED,
+    )
 
 
 @app.command()
@@ -855,9 +1073,7 @@ def stop(name: str = typer.Argument("default", help="Instance name to stop")) ->
         console.print(f"[red]✗[/red] Instance '{name}' not found!")
         raise typer.Exit(1)
 
-    # Run from parent directory to match start command
-    project_root = SCRIPT_DIR.parent
-    cmd = f"cd {project_root} && docker compose -p {name} down"
+    cmd = _get_docker_compose_down_command(name)
 
     with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
         result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
@@ -930,7 +1146,7 @@ def restart(
     _restart_instance(name, instance, registry, only_matrix, use_registry, registry_url, no_build)
 
 
-def _restart_instance(  # noqa: PLR0912, PLR0915
+def _restart_instance(
     name: str,
     instance: Instance,
     registry: Registry,
@@ -940,76 +1156,20 @@ def _restart_instance(  # noqa: PLR0912, PLR0915
     no_build: bool = False,
 ) -> None:
     """Helper function to restart a single instance."""
-    # Verify federation configuration if Matrix is enabled
-    if instance.matrix_type:
-        _verify_extra_hosts_for_federation(instance.matrix_type, registry.instances)
-
-    # Stop the instance
-    project_root = SCRIPT_DIR.parent
-    stop_cmd = f"cd {project_root} && docker compose -p {name} down"
-
-    with console.status(f"[yellow]Stopping instance '{name}'...[/yellow]"):
-        result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        console.print(f"[red]✗[/red] Failed to stop instance '{name}'")
-        if result.stderr:
-            console.print(f"[dim]{result.stderr}[/dim]")
-        raise typer.Exit(1)
-
-    # Start the instance
-    env_file = ENV_DIR / f"{name}.env"
-    if not env_file.exists():
-        console.print(f"[red]✗[/red] Environment file not found: {env_file}")
-        raise typer.Exit(1)
-
-    # Build compose command
-    compose_files = _get_docker_compose_files(instance, name, project_root)
-
-    # Determine which services to restart based on flags
-    try:
-        services = _get_services_to_start(instance, only_matrix)
-    except ValueError as e:
-        console.print(f"[red]✗[/red] {e}")
-        raise typer.Exit(1) from e
-
-    # Pull images from registry if requested
-    if use_registry:
-        _pull_images_from_registry(registry_url, console)
-        build_flag = ""
-    elif no_build:
-        build_flag = ""
-    else:
-        build_flag = "--build"
-
-    start_cmd = f"{compose_files} -p {name} up -d {build_flag} {services}"
-
-    with console.status(f"[yellow]Starting instance '{name}'...[/yellow]"):
-        result = subprocess.run(start_cmd, check=False, shell=True, capture_output=True, text=True)
-
-    # If Matrix is enabled, also restart the well-known service for federation
-    if result.returncode == 0 and instance.matrix_type in [MatrixType.TUWUNEL, MatrixType.SYNAPSE]:
-        env_file_relative = f"deploy/envs/{name}.env"
-        wellknown_cmd = f"cd {project_root} && docker compose --env-file {env_file_relative} -f deploy/docker-compose.wellknown.yml -p {name} up -d"
-        subprocess.run(wellknown_cmd, check=False, shell=True, capture_output=True, text=True)
-
-    if result.returncode == 0:
-        # Update status
-        if only_matrix:
-            registry.instances[name].status = InstanceStatus.PARTIAL
-        else:
-            registry.instances[name].status = InstanceStatus.RUNNING
-        save_registry(registry)
-
-        if only_matrix:
-            console.print(f"[green]✓[/green] Matrix server for '[cyan]{name}[/cyan]' restarted successfully!")
-        else:
-            console.print(f"[green]✓[/green] Instance '[cyan]{name}[/cyan]' restarted successfully!")
-    else:
-        console.print(f"[red]✗[/red] Failed to start instance '{name}'")
-        if result.stderr:
-            console.print(f"[dim]{result.stderr}[/dim]")
-        raise typer.Exit(1)
+    _bring_up_instance(
+        name,
+        instance,
+        registry,
+        only_matrix=only_matrix,
+        use_registry=use_registry,
+        registry_url=registry_url,
+        no_build=no_build,
+        status_message=f"Restarting Matrix server for '{name}'..."
+        if only_matrix
+        else f"Restarting instance '{name}'...",
+        success_verb="restarted",
+        force_recreate=True,
+    )
 
 
 @app.command()
@@ -1042,6 +1202,8 @@ def remove(
         # Remove each instance
         for instance_name in list(instances.keys()):
             _remove_instance(instance_name, registry, console)
+            if registry.instances:
+                save_registry(registry)
 
         # Clear the registry completely
         REGISTRY_FILE.unlink(missing_ok=True)
@@ -1063,7 +1225,7 @@ def remove(
     if not force:
         console.print(f"[yellow]⚠️  Warning:[/yellow] This will permanently delete instance '[cyan]{name}[/cyan]'")
         console.print(f"  - All data in {instance.data_dir}")
-        console.print(f"  - Environment file .env.{name}")
+        console.print(f"  - Environment file envs/{name}.env")
         console.print("  - All containers and volumes")
         confirm = typer.confirm("Are you sure you want to continue?")
         if not confirm:
@@ -1081,19 +1243,28 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
 
     with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
         # Stop containers if running
-        project_root = SCRIPT_DIR.parent
-        stop_cmd = f"cd {project_root} && docker compose -p {name} down -v 2>/dev/null"
-        subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+        stop_cmd = _get_docker_compose_down_command(name, remove_volumes=True)
+        result = subprocess.run(stop_cmd, check=False, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            console.print(f"[red]✗[/red] Failed to tear down containers for instance '{name}'")
+            if result.stderr:
+                console.print(f"[dim]{result.stderr}[/dim]")
+            raise typer.Exit(1)
 
         # Remove data directory
         data_dir = Path(instance.data_dir)
-        if data_dir.exists():
-            shutil.rmtree(data_dir)
+        try:
+            _remove_data_dir(data_dir)
+        except (OSError, RuntimeError) as e:
+            console.print(f"[red]✗[/red] Failed to remove data directory for instance '{name}'")
+            console.print(f"[dim]{e}[/dim]")
+            raise typer.Exit(1) from e
 
         # Remove env file
         env_file = ENV_DIR / f"{name}.env"
         if env_file.exists():
             env_file.unlink()
+        _matrix_host_override_path(name).unlink(missing_ok=True)
 
         # Update registry - remove instance and free up ports
         del registry.instances[name]
@@ -1104,30 +1275,60 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         if instance.matrix_port and instance.matrix_port in registry.allocated_ports.matrix:
             registry.allocated_ports.matrix.remove(instance.matrix_port)
 
+        _sync_matrix_host_overrides(registry.instances)
+
+
+def _remove_data_dir(data_dir: Path) -> None:
+    """Remove an instance data directory, repairing container-owned files if needed."""
+    if not data_dir.exists():
+        return
+
+    try:
+        shutil.rmtree(data_dir)
+    except PermissionError:
+        _repair_data_dir_permissions(data_dir)
+    else:
+        return
+
+    shutil.rmtree(data_dir)
+
+
+def _repair_data_dir_permissions(data_dir: Path) -> None:
+    """Use a shell-capable helper image to hand ownership back to the host user."""
+    uid = os.getuid()
+    gid = os.getgid()
+    repair_script = shlex.quote(f"chown -R {uid}:{gid} /target && chmod -R u+rwX /target")
+    cmd = (
+        "docker run --rm "
+        "--user 0:0 "
+        f"-v {shlex.quote(str(data_dir))}:/target "
+        f"{shlex.quote(PERMISSION_REPAIR_IMAGE)} sh -c {repair_script}"
+    )
+    result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        error = result.stderr.strip() or "permission repair container failed"
+        raise RuntimeError(error)
+
 
 def get_actual_status(name: str) -> tuple[bool, bool]:
     """Check which containers are actually running.
 
     Returns: (mindroom_running, matrix_running)
     """
-    cmd = f"docker compose -p {name} ps --format json 2>/dev/null"
+    cmd = (
+        "docker ps --filter "
+        f"label=com.docker.compose.project={shlex.quote(name)} "
+        "--format '{{.Label \"com.docker.compose.service\"}}'"
+    )
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:
         return False, False
 
-    running_containers = set()
-    for line in result.stdout.strip().split("\n"):
-        if line:
-            try:
-                data = json.loads(line)
-                if data.get("State") == "running":
-                    running_containers.add(data.get("Service"))
-            except json.JSONDecodeError:
-                pass
+    running_containers = {line.strip() for line in result.stdout.strip().splitlines() if line.strip()}
 
     mindroom_running = "mindroom" in running_containers
-    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel", "postgres", "redis"])
+    matrix_running = any(m in running_containers for m in ["synapse", "tuwunel"])
 
     return mindroom_running, matrix_running
 

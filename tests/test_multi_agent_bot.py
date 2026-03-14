@@ -3478,6 +3478,40 @@ class TestMultiAgentOrchestrator:
         assert calls == 2
 
     @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_logs_traceback_on_failure(self) -> None:
+        """Auxiliary task crashes should keep traceback logging intact."""
+        started = asyncio.Event()
+        calls = 0
+
+        async def _operation() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
+            started.set()
+            await asyncio.Future()
+
+        with (
+            patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator.logger.exception") as mock_exception,
+        ):
+            task = asyncio.create_task(
+                _run_auxiliary_task_forever("test task", _operation),
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mock_exception.assert_called_once_with(
+            "Auxiliary task crashed; restarting",
+            task_name="test task",
+        )
+
+    @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:
         """Long healthy runs should reset crash-loop backoff for auxiliary tasks."""
         retry_attempts: list[int] = []

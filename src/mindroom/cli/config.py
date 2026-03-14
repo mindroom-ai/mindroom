@@ -735,7 +735,7 @@ knowledge_bases:
     path: {mind_memory_knowledge_path}
     watch: true
 
-# File-based memory avoids external memory LLMs, and starter configs use a local embedder for knowledge indexing.
+# File-based memory requires no external LLM, and starter configs use a local embedder for knowledge indexing.
 memory:
   backend: file
   embedder:

@@ -19,9 +19,9 @@ services:
       - traefik.enable=true
       # Authelia endpoint
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.rule=Host(`auth-${INSTANCE_DOMAIN}`)
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.entrypoints=${TRAEFIK_WEB_ENTRYPOINT:-websecure}
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.tls=true
-      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME:-mindroom}-authelia.tls.certresolver=${TRAEFIK_CERTRESOLVER:-porkbun}
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-authelia.loadbalancer.server.port=9091
 
       # Middleware for forward auth

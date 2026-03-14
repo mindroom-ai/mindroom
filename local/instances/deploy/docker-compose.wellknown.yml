@@ -14,9 +14,9 @@ services:
 
       # Serve well-known endpoints on Matrix domain
       - traefik.http.routers.${INSTANCE_NAME}-wellknown.rule=Host(`m-${INSTANCE_DOMAIN}`) && PathPrefix(`/.well-known/matrix`)
-      - traefik.http.routers.${INSTANCE_NAME}-wellknown.entrypoints=websecure
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.entrypoints=${TRAEFIK_WEB_ENTRYPOINT:-websecure}
       - traefik.http.routers.${INSTANCE_NAME}-wellknown.tls=true
-      - traefik.http.routers.${INSTANCE_NAME}-wellknown.tls.certresolver=porkbun
+      - traefik.http.routers.${INSTANCE_NAME}-wellknown.tls.certresolver=${TRAEFIK_CERTRESOLVER:-porkbun}
       - traefik.http.routers.${INSTANCE_NAME}-wellknown.service=${INSTANCE_NAME}-wellknown
       - traefik.http.services.${INSTANCE_NAME}-wellknown.loadbalancer.server.port=80
 
