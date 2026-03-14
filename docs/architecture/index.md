@@ -32,7 +32,7 @@ MindRoom's architecture consists of several key components working together.
 │                                                          │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │                Memory System                     │    │
-│  │  (Mem0 + ChromaDB, agent/room/team scopes)      │    │
+│  │  (Mem0 + ChromaDB, agent/team scopes)           │    │
 │  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```

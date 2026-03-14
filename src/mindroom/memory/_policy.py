@@ -106,15 +106,6 @@ def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
     return None
 
 
-def _sanitize_room_id_for_scope(room_id: str) -> str:
-    return room_id.replace(":", "_").replace("!", "")
-
-
-def room_scope_user_id(room_id: str) -> str:
-    """Return the scoped memory user ID for one room."""
-    return f"room_{_sanitize_room_id_for_scope(room_id)}"
-
-
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     """Get all team scope IDs that include the specified agent."""
     if not config.teams:
