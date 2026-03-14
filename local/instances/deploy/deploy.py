@@ -46,6 +46,7 @@ EXTERNAL_NETWORK = "mynetwork"
 DEFAULT_TRAEFIK_WEB_ENTRYPOINT = "websecure"
 DEFAULT_TRAEFIK_MATRIX_ENTRYPOINT = "matrix-fed"
 DEFAULT_TRAEFIK_CERTRESOLVER = "porkbun"
+PERMISSION_REPAIR_IMAGE = "busybox:1.36"
 
 
 # Pydantic Models
@@ -542,11 +543,6 @@ def _traefik_proxy_names(network_name: str) -> list[str]:
 
 def _auth_url(instance: Instance) -> str:
     """Return the external Authelia URL for an instance domain."""
-    domain_parts = instance.domain.split(".")
-    if len(domain_parts) >= 2 and domain_parts[-1] != "localhost":
-        root_domain = ".".join(domain_parts[-2:])
-        subdomain = domain_parts[0]
-        return f"https://auth-{subdomain}.{root_domain}"
     return f"https://auth-{instance.domain}"
 
 
@@ -1244,7 +1240,6 @@ def remove(
 def _remove_instance(name: str, registry: Registry, console: Console) -> None:
     """Helper function to remove a single instance."""
     instance = registry.instances[name]
-    cleanup_image = _get_cleanup_image(name, instance)
 
     with console.status(f"[yellow]Removing instance '{name}'...[/yellow]"):
         # Stop containers if running
@@ -1259,7 +1254,7 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         # Remove data directory
         data_dir = Path(instance.data_dir)
         try:
-            _remove_data_dir(data_dir, cleanup_image=cleanup_image)
+            _remove_data_dir(data_dir)
         except (OSError, RuntimeError) as e:
             console.print(f"[red]✗[/red] Failed to remove data directory for instance '{name}'")
             console.print(f"[dim]{e}[/dim]")
@@ -1283,35 +1278,7 @@ def _remove_instance(name: str, registry: Registry, console: Console) -> None:
         _sync_matrix_host_overrides(registry.instances)
 
 
-def _get_cleanup_image(name: str, instance: Instance) -> str | None:
-    """Return a container image that can repair bind-mount ownership during removal."""
-    project_filter = shlex.quote(f"com.docker.compose.project={name}")
-    running_cmd = f"docker ps -a --filter label={project_filter} --format '{{{{.Image}}}}'"
-    result = subprocess.run(running_cmd, check=False, shell=True, capture_output=True, text=True)
-    if result.returncode == 0:
-        for line in result.stdout.splitlines():
-            image = line.strip()
-            if image:
-                return image
-
-    env_file = ENV_DIR / f"{name}.env"
-    if not env_file.exists():
-        return None
-
-    compose_cmd = f"{_get_docker_compose_files(instance)} config --images"
-    result = subprocess.run(compose_cmd, check=False, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        return None
-
-    for line in result.stdout.splitlines():
-        image = line.strip()
-        if image:
-            return image
-
-    return None
-
-
-def _remove_data_dir(data_dir: Path, *, cleanup_image: str | None) -> None:
+def _remove_data_dir(data_dir: Path) -> None:
     """Remove an instance data directory, repairing container-owned files if needed."""
     if not data_dir.exists():
         return
@@ -1319,17 +1286,15 @@ def _remove_data_dir(data_dir: Path, *, cleanup_image: str | None) -> None:
     try:
         shutil.rmtree(data_dir)
     except PermissionError:
-        if cleanup_image is None:
-            raise
+        _repair_data_dir_permissions(data_dir)
     else:
         return
 
-    _repair_data_dir_permissions(data_dir, cleanup_image)
     shutil.rmtree(data_dir)
 
 
-def _repair_data_dir_permissions(data_dir: Path, cleanup_image: str) -> None:
-    """Use a container image from the stack to hand ownership back to the host user."""
+def _repair_data_dir_permissions(data_dir: Path) -> None:
+    """Use a shell-capable helper image to hand ownership back to the host user."""
     uid = os.getuid()
     gid = os.getgid()
     repair_script = shlex.quote(f"chown -R {uid}:{gid} /target && chmod -R u+rwX /target")
@@ -1337,7 +1302,7 @@ def _repair_data_dir_permissions(data_dir: Path, cleanup_image: str) -> None:
         "docker run --rm "
         "--user 0:0 "
         f"-v {shlex.quote(str(data_dir))}:/target "
-        f"{shlex.quote(cleanup_image)} sh -lc {repair_script}"
+        f"{shlex.quote(PERMISSION_REPAIR_IMAGE)} sh -c {repair_script}"
     )
     result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
     if result.returncode != 0:

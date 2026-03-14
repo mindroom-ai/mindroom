@@ -116,6 +116,14 @@ def test_load_traefik_settings_reads_env_overrides(tmp_path: Path) -> None:
     )
 
 
+def test_auth_url_preserves_nested_subdomains(tmp_path: Path) -> None:
+    """Authelia URLs should match the compose route for nested subdomains."""
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    instance.domain = "foo.bar.example.com"
+
+    assert deploy._auth_url(instance) == "https://auth-foo.bar.example.com"
+
+
 def test_print_running_instance_access_warns_without_traefik(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -301,8 +309,6 @@ def test_remove_instance_repairs_container_owned_data_before_deleting(
 
     def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
         commands.append(cmd)
-        if "docker ps -a --filter" in cmd:
-            return SimpleNamespace(returncode=0, stdout="ghcr.io/mindroom-ai/mindroom-tuwunel:latest\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     permission_denied = PermissionError("permission denied")
@@ -320,8 +326,9 @@ def test_remove_instance_repairs_container_owned_data_before_deleting(
 
     deploy._remove_instance("alpha", registry, deploy.console)
 
+    repair_prefix = f"docker run --rm --user 0:0 -v {data_dir}:/target {deploy.PERMISSION_REPAIR_IMAGE} sh -c "
     assert rmtree_calls == 2
-    assert any(cmd.startswith("docker run --rm ") for cmd in commands)
+    assert any(cmd.startswith(repair_prefix) for cmd in commands)
     assert "alpha" not in registry.instances
     assert not env_file.exists()
     assert registry.allocated_ports.mindroom == []
