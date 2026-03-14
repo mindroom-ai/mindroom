@@ -166,17 +166,22 @@ def test_api_lifespan_syncs_env_credentials_on_startup(monkeypatch: pytest.Monke
     sync_calls: list[str] = []
     watch_calls: list[str] = []
 
-    async def _fake_watch_config(stop_event: asyncio.Event) -> None:
+    async def _fake_watch_config(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
+        assert runtime_paths == main.app.state.runtime_paths
         watch_calls.append("watch")
         await stop_event.wait()
 
-    monkeypatch.setattr(main, "sync_env_to_credentials", lambda: sync_calls.append("sync"))
+    monkeypatch.setattr(
+        main,
+        "sync_env_to_credentials",
+        lambda runtime_paths: sync_calls.append(str(runtime_paths.config_path)),
+    )
     monkeypatch.setattr(main, "_watch_config", _fake_watch_config)
 
     with TestClient(main.app) as client:
         assert client.get("/api/health").status_code == 200
 
-    assert sync_calls == ["sync"]
+    assert len(sync_calls) == 1
     assert watch_calls == ["watch"]
 
 
@@ -198,10 +203,11 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
         stop_event.set()
 
     constants.set_runtime_paths(config_path=config_path)
+    main.app.state.runtime_paths = constants.get_runtime_paths()
     monkeypatch.setattr(main, "watch_file", _fake_watch_file)
-    monkeypatch.setattr(main, "_load_config_from_file", lambda: watched_paths.append(Path("loaded")))
+    monkeypatch.setattr(main, "_load_config_from_file", lambda _runtime_paths: watched_paths.append(Path("loaded")))
 
-    await main._watch_config(stop_event)
+    await main._watch_config(stop_event, main.app.state.runtime_paths)
 
     assert watched_paths == [config_path, Path("loaded")]
 
@@ -1153,8 +1159,9 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     constants.set_runtime_paths(config_path=temp_config_file)
+    main.app.state.runtime_paths = constants.get_runtime_paths()
     monkeypatch.setattr(main, "_MINDROOM_API_KEY", "test-key")
-    main._load_config_from_file()
+    main._load_config_from_file(main.app.state.runtime_paths)
     return TestClient(main.app)
 
 

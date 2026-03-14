@@ -45,6 +45,10 @@ logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
 
 
+class _ApiState(Protocol):
+    runtime_paths: constants.RuntimePaths
+
+
 def _worker_cleanup_interval_seconds() -> float:
     """Return the configured background idle-worker cleanup interval."""
     raw = os.getenv(_WORKER_CLEANUP_INTERVAL_ENV, "0").strip()
@@ -94,30 +98,39 @@ async def _worker_cleanup_loop(stop_event: asyncio.Event) -> None:
                 logger.exception("Background worker cleanup failed")
 
 
-async def _watch_config(stop_event: asyncio.Event) -> None:
+def api_runtime_paths(request: Request | None = None) -> constants.RuntimePaths:
+    """Return the API app's committed runtime paths."""
+    app_state = cast("_ApiState", request.app.state if request is not None else app.state)
+    return app_state.runtime_paths
+
+
+async def _watch_config(
+    stop_event: asyncio.Event,
+    runtime_paths: constants.RuntimePaths,
+) -> None:
     """Watch config.yaml for changes."""
 
     async def _on_config_change() -> None:
-        config_path = constants.get_runtime_paths().config_path
-        logger.info("Config file changed", path=str(config_path))
-        _load_config_from_file()
+        logger.info("Config file changed", path=str(runtime_paths.config_path))
+        _load_config_from_file(runtime_paths)
 
-    await watch_file(constants.get_runtime_paths().config_path, _on_config_change, stop_event=stop_event)
+    await watch_file(runtime_paths.config_path, _on_config_change, stop_event=stop_event)
 
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = constants.get_runtime_paths()
+    _app.state.runtime_paths = runtime_paths
     print(f"Loading config from: {runtime_paths.config_path}")
     print(f"Config exists: {runtime_paths.config_path.exists()}")
 
     # Sync API keys from environment to CredentialsManager
     print("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
+    sync_env_to_credentials(runtime_paths=runtime_paths)
 
     stop_event = asyncio.Event()
-    watch_task = asyncio.create_task(_watch_config(stop_event))
+    watch_task = asyncio.create_task(_watch_config(stop_event, runtime_paths))
     worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event))
 
     yield
@@ -132,6 +145,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
+app.state.runtime_paths = constants.get_runtime_paths()
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(
@@ -155,10 +169,12 @@ _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 _PLATFORM_LOGIN_URL = os.getenv("MINDROOM_PLATFORM_LOGIN_URL")
 
 
-def load_runtime_config() -> tuple[Config, Path]:
+def load_runtime_config(
+    runtime_paths: constants.RuntimePaths | None = None,
+) -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
-    config_path = constants.get_runtime_paths().config_path
-    return Config.from_yaml(config_path), config_path
+    resolved_runtime_paths = runtime_paths or api_runtime_paths()
+    return Config.from_yaml(runtime_paths=resolved_runtime_paths), resolved_runtime_paths.config_path
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -187,9 +203,13 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
     return index_path if index_path.is_file() else None
 
 
-def _save_config_to_file(config: dict[str, Any]) -> None:
+def _save_config_to_file(
+    config: dict[str, Any],
+    runtime_paths: constants.RuntimePaths | None = None,
+) -> None:
     """Save config to YAML file with deterministic ordering."""
-    config_path = constants.get_runtime_paths().config_path
+    resolved_runtime_paths = runtime_paths or api_runtime_paths()
+    config_path = resolved_runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         yaml.dump(
@@ -383,10 +403,14 @@ def _sanitize_next_path(next_path: str | None) -> str:
     return next_path
 
 
-def _render_standalone_login_page(next_path: str) -> str:
+def _render_standalone_login_page(
+    next_path: str,
+    runtime_paths: constants.RuntimePaths | None = None,
+) -> str:
     """Return the standalone dashboard login page."""
     escaped_next_path = html.escape(next_path, quote=True)
-    env_path = html.escape(str(constants.get_runtime_paths().env_path))
+    resolved_runtime_paths = runtime_paths or api_runtime_paths()
+    env_path = html.escape(str(resolved_runtime_paths.env_path))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -537,10 +561,11 @@ async def verify_user(
     return auth_user
 
 
-def _load_config_from_file() -> None:
+def _load_config_from_file(runtime_paths: constants.RuntimePaths | None = None) -> None:
     """Load config from YAML file."""
     global config
-    config_path = constants.get_runtime_paths().config_path
+    resolved_runtime_paths = runtime_paths or api_runtime_paths()
+    config_path = resolved_runtime_paths.config_path
     try:
         with config_path.open() as f, config_lock:
             config = yaml.safe_load(f)
@@ -552,7 +577,7 @@ def _load_config_from_file() -> None:
 constants.ensure_writable_config_path(create_minimal=True)
 
 # Load initial config
-_load_config_from_file()
+_load_config_from_file(app.state.runtime_paths)
 
 # Include routers
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
@@ -623,7 +648,7 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
     if _request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
-    return HTMLResponse(_render_standalone_login_page(next_path))
+    return HTMLResponse(_render_standalone_login_page(next_path, api_runtime_paths(request)))
 
 
 @app.post("/api/config/load")

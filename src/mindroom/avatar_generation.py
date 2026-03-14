@@ -144,9 +144,9 @@ def get_console() -> Console:
     return Console()
 
 
-def load_validated_config() -> Config:
+def load_validated_config(runtime_paths: constants.RuntimePaths) -> Config:
     """Load and validate the active MindRoom configuration."""
-    return Config.from_yaml(constants.runtime_config_path())
+    return Config.from_yaml(runtime_paths=runtime_paths)
 
 
 def get_avatar_path(entity_type: str, entity_name: str) -> Path:
@@ -283,9 +283,15 @@ async def generate_avatar(
     console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
 
 
-def _build_router_user(router_account: _MatrixAccount) -> AgentMatrixUser:
+def _build_router_user(
+    router_account: _MatrixAccount,
+    runtime_paths: constants.RuntimePaths,
+) -> AgentMatrixUser:
     """Create the router user object from persisted Matrix state."""
-    server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
+    server_name = extract_server_name_from_homeserver(
+        constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
+        runtime_paths=runtime_paths,
+    )
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id=MatrixID.from_username(router_account.username, server_name).full_id,
@@ -364,6 +370,7 @@ async def set_room_avatars_in_matrix() -> None:
     """Set avatars for all rooms in Matrix."""
     console = get_console()
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
+    runtime_paths = constants.get_runtime_paths()
 
     state = MatrixState.load()
     router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
@@ -371,15 +378,19 @@ async def set_room_avatars_in_matrix() -> None:
         msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
         raise AvatarSyncError(msg)
 
-    router_user = _build_router_user(router_account)
+    router_user = _build_router_user(router_account, runtime_paths)
     try:
-        client = await login_agent_user(constants.runtime_matrix_homeserver(), router_user)
+        client = await login_agent_user(
+            constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
+            router_user,
+            runtime_paths,
+        )
     except ValueError as exc:
         msg = f"Failed to log in as router for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc
     console.print("[green]✓ Logged in to Matrix as router[/green]")
 
-    config = load_validated_config()
+    config = load_validated_config(runtime_paths)
     failed_labels: list[str] = []
     try:
         success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config)
@@ -553,7 +564,7 @@ async def _generate_missing_avatars(
 
 async def run_avatar_generation() -> None:
     """Generate missing managed avatars in the workspace."""
-    config = load_validated_config()
+    config = load_validated_config(constants.get_runtime_paths())
     missing_targets = _missing_avatar_targets(config)
 
     if not await _generate_missing_avatars(config, missing_targets):

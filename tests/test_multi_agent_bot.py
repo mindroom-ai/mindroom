@@ -598,8 +598,9 @@ class TestAgentBot:
         mock_orchestrator.start = AsyncMock()
         mock_orchestrator.stop = AsyncMock()
 
-        def _capture_logging(*, level: str) -> None:
+        def _capture_logging(*, level: str, runtime_paths: RuntimePaths) -> None:
             del level
+            del runtime_paths
             nonlocal observed_logging_root
             observed_logging_root = constants_module.STORAGE_PATH_OBJ
 
@@ -3186,7 +3187,7 @@ class TestMultiAgentOrchestrator:
 
         call_order: list[str] = []
 
-        async def _wait_for_homeserver() -> None:
+        async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
             call_order.append("wait_for_homeserver")
 
         async def _setup_rooms(_: list[Any]) -> None:
@@ -3213,7 +3214,7 @@ class TestMultiAgentOrchestrator:
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         call_order: list[str] = []
 
-        async def _wait_for_homeserver() -> None:
+        async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
             call_order.append("wait_for_homeserver")
 
         async def _initialize() -> None:

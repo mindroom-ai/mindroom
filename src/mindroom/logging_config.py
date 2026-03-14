@@ -6,10 +6,12 @@ import hashlib
 import logging
 import logging.config
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
-from mindroom import constants
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 __all__ = ["emoji", "get_logger", "setup_logging"]
 
@@ -75,15 +77,20 @@ def emoji(agent_name: str) -> str:
     return f"{emoji} {agent_name}"
 
 
-def setup_logging(level: str = "INFO") -> None:
+def setup_logging(
+    *,
+    level: str = "INFO",
+    runtime_paths: RuntimePaths,
+) -> None:
     """Configure structlog for mindroom with file and console output.
 
     Args:
         level: Minimum logging level (e.g., "DEBUG", "INFO", "WARNING", "ERROR")
+        runtime_paths: Explicit runtime context that determines the log directory
 
     """
     # Create logs directory if it doesn't exist
-    logs_dir = constants.get_runtime_paths().storage_root / "logs"
+    logs_dir = runtime_paths.storage_root / "logs"
     logs_dir.mkdir(exist_ok=True, parents=True)
 
     # Create timestamped log file

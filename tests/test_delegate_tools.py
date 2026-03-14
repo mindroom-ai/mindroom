@@ -19,12 +19,22 @@ from mindroom.tool_system.metadata import TOOL_METADATA
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
     """Create a minimal Config with the given agents."""
     return Config(
         agents=agents,
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
+    )
+
+
+def _runtime_paths(storage_path: Path) -> RuntimePaths:
+    """Create explicit runtime paths for delegate-tool agent creation tests."""
+    return resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
     )
 
 
@@ -392,7 +402,7 @@ class TestDelegateAutoInjection:
     """Test that DelegateTools is auto-injected when delegate_to is configured."""
 
     @patch("mindroom.agents.SqliteDb")
-    def test_auto_inject_delegate_tool(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_auto_inject_delegate_tool(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent with delegate_to should automatically get the delegate tool."""
         config = _make_config(
             {
@@ -404,24 +414,34 @@ class TestDelegateAutoInjection:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        agent = create_agent("leader", config=config, include_interactive_questions=False)
+        agent = create_agent(
+            "leader",
+            config=config,
+            runtime_paths=_runtime_paths(tmp_path),
+            include_interactive_questions=False,
+        )
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" in tool_names
 
     @patch("mindroom.agents.SqliteDb")
-    def test_no_delegate_tool_without_config(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_no_delegate_tool_without_config(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Agent without delegate_to should not get the delegate tool."""
         config = _make_config(
             {
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        agent = create_agent("worker", config=config, include_interactive_questions=False)
+        agent = create_agent(
+            "worker",
+            config=config,
+            runtime_paths=_runtime_paths(tmp_path),
+            include_interactive_questions=False,
+        )
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
-    def test_depth_limit_prevents_injection(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_depth_limit_prevents_injection(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """At max depth, delegate tool should not be auto-injected."""
         config = _make_config(
             {
@@ -436,6 +456,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=_runtime_paths(tmp_path),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -443,7 +464,7 @@ class TestDelegateAutoInjection:
         assert "delegate" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
-    def test_explicit_delegate_skipped_when_delegate_to_empty(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_explicit_delegate_skipped_when_delegate_to_empty(self, mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG002
         """Explicit 'delegate' in tools list should be skipped when delegate_to is empty."""
         config = _make_config(
             {
@@ -454,13 +475,23 @@ class TestDelegateAutoInjection:
                 ),
             },
         )
-        agent = create_agent("leader", config=config, include_interactive_questions=False)
+        agent = create_agent(
+            "leader",
+            config=config,
+            runtime_paths=_runtime_paths(tmp_path),
+            include_interactive_questions=False,
+        )
         tool_names = [tool.name for tool in agent.tools]
         assert "delegate" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
-    def test_depth_limit_prevents_explicit_delegate_tool(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_depth_limit_prevents_explicit_delegate_tool(
+        self,
+        mock_storage: MagicMock,
+        tmp_path: Path,
+    ) -> None:
         """At max depth, explicit 'delegate' in tools list should be skipped."""
+        assert mock_storage is not None
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -475,6 +506,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=_runtime_paths(tmp_path),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -482,8 +514,13 @@ class TestDelegateAutoInjection:
         assert "delegate" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
-    def test_depth_limit_prevents_default_tools_delegate(self, mock_storage: MagicMock) -> None:  # noqa: ARG002
+    def test_depth_limit_prevents_default_tools_delegate(
+        self,
+        mock_storage: MagicMock,
+        tmp_path: Path,
+    ) -> None:
         """At max depth, 'delegate' from defaults.tools should be skipped."""
+        assert mock_storage is not None
         config = Config(
             agents={
                 "leader": AgentConfig(
@@ -499,6 +536,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=_runtime_paths(tmp_path),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )

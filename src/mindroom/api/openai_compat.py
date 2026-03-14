@@ -521,17 +521,17 @@ def _build_tool_execution_identity(
 
 def _parse_chat_request(
     body: bytes,
-) -> tuple[_ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
+) -> tuple[_ChatCompletionRequest, Config, constants.RuntimePaths, str, list[dict[str, Any]] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
-    Returns (request, config, prompt, thread_history) on success, or a JSONResponse error.
+    Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.
     """
     try:
         req = _ChatCompletionRequest(**json.loads(body))
     except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
-    config, _ = _load_config()
+    config, runtime_paths = _load_config()
     validation_error = _validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -540,7 +540,7 @@ def _parse_chat_request(
     if not prompt:
         return _error_response(400, "No user message content found in messages")
 
-    return req, config, prompt, thread_history
+    return req, config, runtime_paths, prompt, thread_history
 
 
 async def _resolve_auto_route(
@@ -682,8 +682,7 @@ async def chat_completions(
     parsed = _parse_chat_request(await request.body())
     if isinstance(parsed, JSONResponse):
         return parsed
-    req, config, prompt, thread_history = parsed
-    runtime_paths = constants.get_runtime_paths()
+    req, config, runtime_paths, prompt, thread_history = parsed
 
     # Resolve auto-routing if model is "auto"
     agent_name = req.model

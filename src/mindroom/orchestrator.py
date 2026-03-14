@@ -489,7 +489,7 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
-        await wait_for_matrix_homeserver()
+        await wait_for_matrix_homeserver(runtime_paths=self._require_runtime_paths())
         if not self.agent_bots:
             await self.initialize()
 
@@ -989,7 +989,7 @@ async def main(
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.
-    setup_logging(level=log_level)
+    setup_logging(level=log_level, runtime_paths=runtime_paths)
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials(runtime_paths=runtime_paths)

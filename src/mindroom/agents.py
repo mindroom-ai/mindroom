@@ -348,17 +348,16 @@ def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
     *,
-    storage_path: Path | None = None,
+    storage_path: Path,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
-    resolved_storage_path = storage_path if storage_path is not None else constants.get_runtime_paths().storage_root
     workspace_path = None
     if agent_config.memory_file_path is not None:
         workspace_path = _resolve_agent_workspace_path(
             agent_name,
             agent_config,
-            storage_path=resolved_storage_path,
+            storage_path=storage_path,
         )
     return AgentToolInitContext(
         workspace_path=workspace_path,
@@ -691,7 +690,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_runtime_paths = runtime_paths or constants.get_runtime_paths()
+    resolved_runtime_paths = runtime_paths or config.runtime_paths
+    if resolved_runtime_paths is None:
+        msg = "create_agent() requires explicit runtime_paths or a Config loaded with runtime paths"
+        raise RuntimeError(msg)
     resolved_storage_path = resolved_runtime_paths.storage_root
 
     agent_config = config.get_agent(agent_name)

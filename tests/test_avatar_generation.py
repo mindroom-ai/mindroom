@@ -221,7 +221,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
@@ -272,7 +272,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars, "workspace_avatar_path", _workspace_path)
     monkeypatch.setattr(generate_avatars, "resolve_avatar_path", _resolve_avatar_path)
@@ -315,7 +315,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(
         generate_avatars.genai,
@@ -482,7 +482,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
@@ -553,13 +553,17 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
-    monkeypatch.setattr(generate_avatars.constants, "runtime_matrix_homeserver", lambda: "http://localhost:8008")
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
 
     await generate_avatars.set_room_avatars_in_matrix()
 
@@ -606,7 +610,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
@@ -616,7 +620,11 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
         "get_room_id",
         lambda room_name: "!war:localhost" if room_name == "war_room" else None,
     )
-    monkeypatch.setattr(generate_avatars.constants, "runtime_matrix_homeserver", lambda: "http://localhost:8008")
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
@@ -664,12 +672,16 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
-    monkeypatch.setattr(generate_avatars.constants, "runtime_matrix_homeserver", lambda: "http://localhost:8008")
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
 
     await generate_avatars.set_room_avatars_in_matrix()
 
@@ -716,7 +728,7 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
     )
     monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
     monkeypatch.setattr(
@@ -724,7 +736,11 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
         "login_agent_user",
         AsyncMock(side_effect=ValueError("Failed to login @router:localhost: M_FORBIDDEN")),
     )
-    monkeypatch.setattr(generate_avatars.constants, "runtime_matrix_homeserver", lambda: "http://localhost:8008")
+    monkeypatch.setattr(
+        generate_avatars.constants,
+        "runtime_matrix_homeserver",
+        lambda *_args, **_kwargs: "http://localhost:8008",
+    )
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,

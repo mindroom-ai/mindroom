@@ -8,12 +8,12 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom import constants
 from mindroom.ai import _cached_agent_run, get_model_instance
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -22,6 +22,15 @@ class _RoomTopic(BaseModel):
     """Structured room topic response."""
 
     topic: str = Field(description="The room topic - concise, informative, with emoji")
+
+
+def _require_runtime_paths(config: Config) -> RuntimePaths:
+    """Return the config's committed runtime context for topic generation."""
+    runtime_paths = config.runtime_paths
+    if runtime_paths is None:
+        msg = "Room topic generation requires a Config loaded with runtime paths"
+        raise RuntimeError(msg)
+    return runtime_paths
 
 
 async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str | None:
@@ -89,7 +98,7 @@ Generate the topic:"""
     )
 
     session_id = f"topic_{room_key}"
-    runtime_paths = constants.get_runtime_paths()
+    runtime_paths = _require_runtime_paths(config)
     try:
         response = await _cached_agent_run(
             agent=agent,

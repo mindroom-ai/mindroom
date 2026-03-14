@@ -3,7 +3,7 @@
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from mindroom import constants
@@ -67,26 +67,33 @@ def _get_configured_matrix_entity(
     return entities[entity_id]
 
 
-async def _get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> AgentRoomsResponse:
+async def _get_agent_matrix_rooms(
+    agent_id: str,
+    agent_data: dict[str, Any],
+    runtime_paths: constants.RuntimePaths,
+) -> AgentRoomsResponse:
     """Get Matrix rooms for a specific configured agent or team.
 
     Args:
         agent_id: The agent or team identifier
         agent_data: The entity configuration data
+        runtime_paths: Runtime context used for homeserver and env-dependent resolution
 
     Returns:
         AgentRoomsResponse with room information
 
     """
     # Create or get the agent user
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     agent_user = await create_agent_user(
-        constants.runtime_matrix_homeserver(),
+        homeserver,
         agent_id,
         agent_data.get("display_name", agent_id),
+        runtime_paths=runtime_paths,
     )
 
     # Login and get the client
-    client = await login_agent_user(constants.runtime_matrix_homeserver(), agent_user)
+    client = await login_agent_user(homeserver, agent_user, runtime_paths)
 
     # Get all joined rooms from Matrix
     joined_rooms = await get_joined_rooms(client) or []
@@ -119,7 +126,7 @@ async def _get_agent_matrix_rooms(agent_id: str, agent_data: dict[str, Any]) -> 
 
 
 @router.get("/agents/rooms")
-async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
+async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     """Get room information for all configured agents and teams.
 
     Returns information about configured rooms, joined rooms,
@@ -130,19 +137,24 @@ async def get_all_agents_rooms() -> AllAgentsRoomsResponse:
     with config_lock:
         entities = _get_configured_matrix_entities(config)
 
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
+
     # Gather room information for all configured Matrix entities concurrently.
-    tasks = [_get_agent_matrix_rooms(agent_id, agent_data) for agent_id, agent_data in entities.items()]
+    tasks = [_get_agent_matrix_rooms(agent_id, agent_data, runtime_paths) for agent_id, agent_data in entities.items()]
     agents_rooms = await asyncio.gather(*tasks)
 
     return AllAgentsRoomsResponse(agents=agents_rooms)
 
 
 @router.get("/agents/{agent_id}/rooms")
-async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
+async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse:
     """Get room information for a specific configured agent or team.
 
     Args:
         agent_id: The agent or team identifier
+        request: FastAPI request carrying the API runtime context
 
     Returns:
         Room information for the configured Matrix entity
@@ -156,7 +168,9 @@ async def get_agent_rooms(agent_id: str) -> AgentRoomsResponse:
     with config_lock:
         agent_data = _get_configured_matrix_entity(config, agent_id)
 
-    return await _get_agent_matrix_rooms(agent_id, agent_data)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    return await _get_agent_matrix_rooms(agent_id, agent_data, api_runtime_paths(request))
 
 
 @router.post("/rooms/leave")
@@ -178,15 +192,21 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
     with config_lock:
         agent_data = _get_configured_matrix_entity(config, request.agent_id)
 
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths()
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
+
     # Create or get the Matrix user for this configured entity.
     agent_user = await create_agent_user(
-        constants.runtime_matrix_homeserver(),
+        homeserver,
         request.agent_id,
         agent_data.get("display_name", request.agent_id),
+        runtime_paths=runtime_paths,
     )
 
     # Login and get the client
-    client = await login_agent_user(constants.runtime_matrix_homeserver(), agent_user)
+    client = await login_agent_user(homeserver, agent_user, runtime_paths)
 
     # Leave the room
     success = await leave_room(client, request.room_id)

@@ -19,7 +19,7 @@ from uuid import uuid4
 from agno.tools import Toolkit
 from playwright.async_api import Browser, BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 
-from mindroom import constants
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 _DEFAULT_PROFILE = "openclaw"
 _DEFAULT_SNAPSHOT_LIMIT = 200
@@ -185,12 +185,13 @@ def _clean_str(value: object) -> str | None:
 class BrowserTools(Toolkit):
     """OpenClaw-style browser control for MindRoom agents."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, output_dir: Path | str | None = None) -> None:
         super().__init__(name="browser", tools=[self.browser])
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._lock = asyncio.Lock()
-        self._output_dir = constants.get_runtime_paths().storage_root / "browser"
-        self._output_dir.mkdir(parents=True, exist_ok=True)
+        self._output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
+        if self._output_dir is not None:
+            self._output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
 
     async def _close_profiles(self) -> None:
@@ -1014,7 +1015,21 @@ class BrowserTools(Toolkit):
         return tab.refs.get(ref_or_selector, ref_or_selector)
 
     def _next_output_path(self, extension: str) -> Path:
-        return self._output_dir / f"{uuid4().hex}.{extension}"
+        return self._resolve_output_dir() / f"{uuid4().hex}.{extension}"
+
+    def _resolve_output_dir(self) -> Path:
+        """Return the directory used for browser artifacts."""
+        if self._output_dir is not None:
+            return self._output_dir
+
+        context = get_tool_runtime_context()
+        if context is None or context.storage_path is None:
+            msg = "BrowserTools requires explicit output_dir or tool runtime context with storage_path"
+            raise RuntimeError(msg)
+
+        self._output_dir = (context.storage_path / "browser").resolve()
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+        return self._output_dir
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:
