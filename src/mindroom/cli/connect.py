@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import CONFIG_PATH, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom import constants
+from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,10 +104,11 @@ def persist_local_provisioning_env(
     client_id: str,
     client_secret: str,
     namespace: str,
-    config_path: str | Path = CONFIG_PATH,
+    config_path: str | Path | None = None,
 ) -> Path:
     """Write local provisioning credentials to .env next to the active config file."""
-    env_path = Path(config_path).expanduser().resolve().parent / ".env"
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else constants.runtime_config_path()
+    env_path = resolved_config_path.parent / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
 

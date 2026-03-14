@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import nio
@@ -18,6 +19,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+import mindroom.constants as constants_module
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
@@ -48,7 +50,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
 
@@ -458,7 +460,7 @@ class TestAgentBot:
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.config.main.Config.from_yaml")
@@ -617,6 +619,79 @@ class TestAgentBot:
         mock_orchestrator_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_orchestrator_main_watches_resolved_config_path(self, tmp_path: Path) -> None:
+        """The top-level config watcher should follow the orchestrator's canonical config path."""
+        reset_runtime_state()
+        watched_paths: list[Path] = []
+        config_watcher_ran = asyncio.Event()
+        resolved_config_path = (tmp_path / "nested" / "config.yaml").resolve()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.config_path = resolved_config_path
+        mock_orchestrator._require_config_path.return_value = resolved_config_path
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _watch_config_task(path: Path, _orchestrator: object) -> None:
+            watched_paths.append(path)
+            config_watcher_ran.set()
+
+        async def _run_auxiliary(task_name: str, operation: Callable[[], Awaitable[None]]) -> None:
+            del task_name
+            await operation()
+
+        async def _start() -> None:
+            await asyncio.wait_for(config_watcher_ran.wait(), timeout=1)
+            msg = "boom"
+            raise PermanentMatrixStartupError(msg)
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._watch_config_task", side_effect=_watch_config_task),
+            patch("mindroom.orchestrator._watch_skills_task", new=AsyncMock()),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", side_effect=_run_auxiliary),
+            pytest.raises(PermanentMatrixStartupError, match="boom"),
+        ):
+            await main(log_level="INFO", storage_path=tmp_path, api=False)
+
+        assert watched_paths == [resolved_config_path]
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_commits_runtime_storage_root_before_logging_and_credential_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Direct orchestrator callers should get the same storage-root contract as the CLI wrapper."""
+        reset_runtime_state()
+        runtime_storage = tmp_path / "runtime-storage"
+        observed_logging_root: Path | None = None
+        observed_credentials_root: Path | None = None
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock()
+        mock_orchestrator.stop = AsyncMock()
+
+        def _capture_logging(*, level: str) -> None:
+            del level
+            nonlocal observed_logging_root
+            observed_logging_root = constants_module.STORAGE_PATH_OBJ
+
+        def _capture_credentials_sync() -> None:
+            nonlocal observed_credentials_root
+            observed_credentials_root = constants_module.STORAGE_PATH_OBJ
+
+        with (
+            patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+        ):
+            await main(log_level="INFO", storage_path=runtime_storage, api=False)
+
+        assert observed_logging_root == runtime_storage.resolve()
+        assert observed_credentials_root == runtime_storage.resolve()
+
+    @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
         config = Config.from_yaml()
@@ -693,7 +768,7 @@ class TestAgentBot:
     @patch("mindroom.bot.stream_agent_response")
     @patch("mindroom.bot.fetch_thread_history")
     @patch("mindroom.bot.should_use_streaming")
-    async def test_agent_bot_on_message_mentioned(
+    async def test_agent_bot_on_message_mentioned(  # noqa: PLR0915
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
@@ -784,42 +859,42 @@ class TestAgentBot:
 
         # Should call AI and send response based on streaming mode
         if enable_streaming:
-            mock_stream_agent_response.assert_called_once_with(
-                agent_name="calculator",
-                prompt=f"{mention_id}: What's 2+2?",
-                session_id="!test:localhost:$thread_root_id",
-                storage_path=tmp_path,
-                config=config,
-                thread_history=[],
-                room_id="!test:localhost",
-                knowledge=None,
-                user_id="@user:localhost",
-                media=MediaInputs(),
-                reply_to_event_id="event123",
-                show_tool_calls=True,
-                run_metadata_collector=ANY,
-            )
+            mock_stream_agent_response.assert_called_once()
+            stream_kwargs = mock_stream_agent_response.call_args.kwargs
+            assert stream_kwargs["agent_name"] == "calculator"
+            assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert stream_kwargs["runtime_paths"].storage_root == tmp_path
+            assert stream_kwargs["config"] == config
+            assert stream_kwargs["thread_history"] == []
+            assert stream_kwargs["room_id"] == "!test:localhost"
+            assert stream_kwargs["knowledge"] is None
+            assert stream_kwargs["user_id"] == "@user:localhost"
+            assert stream_kwargs["media"] == MediaInputs()
+            assert stream_kwargs["reply_to_event_id"] == "event123"
+            assert stream_kwargs["show_tool_calls"] is True
+            assert stream_kwargs["run_metadata_collector"] == {}
             mock_ai_response.assert_not_called()
             # With streaming and stop button: initial message + reaction + edits
             # Note: The exact count may vary based on implementation
             assert bot.client.room_send.call_count >= 2
         else:
-            mock_ai_response.assert_called_once_with(
-                agent_name="calculator",
-                prompt=f"{mention_id}: What's 2+2?",
-                session_id="!test:localhost:$thread_root_id",
-                storage_path=tmp_path,
-                config=config,
-                thread_history=[],
-                room_id="!test:localhost",
-                knowledge=None,
-                user_id="@user:localhost",
-                media=MediaInputs(),
-                reply_to_event_id="event123",
-                show_tool_calls=True,
-                tool_trace_collector=ANY,
-                run_metadata_collector=ANY,
-            )
+            mock_ai_response.assert_called_once()
+            ai_kwargs = mock_ai_response.call_args.kwargs
+            assert ai_kwargs["agent_name"] == "calculator"
+            assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
+            assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
+            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["config"] == config
+            assert ai_kwargs["thread_history"] == []
+            assert ai_kwargs["room_id"] == "!test:localhost"
+            assert ai_kwargs["knowledge"] is None
+            assert ai_kwargs["user_id"] == "@user:localhost"
+            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_kwargs["reply_to_event_id"] == "event123"
+            assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["tool_trace_collector"] == []
+            assert ai_kwargs["run_metadata_collector"] == {}
             mock_stream_agent_response.assert_not_called()
             # With stop button support: initial + reaction + final
             assert bot.client.room_send.call_count >= 2
@@ -2858,7 +2933,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
@@ -2902,7 +2977,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
@@ -2942,7 +3017,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),
@@ -3106,6 +3181,25 @@ class TestMultiAgentOrchestrator:
             assert "calculator" in orchestrator.agent_bots
             assert "general" in orchestrator.agent_bots
             assert "router" in orchestrator.agent_bots
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
+        """Initialize should load the exact config file owned by the orchestrator."""
+        config_path = tmp_path / "custom-config.yaml"
+        mock_config = MagicMock()
+        mock_config.agents = {}
+        mock_config.teams = {}
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+        ):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+            await orchestrator.initialize()
+
+        mock_load_config.assert_called_once()
+        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
@@ -3555,6 +3649,38 @@ class TestMultiAgentOrchestrator:
         assert updated is False
         mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
         mock_configure_knowledge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
+        """Hot reload should keep reading the orchestrator's custom config path."""
+        config_path = tmp_path / "custom-config.yaml"
+        current_config = MagicMock()
+        current_config.authorization.global_users = []
+        new_config = MagicMock()
+        new_config.authorization.global_users = []
+        new_config.defaults.enable_streaming = True
+
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+        orchestrator.config = current_config
+        plan = SimpleNamespace(
+            mindroom_user_changed=False,
+            new_config=new_config,
+            entities_to_restart=set(),
+            new_entities=set(),
+            only_support_service_changes=True,
+        )
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        mock_load_config.assert_called_once()
+        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

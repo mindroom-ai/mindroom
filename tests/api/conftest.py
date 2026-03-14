@@ -38,12 +38,12 @@ def temp_config_file() -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def test_client(temp_config_file: Path) -> TestClient:
     """Create a test client with mocked config file."""
-    # Mock the config file path before importing
+    from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
-    monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
+    constants.set_runtime_paths(config_path=temp_config_file)
 
     # Force reload of config
     main._load_config_from_file()

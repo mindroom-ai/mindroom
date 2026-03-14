@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from mindroom.constants import CREDENTIALS_DIR
+from mindroom import constants
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -33,6 +33,7 @@ logger = get_logger(__name__)
 
 # Global instance for convenience (lazy initialization)
 _credentials_manager: CredentialsManager | None = None
+_credentials_manager_signature: tuple[Path, Path, str | None, Path | None] | None = None
 _credentials_manager_lock = threading.Lock()
 _PRIMARY_CREDENTIALS_STORAGE_PATH: Path | None = None
 
@@ -207,10 +208,7 @@ class CredentialsManager:
 def _default_credentials_base_path() -> Path:
     if _PRIMARY_CREDENTIALS_STORAGE_PATH is not None:
         return _PRIMARY_CREDENTIALS_STORAGE_PATH / "credentials"
-    storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if storage_path:
-        return Path(storage_path).expanduser().resolve() / "credentials"
-    return CREDENTIALS_DIR
+    return constants.get_runtime_paths().storage_root / "credentials"
 
 
 def _default_shared_credentials_base_path(base_path: Path) -> Path:
@@ -234,19 +232,15 @@ def _current_dedicated_worker_root() -> Path | None:
 
 def set_primary_credentials_storage_path(storage_path: Path | None) -> None:
     """Set the primary runtime storage root used for default credentials access."""
-    global _credentials_manager, _PRIMARY_CREDENTIALS_STORAGE_PATH
+    global _credentials_manager, _credentials_manager_signature, _PRIMARY_CREDENTIALS_STORAGE_PATH
     with _credentials_manager_lock:
-        if storage_path is None:
-            _PRIMARY_CREDENTIALS_STORAGE_PATH = None
-            _credentials_manager = None
-            return
-
-        normalized_storage_path = storage_path.expanduser().resolve()
+        normalized_storage_path = None if storage_path is None else storage_path.expanduser().resolve()
         if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
             return
 
         _PRIMARY_CREDENTIALS_STORAGE_PATH = normalized_storage_path
         _credentials_manager = None
+        _credentials_manager_signature = None
 
 
 def get_credentials_manager() -> CredentialsManager:
@@ -256,11 +250,22 @@ def get_credentials_manager() -> CredentialsManager:
         The global CredentialsManager instance
 
     """
-    global _credentials_manager
+    global _credentials_manager, _credentials_manager_signature
+
+    base_path = _default_credentials_base_path()
+    shared_base_path = _default_shared_credentials_base_path(base_path)
+    current_signature = (
+        base_path,
+        shared_base_path,
+        _current_dedicated_worker_key(),
+        _current_dedicated_worker_root(),
+    )
+
     with _credentials_manager_lock:
-        if _credentials_manager is None:
+        if _credentials_manager is None or _credentials_manager_signature != current_signature:
             _credentials_manager = CredentialsManager()
-    return _credentials_manager
+            _credentials_manager_signature = current_signature
+        return _credentials_manager
 
 
 def _resolve_worker_credentials_manager(

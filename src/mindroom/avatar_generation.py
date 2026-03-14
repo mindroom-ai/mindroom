@@ -14,10 +14,9 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
+from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.constants import (
-    CONFIG_PATH,
-    MATRIX_HOMESERVER,
     ROUTER_AGENT_NAME,
     resolve_avatar_path,
     workspace_avatar_path,
@@ -147,7 +146,7 @@ def get_console() -> Console:
 
 def load_validated_config() -> Config:
     """Load and validate the active MindRoom configuration."""
-    return Config.from_yaml(CONFIG_PATH.expanduser().resolve())
+    return Config.from_yaml(constants.runtime_config_path())
 
 
 def get_avatar_path(entity_type: str, entity_name: str) -> Path:
@@ -286,7 +285,7 @@ async def generate_avatar(
 
 def _build_router_user(router_account: _MatrixAccount) -> AgentMatrixUser:
     """Create the router user object from persisted Matrix state."""
-    server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+    server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id=MatrixID.from_username(router_account.username, server_name).full_id,
@@ -374,7 +373,7 @@ async def set_room_avatars_in_matrix() -> None:
 
     router_user = _build_router_user(router_account)
     try:
-        client = await login_agent_user(MATRIX_HOMESERVER, router_user)
+        client = await login_agent_user(constants.runtime_matrix_homeserver(), router_user)
     except ValueError as exc:
         msg = f"Failed to log in as router for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc

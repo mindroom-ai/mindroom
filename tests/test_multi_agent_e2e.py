@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -128,21 +128,21 @@ async def test_agent_processes_direct_mention(
                 await bot._on_message(room, message_event)
 
                 # Verify AI was called with correct parameters (full message body as prompt)
-                mock_ai.assert_called_once_with(
-                    agent_name="calculator",
-                    prompt=f"@mindroom_calculator:{config.domain} What's 15% of 200?",
-                    session_id=f"{test_room_id}:$thread_root:localhost",
-                    thread_history=[],
-                    storage_path=tmp_path,
-                    config=config,
-                    room_id=test_room_id,
-                    knowledge=None,
-                    user_id=test_user_id,
-                    media=MediaInputs(),
-                    reply_to_event_id="$test_event:localhost",
-                    show_tool_calls=True,
-                    run_metadata_collector=ANY,
-                )
+                mock_ai.assert_called_once()
+                ai_kwargs = mock_ai.call_args.kwargs
+                assert ai_kwargs["agent_name"] == "calculator"
+                assert ai_kwargs["prompt"] == f"@mindroom_calculator:{config.domain} What's 15% of 200?"
+                assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
+                assert ai_kwargs["thread_history"] == []
+                assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+                assert ai_kwargs["config"] == config
+                assert ai_kwargs["room_id"] == test_room_id
+                assert ai_kwargs["knowledge"] is None
+                assert ai_kwargs["user_id"] == test_user_id
+                assert ai_kwargs["media"] == MediaInputs()
+                assert ai_kwargs["reply_to_event_id"] == "$test_event:localhost"
+                assert ai_kwargs["show_tool_calls"] is True
+                assert ai_kwargs["run_metadata_collector"] == {}
 
                 # Verify message was sent (thinking + streaming updates)
                 # With streaming: 1 thinking message + streaming updates
@@ -416,22 +416,22 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             await bot._on_message(room, message_event_with_mention)
 
             # Should process the message with explicit mention
-            mock_ai.assert_called_once_with(
-                agent_name="calculator",
-                prompt=f"@mindroom_calculator:{domain} What about 20% of 300?",
-                session_id=f"{test_room_id}:{thread_root_id}",
-                thread_history=mock_fetch.return_value,
-                storage_path=tmp_path,
-                config=config,
-                room_id=test_room_id,
-                knowledge=None,
-                user_id=test_user_id,
-                media=MediaInputs(),
-                reply_to_event_id=f"$test_event2:{domain}",
-                show_tool_calls=True,
-                tool_trace_collector=ANY,
-                run_metadata_collector=ANY,
-            )
+            mock_ai.assert_called_once()
+            ai_kwargs = mock_ai.call_args.kwargs
+            assert ai_kwargs["agent_name"] == "calculator"
+            assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
+            assert ai_kwargs["thread_history"] == mock_fetch.return_value
+            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["config"] == config
+            assert ai_kwargs["room_id"] == test_room_id
+            assert ai_kwargs["knowledge"] is None
+            assert ai_kwargs["user_id"] == test_user_id
+            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_kwargs["reply_to_event_id"] == f"$test_event2:{domain}"
+            assert ai_kwargs["show_tool_calls"] is True
+            assert ai_kwargs["tool_trace_collector"] == []
+            assert ai_kwargs["run_metadata_collector"] == {}
 
             # Verify thread response format (team response with mocking issue)
             assert bot.client.room_send.call_count == 2

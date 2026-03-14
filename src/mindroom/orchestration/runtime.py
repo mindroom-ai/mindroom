@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from mindroom.constants import MATRIX_HOMESERVER, MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
+from mindroom import constants
+from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -147,7 +148,7 @@ async def wait_for_matrix_homeserver(
     """Wait for the configured Matrix homeserver to answer `/versions`."""
     if timeout_seconds is None:
         timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env()
-    versions_url = matrix_versions_url(MATRIX_HOMESERVER)
+    versions_url = matrix_versions_url(constants.runtime_matrix_homeserver())
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
     loop = asyncio.get_running_loop()
     deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
