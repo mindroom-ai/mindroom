@@ -92,25 +92,15 @@ class DelegateTools(Toolkit):
                     manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None
                 ),
             )
-            if self._config_path is None:
-                agent = create_agent(
-                    agent_name,
-                    self._config,
-                    storage_path=self._storage_path,
-                    knowledge=knowledge,
-                    include_interactive_questions=False,
-                    delegation_depth=self._delegation_depth + 1,
-                )
-            else:
-                agent = create_agent(
-                    agent_name,
-                    self._config,
-                    storage_path=self._storage_path,
-                    knowledge=knowledge,
-                    include_interactive_questions=False,
-                    delegation_depth=self._delegation_depth + 1,
-                    config_path=self._config_path,
-                )
+            agent = create_agent(
+                agent_name,
+                self._config,
+                storage_path=self._storage_path,
+                knowledge=knowledge,
+                include_interactive_questions=False,
+                delegation_depth=self._delegation_depth + 1,
+                config_path=self._config_path,
+            )
             logger.info(
                 "Delegating task",
                 from_agent=self._agent_name,

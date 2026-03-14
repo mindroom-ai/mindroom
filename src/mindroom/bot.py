@@ -457,24 +457,7 @@ class AgentBot:
         tool_trace_collector: list[ToolTraceEntry] | None = None,
         run_metadata_collector: dict[str, Any] | None = None,
     ) -> str:
-        """Call `ai_response()` while omitting `config_path` when it is unset."""
-        if self.config_path is None:
-            return await ai_response(
-                agent_name=agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room_id,
-                knowledge=knowledge,
-                user_id=user_id,
-                media=media,
-                reply_to_event_id=reply_to_event_id,
-                show_tool_calls=show_tool_calls,
-                tool_trace_collector=tool_trace_collector,
-                run_metadata_collector=run_metadata_collector,
-            )
+        """Call `ai_response()` with this bot's config-aware runtime settings."""
         return await ai_response(
             agent_name=agent_name,
             prompt=prompt,
@@ -508,23 +491,7 @@ class AgentBot:
         show_tool_calls: bool = True,
         run_metadata_collector: dict[str, Any] | None = None,
     ) -> AsyncIterator[AIStreamChunk]:
-        """Call `stream_agent_response()` while omitting `config_path` when it is unset."""
-        if self.config_path is None:
-            return stream_agent_response(
-                agent_name=agent_name,
-                prompt=prompt,
-                session_id=session_id,
-                storage_path=self.storage_path,
-                config=self.config,
-                thread_history=thread_history,
-                room_id=room_id,
-                knowledge=knowledge,
-                user_id=user_id,
-                media=media,
-                reply_to_event_id=reply_to_event_id,
-                show_tool_calls=show_tool_calls,
-                run_metadata_collector=run_metadata_collector,
-            )
+        """Call `stream_agent_response()` with this bot's config-aware runtime settings."""
         return stream_agent_response(
             agent_name=agent_name,
             prompt=prompt,

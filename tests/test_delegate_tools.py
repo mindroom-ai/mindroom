@@ -126,6 +126,7 @@ class TestDelegateTools:
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
+                config_path=None,
             )
             mock_agent.arun.assert_called_once_with("Write a hello world program")
             assert result == "Here is the generated code: print('hello')"
@@ -179,6 +180,7 @@ class TestDelegateTools:
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=2,
+                config_path=None,
             )
 
     @pytest.mark.asyncio
@@ -271,6 +273,7 @@ class TestDelegateKnowledge:
                 knowledge=mock_knowledge,
                 include_interactive_questions=False,
                 delegation_depth=1,
+                config_path=None,
             )
             assert result == "Found relevant docs"
 
@@ -309,6 +312,7 @@ class TestDelegateKnowledge:
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
+                config_path=None,
             )
 
 
