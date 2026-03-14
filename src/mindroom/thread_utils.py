@@ -164,12 +164,13 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
+    runtime_paths = config.require_runtime_paths()
     configured_agents: list[MatrixID] = []
 
     # Check which agents should be in this room
     for agent_name, agent_config in config.agents.items():
         if agent_name != ROUTER_AGENT_NAME:
-            resolved_rooms = resolve_room_aliases(agent_config.rooms, runtime_paths=config.runtime_paths)
+            resolved_rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
             if room_id in resolved_rooms:
                 configured_agents.append(config.ids[agent_name])
 

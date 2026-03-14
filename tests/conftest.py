@@ -1,5 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
+import itertools
 import os
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest_asyncio
 from aioresponses import aioresponses
 
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -73,6 +75,20 @@ TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
 
 
+def _make_test_runtime_paths(tmp_root: Path) -> object:
+    """Create an isolated runtime context for one test config."""
+    config_path = tmp_root / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
 def create_mock_room(
     room_id: str = "!test:localhost",
     agents: list[str] | None = None,
@@ -132,6 +148,41 @@ def _reset_runtime_paths(tmp_path_factory: pytest.TempPathFactory) -> Generator[
     constants.activate_runtime_paths(runtime_paths=original)
     os.environ.clear()
     os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def _bind_runtime_paths_to_test_configs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Attach a real runtime context to test-created Config objects by default."""
+    counter = itertools.count()
+    original_init = Config.__init__
+    original_model_validate = Config.model_validate.__func__
+
+    def _bind_runtime_paths(config: Config) -> None:
+        if config.runtime_paths is not None:
+            return
+        runtime_root = tmp_path_factory.mktemp(f"config-runtime-{next(counter)}")
+        config._runtime_paths = _make_test_runtime_paths(runtime_root)
+
+    def patched_init(self: Config, /, *args: object, **kwargs: object) -> None:
+        original_init(self, *args, **kwargs)
+        _bind_runtime_paths(self)
+
+    @classmethod
+    def patched_model_validate(
+        cls: type[Config],
+        obj: object,
+        *args: object,
+        **kwargs: object,
+    ) -> Config:
+        config = original_model_validate(cls, obj, *args, **kwargs)
+        _bind_runtime_paths(config)
+        return config
+
+    monkeypatch.setattr(Config, "__init__", patched_init)
+    monkeypatch.setattr(Config, "model_validate", patched_model_validate)
 
 
 @pytest.fixture(autouse=True)

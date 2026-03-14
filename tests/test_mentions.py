@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 
 def _make_config(*, runtime_paths: constants_mod.RuntimePaths | None = None) -> Config:
+    runtime_paths = runtime_paths or constants_mod.resolve_runtime_paths(
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
     config = Config(
         agents={
             "calculator": AgentConfig(display_name="Calculator"),
@@ -37,7 +43,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "Hey @calculator can you help with this?"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Hey @mindroom_calculator:localhost can you help with this?"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -47,7 +53,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "@calculator and @general please work together on this"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert (
             processed == "@mindroom_calculator:localhost and @mindroom_general:localhost please work together on this"
@@ -60,7 +66,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "Ask @mindroom_calculator for help"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -70,7 +76,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "Ask @mindroom_calculator:matrix.org for help"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
@@ -87,7 +93,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths=runtime_paths)
 
         text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
         assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
@@ -97,7 +103,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "Hey @calculator"
-        processed, mentions, markdown = parse_mentions_in_text(text, "matrix.org", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "matrix.org", config)
 
         assert processed == "Hey @mindroom_calculator:matrix.org"
         assert mentions == ["@mindroom_calculator:matrix.org"]
@@ -107,7 +113,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "@calculator is real but @unknown is not"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_calculator:localhost is real but @unknown is not"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -117,7 +123,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "@mindroom_user_123 and @calculator"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
         assert mentions == ["@mindroom_calculator:localhost"]
@@ -127,7 +133,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "@calculator help! @calculator are you there?"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_calculator:localhost help! @mindroom_calculator:localhost are you there?"
         assert mentions == ["@mindroom_calculator:localhost"]  # Only one entry
@@ -204,7 +210,7 @@ class TestMentionParsing:
         config = _make_config()
 
         text = "This has no mentions"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         assert processed == text
         assert mentions == []
@@ -215,7 +221,7 @@ class TestMentionParsing:
 
         # The regex should require word boundaries
         text = "Use decode@code function"
-        processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, _mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
         # Current implementation might catch this - documenting actual behavior
         # This is a limitation we should be aware of
@@ -235,7 +241,7 @@ class TestMentionParsing:
         ]
 
         for text, expected_agents in test_cases:
-            processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
+            _processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
 
             # Extract agent names from the mentioned user IDs
             mentioned_agents = []

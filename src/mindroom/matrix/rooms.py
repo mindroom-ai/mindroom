@@ -48,14 +48,14 @@ async def _set_room_avatar_if_available(
     avatar_category: str,
     avatar_name: str,
     context: str,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Set a room avatar when a managed asset exists.
 
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.
     """
-    avatar_path = resolve_avatar_path(avatar_category, avatar_name, runtime_paths=runtime_paths)
+    avatar_path = resolve_avatar_path(avatar_category, avatar_name, runtime_paths)
     if not avatar_path.exists():
         return
 
@@ -87,9 +87,16 @@ async def _configure_managed_room_access(
 ) -> bool:
     """Apply configured room joinability/discoverability policy for one managed room."""
     access_config = config.matrix_room_access
-    target_join_rule = access_config.get_target_join_rule(room_key, room_id=room_id, room_alias=room_alias)
+    runtime_paths = config.require_runtime_paths()
+    target_join_rule = access_config.get_target_join_rule(
+        room_key,
+        runtime_paths,
+        room_id=room_id,
+        room_alias=room_alias,
+    )
     target_directory_visibility = access_config.get_target_directory_visibility(
         room_key,
+        runtime_paths,
         room_id=room_id,
         room_alias=room_alias,
     )
@@ -144,26 +151,20 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def load_rooms(runtime_paths: RuntimePaths | None = None) -> dict[str, MatrixRoom]:
+def load_rooms(runtime_paths: RuntimePaths) -> dict[str, MatrixRoom]:
     """Load room state from YAML file."""
-    if runtime_paths is None:
-        return {}
     state = MatrixState.load(runtime_paths=runtime_paths)
     return state.rooms
 
 
-def _get_room_aliases(runtime_paths: RuntimePaths | None = None) -> dict[str, str]:
+def _get_room_aliases(runtime_paths: RuntimePaths) -> dict[str, str]:
     """Get mapping of room aliases to room IDs."""
-    if runtime_paths is None:
-        return {}
     state = MatrixState.load(runtime_paths=runtime_paths)
     return state.get_room_aliases()
 
 
-def get_room_id(room_key: str, runtime_paths: RuntimePaths | None = None) -> str | None:
+def get_room_id(room_key: str, runtime_paths: RuntimePaths) -> str | None:
     """Get room ID for a given room key/alias."""
-    if runtime_paths is None:
-        return None
     state = MatrixState.load(runtime_paths=runtime_paths)
     room = state.get_room(room_key)
     return room.room_id if room else None
@@ -183,10 +184,8 @@ def _add_room(
     state.save(runtime_paths=runtime_paths)
 
 
-def _remove_room(room_key: str, runtime_paths: RuntimePaths | None = None) -> bool:
+def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
     """Remove a room from the state."""
-    if runtime_paths is None:
-        return False
     state = MatrixState.load(runtime_paths=runtime_paths)
     if room_key in state.rooms:
         del state.rooms[room_key]
@@ -197,8 +196,7 @@ def _remove_room(room_key: str, runtime_paths: RuntimePaths | None = None) -> bo
 
 def resolve_room_aliases(
     room_list: list[str],
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Resolve room aliases to room IDs.
 
@@ -210,13 +208,11 @@ def resolve_room_aliases(
         List of room IDs (aliases resolved to IDs, IDs passed through)
 
     """
-    if runtime_paths is None:
-        return room_list
-    room_aliases = _get_room_aliases(runtime_paths=runtime_paths)
+    room_aliases = _get_room_aliases(runtime_paths)
     return [room_aliases.get(room, room) for room in room_list]
 
 
-def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths | None = None) -> str | None:
+def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths) -> str | None:
     """Get room alias from room ID (reverse lookup).
 
     Args:
@@ -227,9 +223,7 @@ def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths | None = No
         Room alias if found, None otherwise
 
     """
-    if runtime_paths is None:
-        return None
-    room_aliases = _get_room_aliases(runtime_paths=runtime_paths)
+    room_aliases = _get_room_aliases(runtime_paths)
     for alias, rid in room_aliases.items():
         if rid == room_id:
             return alias

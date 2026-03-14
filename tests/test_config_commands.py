@@ -24,6 +24,10 @@ from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.constants import resolve_runtime_paths
 
 
+def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
+    return resolve_runtime_paths(config_path=config_path)
+
+
 class TestCommandParser:
     """Test config command parsing."""
 
@@ -295,7 +299,7 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response, change_info = await handle_config_command("show", config_path)
+            response, change_info = await handle_config_command("show", _runtime_paths_for_config(config_path))
             assert change_info is None  # show command should not return change info
             assert "Current Configuration:" in response
             assert "test_agent" in response
@@ -313,7 +317,10 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response, change_info = await handle_config_command("get agents.test_agent.display_name", config_path)
+            response, change_info = await handle_config_command(
+                "get agents.test_agent.display_name",
+                _runtime_paths_for_config(config_path),
+            )
             assert change_info is None  # get command should not return change info
             assert "Configuration value for `agents.test_agent.display_name`:" in response
             assert "Test Agent" in response
@@ -333,7 +340,7 @@ class TestConfigCommandHandling:
         try:
             response, change_info = await handle_config_command(
                 'set agents.test_agent.display_name "New Name"',
-                config_path,
+                _runtime_paths_for_config(config_path),
             )
             assert change_info is not None  # set command should return change info for confirmation
             assert "Configuration Change Preview" in response
@@ -352,7 +359,10 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response, change_info = await handle_config_command("get agents.nonexistent", config_path)
+            response, change_info = await handle_config_command(
+                "get agents.nonexistent",
+                _runtime_paths_for_config(config_path),
+            )
             assert change_info is None
             assert "❌" in response
             assert "not found" in response
@@ -376,7 +386,10 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response, change_info = await handle_config_command("get agents.test_agent.tools.5", config_path)
+            response, change_info = await handle_config_command(
+                "get agents.test_agent.tools.5",
+                _runtime_paths_for_config(config_path),
+            )
             assert change_info is None
             assert "❌" in response
             assert "not found" in response
@@ -397,7 +410,7 @@ class TestConfigCommandHandling:
             # Try to set a bool field to a non-boolean string value
             response, change_info = await handle_config_command(
                 "set defaults.markdown not_a_bool",
-                config_path,
+                _runtime_paths_for_config(config_path),
             )
             assert change_info is None  # Invalid config should not return change info
             assert "❌" in response
@@ -412,7 +425,7 @@ class TestConfigCommandHandling:
             config_path = Path(f.name)
 
         try:
-            response, change_info = await handle_config_command("unknown_op", config_path)
+            response, change_info = await handle_config_command("unknown_op", _runtime_paths_for_config(config_path))
             assert change_info is None
             assert "❌ Unknown operation" in response
             assert "unknown_op" in response
@@ -427,7 +440,10 @@ class TestConfigCommandHandling:
 
         try:
             # Command with unmatched quotes
-            response, change_info = await handle_config_command('set test.value "unmatched', config_path)
+            response, change_info = await handle_config_command(
+                'set test.value "unmatched',
+                _runtime_paths_for_config(config_path),
+            )
             assert change_info is None
             assert "❌" in response
             assert "parsing error" in response.lower()
@@ -456,7 +472,7 @@ class TestConfigCommandHandling:
             # shlex turns it into: [item1, item2] (quotes consumed)
             response, change_info = await handle_config_command(
                 "set agents.test_agent.tools [communication, lobby]",
-                config_path,
+                _runtime_paths_for_config(config_path),
             )
             assert change_info is not None  # set command should return change info
             assert "Configuration Change Preview" in response
@@ -485,7 +501,7 @@ class TestConfigCommandHandling:
             # User properly quotes the entire JSON array
             response, change_info = await handle_config_command(
                 'set agents.test_agent.tools ["tool1", "tool2"]',
-                config_path,
+                _runtime_paths_for_config(config_path),
             )
             assert change_info is not None  # set command should return change info
             assert "Configuration Change Preview" in response

@@ -191,9 +191,10 @@ class TestConfigInit:
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
 
         config = Config.from_yaml(target)
+        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
         resolved_knowledge_path = constants_module.resolve_config_relative_path(
             config.knowledge_bases["mind_memory"].path,
-            config_path=target,
+            runtime_paths,
         )
         assert (
             resolved_knowledge_path
@@ -390,9 +391,10 @@ class TestConfigInit:
         workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
         resolved_kb_path = constants_module.resolve_config_relative_path(
             config["knowledge_bases"]["mind_memory"]["path"],
-            config_path=target,
+            runtime_paths,
         )
         assert resolved_kb_path == workspace / "memory"
 
@@ -421,9 +423,10 @@ class TestConfigInit:
         workspace = custom_root / "agents" / "mind" / "workspace" / "mind_data"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
         resolved_kb_path = constants_module.resolve_config_relative_path(
             config["knowledge_bases"]["mind_memory"]["path"],
-            config_path=target,
+            runtime_paths,
         )
         assert resolved_kb_path == workspace / "memory"
         assert env_path.read_text(encoding="utf-8").startswith(f"MINDROOM_STORAGE_PATH={custom_root}\n")

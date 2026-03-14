@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
+from mindroom import constants
 from mindroom.authorization import (
     get_effective_sender_id_for_reply_permissions,
     is_authorized_sender,
@@ -16,81 +17,99 @@ from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.state import MatrixRoom, MatrixState
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=(path or Path("config.yaml")),
+        storage_path=Path("mindroom_data"),
+        process_env={
+            "MATRIX_HOMESERVER": "https://example.com",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config._runtime_paths = runtime_paths
+    return config
+
+
+def _config(**kwargs: object) -> Config:
+    return _bind_runtime_paths(Config(**kwargs))
 
 
 @pytest.fixture
 def mock_config_no_restrictions() -> Config:
     """Config with no authorized users (defaults to only internal system user)."""
-    return Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
+    return _bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
             },
-        },
-        teams={
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "Test team",
-                "agents": ["assistant"],
-                "rooms": ["test_room"],
+            teams={
+                "test_team": {
+                    "display_name": "Test Team",
+                    "role": "Test team",
+                    "agents": ["assistant"],
+                    "rooms": ["test_room"],
+                },
             },
-        },
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        # No authorization field means default empty authorization
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            # No authorization field means default empty authorization
+        ),
     )
 
 
 @pytest.fixture
 def mock_config_with_restrictions() -> Config:
     """Config with authorization restrictions."""
-    return Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
+    return _bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
+                "analyst": {
+                    "display_name": "Analyst",
+                    "role": "Test analyst",
+                    "rooms": ["test_room"],
+                },
             },
-            "analyst": {
-                "display_name": "Analyst",
-                "role": "Test analyst",
-                "rooms": ["test_room"],
+            teams={
+                "test_team": {
+                    "display_name": "Test Team",
+                    "role": "Test team",
+                    "agents": ["assistant"],
+                    "rooms": ["test_room"],
+                },
             },
-        },
-        teams={
-            "test_team": {
-                "display_name": "Test Team",
-                "role": "Test team",
-                "agents": ["assistant"],
-                "rooms": ["test_room"],
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            authorization={
+                "global_users": ["@alice:example.com", "@bob:example.com"],
+                "room_permissions": {},
+                "default_room_access": False,
             },
-        },
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        authorization={
-            "global_users": ["@alice:example.com", "@bob:example.com"],
-            "room_permissions": {},
-            "default_room_access": False,
-        },
+        ),
     )
 
 
 def test_no_restrictions_only_allows_internal_user(
     mock_config_no_restrictions: Config,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that empty authorized_users list only allows internal system user and agents."""
-    # Mock the domain property
-    monkeypatch.setattr(mock_config_no_restrictions.__class__, "domain", property(lambda _: "example.com"))
-
     # Random users should NOT be allowed
     assert not is_authorized_sender("@random_user:example.com", mock_config_no_restrictions, "!test:server")
     assert not is_authorized_sender("@another_user:different.com", mock_config_no_restrictions, "!test:server")
 
     # Agents should still be allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_no_restrictions, "!test:server")
+    assert is_authorized_sender(
+        mock_config_no_restrictions.ids["assistant"].full_id,
+        mock_config_no_restrictions,
+        "!test:server",
+    )
 
     # Internal system user should always be allowed
     assert is_authorized_sender(
@@ -112,37 +131,42 @@ def test_unauthorized_users_blocked(mock_config_with_restrictions: Config) -> No
     assert not is_authorized_sender("@random_user:example.com", mock_config_with_restrictions, "!test:server")
 
 
-def test_agents_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured agents are always allowed regardless of authorized_users."""
-    # Mock the domain property
-    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
-
     # Configured agents should be allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions, "!test:server")
-    assert is_authorized_sender("@mindroom_analyst:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender(
+        mock_config_with_restrictions.ids["assistant"].full_id,
+        mock_config_with_restrictions,
+        "!test:server",
+    )
+    assert is_authorized_sender(
+        mock_config_with_restrictions.ids["analyst"].full_id,
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
     # Non-configured agent should be blocked
     assert not is_authorized_sender("@mindroom_unknown:example.com", mock_config_with_restrictions, "!test:server")
 
 
-def test_teams_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured teams are always allowed regardless of authorized_users."""
-    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
-
     # Configured team should be allowed
-    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender(
+        mock_config_with_restrictions.ids["test_team"].full_id,
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
     # Non-configured team should be blocked
     assert not is_authorized_sender("@mindroom_unknown_team:example.com", mock_config_with_restrictions, "!test:server")
 
 
-def test_router_always_allowed(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that the router agent is always allowed."""
-    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
-
     # Router should always be allowed
     assert is_authorized_sender(
-        f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        mock_config_with_restrictions.ids[ROUTER_AGENT_NAME].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -170,7 +194,7 @@ def test_internal_system_user_always_allowed(
 
 def test_custom_internal_system_user_always_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that custom configured internal user is always allowed."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -194,10 +218,8 @@ def test_custom_internal_system_user_always_allowed(monkeypatch: pytest.MonkeyPa
     assert not is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
 
 
-def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) -> None:
     """Test various mixed authorization scenarios."""
-    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
-
     # Authorized users - allowed
     assert is_authorized_sender("@alice:example.com", mock_config_with_restrictions, "!test:server")
 
@@ -205,14 +227,22 @@ def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, mo
     assert not is_authorized_sender("@eve:example.com", mock_config_with_restrictions, "!test:server")
 
     # Agents - allowed
-    assert is_authorized_sender("@mindroom_assistant:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender(
+        mock_config_with_restrictions.ids["assistant"].full_id,
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
     # Teams - allowed
-    assert is_authorized_sender("@mindroom_test_team:example.com", mock_config_with_restrictions, "!test:server")
+    assert is_authorized_sender(
+        mock_config_with_restrictions.ids["test_team"].full_id,
+        mock_config_with_restrictions,
+        "!test:server",
+    )
 
     # Router - allowed
     assert is_authorized_sender(
-        f"@mindroom_{ROUTER_AGENT_NAME}:example.com",
+        mock_config_with_restrictions.ids[ROUTER_AGENT_NAME].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -224,22 +254,24 @@ def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config, mo
 @pytest.fixture
 def mock_config_with_room_permissions() -> Config:
     """Config with room-specific permissions."""
-    return Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "Test assistant",
-                "rooms": ["test_room"],
+    return _bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Test assistant",
+                    "rooms": ["test_room"],
+                },
             },
-        },
-        authorization={
-            "global_users": ["@alice:example.com"],  # Alice has global access
-            "room_permissions": {
-                "!room1:example.com": ["@bob:example.com", "@charlie:example.com"],
-                "!room2:example.com": ["@charlie:example.com"],
+            authorization={
+                "global_users": ["@alice:example.com"],  # Alice has global access
+                "room_permissions": {
+                    "!room1:example.com": ["@bob:example.com", "@charlie:example.com"],
+                    "!room2:example.com": ["@charlie:example.com"],
+                },
+                "default_room_access": False,
             },
-            "default_room_access": False,
-        },
+        ),
     )
 
 
@@ -270,7 +302,7 @@ def test_room_specific_permissions(mock_config_with_room_permissions: Config, mo
 
 def test_room_specific_permissions_support_full_alias() -> None:
     """Room permissions should allow using a full Matrix room alias key."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -339,7 +371,7 @@ def test_room_specific_permissions_support_managed_room_key(
 
 def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test default_room_access setting."""
-    config_allow_default = Config(
+    config_allow_default = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -380,7 +412,7 @@ def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def mock_config_with_aliases() -> Config:
     """Config with bridge aliases mapping."""
-    return Config(
+    return _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -434,7 +466,7 @@ def test_canonical_user_still_works_with_aliases(mock_config_with_aliases: Confi
 
 def test_agent_reply_permissions_with_aliases() -> None:
     """Per-agent reply allowlists should use canonical IDs after alias resolution."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -466,7 +498,7 @@ def test_agent_reply_permissions_with_aliases() -> None:
 
 def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
     """Bridge bot accounts should still respect per-agent reply allowlists."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -488,7 +520,7 @@ def test_agent_reply_permissions_do_not_bypass_bot_accounts() -> None:
 
 def test_agent_reply_permissions_do_not_bypass_cross_domain_agent_like_ids() -> None:
     """Only configured internal IDs may bypass reply permissions."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -509,7 +541,7 @@ def test_agent_reply_permissions_do_not_bypass_cross_domain_agent_like_ids() -> 
 
 def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
     """A '*' entity key should act as default allowlist for all entities."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -538,7 +570,7 @@ def test_agent_reply_permissions_wildcard_entity_applies_to_all() -> None:
 
 def test_agent_reply_permissions_entity_override_beats_wildcard() -> None:
     """An explicit entity entry should override the '*' entity default."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -567,7 +599,7 @@ def test_agent_reply_permissions_entity_override_beats_wildcard() -> None:
 
 def test_agent_reply_permissions_wildcard_user_allows_everyone() -> None:
     """A '*' user entry should disable sender restriction for that entity."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -595,7 +627,7 @@ def test_agent_reply_permissions_wildcard_user_allows_everyone() -> None:
 
 def test_agent_reply_permissions_support_domain_pattern() -> None:
     """Allowlist entries should support glob patterns like '*:example.com'."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -617,7 +649,7 @@ def test_agent_reply_permissions_support_domain_pattern() -> None:
 
 def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None:
     """Domain patterns should match after aliases resolve to canonical IDs."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -661,7 +693,7 @@ def test_agent_reply_permissions_reject_unknown_entity() -> None:
 
 def test_effective_sender_uses_voice_original_sender_for_router_messages() -> None:
     """Router transcriptions should use embedded original sender for permission checks."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -688,7 +720,7 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
 
 def test_effective_sender_ignores_voice_original_sender_for_non_internal_messages() -> None:
     """Only trusted internal MindRoom senders may override requester identity."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -711,7 +743,7 @@ def test_effective_sender_ignores_voice_original_sender_for_non_internal_message
 
 def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> None:
     """Internal agent relays should respect embedded original sender metadata."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -743,7 +775,7 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
 
 def test_effective_sender_does_not_trust_cross_domain_router_like_ids() -> None:
     """Router sender override must require exact configured router ID."""
-    config = Config(
+    config = _config(
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -792,6 +824,6 @@ def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
     config_path = tmp_path / "config.yaml"
     storage_path = tmp_path / "mindroom_data"
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
-    config = Config(**config_data)
+    config = _config(**config_data)
     config._runtime_paths = runtime_paths
     return config

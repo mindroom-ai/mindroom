@@ -673,7 +673,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     *,
-    runtime_paths: constants.RuntimePaths | None = None,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
     delegation_depth: int = 0,
@@ -683,7 +682,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     Args:
         agent_name: Name of the agent to create
         config: Application configuration
-        runtime_paths: Explicit runtime path context for config/storage resolution.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -700,17 +698,14 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_runtime_paths = runtime_paths or config.runtime_paths
-    if resolved_runtime_paths is None:
-        msg = "create_agent() requires explicit runtime_paths or a Config loaded with runtime paths"
-        raise RuntimeError(msg)
-    resolved_storage_path = resolved_runtime_paths.storage_root
+    runtime_paths = config.require_runtime_paths()
+    resolved_storage_path = runtime_paths.storage_root
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config, runtime_paths=resolved_runtime_paths)
+    load_plugins(config)
 
     tool_names = get_agent_toolkit_names(
         agent_name,
@@ -731,7 +726,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_name,
                 agent_name=agent_name,
                 config=config,
-                runtime_paths=resolved_runtime_paths,
+                runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
                 delegation_depth=delegation_depth,
@@ -792,7 +787,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, agent_config.model, runtime_paths=resolved_runtime_paths)
+    model = get_model_instance(config, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
     skills = build_agent_skills(agent_name, config)

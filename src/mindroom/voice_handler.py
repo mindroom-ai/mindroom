@@ -378,6 +378,7 @@ async def _process_transcription(
         # Get list of available agents and teams
         agent_names = available_agent_names if available_agent_names is not None else list(config.agents.keys())
         team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
+        runtime_paths = config.require_runtime_paths()
 
         agent_display_names = {name: config.agents[name].display_name for name in agent_names if name in config.agents}
         team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
@@ -385,7 +386,7 @@ async def _process_transcription(
         agent_list = (
             "\n".join(
                 [
-                    f"  - @{name} or @{agent_username_localpart(name, runtime_paths=config.runtime_paths)} (spoken as: {agent_display_names[name]})"
+                    f"  - @{name} or @{agent_username_localpart(name, runtime_paths)} (spoken as: {agent_display_names[name]})"
                     for name in agent_names
                 ],
             )

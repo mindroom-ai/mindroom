@@ -71,8 +71,9 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
 
 def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     """Managed room keys must not map to the reserved root Space alias."""
-    reserved_alias = managed_space_alias_localpart()
-    namespace = mindroom_namespace()
+    runtime_paths = constants.resolve_runtime_paths()
+    reserved_alias = managed_space_alias_localpart(runtime_paths)
+    namespace = mindroom_namespace(runtime_paths)
     colliding_room_key = (
         reserved_alias.removesuffix(f"_{namespace}")
         if namespace and reserved_alias.endswith(f"_{namespace}")
@@ -80,25 +81,32 @@ def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
     )
 
     with pytest.raises(ValueError, match="reserved root Space alias"):
-        Config(
-            agents={"general": {"display_name": "General", "rooms": [colliding_room_key]}},
-            matrix_space={"enabled": True},
+        Config.model_validate(
+            {
+                "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+                "matrix_space": {"enabled": True},
+            },
+            context={"runtime_paths": runtime_paths},
         )
 
 
 def test_config_allows_colliding_room_key_when_space_disabled() -> None:
     """Colliding room keys should be accepted when the space feature is disabled."""
-    reserved_alias = managed_space_alias_localpart()
-    namespace = mindroom_namespace()
+    runtime_paths = constants.resolve_runtime_paths()
+    reserved_alias = managed_space_alias_localpart(runtime_paths)
+    namespace = mindroom_namespace(runtime_paths)
     colliding_room_key = (
         reserved_alias.removesuffix(f"_{namespace}")
         if namespace and reserved_alias.endswith(f"_{namespace}")
         else reserved_alias
     )
 
-    config = Config(
-        agents={"general": {"display_name": "General", "rooms": [colliding_room_key]}},
-        matrix_space={"enabled": False},
+    config = Config.model_validate(
+        {
+            "agents": {"general": {"display_name": "General", "rooms": [colliding_room_key]}},
+            "matrix_space": {"enabled": False},
+        },
+        context={"runtime_paths": runtime_paths},
     )
     assert config.matrix_space.enabled is False
 
@@ -348,7 +356,8 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_users(tmp_path) -> None:  # noqa: ANN001
     """The orchestrator should invite both the internal user and authorized users to the root Space."""
     orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
-    orchestrator.config = Config(
+    orchestrator.config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},

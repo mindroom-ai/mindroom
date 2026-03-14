@@ -18,6 +18,11 @@ if TYPE_CHECKING:
     import pytest
 
 
+def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
+    config._runtime_paths = resolve_runtime_paths(config_path=config_path)
+    return config
+
+
 def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     """Load a plugin that registers a tool and provides a skills directory."""
     plugin_root = tmp_path / "plugins" / "demo"
@@ -59,7 +64,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = Config(plugins=["./plugins/demo"])
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
@@ -68,7 +73,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
     try:
-        plugins = load_plugins(config, config_path=config_path)
+        plugins = load_plugins(config)
         assert [plugin.name for plugin in plugins] == ["demo-plugin"]
         assert "demo_plugin" in _TOOL_REGISTRY
         tool = get_tool_by_name("demo_plugin")
@@ -131,7 +136,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = Config(plugins=["demo_pkg"])
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), config_path)
 
     original_registry = _TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
@@ -140,7 +145,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
     try:
-        plugins = load_plugins(config, config_path=config_path)
+        plugins = load_plugins(config)
         assert [plugin.name for plugin in plugins] == ["demo-pkg"]
         assert plugins[0].root == plugin_root.resolve()
         assert "demo_pkg_tool" in _TOOL_REGISTRY
@@ -172,15 +177,15 @@ def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> N
     other_cwd.mkdir(parents=True, exist_ok=True)
     os.chdir(other_cwd)
     try:
-        resolved = plugin_module._resolve_plugin_root("./plugins/demo", config_path=config_path)
+        resolved = plugin_module._resolve_plugin_root("./plugins/demo", resolve_runtime_paths(config_path=config_path))
     finally:
         os.chdir(original_cwd)
 
     assert resolved == plugin_root.resolve()
 
 
-def test_load_plugins_accepts_runtime_paths(tmp_path: Path) -> None:
-    """Plugin loading should accept RuntimePaths directly without peeling out config_path."""
+def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
+    """Plugin loading should resolve relative paths from the config's bound runtime context."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -190,8 +195,8 @@ def test_load_plugins_accepts_runtime_paths(tmp_path: Path) -> None:
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    config = Config(plugins=["./plugins/demo"])
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    plugins = load_plugins(config, runtime_paths=resolve_runtime_paths(config_path=config_path))
+    plugins = load_plugins(config)
 
     assert [plugin.name for plugin in plugins] == ["demo-plugin"]

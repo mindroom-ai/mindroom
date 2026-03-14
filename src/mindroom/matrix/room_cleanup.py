@@ -26,15 +26,13 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_usernames(runtime_paths: RuntimePaths | None = None) -> set[str]:
+def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
     """Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:
         Set of all known bot usernames
 
     """
-    if runtime_paths is None:
-        return set()
     state = MatrixState.load(runtime_paths=runtime_paths)
     bot_usernames = set()
 
@@ -79,7 +77,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     # Get configured bots for this room
     configured_bots = config.get_configured_bots_for_room(room_id)
-    known_bot_usernames = _get_all_known_bot_usernames(runtime_paths=config.require_runtime_paths())
+    known_bot_usernames = _get_all_known_bot_usernames(config.require_runtime_paths())
 
     kicked_bots = []
 

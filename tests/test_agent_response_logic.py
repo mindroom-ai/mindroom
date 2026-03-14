@@ -12,8 +12,10 @@ These tests ensure no regressions in the core response logic.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from mindroom import constants
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -28,14 +30,20 @@ class TestAgentResponseLogic:
         """Set up test config."""
         self.config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
-                "agent1": AgentConfig(display_name="Agent1", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
+                "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
+                "agent1": AgentConfig(display_name="Agent1", rooms=["!room:localhost"]),
+                "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
             },
             teams={},
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
+        )
+        self.config.authorization.default_room_access = True
+        self.config._runtime_paths = constants.resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=Path("mindroom_data"),
+            process_env={"MINDROOM_NAMESPACE": ""},
         )
         # Helper for generating agent IDs with correct domain
         self.domain = self.config.domain
@@ -647,10 +655,16 @@ class TestAgentResponseLogic:
         """A bot_account posting in a thread should not count as a second human."""
         config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
+        )
+        config.authorization.default_room_access = True
+        config._runtime_paths = constants.resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=Path("mindroom_data"),
+            process_env={"MINDROOM_NAMESPACE": ""},
         )
         room = create_mock_room("!room:localhost", ["calculator"], config)
 

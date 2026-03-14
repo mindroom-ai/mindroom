@@ -213,7 +213,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "enhanced"
         assert unseen_event_ids == []
-        assert mock_create_agent.call_args.kwargs["runtime_paths"].config_path == config_path
+        assert "runtime_paths" not in mock_create_agent.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:

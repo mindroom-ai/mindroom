@@ -20,12 +20,9 @@ def _workspace_avatar_path(
     tmp_path: Path,
     entity_type: str,
     entity_name: str,
-    *,
-    runtime_paths: constants_mod.RuntimePaths | None = None,
-    config_path: Path | None = None,
+    runtime_paths: constants_mod.RuntimePaths,
 ) -> Path:
     del runtime_paths
-    del config_path
     return tmp_path / "avatars" / entity_type / f"{entity_name}.png"
 
 
@@ -54,23 +51,21 @@ def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     monkeypatch.setattr(
         generate_avatars,
         "workspace_avatar_path",
-        lambda entity_type, entity_name, *, runtime_paths=None, config_path=None: _workspace_avatar_path(
+        lambda entity_type, entity_name, runtime_paths: _workspace_avatar_path(
             tmp_path,
             entity_type,
             entity_name,
-            runtime_paths=runtime_paths,
-            config_path=config_path,
+            runtime_paths,
         ),
     )
     monkeypatch.setattr(
         generate_avatars,
         "resolve_avatar_path",
-        lambda entity_type, entity_name, *, runtime_paths=None, config_path=None: _workspace_avatar_path(
+        lambda entity_type, entity_name, runtime_paths: _workspace_avatar_path(
             tmp_path,
             entity_type,
             entity_name,
-            runtime_paths=runtime_paths,
-            config_path=config_path,
+            runtime_paths,
         ),
     )
     return avatars_path
@@ -78,7 +73,7 @@ def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
 
 def test_get_avatar_path_uses_workspace_avatars_dir(workspace_avatar_dir: Path) -> None:
     """Generated avatars should land in the workspace avatars directory."""
-    avatar_path = generate_avatars.get_avatar_path("agents", "general")
+    avatar_path = generate_avatars.get_avatar_path("agents", "general", _runtime_paths(workspace_avatar_dir.parent))
 
     assert avatar_path == workspace_avatar_dir / "agents" / "general.png"
     assert avatar_path.parent.is_dir()
@@ -120,7 +115,7 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
         },
         "matrix_space": {"enabled": False},
     }
-    config = generate_avatars.Config.model_validate(raw_config)
+    config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,7 +140,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
         },
         "matrix_space": {"enabled": False},
     }
-    config = generate_avatars.Config.model_validate(raw_config)
+    config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,7 +165,7 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
         },
         "matrix_space": {"enabled": False},
     }
-    config = generate_avatars.Config.model_validate(raw_config)
+    config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,18 +191,15 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         },
         "matrix_space": {"enabled": False},
     }
-    config = generate_avatars.Config.model_validate(raw_config)
+    config = _config_with_runtime_paths(raw_config, tmp_path)
     bundled_root = tmp_path / "bundled"
 
     def _resolve_avatar_path(
         entity_type: str,
         entity_name: str,
-        *,
-        runtime_paths: constants_mod.RuntimePaths | None = None,
-        config_path: Path | None = None,
+        runtime_paths: constants_mod.RuntimePaths,
     ) -> Path:
         del runtime_paths
-        del config_path
         return bundled_root / entity_type / f"{entity_name}.png"
 
     monkeypatch.setattr(generate_avatars, "resolve_avatar_path", _resolve_avatar_path)
@@ -278,23 +270,17 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
     def _workspace_path(
         entity_type: str,
         entity_name: str,
-        *,
-        runtime_paths: constants_mod.RuntimePaths | None = None,
-        config_path: Path | None = None,
+        runtime_paths: constants_mod.RuntimePaths,
     ) -> Path:
         del runtime_paths
-        del config_path
         return workspace_root / entity_type / f"{entity_name}.png"
 
     def _resolve_avatar_path(
         entity_type: str,
         entity_name: str,
-        *,
-        runtime_paths: constants_mod.RuntimePaths | None = None,
-        config_path: Path | None = None,
+        runtime_paths: constants_mod.RuntimePaths,
     ) -> Path:
         del runtime_paths
-        del config_path
         return bundled_root / entity_type / f"{entity_name}.png"
 
     monkeypatch.setattr(
@@ -453,6 +439,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
             entity_name="general",
             role="Helpful assistant",
         ),
+        _runtime_paths(tmp_path),
     )
 
     assert avatar_path.read_bytes() == b"avatar-bytes"
@@ -493,8 +480,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     async def _generate_avatar(
         _client: object,
         target: generate_avatars.AvatarTarget,
-        *,
-        runtime_paths: constants_mod.RuntimePaths | None = None,
+        runtime_paths: constants_mod.RuntimePaths,
     ) -> None:
         del runtime_paths
         avatar_path = workspace_avatar_dir / target.entity_type / f"{target.entity_name}.png"
@@ -576,7 +562,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     client = SimpleNamespace(close=AsyncMock())
     set_room_avatar_from_file = AsyncMock(return_value=True)
 
-    def _get_room_id(room_name: str, *, runtime_paths: constants_mod.RuntimePaths | None = None) -> str | None:
+    def _get_room_id(room_name: str, runtime_paths: constants_mod.RuntimePaths) -> str | None:
         del runtime_paths
         return "!war:localhost" if room_name == "war_room" else None
 
@@ -648,7 +634,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
     monkeypatch.setattr(
         generate_avatars,
         "get_room_id",
-        lambda room_name, **_kwargs: "!war:localhost" if room_name == "war_room" else None,
+        lambda room_name, _runtime_paths: "!war:localhost" if room_name == "war_room" else None,
     )
     monkeypatch.setattr(
         generate_avatars.constants,

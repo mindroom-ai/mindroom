@@ -440,12 +440,12 @@ def ensure_tool_registry_loaded(
     if config is None:
         return
 
-    runtime_paths = config.runtime_paths
-    if runtime_paths is not None:
-        load_plugins(config, runtime_paths=runtime_paths)
-        return
+    if config.runtime_paths is None:
+        if config_path is None:
+            return
+        config = Config.from_yaml(config_path)
 
-    load_plugins(config, config_path=config_path)
+    load_plugins(config)
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

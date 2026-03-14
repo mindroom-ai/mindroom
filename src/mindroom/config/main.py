@@ -64,8 +64,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
 def _resolve_agent_thread_mode(
     agent_config: AgentConfig,
     room_id: str | None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> Literal["thread", "room"]:
     """Resolve one agent's effective thread mode for an optional room context.
 
@@ -89,7 +88,7 @@ def _resolve_agent_thread_mode(
     # Keep this import local to avoid config<->matrix import cycles during module initialization.
     from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
 
-    room_alias = get_room_alias_from_id(room_id, runtime_paths=runtime_paths)
+    room_alias = get_room_alias_from_id(room_id, runtime_paths)
     if room_alias:
         alias_mode = overrides.get(room_alias)
         if alias_mode is not None:
@@ -97,7 +96,7 @@ def _resolve_agent_thread_mode(
 
     for override_key, resolved_room_id in zip(
         overrides,
-        resolve_room_aliases(list(overrides), runtime_paths=runtime_paths),
+        resolve_room_aliases(list(overrides), runtime_paths),
         strict=False,
     ):
         if resolved_room_id == room_id:
@@ -150,8 +149,7 @@ def _router_agents_for_room(
     agents: dict[str, AgentConfig],
     teams: dict[str, TeamConfig],
     room_id: str | None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return agents relevant for router mode resolution in one room context.
 
@@ -169,10 +167,10 @@ def _router_agents_for_room(
 
     router_agents: set[str] = set()
     for agent_name, agent_cfg in agents.items():
-        if room_id in set(resolve_room_aliases(agent_cfg.rooms, runtime_paths=runtime_paths)):
+        if room_id in set(resolve_room_aliases(agent_cfg.rooms, runtime_paths)):
             router_agents.add(agent_name)
     for team_cfg in teams.values():
-        if room_id not in set(resolve_room_aliases(team_cfg.rooms, runtime_paths=runtime_paths)):
+        if room_id not in set(resolve_room_aliases(team_cfg.rooms, runtime_paths)):
             continue
         router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in agents)
     return router_agents or set(agents)
@@ -345,6 +343,8 @@ class Config(BaseModel):
         if self.mindroom_user is None:
             return self
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
         reserved_localparts = {
             agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths=runtime_paths): f"router '{ROUTER_AGENT_NAME}'",
             **{
@@ -368,6 +368,8 @@ class Config(BaseModel):
         if not self.matrix_space.enabled:
             return self
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
         reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
         colliding_rooms = sorted(
             room_key
@@ -389,15 +391,9 @@ class Config(BaseModel):
         """Extract the domain from the MATRIX_HOMESERVER."""
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        homeserver = (
-            runtime_matrix_homeserver(runtime_paths=self._runtime_paths)
-            if self._runtime_paths is not None
-            else "http://localhost:8008"
-        )
-        return extract_server_name_from_homeserver(
-            homeserver,
-            runtime_paths=self._runtime_paths,
-        )
+        runtime_paths = self.require_runtime_paths()
+        homeserver = runtime_matrix_homeserver(runtime_paths)
+        return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
     @cached_property
     def ids(self) -> dict[str, MatrixID]:
@@ -410,21 +406,18 @@ class Config(BaseModel):
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
         mapping: dict[str, MatrixID] = {}
+        runtime_paths = self.require_runtime_paths()
 
         # Add all agents
         for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain, runtime_paths=self._runtime_paths)
+            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain, runtime_paths)
 
         # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(
-            ROUTER_AGENT_NAME,
-            self.domain,
-            runtime_paths=self._runtime_paths,
-        )
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain, runtime_paths)
 
         # Add all teams
         for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, self.domain, runtime_paths=self._runtime_paths)
+            mapping[team_name] = MatrixID.from_agent(team_name, self.domain, runtime_paths)
         return mapping
 
     def get_mindroom_user_id(self) -> str | None:
@@ -624,11 +617,12 @@ class Config(BaseModel):
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
+        runtime_paths = self.require_runtime_paths()
         if entity_name in self.agents:
             return _resolve_agent_thread_mode(
                 self.agents[entity_name],
                 room_id,
-                runtime_paths=self._runtime_paths,
+                runtime_paths,
             )
 
         if entity_name in self.teams:
@@ -636,7 +630,7 @@ class Config(BaseModel):
                 _resolve_agent_thread_mode(
                     self.agents[name],
                     room_id,
-                    runtime_paths=self._runtime_paths,
+                    runtime_paths,
                 )
                 for name in self.teams[entity_name].agents
                 if name in self.agents
@@ -649,13 +643,13 @@ class Config(BaseModel):
                 self.agents,
                 self.teams,
                 room_id,
-                runtime_paths=self._runtime_paths,
+                runtime_paths,
             )
             configured_modes: set[Literal["thread", "room"]] = {
                 _resolve_agent_thread_mode(
                     self.agents[agent_name],
                     room_id,
-                    runtime_paths=self._runtime_paths,
+                    runtime_paths,
                 )
                 for agent_name in router_agents
             }
@@ -709,23 +703,24 @@ class Config(BaseModel):
         from mindroom.matrix.identity import agent_username_localpart  # noqa: PLC0415
         from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
+        runtime_paths = self.require_runtime_paths()
         configured_bots = set()
 
         # Check which agents should be in this room
         for agent_name, agent_config in self.agents.items():
-            resolved_rooms = set(resolve_room_aliases(agent_config.rooms, runtime_paths=self._runtime_paths))
+            resolved_rooms = set(resolve_room_aliases(agent_config.rooms, runtime_paths))
             if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(agent_name, runtime_paths=self._runtime_paths))
+                configured_bots.add(agent_username_localpart(agent_name, runtime_paths))
 
         # Check which teams should be in this room
         for team_name, team_config in self.teams.items():
-            resolved_rooms = set(resolve_room_aliases(team_config.rooms, runtime_paths=self._runtime_paths))
+            resolved_rooms = set(resolve_room_aliases(team_config.rooms, runtime_paths))
             if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(team_name, runtime_paths=self._runtime_paths))
+                configured_bots.add(agent_username_localpart(team_name, runtime_paths))
 
         # Router should be in any room that has any configured agents/teams
         if configured_bots:  # If any bots are configured for this room
-            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths=self._runtime_paths))
+            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
         return configured_bots
 

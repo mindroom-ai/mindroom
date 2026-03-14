@@ -437,7 +437,7 @@ class MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
-        load_plugins(config, runtime_paths=self._require_runtime_paths())
+        load_plugins(config)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -601,7 +601,7 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
-        load_plugins(new_config, runtime_paths=self._require_runtime_paths())
+        load_plugins(new_config)
 
         if not self.config:
             return await self._load_initial_config(new_config)

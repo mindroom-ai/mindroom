@@ -419,26 +419,17 @@ def activate_runtime_paths(
 
 def resolve_config_relative_path(
     raw_path: str | Path,
-    *,
-    config_path: Path | None = None,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> Path:
     """Resolve a configured path, treating relative values as config-directory-relative.
 
     Config-relative paths may use `${MINDROOM_STORAGE_PATH}` or
     `${MINDROOM_CONFIG_PATH}` placeholders only.
     """
-    if runtime_paths is not None and config_path is not None:
-        msg = "Pass either runtime_paths or config_path to resolve_config_relative_path(), not both"
-        raise ValueError(msg)
-    if runtime_paths is None and config_path is None:
-        msg = "resolve_config_relative_path() requires explicit runtime_paths or config_path"
-        raise ValueError(msg)
-    paths = runtime_paths or resolve_runtime_paths(config_path=config_path)
-    unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), paths)).expanduser()
+    unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), runtime_paths)).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
-    return (paths.config_dir / unresolved).resolve()
+    return (runtime_paths.config_dir / unresolved).resolve()
 
 
 def _docker_container_enabled() -> bool:
@@ -446,34 +437,20 @@ def _docker_container_enabled() -> bool:
     return os.getenv("DOCKER_CONTAINER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _use_storage_path_for_workspace_assets(
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
-) -> bool:
+def _use_storage_path_for_workspace_assets(runtime_paths: RuntimePaths) -> bool:
     """Return whether writable workspace assets should live under persistent storage."""
-    if runtime_paths is not None and config_path is not None:
-        msg = "Pass either runtime_paths or config_path to _use_storage_path_for_workspace_assets(), not both"
-        raise ValueError(msg)
-    if runtime_paths is None and config_path is None:
-        msg = "_use_storage_path_for_workspace_assets() requires explicit runtime_paths or config_path"
-        raise ValueError(msg)
     if not _docker_container_enabled():
         return False
-    if runtime_paths is not None:
+    active_runtime_paths = _active_runtime_paths_or_none()
+    if active_runtime_paths is not None and runtime_paths == active_runtime_paths:
         return True
-    assert config_path is not None
     exported_config_path = exported_env_value("MINDROOM_CONFIG_PATH")
     if exported_config_path is None:
         return False
-    return config_path.expanduser().resolve() == Path(exported_config_path).expanduser().resolve()
+    return runtime_paths.config_path == Path(exported_config_path).expanduser().resolve()
 
 
-def avatars_dir(
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
-) -> Path:
+def avatars_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the writable avatars directory for the active workspace.
 
     Source checkouts keep avatars next to the active config file so generated
@@ -482,16 +459,9 @@ def avatars_dir(
     config-adjacent writes would be ephemeral; in that case, store writable
     overrides under the persistent MindRoom storage root instead.
     """
-    if runtime_paths is not None and config_path is not None:
-        msg = "Pass either runtime_paths or config_path to avatars_dir(), not both"
-        raise ValueError(msg)
-    if runtime_paths is None and config_path is None:
-        msg = "avatars_dir() requires explicit runtime_paths or config_path"
-        raise ValueError(msg)
-    paths = runtime_paths or resolve_runtime_paths(config_path=config_path)
-    if _use_storage_path_for_workspace_assets(runtime_paths=runtime_paths, config_path=config_path):
-        return paths.storage_root / "avatars"
-    return paths.config_dir / "avatars"
+    if _use_storage_path_for_workspace_assets(runtime_paths):
+        return runtime_paths.storage_root / "avatars"
+    return runtime_paths.config_dir / "avatars"
 
 
 def bundled_avatars_dir() -> Path:
@@ -502,20 +472,16 @@ def bundled_avatars_dir() -> Path:
 def workspace_avatar_path(
     entity_type: str,
     entity_name: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
+    runtime_paths: RuntimePaths,
 ) -> Path:
     """Return the writable workspace avatar path for a managed entity."""
-    return avatars_dir(runtime_paths=runtime_paths, config_path=config_path) / entity_type / f"{entity_name}.png"
+    return avatars_dir(runtime_paths) / entity_type / f"{entity_name}.png"
 
 
 def resolve_avatar_path(
     entity_type: str,
     entity_name: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
+    runtime_paths: RuntimePaths,
 ) -> Path:
     """Return the best available avatar path for a managed entity.
 
@@ -527,8 +493,7 @@ def resolve_avatar_path(
     workspace_path = workspace_avatar_path(
         entity_type,
         entity_name,
-        runtime_paths=runtime_paths,
-        config_path=config_path,
+        runtime_paths,
     )
     if workspace_path.exists():
         return workspace_path

@@ -22,6 +22,15 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+    )
+    config._runtime_paths = runtime_paths
+    return config
+
+
 class TestMatrixID:
     """Test the MatrixID class."""
 
@@ -53,15 +62,20 @@ class TestMatrixID:
         with pytest.raises(ValueError, match="Invalid Matrix ID, missing domain"):
             MatrixID.parse("@nodomainpart")
 
-    def test_from_agent(self) -> None:
+    def test_from_agent(self, tmp_path: Path) -> None:
         """Test creating MatrixID from agent name."""
-        mid = MatrixID.from_agent("calculator", "localhost")
+        mid = MatrixID.from_agent(
+            "calculator",
+            "localhost",
+            _bind_runtime_paths(self.config, tmp_path).require_runtime_paths(),
+        )
         assert mid.username == "mindroom_calculator"
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
-    def test_agent_name_extraction(self) -> None:
+    def test_agent_name_extraction(self, tmp_path: Path) -> None:
         """Test extracting agent name."""
+        _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
 
         # Valid agent
@@ -76,8 +90,9 @@ class TestMatrixID:
         mid = MatrixID.parse(f"@mindroom_unknown:{domain}")
         assert mid.agent_name(self.config) is None
 
-    def test_parse_router(self) -> None:
+    def test_parse_router(self, tmp_path: Path) -> None:
         """Test parsing a router agent ID."""
+        _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
         mid = MatrixID.parse(f"@mindroom_router:{domain}")
         assert mid.username == "mindroom_router"
@@ -148,8 +163,9 @@ class TestHelperFunctions:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_is_agent_id(self) -> None:
+    def test_is_agent_id(self, tmp_path: Path) -> None:
         """Test quick agent ID check."""
+        _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
         assert is_agent_id(f"@mindroom_calculator:{domain}", self.config) is True
         assert is_agent_id(f"@mindroom_general:{domain}", self.config) is True
@@ -157,8 +173,9 @@ class TestHelperFunctions:
         # Note: is_agent_id expects valid Matrix IDs - invalid IDs should never reach this function
         assert is_agent_id(f"@mindroom_unknown:{domain}", self.config) is False
 
-    def test_extract_agent_name(self) -> None:
+    def test_extract_agent_name(self, tmp_path: Path) -> None:
         """Test agent name extraction."""
+        _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
         assert extract_agent_name(f"@mindroom_calculator:{domain}", self.config) == "calculator"
         assert extract_agent_name(f"@mindroom_general:{domain}", self.config) == "general"

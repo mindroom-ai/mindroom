@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -13,9 +13,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from tests.conftest import TEST_ACCESS_TOKEN
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class _FakeHttpResponse:
@@ -69,24 +66,27 @@ def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
 
 def test_matrix_room_access_invite_only_matching() -> None:
     """Invite-only matching should work for room key, alias, and room ID."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "invite_only_rooms": ["lobby", "#ops:example.com", "!secret:example.com"],
         },
     )
     access = config.matrix_room_access
+    runtime_paths = config.require_runtime_paths()
 
-    assert access.is_invite_only_room("lobby")
-    assert access.is_invite_only_room("ops", room_alias="#ops:example.com")
-    assert access.is_invite_only_room("random", room_id="!secret:example.com")
-    assert not access.is_invite_only_room("public-room")
+    assert access.is_invite_only_room("lobby", runtime_paths)
+    assert access.is_invite_only_room("ops", runtime_paths, room_alias="#ops:example.com")
+    assert access.is_invite_only_room("random", runtime_paths, room_id="!secret:example.com")
+    assert not access.is_invite_only_room("public-room", runtime_paths)
 
 
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Multi-user mode should configure non-restricted rooms as joinable/publishable when enabled."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -115,7 +115,8 @@ async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_invite_only_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invite-only room overrides should force invite/private targets even in multi-user mode."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -421,7 +422,8 @@ async def test_existing_room_reconciliation_runs_after_later_join(
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_respects_alias_invite_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invite-only matching via room_alias should work when passed through configure_managed_room_access."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -452,7 +454,7 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
 @pytest.mark.asyncio
 async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A single room setup failure should not abort setup for remaining rooms."""
-    config = Config()
+    config = _config_with_runtime_paths(Path())
     mock_client = AsyncMock()
 
     monkeypatch.setattr(Config, "get_all_configured_rooms", lambda _self: ["lobby", "ops"])

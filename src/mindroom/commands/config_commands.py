@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
 
-from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
 
@@ -157,16 +155,13 @@ def _format_value(value: Any) -> str:  # noqa: ANN401
 
 async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     args_text: str,
-    config_path: Path | None = None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str, dict[str, Any] | None]:
     """Handle config command execution.
 
     Args:
         args_text: The command arguments
-        config_path: Optional path to config file
-        runtime_paths: Optional runtime context carrying the config path
+        runtime_paths: Runtime context carrying the active config path
 
     Returns:
         Tuple of (response message, config change dict or None)
@@ -174,10 +169,10 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 
     """
     operation, args = _parse_config_args(args_text)
-    path = constants.runtime_config_path(config_path, runtime_paths=runtime_paths)
+    path = runtime_paths.config_path
 
     # Load current config
-    config = Config.from_yaml(runtime_paths=runtime_paths) if runtime_paths is not None else Config.from_yaml(path)
+    config = Config.from_yaml(runtime_paths=runtime_paths)
     config_dict = config.model_dump(exclude_none=True)
 
     if operation == "show":
@@ -288,27 +283,24 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
 async def apply_config_change(
     config_path_str: str,
     new_value: Any,  # noqa: ANN401
-    config_file_path: Path | None = None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Apply a confirmed configuration change.
 
     Args:
         config_path_str: The configuration path (e.g., "agents.analyst.role")
         new_value: The new value to set
-        config_file_path: Optional path to config file
-        runtime_paths: Optional runtime context carrying the config path
+        runtime_paths: Runtime context carrying the active config path
 
     Returns:
         Success or error message
 
     """
-    path = constants.runtime_config_path(config_file_path, runtime_paths=runtime_paths)
+    path = runtime_paths.config_path
 
     try:
         # Load the current configuration
-        config = Config.from_yaml(runtime_paths=runtime_paths) if runtime_paths is not None else Config.from_yaml(path)
+        config = Config.from_yaml(runtime_paths=runtime_paths)
         config_dict = config.model_dump()
 
         # Apply the specific change

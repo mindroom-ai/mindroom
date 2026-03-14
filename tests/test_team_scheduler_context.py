@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import constants
 from mindroom.bot import AgentBot, _DispatchPayload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -36,6 +37,10 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         models={"default": ModelConfig(provider="ollama", id="test-model")},
         router=RouterConfig(model="default"),
     )
+    config._runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+    )
     agent_user = AgentMatrixUser(
         agent_name="general",
         user_id="@mindroom_general:localhost",
@@ -58,8 +63,8 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain),
-        MatrixID.from_agent("research", bot.config.domain),
+        MatrixID.from_agent("general", bot.config.domain, bot.config.require_runtime_paths()),
+        MatrixID.from_agent("research", bot.config.domain, bot.config.require_runtime_paths()),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -94,8 +99,8 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain),
-        MatrixID.from_agent("research", bot.config.domain),
+        MatrixID.from_agent("general", bot.config.domain, bot.config.require_runtime_paths()),
+        MatrixID.from_agent("research", bot.config.domain, bot.config.require_runtime_paths()),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:

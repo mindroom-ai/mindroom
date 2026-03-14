@@ -55,29 +55,19 @@ _TOOL_MODULE_CACHE: dict[Path, float] = {}
 
 def load_plugins(
     config: Config,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
-    if runtime_paths is not None and config_path is not None:
-        msg = "Pass either runtime_paths or config_path to load_plugins(), not both"
-        raise ValueError(msg)
     plugin_paths = config.plugins
     if not plugin_paths:
         set_plugin_skill_roots([])
         return []
-    if runtime_paths is None and config_path is None:
-        runtime_paths = config.runtime_paths
-    if runtime_paths is None and config_path is None:
-        msg = "load_plugins() requires explicit runtime_paths or config_path when plugins are configured"
-        raise RuntimeError(msg)
+    runtime_paths = config.require_runtime_paths()
 
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
 
     for plugin_path in plugin_paths:
-        root = _resolve_plugin_root(plugin_path, runtime_paths=runtime_paths, config_path=config_path)
+        root = _resolve_plugin_root(plugin_path, runtime_paths)
         plugin = _load_plugin(root)
         if plugin is None:
             continue
@@ -91,16 +81,8 @@ def load_plugins(
     return plugins
 
 
-def _resolve_plugin_root(
-    plugin_path: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-    config_path: Path | None = None,
-) -> Path:
-    if runtime_paths is None and config_path is None:
-        msg = "_resolve_plugin_root() requires explicit runtime_paths or config_path"
-        raise RuntimeError(msg)
-    relative = resolve_config_relative_path(plugin_path, runtime_paths=runtime_paths, config_path=config_path)
+def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
+    relative = resolve_config_relative_path(plugin_path, runtime_paths)
     if relative.exists():
         return relative
 

@@ -590,15 +590,12 @@ def _create_model_for_provider(
 def get_model_instance(
     config: Config,
     model_name: str = "default",
-    *,
-    runtime_paths: RuntimePaths | None = None,
 ) -> Model:
     """Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
         model_name: Name of the model configuration to use (default: "default")
-        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
 
     Returns:
         Instantiated model
@@ -621,13 +618,10 @@ def get_model_instance(
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    resolved_runtime_paths = runtime_paths or config.runtime_paths
-    if resolved_runtime_paths is None:
-        msg = "get_model_instance() requires explicit runtime_paths or a Config loaded with runtime paths"
-        raise RuntimeError(msg)
+    runtime_paths = config.require_runtime_paths()
 
     # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_credentials_manager(storage_root=resolved_runtime_paths.storage_root)
+    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
     model_api_key = model_creds.get("api_key") if model_creds else None
 
@@ -635,14 +629,14 @@ def get_model_instance(
         extra_kwargs["api_key"] = model_api_key
     else:
         # Set environment variable from CredentialsManager for Agno to use
-        _set_api_key_env_var(provider, runtime_paths=resolved_runtime_paths)
+        _set_api_key_env_var(provider, runtime_paths=runtime_paths)
 
     return _create_model_for_provider(
         provider,
         model_id,
         model_config,
         extra_kwargs,
-        runtime_paths=resolved_runtime_paths,
+        runtime_paths=runtime_paths,
     )
 
 
@@ -941,7 +935,6 @@ async def _prepare_agent_and_prompt(
     agent = create_agent(
         agent_name,
         config,
-        runtime_paths=runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )

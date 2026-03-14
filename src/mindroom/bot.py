@@ -105,7 +105,6 @@ from .constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_avatar_path,
-    resolve_runtime_paths,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
@@ -232,11 +231,11 @@ def create_bot_for_entity(
 
     """
     enable_streaming = config.defaults.enable_streaming
-    runtime_paths = config.runtime_paths
+    runtime_paths = config.require_runtime_paths()
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
-        rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths=runtime_paths)
+        rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths)
         return AgentBot(
             agent_user,
             storage_path,
@@ -248,13 +247,12 @@ def create_bot_for_entity(
 
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
-        rooms = resolve_room_aliases(team_config.rooms, runtime_paths=runtime_paths)
+        rooms = resolve_room_aliases(team_config.rooms, runtime_paths)
         # Convert team member agent names into canonical agent Matrix IDs.
         # Team streaming resolves config agents from these IDs, so they must keep
         # the `mindroom_` prefix used by MatrixID.from_agent().
         team_matrix_ids = [
-            MatrixID.from_agent(agent_name, config.domain, runtime_paths=config.runtime_paths)
-            for agent_name in team_config.agents
+            MatrixID.from_agent(agent_name, config.domain, runtime_paths) for agent_name in team_config.agents
         ]
         return TeamBot(
             agent_user=agent_user,
@@ -270,7 +268,7 @@ def create_bot_for_entity(
 
     if entity_name in config.agents:
         agent_config = config.agents[entity_name]
-        rooms = resolve_room_aliases(agent_config.rooms, runtime_paths=runtime_paths)
+        rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
         return AgentBot(
             agent_user,
             storage_path,
@@ -390,10 +388,7 @@ class AgentBot:
     @property
     def runtime_paths(self) -> RuntimePaths:
         """Return the active runtime paths for this bot instance."""
-        runtime_paths = self.config.runtime_paths
-        if runtime_paths is not None:
-            return runtime_paths
-        return resolve_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        return self.config.require_runtime_paths()
 
     def _resolve_reply_thread_id(
         self,
@@ -461,7 +456,6 @@ class AgentBot:
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
-            runtime_paths=self.runtime_paths,
             knowledge=knowledge,
         )
 

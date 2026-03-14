@@ -40,10 +40,7 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = constants.resolve_config_relative_path(
-        config.knowledge_bases[base_id].path,
-        runtime_paths=runtime_paths,
-    )
+    root = constants.resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root

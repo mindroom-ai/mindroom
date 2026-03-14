@@ -275,27 +275,35 @@ class TestResolveConfigRelativePath:
     def test_relative_path_resolves_from_config_directory(self, tmp_path: Path) -> None:
         """Relative paths should resolve against the config parent directory."""
         config_path = tmp_path / "cfg" / "config.yaml"
-        resolved = constants_mod.resolve_config_relative_path("openclaw_data/memory", config_path=config_path)
+        resolved = constants_mod.resolve_config_relative_path(
+            "openclaw_data/memory",
+            constants_mod.resolve_runtime_paths(config_path=config_path),
+        )
         assert resolved == (tmp_path / "cfg" / "openclaw_data" / "memory").resolve()
 
     def test_absolute_path_is_preserved(self, tmp_path: Path) -> None:
         """Absolute paths should stay absolute."""
         absolute_path = tmp_path / "knowledge"
-        resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
+        resolved = constants_mod.resolve_config_relative_path(
+            absolute_path,
+            constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml"),
+        )
         assert resolved == absolute_path.resolve()
 
     def test_environment_variables_are_expanded_before_resolution(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Config path resolution should treat `${MINDROOM_STORAGE_PATH}` as the runtime storage root."""
         storage_root = tmp_path / "runtime-storage"
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={"MINDROOM_STORAGE_PATH": str(storage_root)},
+        )
 
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
-            config_path=tmp_path / "config.yaml",
+            runtime_paths,
         )
 
         assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
@@ -303,18 +311,9 @@ class TestResolveConfigRelativePath:
     def test_rejects_non_runtime_placeholders(self, tmp_path: Path) -> None:
         """Config-relative paths should fail closed for unsupported env placeholders."""
         with pytest.raises(ValueError, match="only support"):
-            constants_mod.resolve_config_relative_path("${HOME}/kb", config_path=tmp_path / "config.yaml")
-
-    def test_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
-        """Config-relative resolution should not accept duplicated runtime context."""
-        config_path = tmp_path / "config.yaml"
-        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
-
-        with pytest.raises(ValueError, match="either runtime_paths or config_path"):
             constants_mod.resolve_config_relative_path(
-                "knowledge",
-                config_path=config_path,
-                runtime_paths=runtime_paths,
+                "${HOME}/kb",
+                constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml"),
             )
 
     def test_config_from_yaml_loads_sibling_env_for_expansion(
@@ -341,7 +340,7 @@ class TestResolveConfigRelativePath:
 
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/kb",
-            config_path=config_path,
+            constants_mod.resolve_runtime_paths(config_path=config_path),
         )
         assert resolved == custom_storage.resolve() / "kb"
 
@@ -374,7 +373,7 @@ class TestResolveConfigRelativePath:
 
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/kb",
-            config_path=other_config,
+            constants_mod.resolve_runtime_paths(config_path=other_config),
         )
 
         assert resolved == (other_dir / "storage-other" / "kb").resolve()
@@ -550,7 +549,7 @@ class TestResolveAvatarPath:
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
         constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
-        resolved = constants_mod.avatars_dir(config_path=explicit_config)
+        resolved = constants_mod.avatars_dir(constants_mod.resolve_runtime_paths(config_path=explicit_config))
 
         assert resolved == explicit_config.parent / "avatars"
 
@@ -561,10 +560,10 @@ class TestResolveAvatarPath:
         workspace_avatar = workspace_dir / "agents" / "general.png"
         workspace_avatar.parent.mkdir(parents=True)
         workspace_avatar.write_bytes(b"workspace")
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
-        resolved = constants_mod.resolve_avatar_path("agents", "general")
+        resolved = constants_mod.resolve_avatar_path("agents", "general", constants_mod.resolve_runtime_paths())
 
         assert resolved == workspace_avatar
 
@@ -579,10 +578,10 @@ class TestResolveAvatarPath:
         bundled_avatar = bundled_dir / "rooms" / "lobby.png"
         bundled_avatar.parent.mkdir(parents=True)
         bundled_avatar.write_bytes(b"bundled")
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
-        resolved = constants_mod.resolve_avatar_path("rooms", "lobby")
+        resolved = constants_mod.resolve_avatar_path("rooms", "lobby", constants_mod.resolve_runtime_paths())
 
         assert resolved == bundled_avatar
 
@@ -594,10 +593,10 @@ class TestResolveAvatarPath:
         """Missing avatars should resolve to the workspace location generation writes to."""
         workspace_dir = tmp_path / "workspace"
         bundled_dir = tmp_path / "bundled"
-        monkeypatch.setattr(constants_mod, "avatars_dir", lambda **_kwargs: workspace_dir)
+        monkeypatch.setattr(constants_mod, "avatars_dir", lambda _runtime_paths: workspace_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
-        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent")
+        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", constants_mod.resolve_runtime_paths())
 
         assert resolved == workspace_dir / "rooms" / "nonexistent.png"
 
@@ -614,7 +613,7 @@ class TestResolveAvatarPath:
         runtime_paths = constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
-        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", runtime_paths=runtime_paths)
+        resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", runtime_paths)
 
         assert resolved == storage_dir / "avatars" / "rooms" / "nonexistent.png"
 

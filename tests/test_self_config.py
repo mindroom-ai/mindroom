@@ -411,10 +411,10 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=True)},
         )
         try:
+            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = create_agent(
                 "writer",
                 config=config,
-                runtime_paths=resolve_runtime_paths(config_path=config_path),
             )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
             assert self_config_tool.config_path == config_path
@@ -433,10 +433,10 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["self_config"])},
         )
         try:
+            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = create_agent(
                 "writer",
                 config=config,
-                runtime_paths=resolve_runtime_paths(config_path=config_path),
             )
             self_config_tool = next(t for t in agent.tools if getattr(t, "name", None) == "self_config")
             assert self_config_tool.config_path == config_path
@@ -454,10 +454,10 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["config_manager"])},
         )
         try:
+            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = create_agent(
                 "writer",
                 config=config,
-                runtime_paths=resolve_runtime_paths(config_path=config_path),
             )
             config_manager_tool = next(t for t in agent.tools if getattr(t, "name", None) == "config_manager")
             assert config_manager_tool.config_path == config_path

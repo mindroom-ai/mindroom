@@ -362,21 +362,27 @@ def test_mindroom_user_username_rejects_invalid_characters() -> None:
 def test_mindroom_user_username_rejects_router_collision() -> None:
     """Internal user localpart must not collide with the router account localpart."""
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
-        Config(mindroom_user={"username": "mindroom_router", "display_name": "Alice"})
+        Config.model_validate(
+            {"mindroom_user": {"username": "mindroom_router", "display_name": "Alice"}},
+            context={"runtime_paths": constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})},
+        )
 
 
 def test_mindroom_user_username_rejects_agent_collision() -> None:
     """Internal user localpart must not collide with configured agent localparts."""
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
-        Config(
-            agents={
-                "assistant": {
-                    "display_name": "Assistant",
-                    "role": "Test assistant",
-                    "rooms": ["test_room"],
+        Config.model_validate(
+            {
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "role": "Test assistant",
+                        "rooms": ["test_room"],
+                    },
                 },
+                "mindroom_user": {"username": "mindroom_assistant", "display_name": "Alice"},
             },
-            mindroom_user={"username": "mindroom_assistant", "display_name": "Alice"},
+            context={"runtime_paths": constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})},
         )
 
 

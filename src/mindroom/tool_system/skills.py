@@ -609,10 +609,7 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
 
 
 def _collect_credential_keys(config: Config) -> set[str]:
-    runtime_paths = config.runtime_paths
-    if runtime_paths is None:
-        msg = "_collect_credential_keys() requires a Config loaded with runtime paths"
-        raise RuntimeError(msg)
+    runtime_paths = config.require_runtime_paths()
     credentials_manager = get_credentials_manager(
         storage_root=runtime_paths.storage_root,
     )

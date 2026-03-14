@@ -1041,7 +1041,7 @@ async def _stream_completion(
 def _build_team(
     team_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
+    _runtime_paths: RuntimePaths,
 ) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
@@ -1063,7 +1063,6 @@ def _build_team(
                 create_agent(
                     member_name,
                     config,
-                    runtime_paths=runtime_paths,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),

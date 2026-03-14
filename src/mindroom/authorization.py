@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 
 def _room_permission_lookup_keys(
     room_id: str,
+    runtime_paths: RuntimePaths,
     *,
     room_alias: str | None = None,
     room_key: str | None = None,
-    runtime_paths: RuntimePaths | None = None,
 ) -> list[str]:
     """Build room identifiers that can be used as authorization map keys."""
     keys = [room_id]
@@ -40,7 +40,7 @@ def _room_permission_lookup_keys(
         localpart = room_alias_localpart(room_alias)
         if localpart:
             keys.append(localpart)
-            managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths=runtime_paths)
+            managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
             if managed_room_key:
                 keys.append(managed_room_key)
     return list(dict.fromkeys(keys))
@@ -48,12 +48,9 @@ def _room_permission_lookup_keys(
 
 def _lookup_managed_room_identifiers(
     room_id: str,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str | None, str | None]:
     """Return managed room key + alias from persisted Matrix state for a room ID."""
-    if runtime_paths is None:
-        return None, None
     state = MatrixState.load(runtime_paths=runtime_paths)
     for room_key, room in state.rooms.items():
         if room.room_id == room_id:
@@ -99,7 +96,7 @@ def is_authorized_sender(
         return True
 
     room_permissions = config.authorization.room_permissions
-    runtime_paths = config.runtime_paths
+    runtime_paths = config.require_runtime_paths()
 
     # Check room-specific permissions by direct room identifiers first.
     for permission_key in _room_permission_lookup_keys(room_id, room_alias=room_alias, runtime_paths=runtime_paths):
@@ -109,7 +106,7 @@ def is_authorized_sender(
     # If callers didn't provide room_alias, try persisted managed-room identifiers
     # so room key/alias permissions still work when only room_id is available.
     if room_id.startswith("!") and not all(key.startswith("!") for key in room_permissions):
-        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths=runtime_paths)
+        room_key, persisted_alias = _lookup_managed_room_identifiers(room_id, runtime_paths)
         for permission_key in _room_permission_lookup_keys(
             room_id,
             room_alias=persisted_alias,
