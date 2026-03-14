@@ -23,6 +23,7 @@ from mindroom.constants import (
     STORAGE_PATH,
     config_search_locations,
     ensure_writable_config_path,
+    set_runtime_storage_path,
 )
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -152,6 +153,7 @@ async def _run(
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
+    resolved_storage_path = set_runtime_storage_path(storage_path)
     config = _load_active_config_or_exit()
 
     # Check for missing API keys
@@ -176,7 +178,7 @@ async def _run(
 
         await bot_main(
             log_level=log_level,
-            storage_path=storage_path,
+            storage_path=resolved_storage_path,
             api=api,
             api_port=api_port,
             api_host=api_host,

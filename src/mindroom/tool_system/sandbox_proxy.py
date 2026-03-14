@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import STORAGE_PATH_OBJ, env_flag
+from mindroom import constants
+from mindroom.constants import env_flag
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
@@ -308,7 +309,7 @@ def _current_shared_storage_root() -> Path:
     configured_storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
     if configured_storage_path:
         return shared_storage_root(Path(configured_storage_path))
-    return shared_storage_root(STORAGE_PATH_OBJ)
+    return shared_storage_root(constants.STORAGE_PATH_OBJ)
 
 
 def _agent_tree_relative_path(path: Path) -> str | None:

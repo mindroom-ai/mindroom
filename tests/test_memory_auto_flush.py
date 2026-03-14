@@ -19,9 +19,7 @@ from mindroom.memory.functions import add_agent_memory, append_agent_daily_memor
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
-    resolve_worker_key,
     tool_execution_identity,
-    worker_root_path,
 )
 
 if TYPE_CHECKING:
@@ -290,9 +288,6 @@ async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
         resolved_thread_id="$thread",
         session_id="session-alice",
     )
-    worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    assert worker_key is not None
-
     with tool_execution_identity(alice_identity):
         await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config)
 
@@ -300,9 +295,8 @@ async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
 
     worker_context = await _build_existing_memory_context(
         agent_name="general",
-        storage_path=worker_root_path(tmp_path, worker_key),
+        storage_path=tmp_path,
         config=config,
-        preserve_resolved_storage_path=True,
     )
 
     assert "Alice-authored shared memory" in worker_context

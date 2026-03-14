@@ -15,9 +15,9 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
-from mindroom import agent_prompts
+from mindroom import agent_prompts, constants
 from mindroom import tools as _tools_module  # noqa: F401
-from mindroom.constants import ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -300,7 +300,7 @@ def build_agent_tool_init_context(
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
-    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
     workspace_path = _resolve_agent_workspace_path(
         agent_name,
         agent_config,
@@ -641,7 +641,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_storage_path = storage_path if storage_path is not None else STORAGE_PATH_OBJ
+    resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
 
     agent_config = config.get_agent(agent_name)
     defaults = config.defaults

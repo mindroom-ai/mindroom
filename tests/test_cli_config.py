@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from types import SimpleNamespace
@@ -15,9 +16,12 @@ from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
+import mindroom.constants as constants_module
 from mindroom.cli.main import app
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.matrix.state import MatrixState
+from mindroom.response_tracker import ResponseTracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -647,6 +651,45 @@ class TestRunApiFlags:
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+
+    def test_run_storage_path_updates_runtime_env_and_constants(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Run should unify `--storage-path` with `MINDROOM_STORAGE_PATH` for runtime code."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
+            "agents:\n  a:\n    display_name: A\n    model: default\n"
+            "router:\n  model: default\n"
+            "matrix_space:\n  enabled: false\n",
+        )
+        runtime_storage = tmp_path / "runtime-storage"
+        monkeypatch.setattr("mindroom.cli.main.CONFIG_PATH", cfg)
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+        monkeypatch.setattr(constants_module, "STORAGE_PATH", constants_module.STORAGE_PATH)
+        monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", constants_module.STORAGE_PATH_OBJ)
+        monkeypatch.setattr(constants_module, "MATRIX_STATE_FILE", constants_module.MATRIX_STATE_FILE)
+        monkeypatch.setattr(constants_module, "TRACKING_DIR", constants_module.TRACKING_DIR)
+        monkeypatch.setattr(constants_module, "_MEMORY_DIR", constants_module._MEMORY_DIR)
+        monkeypatch.setattr(constants_module, "CREDENTIALS_DIR", constants_module.CREDENTIALS_DIR)
+        monkeypatch.setattr(constants_module, "ENCRYPTION_KEYS_DIR", constants_module.ENCRYPTION_KEYS_DIR)
+
+        async def _fake_main(**kwargs: object) -> None:
+            assert kwargs["storage_path"] == runtime_storage.resolve()
+            assert runtime_storage.resolve() == constants_module.STORAGE_PATH_OBJ
+            assert str(runtime_storage.resolve()) == constants_module.STORAGE_PATH
+            assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
+            assert ResponseTracker("agent").base_path == runtime_storage.resolve() / "tracking"
+            MatrixState().save()
+            assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
+            result = runner.invoke(app, ["run", "--storage-path", str(runtime_storage)])
+
+        assert result.exit_code == 0
+        mock_main.assert_awaited_once()
 
 
 class TestAvatarsCommands:

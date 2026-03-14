@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.constants as constants_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
@@ -806,7 +807,7 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
-    monkeypatch.setattr(sandbox_runner_module, "STORAGE_PATH_OBJ", storage_root)
+    monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", storage_root)
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
     response = runner_client.post(
@@ -860,6 +861,44 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
 
     canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
+    assert not (worker_root / "workspace" / "note.txt").exists()
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_worker_prefix(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should recover the shared root even with nested worker prefixes."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "nested" / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.delenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", raising=False)
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX", "nested/workers")
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello from nested worker prefix", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    assert canonical_file.read_text(encoding="utf-8") == "hello from nested worker prefix"
     assert not (worker_root / "workspace" / "note.txt").exists()
 
 

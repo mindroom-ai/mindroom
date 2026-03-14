@@ -681,20 +681,6 @@ def test_resolve_agent_state_storage_path_accepts_pre_resolved_agent_root(tmp_pa
     assert resolve_agent_state_storage_path(agent_name="general", base_storage_path=agent_root) == agent_root
 
 
-def test_resolve_agent_state_storage_path_accepts_pre_resolved_worker_root(tmp_path: Path) -> None:
-    """Worker roots should still resolve agent-owned state back onto the shared agent tree."""
-    worker_key = "v1:tenant-123:shared:general"
-    worker_root = worker_root_path(tmp_path, worker_key)
-
-    assert resolve_agent_state_storage_path(
-        agent_name="general",
-        base_storage_path=worker_root,
-    ) == agent_state_root_path(
-        tmp_path,
-        "general",
-    )
-
-
 def test_resolve_agent_owned_path_rejects_absolute_paths(tmp_path: Path) -> None:
     """Agent-owned paths must not point outside the canonical workspace."""
     with pytest.raises(ValueError, match="workspace-relative"):

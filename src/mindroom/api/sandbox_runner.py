@@ -22,7 +22,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
-from mindroom.constants import STORAGE_PATH_OBJ
+from mindroom import constants
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolInitOverrideError,
@@ -351,11 +351,31 @@ def _runner_shared_storage_root() -> Path | None:
         ).strip()
         or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
     )
-    if dedicated_root.name != worker_dir_name(worker_key):
+    return _shared_root_from_dedicated_worker_root(
+        dedicated_root=dedicated_root,
+        worker_key=worker_key,
+        storage_subpath_prefix=storage_subpath_prefix,
+    )
+
+
+def _shared_root_from_dedicated_worker_root(
+    *,
+    dedicated_root: Path,
+    worker_key: str,
+    storage_subpath_prefix: str,
+) -> Path | None:
+    """Recover the shared storage root from `<shared>/<prefix>/<worker-dir>`."""
+    resolved_dedicated_root = dedicated_root.expanduser().resolve()
+    if resolved_dedicated_root.name != worker_dir_name(worker_key):
         return None
-    if dedicated_root.parent.name != storage_subpath_prefix:
-        return None
-    return dedicated_root.parent.parent.resolve()
+
+    prefix_parts = tuple(Path(storage_subpath_prefix.strip("/")).parts)
+    parent = resolved_dedicated_root.parent
+    for expected_part in reversed(prefix_parts):
+        if parent.name != expected_part:
+            return None
+        parent = parent.parent
+    return parent.resolve()
 
 
 def _runner_storage_root() -> Path:
@@ -366,7 +386,7 @@ def _runner_storage_root() -> Path:
     if storage_root:
         return Path(storage_root).expanduser().resolve()
 
-    return STORAGE_PATH_OBJ.resolve()
+    return constants.STORAGE_PATH_OBJ.resolve()
 
 
 def _runner_uses_dedicated_worker() -> bool:

@@ -169,6 +169,34 @@ CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
 ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
 
 
+def set_runtime_storage_path(storage_path: Path) -> Path:
+    """Update the process-wide runtime storage root.
+
+    `mindroom run --storage-path ...` should behave the same as setting
+    `MINDROOM_STORAGE_PATH` before startup, so runtime code only has one
+    storage-root contract to reason about.
+    """
+    resolved_storage_path = Path(storage_path).expanduser().resolve()
+    os.environ["MINDROOM_STORAGE_PATH"] = str(resolved_storage_path)
+
+    global \
+        STORAGE_PATH, \
+        STORAGE_PATH_OBJ, \
+        MATRIX_STATE_FILE, \
+        TRACKING_DIR, \
+        _MEMORY_DIR, \
+        CREDENTIALS_DIR, \
+        ENCRYPTION_KEYS_DIR
+    STORAGE_PATH = str(resolved_storage_path)
+    STORAGE_PATH_OBJ = resolved_storage_path
+    MATRIX_STATE_FILE = STORAGE_PATH_OBJ / "matrix_state.yaml"
+    TRACKING_DIR = STORAGE_PATH_OBJ / "tracking"
+    _MEMORY_DIR = STORAGE_PATH_OBJ / "memory"
+    CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
+    ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
+    return STORAGE_PATH_OBJ
+
+
 def env_flag(name: str, *, default: bool = False) -> bool:
     """Read a boolean environment flag."""
     value = os.getenv(name)

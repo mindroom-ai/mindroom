@@ -9,8 +9,9 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from mindroom import constants
 from mindroom.config.main import Config
-from mindroom.constants import STORAGE_PATH_OBJ, resolve_config_relative_path
+from mindroom.constants import resolve_config_relative_path
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
@@ -81,7 +82,7 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
 async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
     return await initialize_knowledge_managers(
         config,
-        STORAGE_PATH_OBJ,
+        constants.STORAGE_PATH_OBJ,
         start_watchers=False,
         reindex_on_create=True,
     )
@@ -89,7 +90,7 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
 
 async def _ensure_manager(config: Config, base_id: str) -> KnowledgeManager | None:
     existing = get_knowledge_manager(base_id)
-    if existing is not None and existing.matches(config, STORAGE_PATH_OBJ):
+    if existing is not None and existing.matches(config, constants.STORAGE_PATH_OBJ):
         return existing
     managers = await _ensure_managers(config)
     return managers.get(base_id)

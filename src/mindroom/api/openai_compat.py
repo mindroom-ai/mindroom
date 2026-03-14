@@ -27,6 +27,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from mindroom import constants
 from mindroom.agents import create_agent
 from mindroom.ai import (
     AIStreamChunk,
@@ -36,7 +37,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -578,7 +579,7 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
         return
     await initialize_knowledge_managers(
         config=config,
-        storage_path=STORAGE_PATH_OBJ,
+        storage_path=constants.STORAGE_PATH_OBJ,
         start_watchers=False,
         reindex_on_create=True,
     )
@@ -797,7 +798,7 @@ async def _non_stream_completion(
         agent_name=agent_name,
         prompt=prompt,
         session_id=session_id,
-        storage_path=STORAGE_PATH_OBJ,
+        storage_path=constants.STORAGE_PATH_OBJ,
         config=config,
         thread_history=thread_history,
         room_id=None,
@@ -975,7 +976,7 @@ async def _stream_completion(
             agent_name=agent_name,
             prompt=prompt,
             session_id=session_id,
-            storage_path=STORAGE_PATH_OBJ,
+            storage_path=constants.STORAGE_PATH_OBJ,
             config=config,
             thread_history=thread_history,
             room_id=None,
@@ -1051,7 +1052,7 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                 create_agent(
                     member_name,
                     config,
-                    storage_path=STORAGE_PATH_OBJ,
+                    storage_path=constants.STORAGE_PATH_OBJ,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),

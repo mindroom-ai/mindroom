@@ -123,7 +123,7 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
+            patch("mindroom.constants.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -159,7 +159,7 @@ class TestUserAccountManagement:
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
 
-        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
+        with patch("mindroom.constants.MATRIX_STATE_FILE", config_file):
             state.save()
 
             mock_client.login.return_value = nio.LoginResponse(
@@ -205,7 +205,7 @@ class TestUserAccountManagement:
         state = MatrixState()
         state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "wrong_password")
 
-        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file):
+        with patch("mindroom.constants.MATRIX_STATE_FILE", config_file):
             state.save()
 
             # Mock failed login
@@ -266,7 +266,7 @@ class TestUserAccountManagement:
 
         with (
             patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.matrix.state.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
+            patch("mindroom.constants.MATRIX_STATE_FILE", tmp_path / "matrix_state.yaml"),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
@@ -297,7 +297,7 @@ class TestUserAccountManagement:
         custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
 
         with (
-            patch("mindroom.matrix.state.MATRIX_STATE_FILE", config_file),
+            patch("mindroom.constants.MATRIX_STATE_FILE", config_file),
             patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008"),
         ):
             state.save()
