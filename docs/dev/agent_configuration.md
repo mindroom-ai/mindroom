@@ -63,7 +63,7 @@ memory:
 ```
 
 You can override the memory backend per agent with `memory_backend`.
-You can set a per-agent file-memory scope directory with `memory_file_path` when using file memory.
+You can set a per-agent directory with `memory_file_path` when using file memory.
 Use `provider: "sentence_transformers"` to run embeddings locally inside MindRoom with the optional `sentence-transformers` package.
 
 ## Router Configuration
@@ -151,12 +151,12 @@ agents:
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
-    memory_file_path: "./openclaw_data"  # Optional: per-agent file-memory scope directory
+    memory_file_path: "mind_data"  # Optional: directory inside the agent's workspace for file memory
     knowledge_bases:
       - docs
     context_files:
-      - ./workspace/SOUL.md
-      - ./workspace/USER.md
+      - SOUL.md
+      - USER.md
     model: "anthropic"  # Optional: specific model for this agent (overrides default)
 ```
 
@@ -173,9 +173,9 @@ agents:
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
-- **memory_file_path**: Optional directory for this agent's file-memory scope, resolved relative to `config.yaml`
+- **memory_file_path**: Optional directory for this agent's file memory, relative to `agents/<name>/workspace/`
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
-- **context_files**: File paths loaded into role context when the agent is created/reloaded
+- **context_files**: File paths (relative to `agents/<name>/workspace/`) loaded into each agent instance; edits take effect on the next reply without restarting
 - **model**: (Optional) Specific model to use for this agent, overrides the default model
 - **allow_self_config**: (Optional) When `true`, gives the agent a scoped tool to read and modify its own configuration at runtime (default: inherits from `defaults.allow_self_config`, which defaults to `false`)
 
@@ -183,9 +183,9 @@ agents:
 
 `context_files` is useful for OpenClaw-style workspace context:
 
-- Paths are resolved relative to `config.yaml`
+- Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
 - `context_files` are injected in listed order
-- Content is refreshed when agents are created or reloaded
+- Content is refreshed for each freshly built agent instance, so normal replies pick up edits on the next request
 
 ## Room Configuration
 

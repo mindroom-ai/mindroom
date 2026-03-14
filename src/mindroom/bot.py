@@ -74,7 +74,7 @@ from mindroom.thread_utils import (
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
-from . import interactive, voice_handler
+from . import constants, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
@@ -100,10 +100,11 @@ from .commands.handler import CommandEvent, CommandHandlerContext, _generate_wel
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
-    MATRIX_HOMESERVER,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    RuntimePaths,
+    get_runtime_paths,
     resolve_avatar_path,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
@@ -215,6 +216,7 @@ def create_bot_for_entity(
     agent_user: AgentMatrixUser,
     config: Config,
     storage_path: Path,
+    config_path: Path | None = None,
 ) -> AgentBot | TeamBot | None:
     """Create appropriate bot instance for an entity (agent, team, or router).
 
@@ -223,6 +225,7 @@ def create_bot_for_entity(
         agent_user: Matrix user for the bot
         config: Configuration object
         storage_path: Path for storing agent data
+        config_path: Path to the YAML config file used by config-aware tools
 
     Returns:
         Bot instance or None if entity not found in config
@@ -233,7 +236,14 @@ def create_bot_for_entity(
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases))
-        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
+        return AgentBot(
+            agent_user,
+            storage_path,
+            config,
+            rooms,
+            config_path=config_path,
+            enable_streaming=enable_streaming,
+        )
 
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
@@ -247,6 +257,7 @@ def create_bot_for_entity(
             storage_path=storage_path,
             config=config,
             rooms=rooms,
+            config_path=config_path,
             team_agents=team_matrix_ids,
             team_mode=team_config.mode,
             team_model=team_config.model,
@@ -256,7 +267,14 @@ def create_bot_for_entity(
     if entity_name in config.agents:
         agent_config = config.agents[entity_name]
         rooms = resolve_room_aliases(agent_config.rooms)
-        return AgentBot(agent_user, storage_path, config, rooms, enable_streaming=enable_streaming)
+        return AgentBot(
+            agent_user,
+            storage_path,
+            config,
+            rooms,
+            config_path=config_path,
+            enable_streaming=enable_streaming,
+        )
 
     msg = f"Entity '{entity_name}' not found in configuration."
     raise ValueError(msg)
@@ -342,6 +360,7 @@ class AgentBot:
     storage_path: Path
     config: Config
     rooms: list[str] = field(default_factory=list)
+    config_path: Path | None = None
 
     client: nio.AsyncClient | None = field(default=None, init=False)
     running: bool = field(default=False, init=False)
@@ -363,6 +382,14 @@ class AgentBot:
     def matrix_id(self) -> MatrixID:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
+
+    @property
+    def runtime_paths(self) -> RuntimePaths:
+        """Return the active runtime paths for this bot instance."""
+        return get_runtime_paths(
+            config_path=self.config_path,
+            storage_path=self.storage_path,
+        )
 
     def _resolve_reply_thread_id(
         self,
@@ -430,7 +457,7 @@ class AgentBot:
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
-            storage_path=self.storage_path,
+            runtime_paths=self.runtime_paths,
             knowledge=knowledge,
         )
 
@@ -515,7 +542,7 @@ class AgentBot:
             return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
-            MATRIX_HOMESERVER,
+            constants.runtime_matrix_homeserver(),
             self.agent_name,
             self.agent_user.display_name,  # Use existing display name if available
         )
@@ -560,7 +587,7 @@ class AgentBot:
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
-        self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
+        self.client = await login_agent_user(constants.runtime_matrix_homeserver(), self.agent_user)
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
 
@@ -1925,7 +1952,6 @@ class AgentBot:
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
-
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -1934,7 +1960,7 @@ class AgentBot:
                         agent_name=self.agent_name,
                         prompt=model_prompt,
                         session_id=session_id,
-                        storage_path=self.storage_path,
+                        runtime_paths=self.runtime_paths,
                         config=self.config,
                         thread_history=thread_history,
                         room_id=room_id,
@@ -2046,19 +2072,17 @@ class AgentBot:
             self.config,
             agent_name=agent_name,
             active_session_id=session_id,
-            execution_identity=execution_identity,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
-
         async with typing_indicator(self.client, room_id):
             with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
                     session_id=session_id,
-                    storage_path=self.storage_path,
+                    runtime_paths=self.runtime_paths,
                     config=self.config,
                     thread_history=thread_history,
                     room_id=room_id,
@@ -2107,7 +2131,6 @@ class AgentBot:
                 self.config,
                 agent_name=agent_name,
                 session_id=session_id,
-                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
@@ -2216,7 +2239,6 @@ class AgentBot:
             session_id=session_id,
         )
         run_metadata_content: dict[str, Any] = {}
-
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
@@ -2225,7 +2247,7 @@ class AgentBot:
                         agent_name=self.agent_name,
                         prompt=model_prompt,
                         session_id=session_id,
-                        storage_path=self.storage_path,
+                        runtime_paths=self.runtime_paths,
                         config=self.config,
                         thread_history=thread_history,
                         room_id=room_id,
@@ -2321,7 +2343,6 @@ class AgentBot:
             self.config,
             agent_name=self.agent_name,
             active_session_id=session_id,
-            execution_identity=execution_identity,
         )
 
         # Dynamically determine whether to use streaming based on user presence
@@ -2382,7 +2403,6 @@ class AgentBot:
                 self.config,
                 agent_name=self.agent_name,
                 session_id=session_id,
-                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
@@ -2719,7 +2739,7 @@ class AgentBot:
                 session_id=session_id,
             )
             with tool_execution_identity(execution_identity):
-                storage = create_session_storage(self.agent_name, self.storage_path, self.config)
+                storage = create_session_storage(self.agent_name, self.storage_path)
                 removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(
@@ -2748,6 +2768,7 @@ class AgentBot:
         context = CommandHandlerContext(
             client=self.client,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

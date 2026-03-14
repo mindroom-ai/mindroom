@@ -326,7 +326,7 @@ Create a `config.yaml` in your working directory:
 
 ```
 
-agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [./workspace/SOUL.md, ./workspace/USER.md]
+agents: assistant: display_name: Assistant role: A helpful AI assistant that can answer questions model: default include_default_tools: true rooms: [lobby] # Optional: file-based context (OpenClaw-style) # context_files: [SOUL.md, USER.md]
 
 models: default: provider: openai id: gpt-5.4
 
@@ -698,20 +698,19 @@ agents:
     rooms: [lobby]                 # Optional: Rooms to auto-join
     markdown: true                 # Optional: Override default (inherits from defaults section)
     worker_tools: [shell, file]    # Optional: Override default (inherits from defaults section)
-    worker_scope: user_agent       # Optional: Scope proxied tool state per requester+agent
+    worker_scope: user_agent       # Optional: Reuse one proxied runtime per requester+agent
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
-    memory_file_path: ./openclaw_data  # Optional: Per-agent file-memory scope directory (relative to config.yaml)
+    memory_file_path: mind_data  # Optional: directory inside the agent's workspace for file memory
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
-    context_files:                 # Optional: Load files into role context at init/reload
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+    context_files:                 # Optional: Load files into each freshly built agent instance
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -778,7 +777,7 @@ defaults:
   max_tool_calls_from_history: null  # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
-  worker_scope: null               # Default: null (shared runtime state unless an agent opts into worker isolation)
+  worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -887,9 +886,9 @@ timezone: America/Los_Angeles      # Default: UTC
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
 - A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
-- `agents.<name>.context_files` inject file-based context at agent creation/reload (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
+- `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom file-memory scope for that agent
+- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom directory for that agent's file memory
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
@@ -961,21 +960,20 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Custom file-memory scope directory (optional, overrides default <root>/agent_<name>/)
-    memory_file_path: ./openclaw_data
+    # Directory inside the agent's workspace for file memory (optional)
+    memory_file_path: mind_data
 
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
-    # Optional: additional files loaded into role context at agent init/reload
+    # Optional: additional files loaded into each freshly built agent instance
     context_files:
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/MEMORY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+      - mind_data/SOUL.md
+      - mind_data/AGENTS.md
+      - mind_data/USER.md
+      - mind_data/IDENTITY.md
+      - mind_data/TOOLS.md
+      - mind_data/HEARTBEAT.md
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
@@ -990,10 +988,10 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Tools to route through scoped workers via the sandbox proxy (optional, inherits from defaults)
+    # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)
     worker_tools: [shell, file]
 
-    # How proxied tool state is shared (optional, inherits from defaults)
+    # How sandbox runtimes are shared (optional, inherits from defaults)
     worker_scope: user_agent
 
     # Allow this agent to read and modify its own config at runtime
@@ -1028,9 +1026,9 @@ agents:
 | `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
-| `memory_file_path`            | string | `null`      | Custom directory to use as the file-memory scope for this agent instead of the default `<root>/agent_<name>/`. Useful for pointing an agent at an existing workspace (e.g. an OpenClaw workspace). Resolved relative to the config file directory                                                                                 |
+| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
-| `context_files`               | list   | `[]`        | File paths loaded at agent init/reload and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                |
+| `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                        |
 | `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
 | `room_thread_modes`           | map    | `{}`        | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback                                                                                                                                                                           |
 | `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
@@ -1039,8 +1037,8 @@ agents:
 | `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                  |
 | `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
 | `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools`                | list   | `null`      | Tool names to route through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent                               |
-| `worker_scope`                | string | `null`      | Worker-state sharing mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, `user_agent`, and `room_thread`                                                                                                                                                                            |
+| `worker_tools`                | list   | `null`      | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent                                            |
+| `worker_scope`                | string | `null`      | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`                                                                                                                                               |
 | `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
 | `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
@@ -1048,22 +1046,39 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.
+Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `memory_file_path` and `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). Absolute paths and `..` traversal are rejected.
 
 ## Worker Routing
 
-`worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process. When `worker_tools` is omitted, MindRoom currently routes `coding`, `file`, `python`, and `shell` by default and keeps other tools local. `worker_scope` decides which proxied calls share the same worker-owned state directory. Some credential-backed custom tools stay local even if they are listed in `worker_tools`. Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 
 The supported `worker_scope` values are:
 
-- `shared`: one shared worker state per agent.
-- `user`: one worker state per requester.
-- `user_agent`: one worker state per requester and agent.
-- `room_thread`: one worker state per room thread, or per room when no thread ID exists.
+- `shared`: one runtime per agent, shared by all users.
+- `user`: one runtime per user, shared across that user's agents.
+- `user_agent`: one runtime per user+agent pair.
 
-Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the sandbox runner, but they do not get a worker-specific storage root. `worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
+Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
-The dashboard credential UI can only manage credentials for unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` treat credentials as runtime-owned worker state instead of dashboard-managed state.
+### Filesystem Isolation
+
+`worker_scope` controls runtime reuse, not filesystem security. When `memory_file_path` is set, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside that workspace. Without `memory_file_path`, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
+
+Isolation depends on the worker backend:
+
+- **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space. This is the strongest isolation available today.
+- **Kubernetes dedicated workers** (`user`): the runtime can see all agents' storage, because `user` mode intentionally shares one runtime across multiple agents for a single user. Treat this as a shared workstation.
+- **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
+
+Use `user_agent` if you need per-agent filesystem isolation.
+
+### Where Agent Data Lives
+
+Each agent stores all its data in one directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated — it does **not** change where the agent's data lives. All runtimes for the same agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
+
+The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+
+For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
 ## Thread Mode Resolution
 
@@ -1079,11 +1094,11 @@ You can inject file content directly into an agent's role context without using 
 
 `context_files` behavior:
 
-- Paths are resolved relative to the config file directory
+- Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
-This loading happens when the agent is created (and on config reload), not continuously on every message.
+MindRoom loads the files when it builds an agent instance. The normal Matrix and OpenAI-compatible reply paths build fresh agent instances per reply/request, so editing a context file affects the next reply without restarting the process.
 
 ## Agent Delegation
 
@@ -1150,7 +1165,7 @@ defaults:
   max_tool_calls_from_history: null     # Limit tool call messages replayed from history (null = no limit)
   show_tool_calls: true                 # Show tool-call markers and trace metadata in message content
   worker_tools: null                     # Tool names to route through workers (null = use MindRoom's default routing policy, [] = disable)
-  worker_scope: null                     # Worker state scope for proxied tools (shared, user, user_agent, room_thread)
+  worker_scope: null                     # Worker runtime reuse for proxied tools (shared, user, user_agent)
   allow_self_config: false               # Allow agents to read/modify their own config at runtime
 ```
 
@@ -2064,7 +2079,7 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: ./openclaw_data
+    memory_file_path: openclaw_data
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
@@ -2077,12 +2092,12 @@ agents:
       - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
 
     context_files:
-      - ./openclaw_data/SOUL.md
-      - ./openclaw_data/AGENTS.md
-      - ./openclaw_data/USER.md
-      - ./openclaw_data/IDENTITY.md
-      - ./openclaw_data/TOOLS.md
-      - ./openclaw_data/HEARTBEAT.md
+      - openclaw_data/SOUL.md
+      - openclaw_data/AGENTS.md
+      - openclaw_data/USER.md
+      - openclaw_data/IDENTITY.md
+      - openclaw_data/TOOLS.md
+      - openclaw_data/HEARTBEAT.md
 
     knowledge_bases: [openclaw_memory]
 
@@ -2105,7 +2120,7 @@ memory:
     enabled: true
 ```
 
-`memory_file_path` points the file-memory scope directly at the workspace root, so `MEMORY.md` is loaded automatically by the file backend as the entrypoint — no need to list it in `context_files`. `memory_file_path` is ignored unless the effective backend is `file`; if you switch this agent to `mem0`, re-add `MEMORY.md` to `context_files` when you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
+When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the `memory_file_path` directory — no need to add it to `context_files`. If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -2130,11 +2145,11 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory.backend: mem0` for vector memory (global default)
 - `memory.backend: file` for file-first memory (global default)
 - `memory_backend: file` on an individual agent to override the global default
-- `memory_file_path: ./openclaw_data` to point the file-memory scope at an existing workspace directory instead of the default `<root>/agent_<name>/`
-- Agents that use file memory without `memory_file_path` continue to use the global `memory.file.path` (or the default `<storage_path>/memory_files/`)
+- `memory_file_path: openclaw_data` to store file memory in `agents/<name>/workspace/openclaw_data/` instead of the default `agents/<name>/memory_files/agent_<name>/`
+- Agents that use file memory without `memory_file_path` store it under their own `agents/<name>/` directory, not under the shared global `memory.file.path` tree
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at the workspace root and `memory.auto_flush.enabled: true`.
+Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at your workspace directory and `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
@@ -2769,7 +2784,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -2830,9 +2845,10 @@ Example:
 memory:
   backend: file
   file:
-    path: ./mindroom_data/memory_files
     max_entrypoint_lines: 200
 ```
+
+`memory.file.path` is an optional fallback root for direct file-memory paths. It does not relocate canonical agent or team file memory. Use `agents.<name>.memory_file_path` to place an agent's file memory inside its workspace.
 
 Per-agent override example:
 
@@ -2845,19 +2861,22 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
-    memory_file_path: ./openclaw_data
+    memory_file_path: mind_data
 ```
 
-`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`.
+`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`. For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`. Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`. Absolute paths and `..` traversal are rejected.
 
 ### File layout
 
-Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
+Agent file memory is stored under each agent's storage directory by default:
 
-- `agent_<name>/MEMORY.md`
-- `agent_<name>/memory/YYYY-MM-DD.md`
-- `team_<sorted_members>/MEMORY.md`
-- `team_<sorted_members>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
+- `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
+
+Team file memory is mirrored under each participating agent's storage directory:
+
+- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
+- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
 
 ## File Auto-Flush Worker
 
@@ -4988,7 +5007,7 @@ See [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-prox
 
 # Sandbox Proxy Isolation
 
-When agents have code-execution tools (`shell`, `file`, `python`), they can read and modify anything on the filesystem, including config files, credentials, and application code. The **sandbox proxy** isolates these tools by forwarding their calls to a separate worker runtime that has no direct access to the primary process secrets.
+When agents have code-execution tools (`shell`, `file`, `python`), they can read and modify anything on the filesystem, including config files, credentials, and application code. The **sandbox proxy** isolates these tools by forwarding their calls to a separate worker runtime that has no direct access to the primary process secrets. This page describes the current sandboxed execution model.
 
 ## How it works
 
@@ -4997,14 +5016,14 @@ When agents have code-execution tools (`shell`, `file`, `python`), they can read
 │ Primary MindRoom runtime │  ── tool call ──▶     │ Worker runtime           │
 │ has secrets              │  ◀── result ───       │ no primary secrets       │
 │ has credentials          │                       │ leased credentials only  │
-│ has orchestration state  │                       │ worker-owned state       │
+│ has orchestration state  │                       │ agent state + caches     │
 └──────────────────────────┘                       └──────────────────────────┘
 ```
 
 1. Agent invokes `shell.run_shell_command(...)` or another worker-routed tool.
 1. The primary MindRoom runtime resolves the target worker from the configured backend plus worker scope.
 1. The call is forwarded over HTTP to the target worker runtime.
-1. The worker executes the tool locally against its own state and returns the result.
+1. The worker executes the tool against the agent's storage directory plus any worker-local caches and returns the result.
 1. All other tools such as API tools or Matrix-bound tools execute in the primary MindRoom runtime as usual.
 
 The worker runtime authenticates requests with a shared token (`MINDROOM_SANDBOX_PROXY_TOKEN`). For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once. Credentials never become part of the normal tool arguments or the model prompt.
@@ -5013,6 +5032,10 @@ MindRoom currently ships two worker backend shapes:
 
 - `static_runner`: one shared sandbox-runner process, usually a sidecar container or a local HTTP service.
 - `kubernetes`: dedicated worker pods created on demand from the primary runtime, with one logical worker per worker key.
+
+## Where Agent Data Lives
+
+Each agent stores all its persistent data (context files, workspace files, memory, sessions, learning) in one directory: `agents/<name>/`. This directory is shared across all worker scopes — switching `worker_scope` changes how tool runtimes are isolated, not where agent data lives. Worker runtimes may keep their own virtualenvs, caches, and scratch files, but those are not agent data. Multiple runtimes may access the same agent directory concurrently, so files and databases there must tolerate concurrent access.
 
 ## Deployment modes
 
@@ -5051,26 +5074,31 @@ volumes:
   sandbox-workspace:
 ```
 
+Add a shared volume or bind mount for agent storage that both the main process and the runner can access. Keep secrets and other main-process-only files on separate mounts that are not exposed to the runner.
+
 > [!IMPORTANT] The `sandbox-workspace` Docker volume is created as root by default. The runner runs as UID 1000, so you must fix ownership after first creating the volume: `bash docker run --rm -v sandbox-workspace:/workspace busybox chown -R 1000:1000 /workspace` Alternatively, omit the `user:` directive to run as root (less secure).
 
 Key differences from the primary MindRoom runtime:
 
 - **No `env_file`** — runner has no API keys, no Matrix credentials
-- **No data volume** — runner cannot access `mindroom_data/`
-- **Scratch workspace** — a dedicated volume for file operations
-- **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the workspace so the tool registry can initialize without access to the primary data volume
+- **Shared agent data** — the runner reads and writes the same agent storage directories used by the main process
+- **Scratch workspace** — a dedicated volume for worker-local files (caches, virtualenvs)
+- **`MINDROOM_STORAGE_PATH`** — pointed at a writable location inside the scratch workspace for tool registry and cache files
+
+> [!WARNING] **Filesystem isolation depends on the worker backend.** Shared-runner and local backends expose all agent storage to the runner process — there is no per-agent filesystem boundary. Kubernetes dedicated workers restrict mounts so each runtime only sees its own agent's directory (for `shared`, `user_agent`, and unscoped modes). The `user` scope is intentionally broader: it shares one runtime across multiple agents per user, so agents in that runtime can see each other's files. Use `user_agent` for per-agent filesystem isolation.
 
 ### Kubernetes shared sidecar (`workerBackend: static_runner`)
 
 In Kubernetes the shared runner can still run as a second container in the same pod, sharing `localhost` networking. This is the `workerBackend: static_runner` Helm mode. See `cluster/k8s/instance/templates/deployment-mindroom.yaml` for the full manifest. The sidecar gets:
 
-- An `emptyDir` volume for scratch workspace.
+- An `emptyDir` volume for worker-local scratch files and caches.
+- Access to the same shared storage that holds agent data directories.
 - Read-only access to config for plugin tool registration.
 - No access to the primary secrets volume.
 
 ### Kubernetes dedicated workers (`workerBackend: kubernetes`)
 
-In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. The worker state is mounted from the shared instance PVC under a worker-specific subpath, so files, virtualenvs, caches, sessions, and other worker-owned state survive pod recreation. Idle cleanup scales worker Deployments to zero while keeping the PVC-backed state intact.
+In dedicated-worker mode the primary MindRoom runtime creates worker Deployments and Services on demand. Each worker pod runs the sandbox-runner app and is addressed through an internal cluster Service. Each dedicated worker needs access to its agent's storage directory. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 
 Use the instance Helm chart with values like:
 
@@ -5086,7 +5114,7 @@ sandbox_proxy_token: "replace-me"
 
 Important notes for this mode:
 
-- `storageAccessMode` should be `ReadWriteMany` for multi-node shared storage.
+- `storageAccessMode` should be `ReadWriteMany` because multiple dedicated workers may need concurrent access to the same agent storage.
 - If you must keep `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 - `kubernetesWorkerImage` and `kubernetesWorkerImagePullPolicy` default to the main MindRoom image settings when left empty.
 - The chart creates the worker-manager ServiceAccount, Role, RoleBinding, and worker-specific NetworkPolicy rules automatically when this backend is enabled.
@@ -5153,14 +5181,14 @@ When `MINDROOM_WORKER_BACKEND=kubernetes`, the primary runtime resolves worker e
 
 ### Sandbox runner
 
-| Variable                                             | Description                                                                  | Default                                                      |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                        | `false`                                                      |
-| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Shared auth token (must match primary)                                       | *(required)*                                                 |
-| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                  | `inprocess`                                                  |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                           | `120`                                                        |
-| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config *(will fail if not writable)* |
-| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                           | *(optional)*                                                 |
+| Variable                                             | Description                                                                                          | Default                                                      |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `MINDROOM_SANDBOX_RUNNER_MODE`                       | Set to `true` to indicate runner mode                                                                | `false`                                                      |
+| `MINDROOM_SANDBOX_PROXY_TOKEN`                       | Shared auth token (must match primary)                                                               | *(required)*                                                 |
+| `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE`             | `inprocess` or `subprocess`                                                                          | `inprocess`                                                  |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Subprocess timeout                                                                                   | `120`                                                        |
+| `MINDROOM_STORAGE_PATH`                              | Writable directory for tool registry init and worker-local caches (e.g., `/app/workspace/.mindroom`) | `mindroom_data` next to config *(will fail if not writable)* |
+| `MINDROOM_CONFIG_PATH`                               | Path to config.yaml (for plugin tool registration)                                                   | *(optional)*                                                 |
 
 ## Execution modes
 
@@ -5189,8 +5217,8 @@ This shares the `github` credential service with `shell` tool calls and `openai`
 - The shared token authenticates all proxy traffic, so use a strong random value.
 - Credential leases are single-use by default and expire after 60 seconds.
 - The worker container `securityContext` drops all capabilities and disables privilege escalation.
-- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and has no persistent state of its own.
-- With `workerBackend: kubernetes`, dedicated worker pods mount a worker-specific PVC subpath and keep worker-owned state across pod recreation.
+- With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
+- With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
 
 ## Per-agent configuration
@@ -5227,7 +5255,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`. With `MINDROOM_WOR
 
 ## Worker Scope
 
-`worker_tools` chooses which tools execute through the sandbox proxy. `worker_scope` chooses which proxied calls share the same worker-owned storage root. Some credential-backed custom tools stay local even if they are listed in `worker_tools`. Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`worker_tools` controls which tools run in the sandbox proxy. `worker_scope` controls how those sandbox runtimes are shared between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 
 You can set `worker_scope` per agent or in `defaults`:
 
@@ -5247,19 +5275,24 @@ agents:
 
   bridge_helper:
     tools: [shell]
-    worker_scope: room_thread
+    worker_scope: user
 ```
 
 The supported values are:
 
-| Value         | Behavior                                                       |
-| ------------- | -------------------------------------------------------------- |
-| `shared`      | One shared worker state per agent                              |
-| `user`        | One worker state per requester                                 |
-| `user_agent`  | One worker state per requester and agent                       |
-| `room_thread` | One worker state per thread, or per room when no thread exists |
+| Value        | Behavior                                               |
+| ------------ | ------------------------------------------------------ |
+| `shared`     | One runtime per agent, shared by all users             |
+| `user`       | One runtime per user, shared across that user's agents |
+| `user_agent` | One runtime per user+agent pair                        |
 
-If `worker_scope` is unset, proxied tools still use the sandbox runner, but the request stays unscoped and no worker-specific storage root is selected. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility. The dashboard credential UI only supports unscoped agents and agents with `worker_scope=shared`. Agents using `user`, `user_agent`, or `room_thread` must treat credentials as runtime-owned worker state.
+If `worker_scope` is unset, proxied tools still run in the sandbox, but each call gets a fresh runtime instead of a persistent one.
+
+**Important notes:**
+
+- `worker_scope` does **not** change where agent data is stored. All scopes read and write the same agent storage directory (`agents/<name>/`).
+- The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime.
+- `user` mode shares one runtime across multiple agents for a single user, so agents in that runtime can access each other's files. Use `user_agent` for per-agent isolation.
 
 ## Without configured worker routing
 
@@ -5316,20 +5349,22 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 ## Worker Backends
 
-The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
+The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`. The dedicated-worker provisioning flow is implemented today. Both modes store agent data in the same per-agent directory structure.
 
-| Helm value                     | Behavior                                                                             | Best for                                                      |
-| ------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod                  | Simpler deployments and the current shared-worker model       |
-| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger isolation and persistent worker state per worker key |
+| Helm value                     | Behavior                                                            | Best for                                                                              |
+| ------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments                                                                   |
+| `workerBackend: kubernetes`    | Creates dedicated worker Deployments and Services on demand         | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
 
 ### Shared Sidecar Mode
 
-`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all worker-routed tool calls share the same runner process.
+`workerBackend: static_runner` is the default. The primary runtime talks to a shared sidecar over `localhost`. This keeps the deployment simple, but all proxied tool calls share the same runner process. The runner reads and writes the same agent storage directories as the main process.
 
 ### Dedicated Worker Mode
 
-`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle. Each worker pod runs the sandbox-runner app and mounts worker-owned state from the shared PVC under a worker-specific subpath. Idle cleanup scales worker Deployments to zero while preserving that state.
+`workerBackend: kubernetes` enables the built-in Kubernetes worker backend. The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker. Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent. Worker-local files (caches, virtualenvs, metadata) are kept separate per worker. When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
+
+> [!WARNING] **Filesystem isolation depends on `worker_scope`.** With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available. With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user. Use `user_agent` for per-agent filesystem isolation.
 
 Typical Helm values look like:
 
@@ -5356,11 +5391,14 @@ Important behavior and constraints:
 - `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
-- The worker state lives on the shared instance PVC under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
+- Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
+- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
+- Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
+- Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements
 
-Dedicated workers need access to the same PVC as the primary runtime. For multi-node operation, set `storageAccessMode: ReadWriteMany`. If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node. The chart enforces this constraint during template rendering.
+Dedicated workers need access to the same PVC as the primary runtime. Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently. If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node. The chart enforces this constraint during template rendering.
 
 ### RBAC And Network Policy
 
@@ -5504,22 +5542,22 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.              │
-│ --show-completion               Show completion for the current shell, to copy it or   │
-│                                 customize the installation.                            │
-│ --help                -h        Show this message and exit.                            │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                              │
-│ run                 Run the mindroom multi-agent system.                               │
-│ doctor              Check your environment for common issues.                          │
-│ connect             Pair this local MindRoom install with the hosted provisioning      │
-│                     service.                                                           │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
-│ config              Manage MindRoom configuration files.                               │
-│ avatars             Generate and sync managed avatar assets.                           │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.    │
+│ --show-completion               Show completion for the current shell, to    │
+│                                 copy it or customize the installation.       │
+│ --help                -h        Show this message and exit.                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ version             Show the current version of Mindroom.                    │
+│ run                 Run the mindroom multi-agent system.                     │
+│ doctor              Check your environment for common issues.                │
+│ connect             Pair this local MindRoom install with the hosted         │
+│                     provisioning service.                                    │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.  │
+│ config              Manage MindRoom configuration files.                     │
+│ avatars             Generate and sync managed avatar assets.                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## version
@@ -5532,9 +5570,9 @@ Show the current MindRoom version.
  Show the current version of Mindroom.
 
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## run
@@ -5552,23 +5590,26 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
-│                                          ERROR)                                        │
-│                                          [env var: LOG_LEVEL]                          │
-│                                          [default: INFO]                               │
-│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
-│                                          (state, sessions, tracking)                   │
-│                                          [default: mindroom_data]                      │
-│ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          alongside the bot                             │
-│                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
-│                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
-│                                          [default: 0.0.0.0]                            │
-│ --help          -h                       Show this message and exit.                   │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, │
+│                                          WARNING, ERROR)                     │
+│                                          [env var: LOG_LEVEL]                │
+│                                          [default: INFO]                     │
+│ --storage-path  -s              PATH     Base directory for persistent       │
+│                                          MindRoom data (state, sessions,     │
+│                                          tracking)                           │
+│                                          [default: None]                     │
+│ --api               --no-api             Start the bundled dashboard/API     │
+│                                          server alongside the bot            │
+│                                          [default: api]                      │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API  │
+│                                          server                              │
+│                                          [default: 8765]                     │
+│ --api-host                      TEXT     Host for the bundled dashboard/API  │
+│                                          server                              │
+│                                          [default: 0.0.0.0]                  │
+│ --help          -h                       Show this message and exit.         │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars
@@ -5581,14 +5622,14 @@ Generate and sync managed avatar assets.
  Generate and sync managed avatar assets.
 
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.                     │
-│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
-│            router account.                                                             │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ───────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.           │
+│ sync       Sync configured room and root-space avatars to Matrix using the   │
+│            initialized router account.                                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars generate
@@ -5601,9 +5642,9 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
  Generate missing managed avatar files in the workspace.
 
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars sync
@@ -5613,13 +5654,13 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 ```
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized router
- account.
+ Sync configured room and root-space avatars to Matrix using the initialized
+ router account.
 
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                          │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## connect
@@ -5666,51 +5707,56 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
  Start local Synapse + MindRoom Cinny using Docker only.
 
 
-╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                                 PATH                 Directory           │
-│                                                                    containing Synapse  │
-│                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
-│                                                                    [default:           │
-│                                                                    local/matrix]       │
-│ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    Cinny and MindRoom  │
-│                                                                    should use.         │
-│                                                                    [default:           │
-│                                                                    http://localhost:8… │
-│ --server-name                                 TEXT                 Matrix server name  │
-│                                                                    (default: inferred  │
-│                                                                    from                │
-│                                                                    --homeserver-url    │
-│                                                                    hostname).          │
-│                                                                    [default: None]     │
-│ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Cinny  │
-│                                                                    container.          │
-│                                                                    [default: 8080]     │
-│ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Cinny.     │
-│                                                                    [default:           │
-│                                                                    ghcr.io/mindroom-a… │
-│ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Cinny.     │
-│                                                                    [default:           │
-│                                                                    mindroom-cinny-loc… │
-│ --skip-synapse                                                     Skip starting       │
-│                                                                    Synapse (assume it  │
-│                                                                    is already          │
-│                                                                    running).           │
-│ --persist-env             --no-persist-env                         Persist Matrix      │
-│                                                                    local dev settings  │
-│                                                                    to .env next to     │
-│                                                                    config.yaml.        │
-│                                                                    [default:           │
-│                                                                    persist-env]        │
-│ --help                -h                                           Show this message   │
-│                                                                    and exit.           │
-╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                             PATH              Directory        │
+│                                                             containing       │
+│                                                             Synapse          │
+│                                                             docker-compose.… │
+│                                                             (from            │
+│                                                             mindroom-stack   │
+│                                                             settings).       │
+│                                                             [default:        │
+│                                                             local/matrix]    │
+│ --homeserver-url                          TEXT              Homeserver URL   │
+│                                                             that Cinny and   │
+│                                                             MindRoom should  │
+│                                                             use.             │
+│                                                             [default:        │
+│                                                             http://localhos… │
+│ --server-name                             TEXT              Matrix server    │
+│                                                             name (default:   │
+│                                                             inferred from    │
+│                                                             --homeserver-url │
+│                                                             hostname).       │
+│                                                             [default: None]  │
+│ --cinny-port                              INTEGER RANGE     Local host port  │
+│                                           [1<=x<=65535]     for the MindRoom │
+│                                                             Cinny container. │
+│                                                             [default: 8080]  │
+│ --cinny-image                             TEXT              Docker image for │
+│                                                             MindRoom Cinny.  │
+│                                                             [default:        │
+│                                                             ghcr.io/mindroo… │
+│ --cinny-containe…                         TEXT              Container name   │
+│                                                             for MindRoom     │
+│                                                             Cinny.           │
+│                                                             [default:        │
+│                                                             mindroom-cinny-… │
+│ --skip-synapse                                              Skip starting    │
+│                                                             Synapse (assume  │
+│                                                             it is already    │
+│                                                             running).        │
+│ --persist-env          --no-persist-e…                      Persist Matrix   │
+│                                                             local dev        │
+│                                                             settings to .env │
+│                                                             next to          │
+│                                                             config.yaml.     │
+│                                                             [default:        │
+│                                                             persist-env]     │
+│ --help             -h                                       Show this        │
+│                                                             message and      │
+│                                                             exit.            │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Examples

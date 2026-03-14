@@ -99,13 +99,26 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
 
 @pytest.fixture(autouse=True)
 def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure config.domain resolves to 'localhost' for all tests.
+    """Ensure config.domain defaults to 'localhost' for tests.
 
     Tests use ':localhost' Matrix IDs.  Without this, an env-level
     MATRIX_HOMESERVER (e.g. pointing at a staging server) would cause
     agent_name() domain checks to fail.
     """
-    monkeypatch.setattr("mindroom.config.main.MATRIX_HOMESERVER", "http://localhost:8008")
+    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_paths() -> Generator[None, None, None]:
+    """Restore the process-wide runtime path context after each test."""
+    from mindroom import constants  # noqa: PLC0415
+
+    original = constants.get_runtime_paths()
+    original_env = os.environ.copy()
+    yield
+    constants._set_active_runtime_paths(original)
+    os.environ.clear()
+    os.environ.update(original_env)
 
 
 @pytest.fixture(autouse=True)

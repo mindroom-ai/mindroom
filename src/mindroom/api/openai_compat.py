@@ -27,6 +27,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from mindroom import constants
 from mindroom.agents import create_agent
 from mindroom.ai import (
     AIStreamChunk,
@@ -36,7 +37,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME, STORAGE_PATH_OBJ
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -51,7 +52,6 @@ _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -74,13 +74,14 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-def _load_config() -> tuple[Config, Path]:
+def _load_config() -> tuple[Config, constants.RuntimePaths]:
     """Load the current runtime config and return it with its path.
 
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+    runtime_paths = constants.get_runtime_paths()
+    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -109,8 +110,6 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
     message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
     if invalid_scopes & {"user", "user_agent"}:
         message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
-    if "room_thread" in invalid_scopes:
-        message += " worker_scope=room_thread is not supported on /v1."
 
     return _error_response(
         400,
@@ -570,7 +569,7 @@ async def _resolve_auto_route(
     return routed
 
 
-async def _ensure_knowledge_initialized(config: Config) -> None:
+async def _ensure_knowledge_initialized(config: Config, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize knowledge managers if needed.
 
     Safe to call multiple times — `initialize_knowledge_managers` is
@@ -580,7 +579,7 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
         return
     await initialize_knowledge_managers(
         config=config,
-        storage_path=STORAGE_PATH_OBJ,
+        runtime_paths=runtime_paths,
         start_watchers=False,
         reindex_on_create=True,
     )
@@ -617,11 +616,11 @@ async def list_models(
     if auth_error is not None:
         return auth_error
 
-    config, config_path = _load_config()
+    config, runtime_paths = _load_config()
 
     # Use config file mtime as creation timestamp
     try:
-        created = int(config_path.stat().st_mtime)
+        created = int(runtime_paths.config_path.stat().st_mtime)
     except OSError:
         created = 0
 
@@ -684,6 +683,7 @@ async def chat_completions(
     if isinstance(parsed, JSONResponse):
         return parsed
     req, config, prompt, thread_history = parsed
+    runtime_paths = constants.get_runtime_paths()
 
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
@@ -709,7 +709,7 @@ async def chat_completions(
     # Initialize shared knowledge managers once per request (idempotent).
     # Team and single-agent paths both rely on this for knowledge resolution.
     try:
-        await _ensure_knowledge_initialized(config)
+        await _ensure_knowledge_initialized(config, runtime_paths)
     except Exception:
         logger.warning("Knowledge initialization failed, proceeding without knowledge", exc_info=True)
 
@@ -727,6 +727,7 @@ async def chat_completions(
                 prompt,
                 session_id,
                 config,
+                runtime_paths,
                 thread_history,
                 req.user,
                 execution_identity=execution_identity,
@@ -739,6 +740,7 @@ async def chat_completions(
                     prompt,
                     session_id,
                     config,
+                    runtime_paths,
                     thread_history,
                     req.user,
                 )
@@ -760,6 +762,7 @@ async def chat_completions(
                 prompt,
                 session_id,
                 config,
+                runtime_paths,
                 thread_history,
                 req.user,
                 knowledge,
@@ -772,6 +775,7 @@ async def chat_completions(
                     prompt,
                     session_id,
                     config,
+                    runtime_paths,
                     thread_history,
                     req.user,
                     knowledge,
@@ -790,6 +794,7 @@ async def _non_stream_completion(
     prompt: str,
     session_id: str,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
@@ -799,7 +804,7 @@ async def _non_stream_completion(
         agent_name=agent_name,
         prompt=prompt,
         session_id=session_id,
-        storage_path=STORAGE_PATH_OBJ,
+        runtime_paths=runtime_paths,
         config=config,
         thread_history=thread_history,
         room_id=None,
@@ -966,6 +971,7 @@ async def _stream_completion(
     prompt: str,
     session_id: str,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
@@ -977,7 +983,7 @@ async def _stream_completion(
             agent_name=agent_name,
             prompt=prompt,
             session_id=session_id,
-            storage_path=STORAGE_PATH_OBJ,
+            runtime_paths=runtime_paths,
             config=config,
             thread_history=thread_history,
             room_id=None,
@@ -1032,7 +1038,11 @@ async def _stream_completion(
 # ---------------------------------------------------------------------------
 
 
-def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | None, TeamMode]:
+def _build_team(
+    team_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
     Returns (agents, team, mode). When no agents can be created,
@@ -1053,7 +1063,7 @@ def _build_team(team_name: str, config: Config) -> tuple[list[Agent], Team | Non
                 create_agent(
                     member_name,
                     config,
-                    storage_path=STORAGE_PATH_OBJ,
+                    runtime_paths=runtime_paths,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),
@@ -1087,11 +1097,12 @@ async def _non_stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config)
+    agents, team, mode = _build_team(team_name, config, runtime_paths)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1132,13 +1143,14 @@ async def _stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config)
+        agents, team, mode = _build_team(team_name, config, runtime_paths)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 

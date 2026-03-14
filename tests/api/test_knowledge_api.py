@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import mindroom.api.knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 
 if TYPE_CHECKING:
     import pytest
@@ -68,15 +69,17 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
 
 def test_knowledge_root_resolves_relative_path_from_config_dir(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Knowledge API should resolve relative base paths from the config directory."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     config = _knowledge_config(path=Path("knowledge"))
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_dir / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
 
-    root = knowledge_api._knowledge_root(config, "research")
+    root = knowledge_api._knowledge_root(config, "research", runtime_paths.config_path)
 
     assert root == (config_dir / "knowledge").resolve()
 

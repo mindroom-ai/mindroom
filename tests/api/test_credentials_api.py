@@ -223,19 +223,6 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "worker_scope=user" in response.json()["detail"]
 
-    def test_agent_name_rejects_room_thread_scope(
-        self,
-        client: TestClient,
-    ) -> None:
-        """Dashboard credential management should reject room_thread scoped agents."""
-        config = _config_with_worker_scope("room_thread")
-
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
-            response = client.get("/api/credentials/openai?agent_name=general")
-
-        assert response.status_code == 400
-        assert "worker_scope=room_thread" in response.json()["detail"]
-
     def test_shared_agent_name_does_not_merge_global_ui_credentials(
         self,
         client: TestClient,
