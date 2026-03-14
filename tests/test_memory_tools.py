@@ -10,7 +10,9 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config
 from mindroom.custom_tools.memory import MemoryTools
+from mindroom.memory.functions import search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,6 +64,29 @@ class TestMemoryTools:
 
             assert "Failed to store memory" in result
             assert "DB down" in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_uses_same_agent_file_memory_root_as_prompt_reads(
+        self,
+        storage_path: Path,
+        config: Config,
+    ) -> None:
+        """Explicit memory writes should land in the same canonical files prompt reads use."""
+        config.memory.backend = "file"
+        config.memory.file.path = str(storage_path / "shared-memory")
+        config.agents["general"].memory_backend = "file"
+
+        tools = MemoryTools(agent_name="general", storage_path=storage_path, config=config)
+
+        result = await tools.add_memory("Tool memory stays canonical")
+        memories = await search_agent_memories("Tool memory", "general", storage_path, config, limit=5)
+
+        assert result == "Memorized: Tool memory stays canonical"
+        assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
+        assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
+        assert (
+            agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
+        ).exists()
 
     @pytest.mark.asyncio
     async def test_search_memories(self, tools: MemoryTools) -> None:

@@ -84,7 +84,7 @@ def _read_worker_api_root() -> str:
 
 
 def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths for one concrete worker state root."""
+    """Return the filesystem paths for one concrete worker runtime root."""
     resolved_root = state_root.expanduser().resolve()
     metadata_dir = resolved_root / "metadata"
     return LocalWorkerStatePaths(
@@ -99,18 +99,18 @@ def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePath
 
 
 def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths owned by one concrete worker root."""
+    """Return the filesystem paths owned by one concrete worker runtime root."""
     return _local_worker_state_paths_for_root(state_root)
 
 
 def _local_worker_state_paths(worker_key: str, *, worker_root: Path) -> LocalWorkerStatePaths:
-    """Return the filesystem paths owned by one worker key."""
+    """Return the runtime-local filesystem paths owned by one worker key."""
     resolved_root = worker_root.expanduser().resolve()
     return _local_worker_state_paths_for_root(resolved_root / worker_dir_name(worker_key))
 
 
 def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerStatePaths:
-    """Resolve local state paths from a local worker handle."""
+    """Resolve local runtime paths from a local worker handle."""
     state_root = handle.debug_metadata.get("state_root")
     if state_root is None:
         msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
@@ -119,7 +119,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
 
 
 def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
-    """Create the persistent directories and venv for one worker root."""
+    """Create the persistent directories and venv for one worker runtime root."""
     paths.workspace.mkdir(parents=True, exist_ok=True)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +131,7 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
 
 
 def ensure_local_worker_state_locked(worker_key: str, paths: LocalWorkerStatePaths) -> None:
-    """Create one worker state root under a shared per-worker initialization lock."""
+    """Create one worker runtime root under a shared per-worker initialization lock."""
     with _shared_worker_initialization_lock(worker_key):
         _ensure_local_worker_state(paths)
 

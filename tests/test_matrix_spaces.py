@@ -49,7 +49,7 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
         encoding="utf-8",
     )
 
-    with patch("mindroom.matrix.state.MATRIX_STATE_FILE", state_path):
+    with patch("mindroom.constants.MATRIX_STATE_FILE", state_path):
         state = MatrixState.load()
 
     assert state.space_room_id is None

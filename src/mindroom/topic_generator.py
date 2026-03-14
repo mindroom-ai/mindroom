@@ -8,8 +8,8 @@ import nio
 from agno.agent import Agent
 from pydantic import BaseModel, Field
 
+from mindroom import constants
 from mindroom.ai import _cached_agent_run, get_model_instance
-from mindroom.constants import STORAGE_PATH_OBJ
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -95,7 +95,7 @@ Generate the topic:"""
             full_prompt=prompt,
             session_id=session_id,
             agent_name="TopicGenerator",
-            storage_path=STORAGE_PATH_OBJ,
+            storage_path=constants.STORAGE_PATH_OBJ,
         )
     except Exception:
         logger.exception(f"Error generating topic for room {room_key}")

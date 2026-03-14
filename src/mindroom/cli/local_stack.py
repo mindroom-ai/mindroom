@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import httpx
 import typer
 
-from mindroom.constants import CONFIG_PATH, STORAGE_PATH
+from mindroom import constants
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
 from .config import console
@@ -130,7 +130,7 @@ def _write_local_cinny_config(homeserver_url: str, server_name: str) -> Path:
         "sidebar": {"showExploreCommunity": False, "showAddSpace": False},
         "auth": {"hideServerPickerWhenSingle": True},
     }
-    target = Path(STORAGE_PATH).expanduser().resolve() / "local" / "cinny-config.json"
+    target = constants.get_runtime_paths().storage_root / "local" / "cinny-config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"{json.dumps(config, indent=2)}\n", encoding="utf-8")
     return target
@@ -138,7 +138,7 @@ def _write_local_cinny_config(homeserver_url: str, server_name: str) -> Path:
 
 def _persist_local_matrix_env(homeserver_url: str, server_name: str) -> Path:
     """Write local Matrix settings to .env next to the active config file."""
-    env_path = Path(CONFIG_PATH).expanduser().resolve().parent / ".env"
+    env_path = constants.runtime_config_path().parent / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
 
