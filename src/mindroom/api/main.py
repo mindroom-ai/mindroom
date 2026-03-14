@@ -242,8 +242,8 @@ def _run_config_write[T](
 ) -> T:
     """Mutate config under lock and persist atomically."""
     global config
-    try:
-        with config_lock:
+    with config_lock:
+        try:
             original_config = deepcopy(config)
             result = mutate()
             candidate_config = config if save_payload is None else save_payload
@@ -251,15 +251,17 @@ def _run_config_write[T](
             validated_payload = validated_config.model_dump(exclude_none=True)
             config = validated_payload
             _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+        except HTTPException:
+            config = original_config
+            raise
+        except ValidationError as e:
+            config = original_config
+            raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
+        except Exception as e:
+            config = original_config
+            raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
+        else:
             return result
-    except HTTPException:
-        raise
-    except ValidationError as e:
-        config = original_config
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
-    except Exception as e:
-        config = original_config
-        raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:

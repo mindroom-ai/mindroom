@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
@@ -874,6 +875,51 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     assert response.status_code == 422
     saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert "mindroom_user" not in saved_config
+
+
+def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
+    """Failed config writes should roll back before the write lock is released."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_NAMESPACE": "prod1"},
+    )
+    original_config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
+    }
+    main.config = yaml.safe_load(yaml.safe_dump(original_config))
+
+    class _AssertingLock:
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            if exc_type is not None:
+                assert main.config == original_config
+            return False
+
+    original_lock = main.config_lock
+    main.config_lock = _AssertingLock()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            main._run_config_write(
+                lambda: main.config.update(
+                    {
+                        "mindroom_user": {
+                            "username": "mindroom_assistant_prod1",
+                            "display_name": "Owner",
+                        },
+                    },
+                ),
+                runtime_paths=runtime_paths,
+                error_prefix="Failed to save configuration",
+            )
+    finally:
+        main.config_lock = original_lock
+
+    assert exc_info.value.status_code == 422
+    assert main.config == original_config
 
 
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
