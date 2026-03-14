@@ -968,16 +968,18 @@ async def main(
     # Ensure storage exists before any runtime components try to write into it.
     storage_path.mkdir(parents=True, exist_ok=True)
 
-    config_path = Path(CONFIG_PATH)
-
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, config_path=config_path)
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, config_path=Path(CONFIG_PATH))
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
 
     try:
         auxiliary_specs = [
-            ("config watcher", lambda: _watch_config_task(config_path, orchestrator), "config_watcher_supervisor"),
+            (
+                "config watcher",
+                lambda: _watch_config_task(orchestrator.config_path, orchestrator),
+                "config_watcher_supervisor",
+            ),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),
         ]
 

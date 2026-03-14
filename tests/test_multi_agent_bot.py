@@ -49,7 +49,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import TEST_PASSWORD
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Awaitable, Callable
     from pathlib import Path
 
 
@@ -547,6 +547,45 @@ class TestAgentBot:
         state = get_runtime_state()
         assert state.phase == "idle"
         assert state.detail is None
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_watches_resolved_config_path(self, tmp_path: Path) -> None:
+        """The top-level config watcher should follow the orchestrator's canonical config path."""
+        reset_runtime_state()
+        watched_paths: list[Path] = []
+        config_watcher_ran = asyncio.Event()
+        resolved_config_path = (tmp_path / "nested" / "config.yaml").resolve()
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.config_path = resolved_config_path
+        mock_orchestrator.stop = AsyncMock()
+
+        async def _watch_config_task(path: Path, _orchestrator: object) -> None:
+            watched_paths.append(path)
+            config_watcher_ran.set()
+
+        async def _run_auxiliary(task_name: str, operation: Callable[[], Awaitable[None]]) -> None:
+            del task_name
+            await operation()
+
+        async def _start() -> None:
+            await asyncio.wait_for(config_watcher_ran.wait(), timeout=1)
+            msg = "boom"
+            raise PermanentMatrixStartupError(msg)
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._watch_config_task", side_effect=_watch_config_task),
+            patch("mindroom.orchestrator._watch_skills_task", new=AsyncMock()),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", side_effect=_run_auxiliary),
+            pytest.raises(PermanentMatrixStartupError, match="boom"),
+        ):
+            await main(log_level="INFO", storage_path=tmp_path, api=False)
+
+        assert watched_paths == [resolved_config_path]
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

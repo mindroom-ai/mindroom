@@ -83,6 +83,7 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     entry = dict(cast("dict[str, object]", raw_entry))
     entry.pop("room_id", None)
     entry.pop("thread_id", None)
+    # Drop legacy worker-scoped state so old flush files converge on canonical agent keys.
     entry.pop("worker_key", None)
     return cast("_FlushSessionEntry", entry)
 
