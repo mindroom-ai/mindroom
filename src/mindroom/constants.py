@@ -6,12 +6,13 @@ codebase.
 """
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
 from typing import cast
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 load_dotenv()
 
@@ -25,6 +26,7 @@ _CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
 
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
+_ENV_VAR_PATTERN = re.compile(r"\$(\w+)|\$\{([^}]+)\}")
 
 
 def config_search_locations() -> list[Path]:
@@ -48,8 +50,70 @@ def config_search_locations() -> list[Path]:
 
 def _config_base_dir(config_path: Path | None = None) -> Path:
     """Return the absolute directory containing the active config file."""
-    resolved_config_path = (config_path or CONFIG_PATH).expanduser().resolve()
+    resolved_config_path = runtime_config_path(config_path)
     return resolved_config_path.parent
+
+
+def runtime_config_path(config_path: Path | None = None) -> Path:
+    """Return the absolute path to the active runtime config file."""
+    return Path(config_path or CONFIG_PATH).expanduser().resolve()
+
+
+def _config_env_values(config_path: Path | None = None) -> dict[str, str]:
+    """Read config-adjacent `.env` values without mutating process environment."""
+    env_path = runtime_config_path(config_path).parent / ".env"
+    if not env_path.is_file():
+        return {}
+    return {key: value for key, value in dotenv_values(env_path).items() if isinstance(value, str)}
+
+
+def load_config_dotenv(config_path: Path | None = None, *, override: bool = False) -> Path | None:
+    """Load the `.env` file adjacent to the active config path, if present."""
+    env_path = runtime_config_path(config_path).parent / ".env"
+    if not env_path.is_file():
+        return None
+    load_dotenv(env_path, override=override)
+    return env_path
+
+
+def _config_storage_override(config_path: Path | None = None) -> str | None:
+    """Return the storage-root override from env or config-adjacent `.env`."""
+    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    if configured_root:
+        return configured_root
+    return _config_env_values(config_path).get("MINDROOM_STORAGE_PATH")
+
+
+def _expand_config_env_vars(
+    raw_path: str,
+    *,
+    config_path: Path | None = None,
+    default_storage_root: Path | None = None,
+) -> str:
+    """Expand environment variables using runtime env first, then config-adjacent `.env`."""
+    values = _config_env_values(config_path)
+    values.update(os.environ)
+    if default_storage_root is not None:
+        values.setdefault("MINDROOM_STORAGE_PATH", str(default_storage_root))
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        return values.get(name, match.group(0))
+
+    return _ENV_VAR_PATTERN.sub(_replace, raw_path)
+
+
+def storage_root_for_config(config_path: Path | None = None) -> Path:
+    """Return the runtime storage root for one config path."""
+    resolved_config_path = runtime_config_path(config_path)
+    configured_root = _config_storage_override(resolved_config_path)
+    if not configured_root:
+        return (resolved_config_path.parent / "mindroom_data").resolve()
+
+    unresolved = Path(_expand_config_env_vars(configured_root, config_path=resolved_config_path)).expanduser()
+    if unresolved.is_absolute():
+        return unresolved.resolve()
+    return (resolved_config_path.parent / unresolved).resolve()
 
 
 def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | None = None) -> Path:
@@ -57,8 +121,15 @@ def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | No
 
     Environment variables are expanded first so configs can anchor paths to the
     active runtime storage root via values such as `${MINDROOM_STORAGE_PATH}`.
+    Missing `MINDROOM_STORAGE_PATH` falls back to the config-relative default.
     """
-    unresolved = Path(os.path.expandvars(os.fspath(raw_path))).expanduser()
+    unresolved = Path(
+        _expand_config_env_vars(
+            os.fspath(raw_path),
+            config_path=config_path,
+            default_storage_root=storage_root_for_config(config_path),
+        ),
+    ).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
     return (_config_base_dir(config_path) / unresolved).resolve()
@@ -151,9 +222,7 @@ CONFIG_PATH = find_config()
 # Also load .env from the config directory so that API keys placed next to the
 # config file (e.g. ~/.mindroom/.env) are picked up even when CWD is elsewhere.
 # override=True makes config-adjacent .env authoritative for runtime config.
-_config_dotenv = CONFIG_PATH.parent / ".env"
-if _config_dotenv.is_file():
-    load_dotenv(_config_dotenv, override=True)
+load_config_dotenv(CONFIG_PATH, override=True)
 
 # Optional template path used to seed the writable config file if it does not
 # exist yet. Defaults to the same location as CONFIG_PATH so the
@@ -199,6 +268,18 @@ def set_runtime_storage_path(storage_path: Path) -> Path:
     CREDENTIALS_DIR = STORAGE_PATH_OBJ / "credentials"
     ENCRYPTION_KEYS_DIR = STORAGE_PATH_OBJ / "encryption_keys"
     return STORAGE_PATH_OBJ
+
+
+def set_runtime_config_path(config_path: Path) -> Path:
+    """Update the process-wide runtime config path and load its sibling `.env`."""
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    os.environ["MINDROOM_CONFIG_PATH"] = str(resolved_config_path)
+
+    global _CONFIG_PATH_ENV, CONFIG_PATH
+    _CONFIG_PATH_ENV = str(resolved_config_path)
+    CONFIG_PATH = resolved_config_path
+    load_config_dotenv(resolved_config_path, override=True)
+    return CONFIG_PATH
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:

@@ -10,6 +10,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from mindroom import constants
+
 
 @pytest.fixture
 def temp_config_file() -> Generator[Path, None, None]:
@@ -40,10 +42,9 @@ def temp_config_file() -> Generator[Path, None, None]:
 @pytest.fixture
 def test_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with mocked config file."""
-    # Mock the config file path before importing
     from mindroom.api import main  # noqa: PLC0415
 
-    monkeypatch.setattr(main, "CONFIG_PATH", temp_config_file)
+    monkeypatch.setattr(constants, "CONFIG_PATH", temp_config_file)
 
     # Force reload of config
     main._load_config_from_file()

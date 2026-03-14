@@ -184,7 +184,7 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
+    config_path = config_dir / "config.yaml"
 
     config = Config(
         agents={},
@@ -193,7 +193,12 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
             "research": KnowledgeBaseConfig(path="knowledge", watch=False),
         },
     )
-    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        storage_path=tmp_path / "storage",
+        config_path=config_path,
+    )
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
 

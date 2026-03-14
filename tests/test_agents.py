@@ -281,6 +281,46 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["duckduckgo"] is None
 
 
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Agents without memory_file_path should not be forced into an auto-created workspace."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = Config.from_yaml()
+    config.agents["general"].memory_file_path = None
+    config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
+    config.agents["general"].include_default_tools = False
+
+    create_agent("general", config=config)
+
+    overrides_by_tool = {
+        call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert overrides_by_tool["coding"] is None
+    assert overrides_by_tool["shell"] is None
+    assert overrides_by_tool["duckduckgo"] is None
+
+
+@patch("mindroom.agents.load_plugins")
+def test_create_agent_threads_config_path_to_plugin_loading(
+    mock_load_plugins: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Agent creation should resolve relative plugin paths from the active config file."""
+    config_path = tmp_path / "cfg" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config = Config.from_yaml()
+
+    with patch("mindroom.agents.SqliteDb"):
+        create_agent("general", config=config, config_path=config_path)
+
+    mock_load_plugins.assert_called_once_with(config, config_path=config_path)
+
+
 def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
     """Absolute memory_file_path should fail fast instead of creating copied state."""
     config = Config.from_yaml()

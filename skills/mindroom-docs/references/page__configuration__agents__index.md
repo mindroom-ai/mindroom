@@ -162,7 +162,7 @@ Leave `worker_scope` unset for unscoped execution — calls still run in the san
 
 ### Filesystem Isolation
 
-`worker_scope` controls runtime reuse, not filesystem security. Tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside the agent's workspace, but this is a convenience, not a hard boundary.
+`worker_scope` controls runtime reuse, not filesystem security. When `memory_file_path` is set, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside that workspace. Without `memory_file_path`, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 

@@ -7,11 +7,11 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import uvicorn
 
+from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -44,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER, set_runtime_storage_path
+from .constants import MATRIX_HOMESERVER, set_runtime_config_path, set_runtime_storage_path
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -74,6 +74,7 @@ from .orchestration.runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
+    from pathlib import Path
 
     from .knowledge.manager import KnowledgeManager
 
@@ -88,7 +89,7 @@ class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
     storage_path: Path
-    config_path: Path = field(default_factory=lambda: Path(CONFIG_PATH))
+    config_path: Path = field(default_factory=constants.runtime_config_path)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
@@ -184,6 +185,7 @@ class MultiAgentOrchestrator:
         self.knowledge_managers = await initialize_knowledge_managers(
             config=config,
             storage_path=self.storage_path,
+            config_path=self.config_path,
             start_watchers=start_watcher,
             reindex_on_create=False,
         )
@@ -418,7 +420,7 @@ class MultiAgentOrchestrator:
         logger.info("Initializing multi-agent system...")
 
         config = Config.from_yaml(self.config_path)
-        load_plugins(config)
+        load_plugins(config, config_path=self.config_path)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -582,7 +584,7 @@ class MultiAgentOrchestrator:
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
         new_config = Config.from_yaml(self.config_path)
-        load_plugins(new_config)
+        load_plugins(new_config, config_path=self.config_path)
 
         if not self.config:
             return await self._load_initial_config(new_config)
@@ -958,6 +960,7 @@ async def main(
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     storage_path = set_runtime_storage_path(storage_path)
+    config_path = set_runtime_config_path(constants.runtime_config_path())
 
     # Configure logging before any background tasks or account setup begin.
     setup_logging(level=log_level)
@@ -969,7 +972,7 @@ async def main(
     storage_path.mkdir(parents=True, exist_ok=True)
 
     logger.info("Starting orchestrator...")
-    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, config_path=Path(CONFIG_PATH))
+    orchestrator = MultiAgentOrchestrator(storage_path=storage_path, config_path=config_path)
     set_runtime_starting()
     auxiliary_tasks: list[asyncio.Task] = []
 

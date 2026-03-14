@@ -29,9 +29,9 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _knowledge_root(config: Config, base_id: str, *, create: bool = False) -> Path:
+def _knowledge_root(config: Config, base_id: str, *, config_path: Path | None = None, create: bool = False) -> Path:
     _ensure_base_exists(config, base_id)
-    root = resolve_config_relative_path(config.knowledge_bases[base_id].path)
+    root = resolve_config_relative_path(config.knowledge_bases[base_id].path, config_path=config_path)
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
@@ -83,6 +83,7 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
     return await initialize_knowledge_managers(
         config,
         constants.STORAGE_PATH_OBJ,
+        config_path=constants.runtime_config_path(),
         start_watchers=False,
         reindex_on_create=True,
     )
@@ -90,7 +91,11 @@ async def _ensure_managers(config: Config) -> dict[str, KnowledgeManager]:
 
 async def _ensure_manager(config: Config, base_id: str) -> KnowledgeManager | None:
     existing = get_knowledge_manager(base_id)
-    if existing is not None and existing.matches(config, constants.STORAGE_PATH_OBJ):
+    if existing is not None and existing.matches(
+        config,
+        constants.STORAGE_PATH_OBJ,
+        config_path=constants.runtime_config_path(),
+    ):
         return existing
     managers = await _ensure_managers(config)
     return managers.get(base_id)
@@ -138,12 +143,13 @@ async def _stream_upload_to_destination(upload: UploadFile, destination: Path, f
 @router.get("/bases")
 async def list_knowledge_bases() -> dict[str, Any]:
     """List all configured knowledge bases with status summaries."""
-    config = Config.from_yaml()
+    config_path = constants.runtime_config_path()
+    config = Config.from_yaml(config_path)
     manager_map = await _ensure_managers(config)
 
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
-        root = _knowledge_root(config, base_id)
+        root = _knowledge_root(config, base_id, config_path=config_path)
         manager = manager_map.get(base_id)
         if manager is None:
             file_count = len(_list_file_info(root)[0])
@@ -172,8 +178,9 @@ async def list_knowledge_bases() -> dict[str, Any]:
 @router.get("/bases/{base_id}/files")
 async def list_knowledge_files(base_id: str) -> dict[str, Any]:
     """List all managed files currently present in one knowledge base folder."""
-    config = Config.from_yaml()
-    root = _knowledge_root(config, base_id)
+    config_path = constants.runtime_config_path()
+    config = Config.from_yaml(config_path)
+    root = _knowledge_root(config, base_id, config_path=config_path)
     manager = await _ensure_manager(config, base_id)
     files, total_size = _list_file_info(root, manager.list_files() if manager is not None else None)
 
@@ -188,8 +195,9 @@ async def list_knowledge_files(base_id: str) -> dict[str, Any]:
 @router.post("/bases/{base_id}/upload")
 async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile], File(...)]) -> dict[str, Any]:
     """Upload one or more files into a knowledge base folder."""
-    config = Config.from_yaml()
-    root = _knowledge_root(config, base_id, create=True)
+    config_path = constants.runtime_config_path()
+    config = Config.from_yaml(config_path)
+    root = _knowledge_root(config, base_id, config_path=config_path, create=True)
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -230,8 +238,9 @@ async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile]
 @router.delete("/bases/{base_id}/files/{path:path}")
 async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
     """Delete one knowledge file from disk and from the vector index."""
-    config = Config.from_yaml()
-    root = _knowledge_root(config, base_id)
+    config_path = constants.runtime_config_path()
+    config = Config.from_yaml(config_path)
+    root = _knowledge_root(config, base_id, config_path=config_path)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
 
@@ -255,8 +264,9 @@ async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
 @router.get("/bases/{base_id}/status")
 async def knowledge_status(base_id: str) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
-    config = Config.from_yaml()
-    root = _knowledge_root(config, base_id)
+    config_path = constants.runtime_config_path()
+    config = Config.from_yaml(config_path)
+    root = _knowledge_root(config, base_id, config_path=config_path)
     manager = await _ensure_manager(config, base_id)
 
     if manager is not None:
@@ -279,7 +289,7 @@ async def knowledge_status(base_id: str) -> dict[str, Any]:
 @router.post("/bases/{base_id}/reindex")
 async def reindex_knowledge(base_id: str) -> dict[str, Any]:
     """Force reindexing of all files in one knowledge base folder."""
-    config = Config.from_yaml()
+    config = Config.from_yaml(constants.runtime_config_path())
     _ensure_base_exists(config, base_id)
 
     manager = await _ensure_manager(config, base_id)

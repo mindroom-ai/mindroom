@@ -14,6 +14,8 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from mindroom import constants
+from mindroom.api import openai_compat
 from mindroom.api.openai_compat import (
     _build_tool_execution_identity,
     _ChatMessage,
@@ -87,6 +89,26 @@ def authed_client(test_config: Config) -> Iterator[TestClient]:
         patch.dict("os.environ", {"OPENAI_COMPAT_API_KEYS": "test-key-1,test-key-2"}),
     ):
         yield TestClient(app)
+
+
+def test_load_config_uses_dynamic_runtime_config_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI-compatible config loading should follow the active runtime config path."""
+    config_path = tmp_path / "alt-config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+        "agents:\n  only_alt:\n    display_name: OnlyAlt\n    role: alt\n    rooms: []\n"
+        "router:\n  model: default\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(constants, "CONFIG_PATH", config_path)
+
+    config, resolved_path = openai_compat._load_config()
+
+    assert resolved_path == config_path.resolve()
+    assert "only_alt" in config.agents
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from mindroom.constants import (
     VERTEXAI_CLAUDE_ENV_KEYS,
     config_search_locations,
     env_key_for_provider,
+    storage_root_for_config,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -78,29 +79,14 @@ _MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
 _MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
-def _configured_storage_root_override() -> Path | None:
-    """Return the active storage-root override from the environment, if any."""
-    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if not configured_root:
-        return None
-    return Path(configured_root).expanduser().resolve()
-
-
-def _storage_root_for_config(config_dir: Path) -> Path:
-    """Return the runtime storage root implied by env overrides or config location."""
-    if configured_root := _configured_storage_root_override():
-        return configured_root
-    return (config_dir / "mindroom_data").resolve()
-
-
-def _default_mind_workspace(config_dir: Path) -> Path:
+def _default_mind_workspace(config_path: Path) -> Path:
     """Return the starter Mind workspace inside the canonical agent workspace."""
-    return agent_workspace_root_path(_storage_root_for_config(config_dir), "mind") / "mind_data"
+    return agent_workspace_root_path(storage_root_for_config(config_path), "mind") / "mind_data"
 
 
-def _default_mind_knowledge_base_path(config_dir: Path) -> str:
+def _default_mind_knowledge_base_path(config_path: Path) -> str:
     """Return the starter knowledge-base path anchored to the active runtime storage root."""
-    del config_dir
+    del config_path
     return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
 
 
@@ -274,20 +260,20 @@ def config_init(
         content = _minimal_template(selected_preset)
     else:
         full_profile: Literal["full", "public"] = "public" if selected_profile == "public" else "full"
-        content = _full_template(selected_preset, target.parent, profile=full_profile)
+        content = _full_template(selected_preset, target, profile=full_profile)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
 
     if selected_profile != "minimal":
-        _ensure_mind_workspace(_default_mind_workspace(target.parent), force=force)
+        _ensure_mind_workspace(_default_mind_workspace(target), force=force)
 
     env_path = target.parent / ".env"
     env_created = _write_env_file(
         env_path,
         selected_profile,
         selected_preset,
-        storage_root=_storage_root_for_config(target.parent),
+        storage_root=storage_root_for_config(target),
         force=force,
     )
 
@@ -575,13 +561,13 @@ def _model_template_block(provider_preset: _ProviderPreset) -> str:
 
 def _full_template(
     provider_preset: _ProviderPreset,
-    config_dir: Path,
+    config_path: Path,
     *,
     profile: Literal["full", "public"] = "full",
 ) -> str:
     """Return a provider-aware starter config."""
     model_block = _model_template_block(provider_preset)
-    mind_memory_knowledge_path = _default_mind_knowledge_base_path(config_dir)
+    mind_memory_knowledge_path = _default_mind_knowledge_base_path(config_path)
 
     if profile == "public":
         mindroom_user_block = ""

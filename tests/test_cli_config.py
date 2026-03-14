@@ -319,6 +319,65 @@ class TestConfigInit:
         assert result.exit_code == 0
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
+    def test_init_keeps_existing_env_without_storage_root_and_resolves_to_default_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keeping an existing `.env` without MINDROOM_STORAGE_PATH should still produce a working starter config."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
+        assert (workspace / "SOUL.md").exists()
+        config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        resolved_kb_path = constants_module.resolve_config_relative_path(
+            config["knowledge_bases"]["mind_memory"]["path"],
+            config_path=target,
+        )
+        assert resolved_kb_path == workspace / "memory"
+
+    def test_init_keeps_existing_env_storage_root_for_workspace_and_knowledge_base(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keeping an existing `.env` with MINDROOM_STORAGE_PATH should keep starter files under that root."""
+        target = tmp_path / "config.yaml"
+        env_path = tmp_path / ".env"
+        custom_root = tmp_path / "custom-root"
+        env_path.write_text(
+            f"MINDROOM_STORAGE_PATH={custom_root}\nOPENAI_API_KEY=sk-existing\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", "openai"],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0
+        workspace = custom_root / "agents" / "mind" / "workspace" / "mind_data"
+        assert (workspace / "SOUL.md").exists()
+        config = yaml.safe_load(target.read_text(encoding="utf-8"))
+        resolved_kb_path = constants_module.resolve_config_relative_path(
+            config["knowledge_bases"]["mind_memory"]["path"],
+            config_path=target,
+        )
+        assert resolved_kb_path == workspace / "memory"
+        assert env_path.read_text(encoding="utf-8").startswith(f"MINDROOM_STORAGE_PATH={custom_root}\n")
+
     def test_init_overwrites_env_when_confirmed(self, tmp_path: Path) -> None:
         """Config init should overwrite .env when user confirms."""
         target = tmp_path / "config.yaml"

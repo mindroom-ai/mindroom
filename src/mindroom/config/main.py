@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
+from mindroom import constants
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
@@ -18,7 +19,7 @@ from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, Mi
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
-from mindroom.constants import CONFIG_PATH, MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
+from mindroom.constants import MATRIX_HOMESERVER, ROUTER_AGENT_NAME, safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,
@@ -351,7 +352,8 @@ class Config(BaseModel):
     @classmethod
     def from_yaml(cls, config_path: Path | None = None) -> Config:
         """Create a Config instance from YAML data."""
-        path = config_path or CONFIG_PATH
+        path = constants.runtime_config_path(config_path)
+        constants.load_config_dotenv(path)
 
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
@@ -618,7 +620,7 @@ class Config(BaseModel):
             config_path: Path to save the config to. If None, uses CONFIG_PATH.
 
         """
-        path = config_path or CONFIG_PATH
+        path = constants.runtime_config_path(config_path)
         config_dict = self.model_dump(exclude_none=True)
         path_obj = Path(path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)

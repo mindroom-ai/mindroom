@@ -24,6 +24,7 @@ from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
+from mindroom import constants
 from mindroom.constants import resolve_config_relative_path
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -52,8 +53,8 @@ _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 
 
-def _resolve_knowledge_path(path: str) -> Path:
-    return resolve_config_relative_path(path)
+def _resolve_knowledge_path(path: str, *, config_path: Path | None = None) -> Path:
+    return resolve_config_relative_path(path, config_path=config_path)
 
 
 def _safe_identifier(value: str) -> str:
@@ -77,10 +78,16 @@ def _knowledge_base_config(config: Config, base_id: str) -> KnowledgeBaseConfig:
     return config.knowledge_bases[base_id]
 
 
-def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str, ...]:
+def _indexing_settings_key(
+    config: Config,
+    storage_path: Path,
+    base_id: str,
+    *,
+    config_path: Path | None = None,
+) -> tuple[str, ...]:
     embedder_config = config.memory.embedder.config
     base_config = _knowledge_base_config(config, base_id)
-    knowledge_path = _resolve_knowledge_path(base_config.path)
+    knowledge_path = _resolve_knowledge_path(base_config.path, config_path=config_path)
     git_config = base_config.git
     return (
         base_id,
@@ -102,11 +109,17 @@ def _indexing_settings_key(config: Config, storage_path: Path, base_id: str) -> 
     )
 
 
-def _settings_key(config: Config, storage_path: Path, base_id: str) -> tuple[str, ...]:
+def _settings_key(
+    config: Config,
+    storage_path: Path,
+    base_id: str,
+    *,
+    config_path: Path | None = None,
+) -> tuple[str, ...]:
     base_config = _knowledge_base_config(config, base_id)
     git_config = base_config.git
     return (
-        *_indexing_settings_key(config, storage_path, base_id),
+        *_indexing_settings_key(config, storage_path, base_id, config_path=config_path),
         str(base_config.watch),
         str(git_config.poll_interval_seconds) if git_config is not None else "",
         git_config.credentials_service or "" if git_config is not None else "",
@@ -265,6 +278,7 @@ class KnowledgeManager:
     base_id: str
     config: Config
     storage_path: Path
+    config_path: Path | None = None
 
     knowledge_path: Path = field(init=False)
     _settings: tuple[str, ...] = field(init=False)
@@ -283,11 +297,17 @@ class KnowledgeManager:
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
+        self.config_path = constants.runtime_config_path(self.config_path)
         base_config = _knowledge_base_config(self.config, self.base_id)
-        self.knowledge_path = _resolve_knowledge_path(base_config.path)
+        self.knowledge_path = _resolve_knowledge_path(base_config.path, config_path=self.config_path)
         self.knowledge_path.mkdir(parents=True, exist_ok=True)
-        self._settings = _settings_key(self.config, self.storage_path, self.base_id)
-        self._indexing_settings = _indexing_settings_key(self.config, self.storage_path, self.base_id)
+        self._settings = _settings_key(self.config, self.storage_path, self.base_id, config_path=self.config_path)
+        self._indexing_settings = _indexing_settings_key(
+            self.config,
+            self.storage_path,
+            self.base_id,
+            config_path=self.config_path,
+        )
         self._base_storage_path = (self.storage_path / "knowledge_db" / _base_storage_key(self.base_id)).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._index_failures_path = self._base_storage_path / "index_failures.json"
@@ -300,13 +320,18 @@ class KnowledgeManager:
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
-    def matches(self, config: Config, storage_path: Path) -> bool:
+    def matches(self, config: Config, storage_path: Path, *, config_path: Path | None = None) -> bool:
         """Return True when manager settings match the provided config."""
-        return self._settings == _settings_key(config, storage_path, self.base_id)
+        return self._settings == _settings_key(config, storage_path, self.base_id, config_path=config_path)
 
-    def needs_full_reindex(self, config: Config, storage_path: Path) -> bool:
+    def needs_full_reindex(self, config: Config, storage_path: Path, *, config_path: Path | None = None) -> bool:
         """Return True when index-affecting settings changed."""
-        return self._indexing_settings != _indexing_settings_key(config, storage_path, self.base_id)
+        return self._indexing_settings != _indexing_settings_key(
+            config,
+            storage_path,
+            self.base_id,
+            config_path=config_path,
+        )
 
     def get_knowledge(self) -> Knowledge:
         """Return the agno Knowledge instance."""
@@ -920,6 +945,7 @@ async def initialize_knowledge_managers(
     config: Config,
     storage_path: Path,
     *,
+    config_path: Path | None = None,
     start_watchers: bool = False,
     reindex_on_create: bool = True,
 ) -> dict[str, KnowledgeManager]:
@@ -933,19 +959,34 @@ async def initialize_knowledge_managers(
     for base_id in sorted(configured_base_ids):
         existing = _knowledge_managers.get(base_id)
 
-        if existing is not None and existing.matches(config, storage_path):
+        if existing is not None and existing.matches(config, storage_path, config_path=config_path):
             existing.config = config
-            existing._settings = _settings_key(config, storage_path, base_id)
-            existing._indexing_settings = _indexing_settings_key(config, storage_path, base_id)
+            existing.config_path = constants.runtime_config_path(config_path)
+            existing._settings = _settings_key(config, storage_path, base_id, config_path=config_path)
+            existing._indexing_settings = _indexing_settings_key(
+                config,
+                storage_path,
+                base_id,
+                config_path=config_path,
+            )
             if start_watchers:
                 await existing.start_watcher()
             continue
 
-        full_reindex_required = existing.needs_full_reindex(config, storage_path) if existing is not None else False
+        full_reindex_required = (
+            existing.needs_full_reindex(config, storage_path, config_path=config_path)
+            if existing is not None
+            else False
+        )
         if existing is not None:
             await existing.stop_watcher()
 
-        manager = KnowledgeManager(base_id=base_id, config=config, storage_path=storage_path)
+        manager = KnowledgeManager(
+            base_id=base_id,
+            config=config,
+            storage_path=storage_path,
+            config_path=config_path,
+        )
         if reindex_on_create or full_reindex_required:
             await manager.initialize()
         else:

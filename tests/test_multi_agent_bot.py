@@ -3124,13 +3124,14 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.load_plugins") as mock_load_plugins,
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
             await orchestrator.initialize()
 
         mock_load_config.assert_called_once_with(config_path.resolve())
+        mock_load_plugins.assert_called_once_with(mock_config, config_path=config_path.resolve())
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
@@ -3603,7 +3604,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.load_plugins") as mock_load_plugins,
             patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
@@ -3611,6 +3612,7 @@ class TestMultiAgentOrchestrator:
 
         assert updated is False
         mock_load_config.assert_called_once_with(config_path.resolve())
+        mock_load_plugins.assert_called_once_with(new_config, config_path=config_path.resolve())
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

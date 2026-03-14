@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import os
 from typing import TYPE_CHECKING
 
 import mindroom.constants as constants_mod
+from mindroom.config.main import Config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -156,6 +158,35 @@ class TestResolveConfigRelativePath:
         )
 
         assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+
+    def test_config_from_yaml_loads_sibling_env_for_expansion(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Explicit config paths should load their sibling `.env` before path expansion."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        custom_storage = tmp_path / "custom-storage"
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={custom_storage}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+        Config.from_yaml(config_path)
+
+        assert os.getenv("MINDROOM_STORAGE_PATH") == str(custom_storage.resolve())
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/kb",
+            config_path=config_path,
+        )
+        assert resolved == custom_storage.resolve() / "kb"
 
 
 class TestResolveAvatarPath:

@@ -95,7 +95,7 @@ class _AdditionalContextChunk:
 class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
-    workspace_path: Path
+    workspace_path: Path | None
     worker_scope: WorkerScope | None
 
 
@@ -336,10 +336,10 @@ def _tool_supports_base_dir(tool_name: str) -> bool:
 def _tool_base_dir_override(
     tool_name: str,
     *,
-    workspace_path: Path,
+    workspace_path: Path | None,
 ) -> dict[str, object] | None:
     """Build per-agent tool overrides for workspace-aware local tools."""
-    if not _tool_supports_base_dir(tool_name):
+    if workspace_path is None or not _tool_supports_base_dir(tool_name):
         return None
     return {"base_dir": str(workspace_path)}
 
@@ -353,10 +353,14 @@ def build_agent_tool_init_context(
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_config = config.get_agent(agent_name)
     resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
-    workspace_path = _resolve_agent_workspace_path(
-        agent_name,
-        agent_config,
-        storage_path=resolved_storage_path,
+    workspace_path = (
+        _resolve_agent_workspace_path(
+            agent_name,
+            agent_config,
+            storage_path=resolved_storage_path,
+        )
+        if agent_config.memory_file_path is not None
+        else None
     )
     return AgentToolInitContext(
         workspace_path=workspace_path,
@@ -700,7 +704,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config)
+    load_plugins(config, config_path=config_path)
 
     tool_names = get_agent_toolkit_names(
         agent_name,

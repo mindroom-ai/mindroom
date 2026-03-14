@@ -37,7 +37,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -81,7 +81,8 @@ def _load_config() -> tuple[Config, Path]:
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    return Config.from_yaml(CONFIG_PATH), CONFIG_PATH
+    config_path = constants.runtime_config_path()
+    return Config.from_yaml(config_path), config_path
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -580,6 +581,7 @@ async def _ensure_knowledge_initialized(config: Config) -> None:
     await initialize_knowledge_managers(
         config=config,
         storage_path=constants.STORAGE_PATH_OBJ,
+        config_path=constants.runtime_config_path(),
         start_watchers=False,
         reindex_on_create=True,
     )
