@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 import uvicorn
 
-from mindroom.agents import get_rooms_for_entity
+from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
@@ -44,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import CONFIG_PATH, MATRIX_HOMESERVER
+from .constants import CONFIG_PATH, MATRIX_HOMESERVER, set_runtime_storage_path
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -342,6 +342,7 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
+        ensure_default_agent_workspaces(config, self.storage_path)
         await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
         await self._sync_memory_auto_flush_worker()
 
@@ -956,11 +957,10 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
+    storage_path = set_runtime_storage_path(storage_path)
+
     # Configure logging before any background tasks or account setup begin.
     setup_logging(level=log_level)
-
-    # Canonicalize once at startup so downstream storage paths are cwd-stable.
-    storage_path = storage_path.expanduser().resolve()
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
     sync_env_to_credentials()

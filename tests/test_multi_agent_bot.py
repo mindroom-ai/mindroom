@@ -19,6 +19,7 @@ from agno.models.ollama import Ollama
 from agno.run.agent import RunContentEvent
 from agno.run.team import TeamRunOutput
 
+import mindroom.constants as constants_module
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
@@ -586,6 +587,39 @@ class TestAgentBot:
             await main(log_level="INFO", storage_path=tmp_path, api=False)
 
         assert watched_paths == [resolved_config_path]
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_commits_runtime_storage_root_before_logging_and_credential_sync(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Direct orchestrator callers should get the same storage-root contract as the CLI wrapper."""
+        reset_runtime_state()
+        runtime_storage = tmp_path / "runtime-storage"
+        observed_logging_root: Path | None = None
+        observed_credentials_root: Path | None = None
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.start = AsyncMock()
+        mock_orchestrator.stop = AsyncMock()
+
+        def _capture_logging(*, level: str) -> None:
+            del level
+            nonlocal observed_logging_root
+            observed_logging_root = constants_module.STORAGE_PATH_OBJ
+
+        def _capture_credentials_sync() -> None:
+            nonlocal observed_credentials_root
+            observed_credentials_root = constants_module.STORAGE_PATH_OBJ
+
+        with (
+            patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
+            patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
+        ):
+            await main(log_level="INFO", storage_path=runtime_storage, api=False)
+
+        assert observed_logging_root == runtime_storage.resolve()
+        assert observed_credentials_root == runtime_storage.resolve()
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:

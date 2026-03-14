@@ -99,14 +99,9 @@ def _default_mind_workspace(config_dir: Path) -> Path:
 
 
 def _default_mind_knowledge_base_path(config_dir: Path) -> str:
-    """Return the starter knowledge-base path that points at the canonical Mind workspace."""
-    knowledge_root = (_default_mind_workspace(config_dir) / "memory").resolve()
-    resolved_config_dir = config_dir.resolve()
-    try:
-        relative_knowledge_root = knowledge_root.relative_to(resolved_config_dir)
-    except ValueError:
-        return str(knowledge_root)
-    return f"./{relative_knowledge_root.as_posix()}"
+    """Return the starter knowledge-base path anchored to the active runtime storage root."""
+    del config_dir
+    return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
@@ -131,11 +126,12 @@ def _write_env_file(
     selected_profile: _ConfigInitProfile,
     selected_preset: _ProviderPreset,
     *,
+    storage_root: Path,
     force: bool,
 ) -> bool:
     """Create or update .env and return whether the file changed."""
     if not env_path.exists():
-        env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+        env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
         console.print(f"[green]Env file created:[/green] {env_path}")
         return True
 
@@ -143,7 +139,7 @@ def _write_env_file(
     if not should_overwrite:
         return False
 
-    env_path.write_text(_env_template(selected_profile, selected_preset), encoding="utf-8")
+    env_path.write_text(_env_template(selected_profile, selected_preset, storage_root), encoding="utf-8")
     console.print(f"[green]Env file overwritten:[/green] {env_path}")
     return True
 
@@ -287,7 +283,13 @@ def config_init(
         _ensure_mind_workspace(_default_mind_workspace(target.parent), force=force)
 
     env_path = target.parent / ".env"
-    env_created = _write_env_file(env_path, selected_profile, selected_preset, force=force)
+    env_created = _write_env_file(
+        env_path,
+        selected_profile,
+        selected_preset,
+        storage_root=_storage_root_for_config(target.parent),
+        force=force,
+    )
 
     console.print(f"[green]Config created:[/green] {target}")
     _print_config_init_next_steps(
@@ -697,7 +699,11 @@ defaults:
 """
 
 
-def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset) -> str:
+def _env_template(
+    profile: _ConfigInitProfile,
+    provider_preset: _ProviderPreset,
+    storage_root: Path,
+) -> str:
     """Return a starter .env file for standalone deployments.
 
     Generates a random dashboard API key.
@@ -721,14 +727,9 @@ def _env_template(profile: _ConfigInitProfile, provider_preset: _ProviderPreset)
         )
 
     provider_lines_text = _provider_env_template(provider_preset)
-    storage_root_override = _configured_storage_root_override()
     storage_root_block = (
-        ""
-        if storage_root_override is None
-        else (
-            "# Optional: override the runtime storage root used for canonical agent state\n"
-            f"MINDROOM_STORAGE_PATH={storage_root_override}\n\n"
-        )
+        "# Runtime storage root for canonical agent state, sessions, logs, and credentials\n"
+        f"MINDROOM_STORAGE_PATH={storage_root.expanduser().resolve()}\n\n"
     )
 
     return f"""\

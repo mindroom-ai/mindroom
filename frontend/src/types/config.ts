@@ -85,12 +85,12 @@ export interface Agent {
   instructions: string[];
   rooms: string[];
   knowledge_bases?: string[];
-  context_files?: string[]; // File paths read at agent init and prepended to role context
+  context_files?: string[]; // Workspace-relative files loaded into each freshly built agent instance
   markdown?: boolean; // Per-agent markdown override
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
-  memory_file_path?: string; // Per-agent file-memory scope directory (used when effective backend is file)
+  memory_file_path?: string; // Workspace-relative directory for this agent's file memory
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)

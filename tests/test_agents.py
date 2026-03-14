@@ -203,11 +203,12 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         name: str,
         *,
         tool_init_overrides: dict[str, object] | None = None,
+        runtime_overrides: dict[str, object] | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del tool_init_overrides, worker_tools_override, worker_scope, routing_agent_name
+        del tool_init_overrides, runtime_overrides, worker_tools_override, worker_scope, routing_agent_name
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
@@ -593,11 +594,12 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         tool_name: str,
         *,
         tool_init_overrides: dict[str, object] | None = None,
+        runtime_overrides: dict[str, object] | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del tool_init_overrides, worker_tools_override
+        del tool_init_overrides, runtime_overrides, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,
@@ -758,21 +760,57 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     assert "Canonical soul context." not in deleted_agent.role
     assert "Updated canonical soul context." not in deleted_agent.role
 
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-2",
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
+    _mock_storage: MagicMock,  # noqa: PT019
+    tmp_path: Path,
+) -> None:
+    """The default starter Mind profile should materialize its workspace under the active runtime root."""
+    runtime_storage = tmp_path / "runtime-storage"
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                role="Personal assistant",
+                model="default",
+                rooms=["personal"],
+                tools=[],
+                include_default_tools=False,
+                learning=False,
+                memory_backend="file",
+                memory_file_path="mind_data",
+                context_files=[
+                    "mind_data/SOUL.md",
+                    "mind_data/AGENTS.md",
+                    "mind_data/USER.md",
+                    "mind_data/IDENTITY.md",
+                    "mind_data/TOOLS.md",
+                    "mind_data/HEARTBEAT.md",
+                ],
+                knowledge_bases=["mind_memory"],
+            ),
+        },
+        knowledge_bases={
+            "mind_memory": KnowledgeBaseConfig(
+                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+                watch=True,
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
-    canonical_soul.write_text("Shared canonical soul context.", encoding="utf-8")
 
-    with tool_execution_identity(bob_identity):
-        bob_agent = create_agent("general", config=config, storage_path=tmp_path)
+    agent = create_agent("mind", config=config, storage_path=runtime_storage)
 
-    assert "Shared canonical soul context." in bob_agent.role
+    workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+    assert (workspace / "SOUL.md").exists()
+    assert (workspace / "AGENTS.md").exists()
+    assert (workspace / "USER.md").exists()
+    assert (workspace / "IDENTITY.md").exists()
+    assert (workspace / "TOOLS.md").exists()
+    assert (workspace / "HEARTBEAT.md").exists()
+    assert (workspace / "MEMORY.md").exists()
+    assert "## Personality Context" in agent.role
 
 
 @patch("mindroom.agents.get_tool_by_name")

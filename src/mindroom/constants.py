@@ -53,8 +53,12 @@ def _config_base_dir(config_path: Path | None = None) -> Path:
 
 
 def resolve_config_relative_path(raw_path: str | Path, *, config_path: Path | None = None) -> Path:
-    """Resolve a configured path, treating relative values as config-directory-relative."""
-    unresolved = Path(raw_path).expanduser()
+    """Resolve a configured path, treating relative values as config-directory-relative.
+
+    Environment variables are expanded first so configs can anchor paths to the
+    active runtime storage root via values such as `${MINDROOM_STORAGE_PATH}`.
+    """
+    unresolved = Path(os.path.expandvars(os.fspath(raw_path))).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
     return (_config_base_dir(config_path) / unresolved).resolve()

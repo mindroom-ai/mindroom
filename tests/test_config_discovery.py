@@ -141,6 +141,22 @@ class TestResolveConfigRelativePath:
         resolved = constants_mod.resolve_config_relative_path(absolute_path, config_path=tmp_path / "config.yaml")
         assert resolved == absolute_path.resolve()
 
+    def test_environment_variables_are_expanded_before_resolution(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config path resolution should treat `${MINDROOM_STORAGE_PATH}` as the runtime storage root."""
+        storage_root = tmp_path / "runtime-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+            config_path=tmp_path / "config.yaml",
+        )
+
+        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+
 
 class TestResolveAvatarPath:
     """Tests for resolve_avatar_path()."""

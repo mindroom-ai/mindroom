@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
@@ -29,8 +30,6 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.knowledge.protocol import KnowledgeProtocol
     from agno.models.base import Model
     from agno.tools.toolkit import Toolkit
@@ -44,6 +43,26 @@ logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 _MAX_INSTRUCTION_LENGTH = 100
+_DEFAULT_MIND_AGENT_NAME = "mind"
+_DEFAULT_MIND_WORKSPACE_DIRNAME = "mind_data"
+_DEFAULT_MIND_CONTEXT_FILES = (
+    "mind_data/SOUL.md",
+    "mind_data/AGENTS.md",
+    "mind_data/USER.md",
+    "mind_data/IDENTITY.md",
+    "mind_data/TOOLS.md",
+    "mind_data/HEARTBEAT.md",
+)
+_DEFAULT_MIND_TEMPLATE_FILENAMES = (
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
+)
+_DEFAULT_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+_DEFAULT_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
 @dataclass
@@ -81,6 +100,39 @@ class AgentToolInitContext:
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
+
+
+def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
+    return (
+        agent_name == _DEFAULT_MIND_AGENT_NAME
+        and agent_config.memory_backend == "file"
+        and agent_config.memory_file_path == _DEFAULT_MIND_WORKSPACE_DIRNAME
+        and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
+    )
+
+
+def _ensure_default_mind_workspace(storage_path: Path) -> None:
+    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME) / _DEFAULT_MIND_WORKSPACE_DIRNAME
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+    for filename in _DEFAULT_MIND_TEMPLATE_FILENAMES:
+        source_path = _DEFAULT_MIND_TEMPLATE_DIR / filename
+        target_path = workspace_path / filename
+        if target_path.exists():
+            continue
+        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    memory_path = workspace_path / "MEMORY.md"
+    if not memory_path.exists():
+        memory_path.write_text(_DEFAULT_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+
+
+def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
+    """Materialize built-in starter workspaces under the active runtime storage root."""
+    for agent_name, agent_config in config.agents.items():
+        if _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+            _ensure_default_mind_workspace(storage_path)
 
 
 def _get_datetime_context(timezone_str: str) -> str:
@@ -376,6 +428,7 @@ def build_agent_toolkit(
             tool_name,
             workspace_path=tool_init_context.workspace_path,
         ),
+        runtime_overrides={"config_path": config_path},
         worker_tools_override=worker_tools,
         worker_scope=tool_init_context.worker_scope,
         routing_agent_name=agent_name,
@@ -644,6 +697,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     resolved_storage_path = storage_path if storage_path is not None else constants.STORAGE_PATH_OBJ
 
     agent_config = config.get_agent(agent_name)
+    ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
     load_plugins(config)

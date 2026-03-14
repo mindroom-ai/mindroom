@@ -522,7 +522,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.CONFIG:
         # Handle config command
         args_text = command.args.get("args_text", "")
-        response_text, change_info = await handle_config_command(args_text)
+        response_text, change_info = await handle_config_command(args_text, context.config_path)
 
         # If we have change_info, this is a config set that needs confirmation
         if change_info:

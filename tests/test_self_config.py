@@ -424,3 +424,20 @@ class TestAgentCreationInjection:
             assert "Error" not in result
         finally:
             config_path.unlink(missing_ok=True)
+
+    @patch("mindroom.agents.SqliteDb")
+    def test_config_path_threaded_to_config_manager(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
+        """Generic tool loading should thread config_path into config_manager as well."""
+        config, config_path = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["config_manager"])},
+        )
+        try:
+            agent = create_agent("writer", config=config, config_path=config_path)
+            config_manager_tool = next(t for t in agent.tools if getattr(t, "name", None) == "config_manager")
+            assert config_manager_tool.config_path == config_path
+
+            result = config_manager_tool.get_info(info_type="agents")
+            assert "Writer" in result
+            assert "Error" not in result
+        finally:
+            config_path.unlink(missing_ok=True)

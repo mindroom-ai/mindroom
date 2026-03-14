@@ -17,7 +17,9 @@ from google.auth.exceptions import DefaultCredentialsError
 from typer.testing import CliRunner
 
 import mindroom.constants as constants_module
+from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.main import app
+from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixState
@@ -93,8 +95,8 @@ class TestConfigInit:
             "matrix_message",
         ]
         assert mind["skills"] == ["mindroom-docs"]
-        assert (
-            config["knowledge_bases"]["mind_memory"]["path"] == "./mindroom_data/agents/mind/workspace/mind_data/memory"
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
         )
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
@@ -103,6 +105,9 @@ class TestConfigInit:
         assert config["memory"]["file"]["max_entrypoint_lines"] == 200
         assert config["memory"]["auto_flush"]["enabled"] is True
         assert "openclaw_compat" not in target.read_text()
+
+        env_content = (tmp_path / ".env").read_text()
+        assert f"MINDROOM_STORAGE_PATH={(tmp_path / 'mindroom_data').resolve()}" in env_content
 
     def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
         """Full template should scaffold the required mind_data files."""
@@ -141,13 +146,45 @@ class TestConfigInit:
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
-        assert (
-            config["knowledge_bases"]["mind_memory"]["path"]
-            == "./custom-storage/agents/mind/workspace/mind_data/memory"
+        assert config["knowledge_bases"]["mind_memory"]["path"] == (
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
         )
 
         env_content = (tmp_path / ".env").read_text()
         assert f"MINDROOM_STORAGE_PATH={storage_root.resolve()}" in env_content
+
+    def test_init_full_profile_runtime_storage_override_keeps_mind_workspace_and_kb_in_sync(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The starter Mind profile should follow the active runtime storage root, not the init-time one."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
+        assert result.exit_code == 0
+
+        runtime_storage = tmp_path / "alternate-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(runtime_storage))
+
+        config = Config.from_yaml(target)
+        resolved_knowledge_path = constants_module.resolve_config_relative_path(
+            config.knowledge_bases["mind_memory"].path,
+            config_path=target,
+        )
+        assert (
+            resolved_knowledge_path
+            == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+        )
+
+        ensure_default_agent_workspaces(config, runtime_storage)
+        runtime_workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+        assert (runtime_workspace / "SOUL.md").exists()
+        assert (runtime_workspace / "AGENTS.md").exists()
+        assert (runtime_workspace / "USER.md").exists()
+        assert (runtime_workspace / "IDENTITY.md").exists()
+        assert (runtime_workspace / "TOOLS.md").exists()
+        assert (runtime_workspace / "HEARTBEAT.md").exists()
+        assert (runtime_workspace / "MEMORY.md").exists()
 
     def test_init_without_path_uses_detected_default_location(
         self,
