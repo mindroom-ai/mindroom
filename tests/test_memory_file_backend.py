@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -12,14 +11,12 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.memory.functions import (
     add_agent_memory,
-    add_room_memory,
     append_agent_daily_memory,
     build_memory_enhanced_prompt,
     delete_agent_memory,
     get_agent_memory,
     list_all_agent_memories,
     search_agent_memories,
-    search_room_memories,
     store_conversation_memory,
     update_agent_memory,
 )
@@ -215,7 +212,6 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
             storage_path,
             "session-alice",
             config,
-            room_id="!room:example.org",
         )
         alice_results = await search_agent_memories(
             "Alice-authored shared team",
@@ -298,29 +294,6 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
 
 
 @pytest.mark.asyncio
-async def test_file_backend_room_prompt_search_uses_agent_override(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "mem0"
-    config.memory.file.path = str(storage_path / "memory-files")
-    config.agents["general"].memory_backend = "file"
-
-    await add_room_memory("Room memory note", "!room:server", storage_path, config, agent_name="general")
-
-    with patch(
-        "mindroom.memory.functions.create_memory_instance",
-        side_effect=AssertionError("Mem0 should not be used for file-backed agent prompt building"),
-    ):
-        enhanced = await build_memory_enhanced_prompt(
-            "Room memory note",
-            "general",
-            storage_path,
-            config,
-            room_id="!room:server",
-        )
-
-    assert "Room memory note" in enhanced
-
-
-@pytest.mark.asyncio
 async def test_file_backend_search_skips_structured_line_duplicates(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
@@ -369,7 +342,10 @@ async def test_file_backend_memory_crud_and_scope(storage_path: Path, config: Co
 
 
 @pytest.mark.asyncio
-async def test_file_backend_store_conversation_memory_with_room(storage_path: Path, config: Config) -> None:
+async def test_file_backend_store_conversation_memory_uses_agent_scope_only(
+    storage_path: Path,
+    config: Config,
+) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
 
@@ -379,20 +355,11 @@ async def test_file_backend_store_conversation_memory_with_room(storage_path: Pa
         storage_path,
         "session123",
         config,
-        room_id="!room:server",
     )
 
     agent_results = await search_agent_memories("requirement", "general", storage_path, config, limit=5)
-    room_results = await search_room_memories(
-        "requirement",
-        "!room:server",
-        storage_path,
-        config,
-        agent_name="general",
-        limit=5,
-    )
     assert any("Remember this requirement" in result.get("memory", "") for result in agent_results)
-    assert any("Remember this requirement" in result.get("memory", "") for result in room_results)
+    assert not (storage_path / "memory-files" / "room_room_server").exists()
 
 
 @pytest.mark.asyncio

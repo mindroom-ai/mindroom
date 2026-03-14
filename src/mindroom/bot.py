@@ -2106,8 +2106,6 @@ class AgentBot:
                 self.config,
                 agent_name=agent_name,
                 session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
@@ -2117,7 +2115,6 @@ class AgentBot:
                         self.storage_path,
                         session_id,
                         self.config,
-                        room_id,
                         thread_history,
                         user_id,
                         execution_identity=execution_identity,
@@ -2382,8 +2379,6 @@ class AgentBot:
                 self.config,
                 agent_name=self.agent_name,
                 session_id=session_id,
-                room_id=room_id,
-                thread_id=thread_id,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
@@ -2393,7 +2388,6 @@ class AgentBot:
                         self.storage_path,
                         session_id,
                         self.config,
-                        room_id,
                         thread_history,
                         user_id,
                         execution_identity=execution_identity,
@@ -2817,7 +2811,6 @@ class TeamBot(AgentBot):
                     self.storage_path,
                     session_id,
                     self.config,
-                    room_id,
                     thread_history,
                     user_id,
                     execution_identity=execution_identity,

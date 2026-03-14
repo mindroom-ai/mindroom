@@ -12,7 +12,7 @@ MindRoom is an AI agent orchestration system with Matrix integration. It provide
 
 - **Multi-agent collaboration** - Configure multiple specialized agents that can work together
 - **Matrix-native** - Agents live in Matrix rooms and respond to messages
-- **Persistent memory** - Agent, room, and team-scoped memory that persists across conversations
+- **Persistent memory** - Agent and team-scoped memory that persists across conversations
 - **100+ tool integrations** - Connect to external services like GitHub, Slack, Gmail, and more
 - **Hot-reload configuration** - Update `config.yaml` and agents restart automatically
 - **Scheduled tasks** - Schedule agents to run at specific times with cron expressions or natural language
@@ -113,7 +113,7 @@ mindroom run
 | **Agents** | Single-specialty actors with specific tools and instructions |
 | **Teams** | Collaborative bundles of agents (coordinate or collaborate modes) |
 | **Router** | Built-in traffic director that routes messages to the right agent |
-| **Memory** | Mem0-inspired memory system with agent, room, and team scopes |
+| **Memory** | Mem0-inspired memory system with agent and team scopes |
 | **Knowledge Bases** | File-backed RAG indexing with per-agent base assignment |
 | **Tools** | 100+ integrations for external services |
 | **Skills** | OpenClaw-compatible skills system for extended agent capabilities |

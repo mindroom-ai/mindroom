@@ -23,11 +23,9 @@ Optional:
 | Scope | User ID Format | Description |
 |---|---|---|
 | Agent | `agent_<name>` | Agent preferences and durable user context |
-| Room | `room_<safe_room_id>` | Shared room/project context |
 | Team | `team_<agent1>+<agent2>+...` | Shared team conversation memory |
 
 Notes:
-- Room IDs are sanitized (`:` -> `_`, `!` removed).
 - Team IDs are sorted agent names joined by `+`.
 
 ## Backend: `mem0`
@@ -101,10 +99,8 @@ Agent file memory is stored under each agent's storage directory by default:
 - `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
 - `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
 
-Room and team file memory continue to use the shared `memory.file.path` base when configured, or `<storage_path>/memory_files` by default:
+Team file memory is mirrored under each participating agent's storage directory:
 
-- `room_<safe_room_id>/MEMORY.md`
-- `room_<safe_room_id>/memory/YYYY-MM-DD.md`
 - `team_<sorted_members>/MEMORY.md`
 - `team_<sorted_members>/memory/YYYY-MM-DD.md`
 

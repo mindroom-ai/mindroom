@@ -38,8 +38,6 @@ class _FlushSessionEntry(TypedDict, total=False):
 
     agent_name: str
     session_id: str
-    room_id: str | None
-    thread_id: str | None
     dirty: bool
     in_flight: bool
     first_dirty_at: int
@@ -79,6 +77,16 @@ def _session_key(agent_name: str, session_id: str) -> str:
     return f"{agent_name}:{session_id}"
 
 
+def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
+    if not isinstance(raw_entry, dict):
+        return None
+    entry = dict(cast("dict[str, object]", raw_entry))
+    entry.pop("room_id", None)
+    entry.pop("thread_id", None)
+    entry.pop("worker_key", None)
+    return cast("_FlushSessionEntry", entry)
+
+
 def _read_state_unlocked(storage_path: Path) -> _FlushState:
     path = _state_path(storage_path)
     if not path.exists():
@@ -96,7 +104,14 @@ def _read_state_unlocked(storage_path: Path) -> _FlushState:
     if not isinstance(data, dict):
         return _empty_state()
     sessions_raw = data.get("sessions")
-    sessions = sessions_raw if isinstance(sessions_raw, dict) else {}
+    sessions: dict[str, _FlushSessionEntry] = {}
+    if isinstance(sessions_raw, dict):
+        for key, raw_entry in sessions_raw.items():
+            if not isinstance(key, str):
+                continue
+            entry = _sanitize_session_entry(raw_entry)
+            if entry is not None:
+                sessions[key] = entry
     return {"version": 1, "sessions": sessions}
 
 
@@ -129,8 +144,6 @@ def mark_auto_flush_dirty_session(
     *,
     agent_name: str,
     session_id: str,
-    room_id: str | None,
-    thread_id: str | None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
@@ -154,8 +167,6 @@ def mark_auto_flush_dirty_session(
             **existing,
             "agent_name": agent_name,
             "session_id": session_id,
-            "room_id": room_id,
-            "thread_id": thread_id,
             "dirty": True,
             "dirty_revision": dirty_revision + 1,
             # Keep in-flight status if a flush is already running for this key.

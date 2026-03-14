@@ -81,7 +81,6 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             storage_path,
             "session-alice",
             config,
-            room_id="!room:example.org",
             execution_identity=execution_identity,
         )
 
@@ -91,16 +90,6 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             expected_storage_path,
             "agent_general",
             {"type": "conversation", "session_id": "session-alice", "agent": "general"},
-        ),
-        (
-            expected_storage_path,
-            "room_room_example.org",
-            {
-                "type": "conversation",
-                "session_id": "session-alice",
-                "room_id": "!room:example.org",
-                "contributed_by": "general",
-            },
         ),
     ]
 
@@ -169,7 +158,6 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 storage_path,
                 "session-alice",
                 config,
-                room_id="!room:example.org",
             )
             alice_results = await search_agent_memories(
                 "Alice-authored shared team",
