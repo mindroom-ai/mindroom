@@ -853,7 +853,6 @@ async def _prepare_agent_and_prompt(
     agent_name: str,
     prompt: str,
     storage_path: Path,
-    room_id: str | None,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
@@ -869,7 +868,7 @@ async def _prepare_agent_and_prompt(
         (empty when using the fallback path).
 
     """
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, room_id)
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config)
 
     unseen_event_ids: list[str] = []
 
@@ -935,7 +934,7 @@ async def ai_response(
         storage_path: Path for storing agent data
         config: Application configuration
         thread_history: Optional thread history
-        room_id: Optional room ID for room memory access
+        room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         include_interactive_questions: Whether to include the interactive
@@ -954,7 +953,7 @@ async def ai_response(
         Agent response string
 
     """
-    logger.info("AI request", agent=agent_name)
+    logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
@@ -963,7 +962,6 @@ async def ai_response(
             agent_name,
             prompt,
             storage_path,
-            room_id,
             config,
             thread_history,
             knowledge,
@@ -1142,7 +1140,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         storage_path: Path for storing agent data
         config: Application configuration
         thread_history: Optional thread history
-        room_id: Optional room ID for room memory access
+        room_id: Optional Matrix room ID for caller context
         knowledge: Optional shared knowledge base for RAG-enabled agents
         user_id: Matrix user ID of the sender, used by Agno's LearningMachine
         include_interactive_questions: Whether to include the interactive
@@ -1159,7 +1157,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         Streaming chunks/events as they become available
 
     """
-    logger.info("AI streaming request", agent=agent_name)
+    logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
 
     # Prepare agent and prompt - this can fail if agent creation fails
@@ -1168,7 +1166,6 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             agent_name,
             prompt,
             storage_path,
-            room_id,
             config,
             thread_history,
             knowledge,
