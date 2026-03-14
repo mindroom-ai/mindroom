@@ -21,7 +21,10 @@ def _patch_config_globals(
     search_paths: list[Path] | None = None,
 ) -> None:
     """Patch module-level config globals used by find_config / config_search_locations."""
-    monkeypatch.setattr(constants_mod, "_CONFIG_PATH_ENV", env)
+    if env is None:
+        monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", env)
     if search_paths is not None:
         monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
 
@@ -186,6 +189,40 @@ class TestResolveConfigRelativePath:
         )
         assert resolved == custom_storage.resolve() / "kb"
 
+    def test_explicit_config_path_uses_its_own_sibling_env_over_active_runtime_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Alternate config loads must not inherit the active runtime storage root."""
+        active_dir = tmp_path / "active"
+        other_dir = tmp_path / "other"
+        active_dir.mkdir(parents=True, exist_ok=True)
+        other_dir.mkdir(parents=True, exist_ok=True)
+        active_config = active_dir / "config.yaml"
+        other_config = other_dir / "config.yaml"
+        for path in (active_config, other_config):
+            path.write_text(
+                "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+                encoding="utf-8",
+            )
+        (active_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={active_dir / 'storage-active'}\n",
+            encoding="utf-8",
+        )
+        (other_dir / ".env").write_text(
+            f"MINDROOM_STORAGE_PATH={other_dir / 'storage-other'}\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.set_runtime_paths(config_path=active_config)
+
+        resolved = constants_mod.resolve_config_relative_path(
+            "${MINDROOM_STORAGE_PATH}/kb",
+            config_path=other_config,
+        )
+
+        assert resolved == (other_dir / "storage-other" / "kb").resolve()
+
     def test_config_from_yaml_does_not_override_existing_shell_env(
         self,
         tmp_path: Path,
@@ -231,6 +268,23 @@ class TestResolveConfigRelativePath:
         config = Config.from_yaml(config_path)
 
         assert config.domain == "example.org"
+
+    def test_ensure_writable_config_path_uses_active_runtime_template_env(self, tmp_path: Path) -> None:
+        """Template seeding should honor MINDROOM_CONFIG_TEMPLATE from the active runtime `.env`."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        template_path = tmp_path / "template.yaml"
+        template_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+        (config_dir / ".env").write_text(
+            f"MINDROOM_CONFIG_TEMPLATE={template_path}\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.set_runtime_paths(config_path=config_path)
+
+        assert constants_mod.ensure_writable_config_path() is True
+        assert config_path.read_text(encoding="utf-8") == "agents: {}\nmodels: {}\n"
 
 
 class TestResolveAvatarPath:

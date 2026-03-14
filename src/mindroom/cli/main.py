@@ -7,7 +7,7 @@ import hashlib
 import os
 import socket
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import httpx
@@ -16,11 +16,9 @@ import yaml
 from pydantic import ValidationError
 
 import mindroom.cli.connect as cli_connect
-from mindroom import __version__
+from mindroom import __version__, constants
 from mindroom.constants import (
-    CONFIG_PATH,
     MATRIX_SSL_VERIFY,
-    STORAGE_PATH,
     config_search_locations,
     ensure_writable_config_path,
     set_runtime_storage_path,
@@ -81,8 +79,8 @@ def run(
         case_sensitive=False,
         envvar="LOG_LEVEL",
     ),
-    storage_path: Path = typer.Option(  # noqa: B008
-        Path(STORAGE_PATH),
+    storage_path: Path | None = typer.Option(  # noqa: B008
+        None,
         "--storage-path",
         "-s",
         help="Base directory for persistent MindRoom data (state, sessions, tracking)",
@@ -114,7 +112,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
-            storage_path=storage_path,
+            storage_path=storage_path or constants.get_runtime_paths().storage_root,
             api=api,
             api_port=api_port,
             api_host=api_host,
@@ -126,7 +124,7 @@ def _load_active_config_or_exit() -> Config:
     """Load the active config file or exit with friendly validation errors."""
     ensure_writable_config_path()
 
-    config_path = Path(CONFIG_PATH)
+    config_path = constants.runtime_config_path()
     if not config_path.exists():
         _print_missing_config_error()
         raise typer.Exit(1)
@@ -276,7 +274,7 @@ def connect(
         console.print("[red]Error:[/red] Invalid provisioning URL.")
         raise typer.Exit(1)
 
-    resolved_config_path = (path or Path(CONFIG_PATH)).expanduser().resolve()
+    resolved_config_path = (path or constants.runtime_config_path()).expanduser().resolve()
     normalized_client_name = client_name.strip() or socket.gethostname()
     try:
         credentials = cli_connect.complete_local_pairing(
@@ -359,7 +357,7 @@ def _print_pairing_success_with_exports(
 
 def _local_client_fingerprint(*, config_path: Path | None = None) -> str:
     """Return a stable, non-secret local fingerprint."""
-    resolved_config_path = (config_path or Path(CONFIG_PATH)).expanduser().resolve()
+    resolved_config_path = (config_path or constants.runtime_config_path()).expanduser().resolve()
     raw = f"{socket.gethostname()}:{resolved_config_path}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -384,13 +382,13 @@ def _print_missing_config_error() -> None:
 
 
 def _print_connection_error(exc: BaseException) -> None:
-    from mindroom.constants import MATRIX_HOMESERVER  # noqa: PLC0415
-
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
-    console.print(f"  2. MATRIX_HOMESERVER is set correctly (current: {MATRIX_HOMESERVER})")
+    console.print(
+        f"  2. MATRIX_HOMESERVER is set correctly (current: {constants.runtime_matrix_homeserver()})",
+    )
     console.print("  3. The server is reachable from this machine")
 
 

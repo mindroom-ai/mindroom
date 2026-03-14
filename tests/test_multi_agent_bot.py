@@ -460,7 +460,7 @@ class TestAgentBot:
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
-    @patch("mindroom.bot.MATRIX_HOMESERVER", "http://localhost:8008")
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.config.main.Config.from_yaml")
@@ -2864,7 +2864,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=list(room_members))),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
@@ -2908,7 +2908,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.is_authorized_sender", side_effect=is_authorized_sender_for_test),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
@@ -2948,7 +2948,7 @@ class TestMultiAgentOrchestrator:
         mock_invite = AsyncMock(return_value=True)
 
         with (
-            patch("mindroom.orchestrator.MATRIX_HOMESERVER", "http://localhost:8008"),
+            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
             patch("mindroom.orchestrator.get_joined_rooms", new=AsyncMock(return_value=["!room1:localhost"])),
             patch("mindroom.orchestrator.get_room_members", side_effect=mock_get_room_members),
             patch("mindroom.orchestrator.invite_to_room", mock_invite),

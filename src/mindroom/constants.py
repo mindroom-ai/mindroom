@@ -19,11 +19,6 @@ load_dotenv()
 # Agent names
 ROUTER_AGENT_NAME = "router"
 
-# Default path to agents configuration file. Allow overriding via environment
-# variable so deployments can place the writable configuration file on a
-# persistent volume instead of the package directory (which may be read-only).
-_CONFIG_PATH_ENV = os.getenv("MINDROOM_CONFIG_PATH")
-
 # Search order for existing files: env var > ./config.yaml > ~/.mindroom/config.yaml
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
@@ -56,8 +51,8 @@ def config_search_locations() -> list[Path]:
     """
     seen: set[Path] = set()
     locations: list[Path] = []
-    if _CONFIG_PATH_ENV:
-        resolved = Path(_CONFIG_PATH_ENV).expanduser().resolve()
+    if configured_path := os.getenv("MINDROOM_CONFIG_PATH"):
+        resolved = Path(configured_path).expanduser().resolve()
         seen.add(resolved)
         locations.append(resolved)
     for p in _CONFIG_SEARCH_PATHS:
@@ -85,6 +80,14 @@ def _runtime_env_file_values(paths: RuntimePaths) -> dict[str, str]:
     return {key: value for key, value in dotenv_values(paths.env_path).items() if isinstance(value, str)}
 
 
+def _active_runtime_paths_or_none() -> RuntimePaths | None:
+    return globals().get("_ACTIVE_RUNTIME_PATHS")
+
+
+def _is_active_runtime_context(paths: RuntimePaths) -> bool:
+    return _active_runtime_paths_or_none() == paths
+
+
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -95,10 +98,25 @@ def resolve_runtime_paths(
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
 
+    active_paths = _active_runtime_paths_or_none()
+
+    configured_storage_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
+    configured_storage_path = Path(configured_storage_root).expanduser().resolve() if configured_storage_root else None
+
     if storage_path is not None:
         resolved_storage_root = Path(storage_path).expanduser().resolve()
-    elif configured_storage_root := os.getenv("MINDROOM_STORAGE_PATH", "").strip():
-        resolved_storage_root = Path(configured_storage_root).expanduser().resolve()
+    elif config_path is not None and active_paths is not None and resolved_config_path == active_paths.config_path:
+        resolved_storage_root = active_paths.storage_root
+    elif (
+        config_path is not None
+        and configured_storage_path is not None
+        and (active_paths is None or configured_storage_path != active_paths.storage_root)
+    ):
+        resolved_storage_root = configured_storage_path
+    elif config_path is not None and (env_storage_root := _storage_root_from_env_path(env_path)):
+        resolved_storage_root = env_storage_root
+    elif configured_storage_path is not None:
+        resolved_storage_root = configured_storage_path
     elif env_storage_root := _storage_root_from_env_path(env_path):
         resolved_storage_root = env_storage_root
     else:
@@ -182,10 +200,17 @@ def runtime_env_flag(
 
 def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths | None = None) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
+    paths = runtime_paths or get_runtime_paths()
+    if (
+        runtime_paths is not None
+        and not _is_active_runtime_context(paths)
+        and (file_value := _runtime_env_file_values(paths).get("MATRIX_HOMESERVER"))
+    ):
+        return file_value
     return (
         runtime_env_value(
             "MATRIX_HOMESERVER",
-            runtime_paths=runtime_paths,
+            runtime_paths=paths,
             default="http://localhost:8008",
         )
         or "http://localhost:8008"
@@ -320,8 +345,8 @@ def find_config() -> Path:
     so that derived paths like STORAGE_PATH stay relative and display
     cleanly in CLI help text.
     """
-    if _CONFIG_PATH_ENV:
-        return Path(_CONFIG_PATH_ENV).expanduser()
+    if configured_path := os.getenv("MINDROOM_CONFIG_PATH"):
+        return Path(configured_path).expanduser()
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():
             return path
@@ -331,10 +356,6 @@ def find_config() -> Path:
 _ACTIVE_RUNTIME_PATHS = resolve_runtime_paths()
 
 
-# Optional template path used to seed the writable config file if it does not
-# exist yet. Defaults to the same location as CONFIG_PATH so the
-# behaviour is unchanged when no overrides are provided.
-_CONFIG_TEMPLATE_ENV = os.getenv("MINDROOM_CONFIG_TEMPLATE")
 _set_active_runtime_paths(_ACTIVE_RUNTIME_PATHS)
 load_runtime_env(get_runtime_paths(), sync_path_env=False)
 
@@ -486,7 +507,8 @@ def ensure_writable_config_path(*, create_minimal: bool = False) -> bool:
     if config_path.exists():
         return True
 
-    template_path = Path(_CONFIG_TEMPLATE_ENV).expanduser().resolve() if _CONFIG_TEMPLATE_ENV else config_path
+    template_env = runtime_env_value("MINDROOM_CONFIG_TEMPLATE")
+    template_path = Path(template_env).expanduser().resolve() if template_env else config_path
     if template_path != config_path and template_path.exists():
         shutil.copyfile(template_path, config_path)
         config_path.chmod(0o600)

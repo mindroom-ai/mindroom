@@ -114,14 +114,11 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     from mindroom import constants  # noqa: PLC0415
 
     original = constants.get_runtime_paths()
-    original_path_env = {key: os.environ.get(key) for key in ("MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH")}
+    original_env = os.environ.copy()
     yield
     constants._set_active_runtime_paths(original)
-    for key, value in original_path_env.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
+    os.environ.clear()
+    os.environ.update(original_env)
 
 
 @pytest.fixture(autouse=True)

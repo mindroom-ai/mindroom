@@ -338,12 +338,29 @@ def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> 
         config.agents["general"].memory_file_path = str(tmp_path / "external" / "mind_data")
 
 
+def test_create_agent_rejects_env_var_memory_file_workspace() -> None:
+    """Env-var memory_file_path should fail fast instead of becoming a literal workspace subdir."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+
+    with pytest.raises(ValidationError, match="env-variable references"):
+        config.agents["general"].memory_file_path = "${MINDROOM_STORAGE_PATH}/mind_data"
+
+
 def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
     """Absolute context_files should fail fast instead of creating copied state."""
     config = Config.from_yaml()
 
     with pytest.raises(ValidationError, match="workspace-relative"):
         config.agents["general"].context_files = [str(tmp_path / "SOUL.md")]
+
+
+def test_create_agent_rejects_env_var_context_files() -> None:
+    """Env-var context_files should fail fast instead of becoming literal workspace segments."""
+    config = Config.from_yaml()
+
+    with pytest.raises(ValidationError, match="env-variable references"):
+        config.agents["general"].context_files = ["${MINDROOM_STORAGE_PATH}/SOUL.md"]
 
 
 @patch("mindroom.agents.get_tool_by_name")

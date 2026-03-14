@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 import uvicorn
 
+from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -43,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import MATRIX_HOMESERVER, RuntimePaths, get_runtime_paths, set_runtime_paths
+from .constants import RuntimePaths, get_runtime_paths, set_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -167,7 +168,7 @@ class MultiAgentOrchestrator:
             return
         # The user account is managed through the same Matrix account lifecycle as bots.
         user_account = await create_agent_user(
-            MATRIX_HOMESERVER,
+            constants.runtime_matrix_homeserver(),
             INTERNAL_USER_AGENT_NAME,
             config.mindroom_user.display_name,
             username=config.mindroom_user.username,
@@ -676,7 +677,7 @@ class MultiAgentOrchestrator:
             all_rooms = load_rooms()
             all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
             if all_room_ids and config.mindroom_user is not None:
-                await ensure_user_in_rooms(MATRIX_HOMESERVER, all_room_ids)
+                await ensure_user_in_rooms(constants.runtime_matrix_homeserver(), all_room_ids)
 
         # First invitation and join pass for rooms the router already manages.
         await self._ensure_room_invitations()
@@ -784,7 +785,7 @@ class MultiAgentOrchestrator:
         if config.mindroom_user is None or not user_account:
             return authorized_user_ids
 
-        server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
         user_id = MatrixID.from_username(user_account.username, server_name).full_id
         authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
@@ -855,7 +856,7 @@ class MultiAgentOrchestrator:
         if not joined_rooms:
             return
 
-        server_name = extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
         authorized_user_ids = get_authorized_user_ids_to_invite(config)
         authorized_user_ids = await self._invite_internal_user_to_rooms(
             config,

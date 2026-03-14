@@ -9,7 +9,8 @@ from croniter import CroniterError, croniter
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from mindroom.constants import MATRIX_HOMESERVER, ROUTER_AGENT_NAME
+from mindroom import constants
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
 from mindroom.matrix.users import create_agent_user, login_agent_user
@@ -226,11 +227,11 @@ def _build_updated_workflow(
 async def _get_router_client() -> AsyncClient:
     """Login the router user and return an authenticated Matrix client."""
     router_user = await create_agent_user(
-        MATRIX_HOMESERVER,
+        constants.runtime_matrix_homeserver(),
         ROUTER_AGENT_NAME,
         "RouterAgent",
     )
-    return await login_agent_user(MATRIX_HOMESERVER, router_user)
+    return await login_agent_user(constants.runtime_matrix_homeserver(), router_user)
 
 
 @router.get("", response_model=ListSchedulesResponse)

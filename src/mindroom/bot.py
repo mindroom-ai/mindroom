@@ -74,7 +74,7 @@ from mindroom.thread_utils import (
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
-from . import interactive, voice_handler
+from . import constants, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
 from .ai import ai_response, stream_agent_response
 from .attachment_media import resolve_attachment_media
@@ -100,7 +100,6 @@ from .commands.handler import CommandEvent, CommandHandlerContext, _generate_wel
 from .commands.parsing import Command, command_parser
 from .constants import (
     ATTACHMENT_IDS_KEY,
-    MATRIX_HOMESERVER,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -543,7 +542,7 @@ class AgentBot:
             return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
-            MATRIX_HOMESERVER,
+            constants.runtime_matrix_homeserver(),
             self.agent_name,
             self.agent_user.display_name,  # Use existing display name if available
         )
@@ -588,7 +587,7 @@ class AgentBot:
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
-        self.client = await login_agent_user(MATRIX_HOMESERVER, self.agent_user)
+        self.client = await login_agent_user(constants.runtime_matrix_homeserver(), self.agent_user)
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
 

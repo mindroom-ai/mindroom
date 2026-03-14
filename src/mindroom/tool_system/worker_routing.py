@@ -315,6 +315,9 @@ def agent_workspace_relative_path(path_text: str) -> Path:
     if not normalized_text:
         msg = "Agent-owned paths must not be empty."
         raise ValueError(msg)
+    if "$" in normalized_text:
+        msg = f"Agent-owned paths must be workspace-relative literals, not env-variable references: {path_text}"
+        raise ValueError(msg)
 
     candidate = Path(normalized_text).expanduser()
     if candidate.is_absolute():

@@ -155,7 +155,7 @@ def test_ensure_writable_config_path_seeds_from_template(
     template_config.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
 
     constants.set_runtime_paths(config_path=writable_config)
-    monkeypatch.setattr(constants, "_CONFIG_TEMPLATE_ENV", str(template_config))
+    monkeypatch.setenv("MINDROOM_CONFIG_TEMPLATE", str(template_config))
 
     assert constants.ensure_writable_config_path() is True
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
