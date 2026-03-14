@@ -11,7 +11,7 @@ MindRoom supports two memory backends:
 
 Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
-Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a workspace-relative directory inside that agent's canonical workspace.
+Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -89,13 +89,14 @@ agents:
     memory_file_path: mind_data
 ```
 
-`memory_file_path` is resolved relative to the agent's canonical workspace root, not `config.yaml`.
-When set, the agent uses that workspace directory as its memory scope instead of the default `agents/<agent>/memory_files/agent_<name>/` path inside the canonical agent state root.
+`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`.
+For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`.
+Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`.
 Absolute paths and `..` traversal are rejected.
 
 ### File layout
 
-Agent file memory is stored under each agent's canonical state root by default:
+Agent file memory is stored under each agent's storage directory by default:
 
 - `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
 - `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`

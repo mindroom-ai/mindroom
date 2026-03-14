@@ -55,36 +55,33 @@ helm upgrade --install instance-1 ./cluster/k8s/instance \
 
 The instance chart supports two worker backend modes for worker-routed tools such as `shell`, `file`, and `python`.
 The dedicated-worker provisioning flow is implemented today.
-Both modes use the same canonical per-agent state model.
+Both modes store agent data in the same per-agent directory structure.
 
 | Helm value | Behavior | Best for |
 |------------|----------|----------|
-| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments and the current shared-worker model |
-| `workerBackend: kubernetes` | Creates dedicated worker Deployments and Services on demand from the primary runtime | Stronger runtime isolation with shared canonical agent state, but not automatic per-agent filesystem isolation |
+| `workerBackend: static_runner` | Runs one shared sandbox-runner sidecar inside the main MindRoom pod | Simpler deployments |
+| `workerBackend: kubernetes` | Creates dedicated worker Deployments and Services on demand | Stronger runtime isolation per agent (filesystem isolation depends on `worker_scope`) |
 
 ### Shared Sidecar Mode
 
 `workerBackend: static_runner` is the default.
 The primary runtime talks to a shared sidecar over `localhost`.
-This keeps the deployment simple, but all worker-routed tool calls share the same runner process.
-The runner also reads and writes the same canonical agent state roots used by the primary runtime.
+This keeps the deployment simple, but all proxied tool calls share the same runner process.
+The runner reads and writes the same agent storage directories as the main process.
 
 ### Dedicated Worker Mode
 
 `workerBackend: kubernetes` enables the built-in Kubernetes worker backend.
-The primary runtime creates worker Deployments and Services on demand and routes tool calls to the resolved worker handle.
-Each worker pod runs the sandbox-runner app and is able to access the same canonical agent state roots used by every other runtime for the same agent.
-Dedicated workers may still keep worker-local caches and metadata isolated by worker key.
-Idle cleanup scales worker Deployments to zero while preserving canonical agent state and any separately retained worker-local caches by policy.
+The primary runtime creates worker Deployments and Services on demand and routes tool calls to the matching worker.
+Each worker pod runs the sandbox-runner app and accesses the same agent storage directory as every other runtime for that agent.
+Worker-local files (caches, virtualenvs, metadata) are kept separate per worker.
+When a worker is idle, its Deployment scales to zero, but agent data and worker caches are preserved.
 
 > [!WARNING]
-> The Kubernetes dedicated-worker backend now narrows mounts for `shared`, `user_agent`, and unscoped dedicated execution so those workers only see the addressed agent root plus their worker root.
-> `worker_scope=user` is intentionally broader and mounts the `agents/` tree as a per-requester workstation mode.
-> `user` creates one persistent runtime per requester.
-> Multiple agents may run inside that runtime.
-> Those agents may access each other's mounted files inside that runtime.
-> Treat `worker_scope=user` as a per-requester workstation or trust-sharing mode.
-> Use `user_agent` if you need the clearest per-agent filesystem isolation.
+> **Filesystem isolation depends on `worker_scope`.**
+> With `shared`, `user_agent`, or unscoped execution, each worker can only see its own agent's storage directory — this is the strongest isolation available.
+> With `user`, the worker can see all agents' storage because it shares one runtime across multiple agents for a single user.
+> Use `user_agent` for per-agent filesystem isolation.
 
 Typical Helm values look like:
 
@@ -111,15 +108,15 @@ Important behavior and constraints:
 - `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
-- Dedicated workers need access to the shared instance PVC or equivalent shared storage so they can reach canonical agent state roots.
-- Dedicated workers narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution to the addressed agent root plus the worker runtime root.
-- Dedicated workers keep mirrored credentials under the worker runtime root rather than mounting shared-root credential directories into agent-isolated pods.
+- Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
+- For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
+- Credentials are mirrored into the worker's scratch space rather than mounting the shared credentials directory into agent-isolated pods.
 - Worker-local caches may still live under `kubernetesWorkerStorageSubpathPrefix/<worker-dir>/`.
 
 ### Storage Requirements
 
 Dedicated workers need access to the same PVC as the primary runtime.
-Set `storageAccessMode: ReadWriteMany` so multiple workers can access the same canonical agent state roots concurrently.
+Set `storageAccessMode: ReadWriteMany` so multiple workers can access agent storage concurrently.
 If your storage class only supports `ReadWriteOnce`, set `controlPlaneNodeName` so the control plane and dedicated workers stay on the same node.
 The chart enforces this constraint during template rendering.
 

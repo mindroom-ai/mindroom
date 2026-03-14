@@ -60,7 +60,7 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Workspace-relative file-memory path inside this agent's canonical workspace (optional)
+    # Directory inside the agent's workspace for file memory (optional)
     memory_file_path: mind_data
 
     # Assign agent to one or more configured knowledge bases (optional)
@@ -88,10 +88,10 @@ agents:
       bridge_telegram: room
       "!abc123:example.com": room
 
-    # Tools to route through scoped workers via the sandbox proxy (optional, inherits from defaults)
+    # Tools to run in the sandbox proxy instead of the main process (optional, inherits from defaults)
     worker_tools: [shell, file]
 
-    # How proxied worker runtimes are reused (optional, inherits from defaults)
+    # How sandbox runtimes are shared (optional, inherits from defaults)
     worker_scope: user_agent
 
     # Allow this agent to read and modify its own config at runtime
@@ -126,9 +126,9 @@ agents:
 | `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
-| `memory_file_path`            | string | `null`      | Workspace-relative directory inside this agent's canonical workspace to use for file memory                                                                                                                                                                                                                                       |
+| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
-| `context_files`               | list   | `[]`        | Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                           |
+| `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                        |
 | `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
 | `room_thread_modes`           | map    | `{}`        | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback                                                                                                                                                                           |
 | `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
@@ -137,8 +137,8 @@ agents:
 | `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                  |
 | `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
 | `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools`                | list   | `null`      | Tool names to route through the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md). Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom applies its built-in default routing policy. Set to `[]` to explicitly disable proxy routing for this agent                               |
-| `worker_scope`                | string | `null`      | Worker runtime reuse mode for proxied tools. Inherits from `defaults.worker_scope`. Valid values are `shared`, `user`, and `user_agent`. `user` reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary                                                                            |
+| `worker_tools`                | list   | `null`      | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent                                            |
+| `worker_scope`                | string | `null`      | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`                                                                                                                                               |
 | `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
 | `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
 
@@ -146,29 +146,39 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. When `memory_file_path` is set, it must be a workspace-relative directory inside the agent's canonical workspace. `context_files` follow the same rule and must point at files inside that canonical workspace. Absolute paths and `..` traversal are rejected.
+Learning data is persisted to `mindroom_data/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `memory_file_path` and `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). Absolute paths and `..` traversal are rejected.
 
 ## Worker Routing
 
-`worker_tools` decides which toolkits are executed through the sandbox proxy instead of directly in the main MindRoom process. When `worker_tools` is omitted, MindRoom currently routes `coding`, `file`, `python`, and `shell` by default and keeps other tools local. `worker_scope` decides which proxied calls reuse the same worker runtime. Some credential-backed custom tools stay local even if they are listed in `worker_tools`. Currently that local-only set is `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
+`worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process. When omitted, MindRoom routes `coding`, `file`, `python`, and `shell` through the proxy by default. `worker_scope` controls how those sandbox runtimes are reused between calls. Some credential-backed tools always stay local regardless of `worker_tools`: `gmail`, `google_calendar`, `google_sheets`, and `homeassistant`.
 
 The supported `worker_scope` values are:
 
-- `shared`: one shared worker runtime per agent.
-- `user`: one worker runtime per requester, potentially reused across multiple agents for that requester.
-- `user_agent`: one worker runtime per requester and agent.
+- `shared`: one runtime per agent, shared by all users.
+- `user`: one runtime per user, shared across that user's agents.
+- `user_agent`: one runtime per user+agent pair.
 
-Leave `worker_scope` unset to keep proxied calls unscoped. They still run in the sandbox runner, but they do not get a scoped reusable worker runtime. `worker_scope` primarily affects proxied tool execution, and it also affects dashboard credential support and OpenAI-compatible agent eligibility.
+Leave `worker_scope` unset for unscoped execution — calls still run in the sandbox, but each call gets a fresh runtime instead of a persistent one. `worker_scope` also affects dashboard credential support and OpenAI-compatible agent eligibility.
 
 ### Filesystem Isolation
 
-`worker_scope` does not guarantee an agent-level filesystem boundary. It only selects which proxied calls may reuse the same runtime. For filesystem-capable worker tools such as `shell`, `file`, `python`, and `coding`, `base_dir` is a convenience default rather than a hard security boundary. Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution so those runtimes only see the addressed agent root plus their worker root. Shared-runner and local worker backends do not provide that hard boundary today. `user` creates one persistent runtime per requester. Multiple agents may run inside that runtime. Those agents may access each other's mounted files inside that runtime. Treat `user` as a per-requester workstation or trust-sharing mode. Use `user_agent` if you need the clearest per-agent filesystem isolation.
+`worker_scope` controls runtime reuse, not filesystem security. Tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside the agent's workspace, but this is a convenience, not a hard boundary.
 
-### State Ownership
+Isolation depends on the worker backend:
 
-MindRoom treats state ownership separately from runtime isolation. Each agent has one canonical state root. That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state. All worker scopes read and write that same canonical agent state root. `worker_scope` controls execution isolation and runtime reuse, not which files are authoritative. Multiple runtimes may access the same agent state root concurrently, so sensitive files and databases must tolerate concurrent writers or use explicit locking.
+- **Kubernetes dedicated workers** (`shared`, `user_agent`, unscoped): the runtime can only see its own agent's storage directory plus its worker-local scratch space. This is the strongest isolation available today.
+- **Kubernetes dedicated workers** (`user`): the runtime can see all agents' storage, because `user` mode intentionally shares one runtime across multiple agents for a single user. Treat this as a shared workstation.
+- **Shared-runner and local backends**: no hard filesystem boundary today, regardless of scope.
 
-The dashboard credential UI can only manage credentials for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` treat credentials as runtime-owned worker state instead of dashboard-managed state.
+Use `user_agent` if you need per-agent filesystem isolation.
+
+### Where Agent Data Lives
+
+Each agent stores all its data in one directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated — it does **not** change where the agent's data lives. All runtimes for the same agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
+
+The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
+
+For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
 ## Thread Mode Resolution
 
@@ -184,7 +194,7 @@ You can inject file content directly into an agent's role context without using 
 
 `context_files` behavior:
 
-- Paths are resolved relative to the agent's canonical workspace
+- Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
