@@ -13,7 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
 from mindroom.knowledge.manager import ensure_agent_knowledge_managers
-from mindroom.knowledge.utils import get_knowledge_for_base, resolve_agent_knowledge
+from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base, resolve_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
 
@@ -85,39 +86,40 @@ class DelegateTools(Toolkit):
 
         try:
             execution_identity = get_tool_execution_identity()
-            await ensure_agent_knowledge_managers(
+            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_agent_knowledge_managers(
                 agent_name,
                 self._config,
                 self._storage_path,
                 execution_identity=execution_identity,
             )
 
-            knowledge = resolve_agent_knowledge(
-                agent_name,
-                self._config,
-                lambda base_id: get_knowledge_for_base(
-                    base_id,
-                    config=self._config,
+            with bound_knowledge_managers(request_knowledge_managers):
+                knowledge = resolve_agent_knowledge(
+                    agent_name,
+                    self._config,
+                    lambda base_id: get_knowledge_for_base(
+                        base_id,
+                        config=self._config,
+                        storage_path=self._storage_path,
+                        execution_identity=execution_identity,
+                    ),
+                )
+                agent = create_agent(
+                    agent_name,
+                    self._config,
                     storage_path=self._storage_path,
-                    execution_identity=execution_identity,
-                ),
-            )
-            agent = create_agent(
-                agent_name,
-                self._config,
-                storage_path=self._storage_path,
-                knowledge=knowledge,
-                include_interactive_questions=False,
-                delegation_depth=self._delegation_depth + 1,
-            )
-            logger.info(
-                "Delegating task",
-                from_agent=self._agent_name,
-                to_agent=agent_name,
-                depth=self._delegation_depth + 1,
-                task_preview=task[:100],
-            )
-            response = await agent.arun(task)
+                    knowledge=knowledge,
+                    include_interactive_questions=False,
+                    delegation_depth=self._delegation_depth + 1,
+                )
+                logger.info(
+                    "Delegating task",
+                    from_agent=self._agent_name,
+                    to_agent=agent_name,
+                    depth=self._delegation_depth + 1,
+                    task_preview=task[:100],
+                )
+                response = await agent.arun(task)
         except Exception as e:
             logger.exception(
                 "Delegation failed",

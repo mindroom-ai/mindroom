@@ -111,7 +111,12 @@ from .constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
 from .knowledge.manager import ensure_agent_knowledge_managers
-from .knowledge.utils import MultiKnowledgeVectorDb, get_knowledge_for_base, resolve_agent_knowledge
+from .knowledge.utils import (
+    MultiKnowledgeVectorDb,
+    bound_knowledge_managers,
+    get_knowledge_for_base,
+    resolve_agent_knowledge,
+)
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -406,7 +411,7 @@ class AgentBot:
         return self.config.defaults.show_tool_calls
 
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to one or more knowledge bases."""
+        """Return the current knowledge assigned to one or more agent bases."""
         execution_identity = get_tool_execution_identity()
 
         def _shared_manager(base_id: str) -> KnowledgeManager | None:
@@ -430,6 +435,24 @@ class AgentBot:
                 knowledge_bases=missing_base_ids,
             ),
         )
+
+    async def _ensure_request_knowledge_managers(
+        self,
+        agent_names: list[str],
+        execution_identity: ToolExecutionIdentity,
+    ) -> dict[str, KnowledgeManager]:
+        """Ensure and collect managers needed for the current request scope."""
+        managers: dict[str, KnowledgeManager] = {}
+        for agent_name in agent_names:
+            managers.update(
+                await ensure_agent_knowledge_managers(
+                    agent_name,
+                    self.config,
+                    self.storage_path,
+                    execution_identity=execution_identity,
+                ),
+            )
+        return managers
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
@@ -1689,13 +1712,7 @@ class AgentBot:
             user_id=requester_user_id,
             session_id=session_id,
         )
-        for agent_name in agent_names:
-            await ensure_agent_knowledge_managers(
-                agent_name,
-                self.config,
-                self.storage_path,
-                execution_identity=execution_identity,
-            )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(agent_names, execution_identity)
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1708,7 +1725,11 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                        bound_knowledge_managers(request_knowledge_managers),
+                    ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=model_message,
@@ -1747,7 +1768,11 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                        bound_knowledge_managers(request_knowledge_managers),
+                    ):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
@@ -1937,11 +1962,9 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
-        await ensure_agent_knowledge_managers(
-            self.agent_name,
-            self.config,
-            self.storage_path,
-            execution_identity=execution_identity,
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
         )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
@@ -1949,7 +1972,11 @@ class AgentBot:
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                    bound_knowledge_managers(request_knowledge_managers),
+                ):
                     knowledge = self._knowledge_for_agent(self.agent_name)
                     response_text = await ai_response(
                         agent_name=self.agent_name,
@@ -2061,12 +2088,7 @@ class AgentBot:
             session_id=session_id,
             agent_name=agent_name,
         )
-        await ensure_agent_knowledge_managers(
-            agent_name,
-            self.config,
-            self.storage_path,
-            execution_identity=execution_identity,
-        )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers([agent_name], execution_identity)
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
@@ -2079,7 +2101,11 @@ class AgentBot:
         run_metadata_content: dict[str, Any] = {}
 
         async with typing_indicator(self.client, room_id):
-            with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+            with (
+                tool_execution_identity(execution_identity),
+                tool_runtime_context(tool_context),
+                bound_knowledge_managers(request_knowledge_managers),
+            ):
                 knowledge = self._knowledge_for_agent(agent_name)
                 response_text = await ai_response(
                     agent_name=agent_name,
@@ -2244,18 +2270,20 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
-        await ensure_agent_knowledge_managers(
-            self.agent_name,
-            self.config,
-            self.storage_path,
-            execution_identity=execution_identity,
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
         )
         run_metadata_content: dict[str, Any] = {}
 
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                    bound_knowledge_managers(request_knowledge_managers),
+                ):
                     knowledge = self._knowledge_for_agent(self.agent_name)
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
