@@ -35,22 +35,22 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.    │
-│ --show-completion               Show completion for the current shell, to    │
-│                                 copy it or customize the installation.       │
-│ --help                -h        Show this message and exit.                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                    │
-│ run                 Run the mindroom multi-agent system.                     │
-│ doctor              Check your environment for common issues.                │
-│ connect             Pair this local MindRoom install with the hosted         │
-│                     provisioning service.                                    │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.  │
-│ config              Manage MindRoom configuration files.                     │
-│ avatars             Generate and sync managed avatar assets.                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
+│ avatars             Generate and sync managed avatar assets.                           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -79,9 +79,9 @@ Show the current MindRoom version.
  Show the current version of Mindroom.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -115,26 +115,23 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, │
-│                                          WARNING, ERROR)                     │
-│                                          [env var: LOG_LEVEL]                │
-│                                          [default: INFO]                     │
-│ --storage-path  -s              PATH     Base directory for persistent       │
-│                                          MindRoom data (state, sessions,     │
-│                                          tracking)                           │
-│                                          [default: None]                     │
-│ --api               --no-api             Start the bundled dashboard/API     │
-│                                          server alongside the bot            │
-│                                          [default: api]                      │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 8765]                     │
-│ --api-host                      TEXT     Host for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 0.0.0.0]                  │
-│ --help          -h                       Show this message and exit.         │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
+│                                          ERROR)                                        │
+│                                          [env var: LOG_LEVEL]                          │
+│                                          [default: INFO]                               │
+│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
+│                                          (state, sessions, tracking)                   │
+│                                          [default: None]                               │
+│ --api               --no-api             Start the bundled dashboard/API server        │
+│                                          alongside the bot                             │
+│                                          [default: api]                                │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
+│                                          [default: 8765]                               │
+│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
+│                                          [default: 0.0.0.0]                            │
+│ --help          -h                       Show this message and exit.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -163,14 +160,14 @@ Generate and sync managed avatar assets.
  Generate and sync managed avatar assets.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.           │
-│ sync       Sync configured room and root-space avatars to Matrix using the   │
-│            initialized router account.                                       │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.                     │
+│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
+│            router account.                                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -201,9 +198,9 @@ In containerized deployments, generated overrides are written under the persiste
  Generate missing managed avatar files in the workspace.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -229,13 +226,13 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized
- router account.
+ Sync configured room and root-space avatars to Matrix using the initialized router
+ account.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -300,56 +297,51 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
  Start local Synapse + MindRoom Cinny using Docker only.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                             PATH              Directory        │
-│                                                             containing       │
-│                                                             Synapse          │
-│                                                             docker-compose.… │
-│                                                             (from            │
-│                                                             mindroom-stack   │
-│                                                             settings).       │
-│                                                             [default:        │
-│                                                             local/matrix]    │
-│ --homeserver-url                          TEXT              Homeserver URL   │
-│                                                             that Cinny and   │
-│                                                             MindRoom should  │
-│                                                             use.             │
-│                                                             [default:        │
-│                                                             http://localhos… │
-│ --server-name                             TEXT              Matrix server    │
-│                                                             name (default:   │
-│                                                             inferred from    │
-│                                                             --homeserver-url │
-│                                                             hostname).       │
-│                                                             [default: None]  │
-│ --cinny-port                              INTEGER RANGE     Local host port  │
-│                                           [1<=x<=65535]     for the MindRoom │
-│                                                             Cinny container. │
-│                                                             [default: 8080]  │
-│ --cinny-image                             TEXT              Docker image for │
-│                                                             MindRoom Cinny.  │
-│                                                             [default:        │
-│                                                             ghcr.io/mindroo… │
-│ --cinny-containe…                         TEXT              Container name   │
-│                                                             for MindRoom     │
-│                                                             Cinny.           │
-│                                                             [default:        │
-│                                                             mindroom-cinny-… │
-│ --skip-synapse                                              Skip starting    │
-│                                                             Synapse (assume  │
-│                                                             it is already    │
-│                                                             running).        │
-│ --persist-env          --no-persist-e…                      Persist Matrix   │
-│                                                             local dev        │
-│                                                             settings to .env │
-│                                                             next to          │
-│                                                             config.yaml.     │
-│                                                             [default:        │
-│                                                             persist-env]     │
-│ --help             -h                                       Show this        │
-│                                                             message and      │
-│                                                             exit.            │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│                                                                    [default: None]     │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
