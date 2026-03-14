@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import typer
@@ -23,6 +24,7 @@ from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
 )
+from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
@@ -35,6 +37,9 @@ from .config import (
 )
 from .doctor import doctor
 from .local_stack import local_stack_setup
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -53,7 +58,9 @@ app = typer.Typer(
     # Disable showing locals which can be very large (also see `setup_logging`)
     pretty_exceptions_show_locals=False,
 )
+avatars_app = typer.Typer(help="Generate and sync managed avatar assets.")
 app.add_typer(config_app, name="config")
+app.add_typer(avatars_app, name="avatars")
 
 
 @app.command()
@@ -114,24 +121,15 @@ def run(
     )
 
 
-async def _run(
-    log_level: str,
-    storage_path: Path,
-    *,
-    api: bool,
-    api_port: int,
-    api_host: str,
-) -> None:
-    """Run the multi-agent system with friendly error handling."""
+def _load_active_config_or_exit() -> Config:
+    """Load the active config file or exit with friendly validation errors."""
     ensure_writable_config_path()
 
-    # Check config exists before starting
     config_path = Path(CONFIG_PATH)
     if not config_path.exists():
         _print_missing_config_error()
         raise typer.Exit(1)
 
-    # Validate config early so users get a clear message instead of a traceback
     try:
         config = _load_config_quiet(config_path)
     except ValidationError as exc:
@@ -141,6 +139,20 @@ async def _run(
         console.print(f"[red]Error:[/red] Could not load configuration: {exc}")
         console.print("\n  [cyan]mindroom config validate[/cyan]  Check your config")
         raise typer.Exit(1) from None
+
+    return config
+
+
+async def _run(
+    log_level: str,
+    storage_path: Path,
+    *,
+    api: bool,
+    api_port: int,
+    api_host: str,
+) -> None:
+    """Run the multi-agent system with friendly error handling."""
+    config = _load_active_config_or_exit()
 
     # Check for missing API keys
     _check_env_keys(config)
@@ -182,6 +194,42 @@ async def _run(
 
 
 app.command()(doctor)
+
+
+@avatars_app.command("generate")
+def avatars_generate() -> None:
+    """Generate missing managed avatar files in the workspace."""
+    _load_active_config_or_exit()
+
+    try:
+        from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
+
+        asyncio.run(run_avatar_generation())
+    except AvatarGenerationError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+
+@avatars_app.command("sync")
+def avatars_sync() -> None:
+    """Sync configured room and root-space avatars to Matrix using the initialized router account."""
+    _load_active_config_or_exit()
+
+    try:
+        from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
+
+        asyncio.run(set_room_avatars_in_matrix())
+    except AvatarSyncError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from None
+    except ConnectionError as exc:
+        _print_connection_error(exc)
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        if "connect" in str(exc).lower() or "refused" in str(exc).lower():
+            _print_connection_error(exc)
+            raise typer.Exit(1) from None
+        raise
 
 
 @app.command()

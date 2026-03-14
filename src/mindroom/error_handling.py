@@ -7,6 +7,14 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+class AvatarGenerationError(RuntimeError):
+    """Raised when managed avatar generation cannot produce required assets."""
+
+
+class AvatarSyncError(RuntimeError):
+    """Raised when managed avatar sync cannot complete."""
+
+
 def _extract_provider_from_error(error: Exception) -> str | None:
     """Try to extract the provider name from the exception's module."""
     module = type(error).__module__ or ""
