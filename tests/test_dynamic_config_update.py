@@ -14,6 +14,7 @@ from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
+from tests.conftest import orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +40,7 @@ class TestDynamicConfigUpdate:
         )
 
         # Create orchestrator and set initial config
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
@@ -194,7 +195,7 @@ class TestDynamicConfigUpdate:
             defaults={"enable_streaming": False},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         mock_bot = MagicMock(spec=AgentBot)
@@ -250,7 +251,7 @@ class TestDynamicConfigUpdate:
             },
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         general_bot = MagicMock(spec=AgentBot)
@@ -302,7 +303,7 @@ class TestDynamicConfigUpdate:
             authorization={"global_users": ["@alice:example.com"]},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         general_bot = MagicMock(spec=AgentBot)
@@ -353,7 +354,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config
@@ -407,7 +408,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config

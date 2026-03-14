@@ -16,7 +16,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, orchestrator_runtime_paths
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
@@ -514,7 +514,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     # Initialize with initial config
     await orchestrator.initialize()

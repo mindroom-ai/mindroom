@@ -18,7 +18,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, orchestrator_runtime_paths
 
 
 def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
@@ -320,7 +320,7 @@ class TestDMIntegration:
     async def test_dm_response_flow(self, tmp_path: Path) -> None:
         """Test the complete flow of responding in a DM."""
         # This is a more complex integration test
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         config = _config()
         config.agents = {"researcher": MagicMock()}

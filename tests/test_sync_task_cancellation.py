@@ -11,6 +11,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.orchestration.runtime import cancel_sync_task, stop_entities
 from mindroom.orchestrator import MultiAgentOrchestrator
+from tests.conftest import orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,7 +125,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.get_all_configured_rooms.return_value = []
 
         # Create orchestrator
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = config
 
         # Initialize bots
@@ -157,7 +158,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         patch("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # Create orchestrator with existing agent
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         # Setup existing config and bot
         old_config = MagicMock(spec=Config)
@@ -223,7 +224,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch.object(MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         old_config = Config(
             agents={
@@ -296,7 +297,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
 async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path) -> None:
     """Test that stop() cancels all sync tasks."""
     with patch("mindroom.orchestrator.cancel_sync_task") as mock_cancel:
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
         # Track which tasks are cancelled
         cancelled = []

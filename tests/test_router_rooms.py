@@ -16,7 +16,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, orchestrator_runtime_paths
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -245,7 +245,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     # Create orchestrator
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     # Initialize (creates all bots)
     await orchestrator.initialize()
@@ -343,7 +343,7 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("mindroom.bot.TeamBot.join_configured_rooms", AsyncMock())
     monkeypatch.setattr("mindroom.bot.TeamBot.leave_unconfigured_rooms", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     await orchestrator.initialize()
 

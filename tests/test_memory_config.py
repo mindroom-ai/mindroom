@@ -13,6 +13,7 @@ from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryL
 from mindroom.config.models import EmbedderConfig, RouterConfig
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
 from mindroom.orchestrator import MultiAgentOrchestrator
+from tests.conftest import orchestrator_runtime_paths
 
 
 class TestMemoryConfig:
@@ -321,7 +322,7 @@ class TestMemoryConfig:
         project_root.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(project_root)
 
-        orchestrator = MultiAgentOrchestrator(storage_path=Path("mindroom_data"))
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(Path("mindroom_data")))
 
         other_cwd = tmp_path / "other"
         other_cwd.mkdir(parents=True, exist_ok=True)

@@ -16,7 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, orchestrator_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -161,7 +161,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         client.sync_forever = AsyncMock()
 
     # Create orchestrator with specific room configuration
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     # Patch the config loading to assign rooms
     with patch("mindroom.config.main.Config.from_yaml") as mock_config:

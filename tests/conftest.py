@@ -11,7 +11,7 @@ import pytest_asyncio
 from aioresponses import aioresponses
 
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
@@ -20,6 +20,7 @@ __all__ = [
     "aioresponse",
     "bypass_authorization",
     "create_mock_room",
+    "orchestrator_runtime_paths",
 ]
 
 
@@ -75,13 +76,29 @@ TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
 
 
-def _make_test_runtime_paths(tmp_root: Path) -> object:
+def _make_test_runtime_paths(tmp_root: Path) -> RuntimePaths:
     """Create an isolated runtime context for one test config."""
     config_path = tmp_root / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
+def orchestrator_runtime_paths(
+    storage_path: Path,
+    *,
+    config_path: Path | None = None,
+) -> RuntimePaths:
+    """Build an explicit runtime context for orchestrator tests."""
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",

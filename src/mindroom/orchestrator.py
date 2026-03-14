@@ -44,7 +44,6 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import RuntimePaths, resolve_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -76,6 +75,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
 
+    from .constants import RuntimePaths
     from .knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
@@ -88,9 +88,9 @@ _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 class MultiAgentOrchestrator:
     """Orchestrates multiple agent bots."""
 
-    storage_path: Path | None = None
-    config_path: Path | None = None
-    runtime_paths: RuntimePaths | None = None
+    runtime_paths: RuntimePaths
+    storage_path: Path = field(init=False)
+    config_path: Path = field(init=False)
     agent_bots: dict[str, AgentBot | TeamBot] = field(default_factory=dict, init=False)
     running: bool = field(default=False, init=False)
     config: Config | None = field(default=None, init=False)
@@ -102,16 +102,11 @@ class MultiAgentOrchestrator:
     _knowledge_refresh_task: asyncio.Task | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Store a canonical absolute storage path to survive runtime cwd changes."""
-        self.runtime_paths = self.runtime_paths or resolve_runtime_paths(
-            config_path=self.config_path,
-            storage_path=self.storage_path,
-        )
+        """Store canonical derived paths from the explicit runtime context."""
         self.storage_path = self.runtime_paths.storage_root
         self.config_path = self.runtime_paths.config_path
 
     def _require_runtime_paths(self) -> RuntimePaths:
-        assert self.runtime_paths is not None
         return self.runtime_paths
 
     def _require_storage_path(self) -> Path:

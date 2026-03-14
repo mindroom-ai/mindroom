@@ -481,7 +481,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             mock_from_yaml.return_value = mock_config
 
             with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+                orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
                 await orchestrator.initialize()
 
                 # Verify agents were created (2 agents + 1 router)

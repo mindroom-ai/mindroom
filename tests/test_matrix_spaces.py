@@ -16,6 +16,7 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.identity import managed_space_alias_localpart, mindroom_namespace
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import MultiAgentOrchestrator
+from tests.conftest import orchestrator_runtime_paths
 
 
 def _config_with_runtime_paths(tmp_path, **config_data: object) -> Config:  # noqa: ANN001
@@ -355,7 +356,7 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_users(tmp_path) -> None:  # noqa: ANN001
     """The orchestrator should invite both the internal user and authorized users to the root Space."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
@@ -392,7 +393,7 @@ async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_us
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_invites_authorized_user_without_internal_user(tmp_path) -> None:  # noqa: ANN001
     """The root Space should still invite the owner when no internal user exists."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = Config(
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
@@ -419,7 +420,7 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 @pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_runs_root_space_after_each_room_reconciliation(tmp_path) -> None:  # noqa: ANN001
     """Space reconciliation should happen as a post-room phase during startup."""
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = Config(
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
@@ -468,7 +469,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         matrix_space={"enabled": True, "name": "Workspace"},
     )
 
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = initial_config
 
     general_bot = MagicMock()

@@ -2831,7 +2831,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_orchestrator_initialization(self, tmp_path: Path) -> None:
         """Test MultiAgentOrchestrator initialization."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         assert orchestrator.agent_bots == {}
         assert not orchestrator.running
 
@@ -2852,7 +2852,7 @@ class TestMultiAgentOrchestrator:
             },
         )
         config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -2902,7 +2902,7 @@ class TestMultiAgentOrchestrator:
             },
         )
         config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -2940,7 +2940,7 @@ class TestMultiAgentOrchestrator:
             authorization={"default_room_access": False},
         )
         config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         router_bot = MagicMock()
@@ -2977,7 +2977,7 @@ class TestMultiAgentOrchestrator:
                 ),
             },
         )
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         bot = AsyncMock()
@@ -3011,7 +3011,7 @@ class TestMultiAgentOrchestrator:
             },
             mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
         )
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         router_bot = AsyncMock()
@@ -3055,7 +3055,7 @@ class TestMultiAgentOrchestrator:
                 ),
             },
         )
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = config
 
         router_joined = False
@@ -3112,7 +3112,7 @@ class TestMultiAgentOrchestrator:
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 
             # Should have 3 bots: calculator, general, and router
@@ -3133,7 +3133,13 @@ class TestMultiAgentOrchestrator:
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot"),
         ):
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+            orchestrator = MultiAgentOrchestrator(
+                runtime_paths=resolve_runtime_paths(
+                    config_path=config_path,
+                    storage_path=tmp_path,
+                    process_env={},
+                ),
+            )
             await orchestrator.initialize()
 
         mock_load_config.assert_called_once()
@@ -3160,7 +3166,7 @@ class TestMultiAgentOrchestrator:
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()  # Need to initialize first
 
             # Mock start for all bots to avoid actual login/setup
@@ -3187,7 +3193,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_orchestrator_start_sets_up_rooms_before_knowledge(self, tmp_path: Path) -> None:
         """Room creation/invites should happen before knowledge refresh work."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
         bot = MagicMock()
@@ -3221,7 +3227,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_orchestrator_waits_for_homeserver_before_initialize(self, tmp_path: Path) -> None:
         """Matrix readiness must gate initialize(), which creates the internal Matrix user."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         call_order: list[str] = []
 
         async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
@@ -3425,7 +3431,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_schedule_knowledge_refresh_retries_until_success(self, tmp_path: Path) -> None:
         """Background knowledge refresh should keep retrying until it succeeds."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         config = MagicMock()
         attempts = 0
 
@@ -3452,7 +3458,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_orchestrator_start_schedules_retry_for_failed_agents(self, tmp_path: Path) -> None:
         """Startup should keep degraded agents around and retry them in the background."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
         router_bot = MagicMock()
@@ -3481,7 +3487,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_orchestrator_start_skips_retry_for_permanent_failures(self, tmp_path: Path) -> None:
         """Permanent startup failures should leave bots disabled without retry loops."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         orchestrator.config = MagicMock()
 
         router_bot = MagicMock()
@@ -3606,7 +3612,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_update_config_schedules_knowledge_refresh_when_running(self, tmp_path: Path) -> None:
         """Hot reload should schedule (not block on) knowledge refresh while running."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
         config = MagicMock()
         config.agents = {}
@@ -3651,7 +3657,13 @@ class TestMultiAgentOrchestrator:
         new_config.authorization.global_users = []
         new_config.defaults.enable_streaming = True
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+        orchestrator = MultiAgentOrchestrator(
+            runtime_paths=resolve_runtime_paths(
+                config_path=config_path,
+                storage_path=tmp_path,
+                process_env={},
+            ),
+        )
         orchestrator.config = current_config
         plan = SimpleNamespace(
             mindroom_user_changed=False,
@@ -3676,7 +3688,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:
         """Hot reload should retain failed bots and retry them instead of dropping them."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
         old_config = Config(
             agents={
@@ -3751,7 +3763,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_update_config_keeps_permanently_failed_new_bot_without_retry(self, tmp_path: Path) -> None:
         """Hot reload should retain permanently failed bots without scheduling retries."""
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
 
         old_config = Config(
             agents={
@@ -3844,7 +3856,7 @@ class TestMultiAgentOrchestrator:
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 
             # Mock the agent clients and ensure_user_account
@@ -3883,7 +3895,7 @@ class TestMultiAgentOrchestrator:
         mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+            orchestrator = MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize()
 
             # All bots should have streaming disabled except teams (which never stream)
