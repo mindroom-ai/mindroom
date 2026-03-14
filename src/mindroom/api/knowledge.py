@@ -107,7 +107,8 @@ async def _ensure_manager(
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeManager | None:
     existing = get_knowledge_manager(base_id)
-    if existing is not None and existing.matches(config, runtime_paths):
+    knowledge_path = _knowledge_root(config, base_id, runtime_paths.config_path)
+    if existing is not None and existing.matches(config, runtime_paths.storage_root, knowledge_path):
         return existing
     managers = await _ensure_managers(config, runtime_paths)
     return managers.get(base_id)
@@ -160,6 +161,7 @@ async def list_knowledge_bases() -> dict[str, Any]:
 
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
+        base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths.config_path)
         manager = manager_map.get(base_id)
         if manager is None:
@@ -174,7 +176,7 @@ async def list_knowledge_bases() -> dict[str, Any]:
             {
                 "name": base_id,
                 "path": str(root),
-                "watch": config.knowledge_bases[base_id].watch,
+                "watch": base_config.watch,
                 "file_count": file_count,
                 "indexed_count": indexed_count,
             },

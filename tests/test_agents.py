@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config.agent import AgentConfig, CultureConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, CultureConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -36,6 +36,8 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -1047,6 +1049,151 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     assert "Relative soul context." in agent.role
 
 
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private per-user roots should copy their configured template and isolate private context files."""
+    config = Config.from_yaml()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    template_dir = build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+        context_files=["USER.md"],
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"):
+        assert template_dir == (config_dir / "mind_template").resolve()
+
+        with tool_execution_identity(alice_identity):
+            create_agent(
+                "general",
+                config=config,
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_dir / "config.yaml"),
+            )
+            alice_worker_key = resolve_worker_key("user", alice_identity)
+            assert alice_worker_key is not None
+            alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+            assert (alice_workspace / "USER.md").exists()
+            assert (alice_workspace / "MEMORY.md").exists()
+            (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
+            alice_agent = create_agent(
+                "general",
+                config=config,
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_dir / "config.yaml"),
+            )
+
+        with tool_execution_identity(bob_identity):
+            bob_agent = create_agent(
+                "general",
+                config=config,
+                runtime_paths=_runtime_paths(tmp_path, config_path=config_dir / "config.yaml"),
+            )
+            bob_worker_key = resolve_worker_key("user", bob_identity)
+            assert bob_worker_key is not None
+            bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+
+    assert alice_workspace != bob_workspace
+    assert "Alice private root context." in alice_agent.role
+    assert (bob_workspace / "USER.md").exists()
+    assert "Alice private root context." not in bob_agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_template_dir_does_not_imply_context_files(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private template directories should not implicitly load Mind-style context files."""
+    config = Config.from_yaml()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+        },
+    )
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with patch("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml"), tool_execution_identity(identity):
+        agent = create_agent(
+            "general",
+            config=config,
+            runtime_paths=_runtime_paths(tmp_path, config_path=config_dir / "config.yaml"),
+        )
+
+    assert "Template user." not in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_root_requires_execution_identity(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Private agents should fail closed instead of falling back to shared config-relative state."""
+    config = Config.from_yaml()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+    )
+
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path))
+
+    assert not (tmp_path / "mind_data").exists()
+
+
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
     """Agents must not reference unknown knowledge bases."""
     with pytest.raises(ValidationError, match="Agents reference unknown knowledge bases: calculator -> research"):
@@ -1230,6 +1377,179 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     )
 
     assert config.agents["calculator"].knowledge_bases == ["research"]
+
+
+def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
+    """Top-level knowledge base IDs must not collide with synthetic private IDs."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "knowledge_bases keys must not use the reserved private prefix '__agent_private__:'; "
+            "invalid keys: __agent_private__:mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(display_name="Mind"),
+            },
+            knowledge_bases={
+                "__agent_private__:mind": KnowledgeBaseConfig(path="./company_docs"),
+            },
+        )
+
+
+def test_config_private_knowledge_requires_path_without_template_default() -> None:
+    """Private knowledge needs an explicit path whenever it is enabled."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(watch=False),
+                    ),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("root", "expected_message"),
+    [
+        ("", "private.root must not be empty"),
+        ("   ", "private.root must not be empty"),
+        (".", "private.root must not be the workspace root"),
+        ("sessions", "private.root must not use reserved runtime directory 'sessions'"),
+        ("sessions/nested", "private.root must not use reserved runtime directory 'sessions'"),
+        ("learning", "private.root must not use reserved runtime directory 'learning'"),
+        ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
+    ],
+)
+def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
+    """Private roots must stay out of the worker root and runtime-managed directories."""
+    with pytest.raises(ValidationError, match=re.escape(expected_message)):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root=root,
+                    ),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize("path", ["", "   "])
+def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
+    """Blank private knowledge paths should be rejected explicitly."""
+    with pytest.raises(ValidationError, match=re.escape("private.knowledge.path must not be empty")):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(path=path),
+                    ),
+                ),
+            },
+        )
+
+
+def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
+    """A dot path is allowed to index the entire private root explicitly."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    knowledge=AgentPrivateKnowledgeConfig(path="."),
+                ),
+            ),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_knowledge_base_config(private_base_id).path == "."
+
+
+def test_config_private_and_shared_knowledge_coexist() -> None:
+    """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                ),
+                knowledge_bases=["company_docs"],
+            ),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
+    private_config = config.get_knowledge_base_config(private_base_id)
+    assert private_config.path == "memory"
+
+
+def test_template_dir_does_not_imply_private_knowledge() -> None:
+    """Copying from a template directory alone should not create a private knowledge base."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                ),
+            ),
+        },
+    )
+
+    assert config.get_agent_private_knowledge_base_id("mind") is None
+    assert config.get_agent_knowledge_base_ids("mind") == []
+
+
+def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
+    """Synthetic private base IDs should resolve only while private knowledge is actually active."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                ),
+            ),
+            "assistant": AgentConfig(display_name="Assistant"),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    assert config.get_private_knowledge_base_agent("__agent_private__:mind") == "mind"
+    assert config.get_private_knowledge_base_agent("__agent_private__:assistant") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:missing") is None
 
 
 def test_config_rejects_duplicate_default_tools() -> None:

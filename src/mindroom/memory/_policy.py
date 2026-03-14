@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path, resolve_agent_state_storage_path
+from mindroom.tool_system.worker_routing import (
+    get_tool_execution_identity,
+    resolve_agent_owned_path,
+    resolve_agent_state_storage_path,
+)
+from mindroom.workspaces import resolve_agent_private_state_storage_path
 
 from ._shared import FileMemoryResolution
 
@@ -154,14 +159,21 @@ def resolve_file_memory_resolution(
     preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Resolve file-memory storage settings for one caller context."""
-    resolved_storage_path = (
-        storage_path
-        if agent_name is None
-        else resolve_agent_state_storage_path(
-            agent_name=agent_name,
-            base_storage_path=storage_path,
-        )
-    )
+    resolved_storage_path = storage_path
+    agent_config = config.agents.get(agent_name) if agent_name is not None else None
+    if agent_name is not None:
+        if agent_config is not None and agent_config.private is not None:
+            resolved_storage_path = resolve_agent_private_state_storage_path(
+                agent_name,
+                config,
+                base_storage_path=storage_path,
+                execution_identity=get_tool_execution_identity(),
+            )
+        else:
+            resolved_storage_path = resolve_agent_state_storage_path(
+                agent_name=agent_name,
+                base_storage_path=storage_path,
+            )
     resolution = file_memory_resolution_from_paths(
         original_storage_path=original_storage_path or storage_path,
         resolved_storage_path=resolved_storage_path,
@@ -170,7 +182,6 @@ def resolve_file_memory_resolution(
     if agent_name is None:
         return resolution
 
-    agent_config = config.agents.get(agent_name)
     if agent_config is None or agent_config.memory_file_path is None:
         return resolution
 

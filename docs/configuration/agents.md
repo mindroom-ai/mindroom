@@ -132,6 +132,7 @@ agents:
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
 | `memory_file_path` | string | `null` | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/` |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -143,7 +144,7 @@ agents:
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
-| `worker_scope` | string | `null` | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope` |
+| `worker_scope` | string | `null` | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. `room_thread`: one per room thread. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` becomes the worker scope for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
@@ -204,6 +205,102 @@ Agents using `user` or `user_agent` manage credentials through their worker runt
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md).
 
+## Private Instances
+
+Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
+The YAML definition stays shared.
+The private root, copied files, file-memory workspace, and private knowledge path do not.
+
+```yaml
+knowledge_bases:
+  company_docs:
+    path: ./company_docs
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    tools: [file, shell]
+    worker_tools: [file, shell]
+    memory_backend: file
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+      context_files:
+        - SOUL.md
+        - AGENTS.md
+        - USER.md
+        - IDENTITY.md
+        - TOOLS.md
+        - HEARTBEAT.md
+        - MEMORY.md
+      knowledge:
+        path: memory
+        watch: true
+    knowledge_bases: [company_docs]
+```
+
+Example template directory:
+
+```text
+mind_template/
+├── SOUL.md
+├── AGENTS.md
+├── USER.md
+├── IDENTITY.md
+├── TOOLS.md
+├── HEARTBEAT.md
+├── MEMORY.md
+└── memory/
+```
+
+In the example above, each requester gets their own effective `mind_data/` root under the worker-owned state root for that request.
+That private root is not created next to `config.yaml`.
+It lives inside the runtime state owned by the effective `private.per` worker boundary.
+For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+
+### Private Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private.per` | `user`, `user_agent`, or `room_thread` | *required* | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope |
+| `private.root` | string | `<agent_name>_data` | Private root name under the effective worker-owned state root. Must be a relative path and cannot escape with `..` |
+| `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root on first use. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error on first use if the directory does not exist |
+| `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |
+| `private.knowledge` | object | `null` | Optional requester-local knowledge indexed from inside the private root. See [Knowledge Bases](../knowledge.md#private-agent-knowledge) |
+
+### Runtime Behavior
+
+1. MindRoom resolves the worker-owned state root from `private.per`.
+2. MindRoom creates the effective private root inside that worker-owned state root.
+3. If `private.template_dir` is set, MindRoom copies the template directory into the private root without overwriting files that already exist there.
+4. MindRoom loads any `private.context_files` from that private root when the agent is created or reloaded.
+5. If `memory_backend: file` is enabled, MindRoom uses that same private root as the file-memory root for that requester.
+6. If `private.knowledge.path` is configured, MindRoom indexes that private-root-relative path as requester-local knowledge for that requester only.
+
+### Important Rules
+
+- `private` is explicit opt-in.
+- `private` does not automatically enable file memory.
+- `private` does not automatically load any context files.
+- `private` does not automatically create a private knowledge base.
+- If `private.template_dir` is omitted, MindRoom still creates the private root.
+- Private agents require an active requester-scoped runtime context.
+- MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
+- Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
+- Set `private.context_files` explicitly for any copied files you want loaded into role context.
+- Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
+- Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want requester-local knowledge indexing.
+- `private` cannot be combined with `worker_scope`.
+- `private` cannot be combined with `memory_file_path`.
+- Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both requester-local knowledge and shared knowledge in the same run.
+- Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+- Custom templates are fully supported.
+- The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
+
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
@@ -229,6 +326,7 @@ You can inject file content directly into an agent's role context without using 
 `context_files` behavior:
 
 - Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
+- `private.context_files` paths are resolved relative to the effective private root
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 

@@ -1012,35 +1012,36 @@ agents:
 
 ## Configuration Options
 
-| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                                                                                       |
-| ----------------------------- | ------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                                                                                                     |
-| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                                                                                                  |
-| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                                                                                             |
-| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                          |
-| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                                                                                                |
-| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                                                                                          |
-| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                                                                                          |
-| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                                                                                                  |
-| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                                                                                        |
-| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                               |
-| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                 |
-| `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                 |
-| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                |
-| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                         |
-| `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                        |
-| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                 |
-| `room_thread_modes`           | map    | `{}`        | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback                                                                                                                                                                           |
-| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                            |
-| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                                                                                             |
-| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                                                                                                |
-| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                  |
-| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                |
-| `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
-| `worker_tools`                | list   | `null`      | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent                                            |
-| `worker_scope`                | string | `null`      | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`                                                                                                                                               |
-| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                         |
-| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                           |
+| Option                        | Type   | Default     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------- | ------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `display_name`                | string | *required*  | Human-readable name shown in Matrix as the bot's display name                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `role`                        | string | `""`        | System prompt describing the agent's purpose — guides its behavior and expertise                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `model`                       | string | `"default"` | Model name (must match a key in the `models` section)                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `tools`                       | list   | `[]`        | Agent-specific tool names (see [Tools](https://docs.mindroom.chat/tools/index.md)); effective tools are `tools + defaults.tools` with duplicates removed                                                                                                                                                                                                                                                                                                                                                                |
+| `include_default_tools`       | bool   | `true`      | When `true`, append `defaults.tools` to this agent's `tools`; set to `false` to opt this agent out                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `skills`                      | list   | `[]`        | Skill names the agent can use (see [Skills](https://docs.mindroom.chat/skills/index.md))                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `instructions`                | list   | `[]`        | Extra lines appended to the system prompt after the role                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `rooms`                       | list   | `[]`        | Room aliases to auto-join; rooms are created if they don't exist                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `markdown`                    | bool   | `null`      | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`)                                                                                                                                                                                                                                                                                                                                                                                              |
+| `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                                                                                                                                                                                                                     |
+| `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                                                                                                                                                                                                       |
+| `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                                                                                                                                                                                                      |
+| `private`                     | object | `null`      | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
+| `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                                                                                                                                                              |
+| `thread_mode`                 | string | `"thread"`  | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile                                                                                                                                                                                                                                                                                                       |
+| `room_thread_modes`           | map    | `{}`        | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback                                                                                                                                                                                                                                                                                                                                                                 |
+| `num_history_runs`            | int    | `null`      | Number of prior Agno runs to include as history context (`null` = all). Mutually exclusive with `num_history_messages`                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `num_history_messages`        | int    | `null`      | Max messages from history. Mutually exclusive with `num_history_runs`                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `compress_tool_results`       | bool   | `null`      | Compress tool results in history to save context. Inherits from `defaults.compress_tool_results` (default: `true`)                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `enable_session_summaries`    | bool   | `null`      | Generate AI summaries of older conversation segments for compaction (each summary costs an extra LLM call). Inherits from `defaults.enable_session_summaries` (default: `false`)                                                                                                                                                                                                                                                                                                                                        |
+| `max_tool_calls_from_history` | int    | `null`      | Limit tool call messages replayed from history (`null` = no limit)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `show_tool_calls`             | bool   | `null`      | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path.                                                                                                                                                                                       |
+| `worker_tools`                | list   | `null`      | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent                                                                                                                                                                                                                                  |
+| `worker_scope`                | string | `null`      | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. `room_thread`: one per room thread. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` becomes the worker scope for that agent                                                                                                                                                                                   |
+| `allow_self_config`           | bool   | `null`      | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool                                                                                                                                                                                                                                                                                                               |
+| `delegate_to`                 | list   | `[]`        | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation))                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 
@@ -1080,6 +1081,97 @@ The dashboard credential UI only works for unscoped agents and agents with `work
 
 For more details on storage layout and isolation, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/index.md).
 
+## Private Instances
+
+Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime. The YAML definition stays shared. The private root, copied files, file-memory workspace, and private knowledge path do not.
+
+```
+knowledge_bases:
+  company_docs:
+    path: ./company_docs
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    tools: [file, shell]
+    worker_tools: [file, shell]
+    memory_backend: file
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+      context_files:
+        - SOUL.md
+        - AGENTS.md
+        - USER.md
+        - IDENTITY.md
+        - TOOLS.md
+        - HEARTBEAT.md
+        - MEMORY.md
+      knowledge:
+        path: memory
+        watch: true
+    knowledge_bases: [company_docs]
+```
+
+Example template directory:
+
+```
+mind_template/
+├── SOUL.md
+├── AGENTS.md
+├── USER.md
+├── IDENTITY.md
+├── TOOLS.md
+├── HEARTBEAT.md
+├── MEMORY.md
+└── memory/
+```
+
+In the example above, each requester gets their own effective `mind_data/` root under the worker-owned state root for that request. That private root is not created next to `config.yaml`. It lives inside the runtime state owned by the effective `private.per` worker boundary. For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+
+### Private Fields
+
+| Field                   | Type                                   | Default             | Description                                                                                                                                                                                                                                 |
+| ----------------------- | -------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `private.per`           | `user`, `user_agent`, or `room_thread` | *required*          | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope                                                                                                                                |
+| `private.root`          | string                                 | `<agent_name>_data` | Private root name under the effective worker-owned state root. Must be a relative path and cannot escape with `..`                                                                                                                          |
+| `private.template_dir`  | string                                 | `null`              | Optional local directory copied recursively into each private root on first use. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error on first use if the directory does not exist |
+| `private.context_files` | list                                   | `null`              | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it                                                                                                        |
+| `private.knowledge`     | object                                 | `null`              | Optional requester-local knowledge indexed from inside the private root. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge)                                                                               |
+
+### Runtime Behavior
+
+1. MindRoom resolves the worker-owned state root from `private.per`.
+1. MindRoom creates the effective private root inside that worker-owned state root.
+1. If `private.template_dir` is set, MindRoom copies the template directory into the private root without overwriting files that already exist there.
+1. MindRoom loads any `private.context_files` from that private root when the agent is created or reloaded.
+1. If `memory_backend: file` is enabled, MindRoom uses that same private root as the file-memory root for that requester.
+1. If `private.knowledge.path` is configured, MindRoom indexes that private-root-relative path as requester-local knowledge for that requester only.
+
+### Important Rules
+
+- `private` is explicit opt-in.
+- `private` does not automatically enable file memory.
+- `private` does not automatically load any context files.
+- `private` does not automatically create a private knowledge base.
+- If `private.template_dir` is omitted, MindRoom still creates the private root.
+- Private agents require an active requester-scoped runtime context.
+- MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
+- Set `memory_backend: file` if you want `MEMORY.md` and `memory/` inside the private root to be the agent's actual file memory.
+- Set `private.context_files` explicitly for any copied files you want loaded into role context.
+- Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
+- Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want requester-local knowledge indexing.
+- `private` cannot be combined with `worker_scope`.
+- `private` cannot be combined with `memory_file_path`.
+- Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both requester-local knowledge and shared knowledge in the same run.
+- Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+- Custom templates are fully supported.
+- The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
+
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID. For an agent, MindRoom checks `room_thread_modes` in this order. First, it checks an exact room ID key. Second, it checks the managed room key/alias associated with that room ID. Third, it resolves each configured `room_thread_modes` key to a room ID and matches that against the current room. If none match, it falls back to `thread_mode`.
@@ -1095,6 +1187,7 @@ You can inject file content directly into an agent's role context without using 
 `context_files` behavior:
 
 - Paths are relative to the agent's workspace (`agents/<name>/workspace/`)
+- `private.context_files` paths are resolved relative to the effective private root
 - Existing files are loaded in list order and added under `Personality Context`
 - Missing files are skipped with a warning in logs
 
@@ -2591,6 +2684,44 @@ knowledge_bases:
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
 
+### Private Agent Knowledge
+
+Use `agents.<name>.private.knowledge` when one shared agent definition should index requester-local knowledge from that requester's private root.
+
+```
+knowledge_bases:
+  company_docs:
+    path: ./company_docs
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+      knowledge:
+        path: memory
+        watch: true
+    knowledge_bases: [company_docs]
+```
+
+With this configuration, each requester's private knowledge path becomes `<their private root>/memory`. The template source is explicit, so you can see and edit the files being copied into each requester's private root. `private.template_dir` only copies files. Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`. `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`. `private.knowledge.path` can point to any file or folder inside the private root. When `private.knowledge.path` points to a single file, MindRoom indexes that file directly and watches its parent directory for changes. Git-backed private knowledge must point to a directory, not a single file. MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime. For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root. Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge. This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
+
+| Field                             | Type   | Default | Description                                                                                                                                                               |
+| --------------------------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `private.knowledge.enabled`       | bool   | `true`  | Whether requester-local knowledge indexing is active for this agent                                                                                                       |
+| `private.knowledge.path`          | string | `null`  | Private-root-relative file or folder to index. Required when `private.knowledge.enabled` is `true`                                                                        |
+| `private.knowledge.watch`         | bool   | `true`  | Whether private knowledge should refresh when files change. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root |
+| `private.knowledge.chunk_size`    | int    | `5000`  | Maximum characters per indexed chunk                                                                                                                                      |
+| `private.knowledge.chunk_overlap` | int    | `0`     | Overlap characters between adjacent chunks. Must be smaller than `chunk_size`                                                                                             |
+| `private.knowledge.git`           | object | `null`  | Optional Git sync configuration for requester-local knowledge                                                                                                             |
+
+Use `private.knowledge` when the data itself should be private to that requester's private instance. Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
+
 ### Multiple Knowledge Bases
 
 You can define multiple knowledge bases and assign them to different agents:
@@ -2747,7 +2878,7 @@ memory:
 
 ## Storage
 
-Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
+Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`. For requester-private agent knowledge, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -2775,7 +2906,7 @@ Knowledge base configuration supports hot reload. When you change `config.yaml`:
 - Removed knowledge bases are stopped and cleaned up
 - Changed settings (path, chunking, embedder, git config) trigger a re-initialization
 - Unchanged knowledge bases continue running without interruption
-- File watchers are preserved across reloads
+- Background watchers are preserved across reloads when that knowledge base actually runs a watcher
 
 # Memory System
 
@@ -2784,7 +2915,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -2864,7 +2995,23 @@ agents:
     memory_file_path: mind_data
 ```
 
-`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`. For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`. Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`. Absolute paths and `..` traversal are rejected.
+`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`. For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`. Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`. Absolute paths and `..` traversal are rejected. For requester-private agents, use `private` instead of `memory_file_path` when you need per-requester file-memory isolation.
+
+Private instance example:
+
+```
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    memory_backend: file
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+```
+
+In this setup, each requester gets their own private `mind_data/` root inside the worker-owned state for that requester. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root instead of `<storage_path>/memory_files/agent_<name>/`. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded on first use. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. `private` and `memory_file_path` are mutually exclusive. Use `memory_file_path` for shared single-user workspaces. Use `private` for requester-isolated workspaces.
 
 ### File layout
 
@@ -3683,7 +3830,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 
 ### Model selection
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
+Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only agents whose effective worker scope is unscoped or `shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` always uses an isolating scope.
 
 ### Auto-routing
 
@@ -3749,6 +3896,8 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
+- **No room memory** — only agent-scoped memory (no `room_id` in API requests)
+- **No requester-private instances** — `/v1` currently supports only unscoped agents and agents with `worker_scope=shared`, so `agents.<name>.private` and other isolating scopes are not available there
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available
 
 # Architecture
@@ -5542,22 +5691,22 @@ mindroom [OPTIONS] COMMAND [ARGS]...
  mindroom config init   Create a starter config
  mindroom run           Start the system
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --install-completion            Install completion for the current shell.    │
-│ --show-completion               Show completion for the current shell, to    │
-│                                 copy it or customize the installation.       │
-│ --help                -h        Show this message and exit.                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ version             Show the current version of Mindroom.                    │
-│ run                 Run the mindroom multi-agent system.                     │
-│ doctor              Check your environment for common issues.                │
-│ connect             Pair this local MindRoom install with the hosted         │
-│                     provisioning service.                                    │
-│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.  │
-│ config              Manage MindRoom configuration files.                     │
-│ avatars             Generate and sync managed avatar assets.                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --install-completion            Install completion for the current shell.              │
+│ --show-completion               Show completion for the current shell, to copy it or   │
+│                                 customize the installation.                            │
+│ --help                -h        Show this message and exit.                            │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ version             Show the current version of Mindroom.                              │
+│ run                 Run the mindroom multi-agent system.                               │
+│ doctor              Check your environment for common issues.                          │
+│ connect             Pair this local MindRoom install with the hosted provisioning      │
+│                     service.                                                           │
+│ local-stack-setup   Start local Synapse + MindRoom Cinny using Docker only.            │
+│ config              Manage MindRoom configuration files.                               │
+│ avatars             Generate and sync managed avatar assets.                           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## version
@@ -5570,9 +5719,9 @@ Show the current MindRoom version.
  Show the current version of Mindroom.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## run
@@ -5590,26 +5739,23 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, │
-│                                          WARNING, ERROR)                     │
-│                                          [env var: LOG_LEVEL]                │
-│                                          [default: INFO]                     │
-│ --storage-path  -s              PATH     Base directory for persistent       │
-│                                          MindRoom data (state, sessions,     │
-│                                          tracking)                           │
-│                                          [default: None]                     │
-│ --api               --no-api             Start the bundled dashboard/API     │
-│                                          server alongside the bot            │
-│                                          [default: api]                      │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 8765]                     │
-│ --api-host                      TEXT     Host for the bundled dashboard/API  │
-│                                          server                              │
-│                                          [default: 0.0.0.0]                  │
-│ --help          -h                       Show this message and exit.         │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
+│                                          ERROR)                                        │
+│                                          [env var: LOG_LEVEL]                          │
+│                                          [default: INFO]                               │
+│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
+│                                          (state, sessions, tracking)                   │
+│                                          [default: None]                               │
+│ --api               --no-api             Start the bundled dashboard/API server        │
+│                                          alongside the bot                             │
+│                                          [default: api]                                │
+│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
+│                                          [default: 8765]                               │
+│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
+│                                          [default: 0.0.0.0]                            │
+│ --help          -h                       Show this message and exit.                   │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars
@@ -5622,14 +5768,14 @@ Generate and sync managed avatar assets.
  Generate and sync managed avatar assets.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ generate   Generate missing managed avatar files in the workspace.           │
-│ sync       Sync configured room and root-space avatars to Matrix using the   │
-│            initialized router account.                                       │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ generate   Generate missing managed avatar files in the workspace.                     │
+│ sync       Sync configured room and root-space avatars to Matrix using the initialized │
+│            router account.                                                             │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars generate
@@ -5642,9 +5788,9 @@ Generate missing managed avatar files in the workspace. In a source checkout, ge
  Generate missing managed avatar files in the workspace.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## avatars sync
@@ -5654,13 +5800,13 @@ Sync configured room and root-space avatars to Matrix using the initialized rout
 ```
  Usage: root avatars sync [OPTIONS]
 
- Sync configured room and root-space avatars to Matrix using the initialized
- router account.
+ Sync configured room and root-space avatars to Matrix using the initialized router
+ account.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## connect
@@ -5707,56 +5853,51 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
  Start local Synapse + MindRoom Cinny using Docker only.
 
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                             PATH              Directory        │
-│                                                             containing       │
-│                                                             Synapse          │
-│                                                             docker-compose.… │
-│                                                             (from            │
-│                                                             mindroom-stack   │
-│                                                             settings).       │
-│                                                             [default:        │
-│                                                             local/matrix]    │
-│ --homeserver-url                          TEXT              Homeserver URL   │
-│                                                             that Cinny and   │
-│                                                             MindRoom should  │
-│                                                             use.             │
-│                                                             [default:        │
-│                                                             http://localhos… │
-│ --server-name                             TEXT              Matrix server    │
-│                                                             name (default:   │
-│                                                             inferred from    │
-│                                                             --homeserver-url │
-│                                                             hostname).       │
-│                                                             [default: None]  │
-│ --cinny-port                              INTEGER RANGE     Local host port  │
-│                                           [1<=x<=65535]     for the MindRoom │
-│                                                             Cinny container. │
-│                                                             [default: 8080]  │
-│ --cinny-image                             TEXT              Docker image for │
-│                                                             MindRoom Cinny.  │
-│                                                             [default:        │
-│                                                             ghcr.io/mindroo… │
-│ --cinny-containe…                         TEXT              Container name   │
-│                                                             for MindRoom     │
-│                                                             Cinny.           │
-│                                                             [default:        │
-│                                                             mindroom-cinny-… │
-│ --skip-synapse                                              Skip starting    │
-│                                                             Synapse (assume  │
-│                                                             it is already    │
-│                                                             running).        │
-│ --persist-env          --no-persist-e…                      Persist Matrix   │
-│                                                             local dev        │
-│                                                             settings to .env │
-│                                                             next to          │
-│                                                             config.yaml.     │
-│                                                             [default:        │
-│                                                             persist-env]     │
-│ --help             -h                                       Show this        │
-│                                                             message and      │
-│                                                             exit.            │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --synapse-dir                                 PATH                 Directory           │
+│                                                                    containing Synapse  │
+│                                                                    docker-compose.yml  │
+│                                                                    (from               │
+│                                                                    mindroom-stack      │
+│                                                                    settings).          │
+│                                                                    [default:           │
+│                                                                    local/matrix]       │
+│ --homeserver-url                              TEXT                 Homeserver URL that │
+│                                                                    Cinny and MindRoom  │
+│                                                                    should use.         │
+│                                                                    [default:           │
+│                                                                    http://localhost:8… │
+│ --server-name                                 TEXT                 Matrix server name  │
+│                                                                    (default: inferred  │
+│                                                                    from                │
+│                                                                    --homeserver-url    │
+│                                                                    hostname).          │
+│                                                                    [default: None]     │
+│ --cinny-port                                  INTEGER RANGE        Local host port for │
+│                                               [1<=x<=65535]        the MindRoom Cinny  │
+│                                                                    container.          │
+│                                                                    [default: 8080]     │
+│ --cinny-image                                 TEXT                 Docker image for    │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    ghcr.io/mindroom-a… │
+│ --cinny-container-n…                          TEXT                 Container name for  │
+│                                                                    MindRoom Cinny.     │
+│                                                                    [default:           │
+│                                                                    mindroom-cinny-loc… │
+│ --skip-synapse                                                     Skip starting       │
+│                                                                    Synapse (assume it  │
+│                                                                    is already          │
+│                                                                    running).           │
+│ --persist-env             --no-persist-env                         Persist Matrix      │
+│                                                                    local dev settings  │
+│                                                                    to .env next to     │
+│                                                                    config.yaml.        │
+│                                                                    [default:           │
+│                                                                    persist-env]        │
+│ --help                -h                                           Show this message   │
+│                                                                    and exit.           │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Examples

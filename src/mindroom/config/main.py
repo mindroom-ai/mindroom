@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
@@ -122,8 +122,8 @@ def _router_agents_for_room(
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     _runtime_paths: RuntimePaths | None = PrivateAttr(default=None)
-
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -224,6 +224,40 @@ class Config(BaseModel):
                 for agent_name, base_id in sorted(invalid_assignments, key=lambda item: (item[0], item[1]))
             )
             msg = f"Agents reference unknown knowledge bases: {formatted}"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_reserved_knowledge_base_ids(self) -> Config:
+        """Reject top-level knowledge base IDs that collide with synthetic private IDs."""
+        reserved_ids = sorted(
+            base_id for base_id in self.knowledge_bases if base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        )
+        if reserved_ids:
+            formatted = ", ".join(reserved_ids)
+            msg = (
+                "knowledge_bases keys must not use the reserved private prefix "
+                f"'{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_knowledge(self) -> Config:
+        """Ensure enabled private knowledge declares an explicit path."""
+        invalid_private_knowledge = [
+            agent_name
+            for agent_name, agent_config in self.agents.items()
+            if (
+                agent_config.private is not None
+                and agent_config.private.knowledge is not None
+                and agent_config.private.knowledge.enabled
+                and agent_config.private.knowledge.path is None
+            )
+        ]
+        if invalid_private_knowledge:
+            formatted = ", ".join(sorted(invalid_private_knowledge))
+            msg = f"agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: {formatted}"
             raise ValueError(msg)
         return self
 
@@ -444,9 +478,76 @@ class Config(BaseModel):
     def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:
         """Get the effective worker scope for an agent."""
         agent_config = self.get_agent(agent_name)
+        if agent_config.private is not None:
+            return agent_config.private.per
         if agent_config.worker_scope is not None:
             return agent_config.worker_scope
         return self.defaults.worker_scope
+
+    def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
+        """Return the synthetic knowledge base ID for one agent's private knowledge."""
+        agent_config = self.get_agent(agent_name)
+        if agent_config.private is None:
+            return None
+        private_knowledge = agent_config.private.knowledge
+        if private_knowledge is None or not private_knowledge.enabled or private_knowledge.path is None:
+            return None
+        return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
+
+    def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
+        """Return the owning agent for a synthetic private knowledge base ID."""
+        if not base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX):
+            return None
+        agent_name = base_id.removeprefix(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        if agent_name not in self.agents:
+            return None
+        if self.get_agent_private_knowledge_base_id(agent_name) != base_id:
+            return None
+        return agent_name
+
+    def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
+        """Return shared and private knowledge base IDs assigned to one agent."""
+        agent_config = self.get_agent(agent_name)
+        base_ids = list(agent_config.knowledge_bases)
+        private_base_id = self.get_agent_private_knowledge_base_id(agent_name)
+        if private_base_id is not None:
+            base_ids.append(private_base_id)
+        return base_ids
+
+    def get_knowledge_base_config(self, base_id: str) -> KnowledgeBaseConfig:
+        """Return one effective knowledge base config, including synthetic private bases."""
+        configured = self.knowledge_bases.get(base_id)
+        if configured is not None:
+            return configured
+
+        agent_name = self.get_private_knowledge_base_agent(base_id)
+        if agent_name is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        agent_config = self.get_agent(agent_name)
+        private_config = agent_config.private
+        if private_config is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        private_knowledge = private_config.knowledge
+        if private_knowledge is None or not private_knowledge.enabled:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        knowledge_path = private_knowledge.path
+        if knowledge_path is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        return KnowledgeBaseConfig(
+            path=knowledge_path,
+            watch=private_knowledge.watch,
+            chunk_size=private_knowledge.chunk_size,
+            chunk_overlap=private_knowledge.chunk_overlap,
+            git=private_knowledge.git,
+        )
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.

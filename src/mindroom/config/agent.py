@@ -2,15 +2,154 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
+PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
+_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db"})
+
+
+def _validate_safe_relative_path(
+    value: str,
+    *,
+    field_name: str,
+    allow_current_dir: bool = False,
+    reserved_first_parts: frozenset[str] = frozenset(),
+) -> str:
+    stripped = value.strip()
+    if not stripped:
+        msg = f"{field_name} must not be empty"
+        raise ValueError(msg)
+
+    path = Path(stripped)
+    if path.is_absolute():
+        msg = f"{field_name} must be a relative path"
+        raise ValueError(msg)
+    if ".." in path.parts:
+        msg = f"{field_name} must stay within the workspace root"
+        raise ValueError(msg)
+    if not allow_current_dir and path == Path():
+        msg = f"{field_name} must not be the workspace root"
+        raise ValueError(msg)
+
+    first_part = next(iter(path.parts), None)
+    if first_part in reserved_first_parts:
+        msg = f"{field_name} must not use reserved runtime directory '{first_part}'"
+        raise ValueError(msg)
+
+    return stripped
+
+
+class AgentPrivateKnowledgeConfig(BaseModel):
+    """Private requester-local knowledge indexed from the agent's private root."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to index requester-local knowledge for this private agent instance",
+    )
+    path: str | None = Field(
+        default=None,
+        description="Path to private knowledge documents relative to the private root",
+    )
+    watch: bool = Field(default=True, description="Watch the private knowledge path for changes")
+    chunk_size: int = Field(
+        default=5000,
+        ge=128,
+        description="Maximum number of characters per indexed chunk for text-like private knowledge files",
+    )
+    chunk_overlap: int = Field(
+        default=0,
+        ge=0,
+        description="Number of overlapping characters between adjacent private knowledge chunks",
+    )
+    git: KnowledgeGitConfig | None = Field(
+        default=None,
+        description="Optional Git sync configuration for requester-local private knowledge",
+    )
+
+    @field_validator("path")
+    @classmethod
+    def validate_private_knowledge_path(cls, value: str | None) -> str | None:
+        """Private knowledge paths must stay inside the private root."""
+        if value is None:
+            return None
+        return _validate_safe_relative_path(
+            value,
+            field_name="private.knowledge.path",
+            allow_current_dir=True,
+        )
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> Self:
+        """Ensure chunk overlap is always smaller than chunk size."""
+        if self.chunk_overlap >= self.chunk_size:
+            msg = "private.knowledge.chunk_overlap must be smaller than private.knowledge.chunk_size"
+            raise ValueError(msg)
+        return self
+
+
+class AgentPrivateConfig(BaseModel):
+    """Requester-private materialized state for one shared agent definition."""
+
+    per: PrivateWorkerScope = Field(
+        description="Worker boundary that gets its own private copy of this agent's state",
+    )
+    root: str | None = Field(
+        default=None,
+        description="Private root path relative to the active worker state root; defaults to <agent_name>_data",
+    )
+    template_dir: str | None = Field(
+        default=None,
+        description="Optional local directory copied into each requester root on first use",
+    )
+    context_files: list[str] | None = Field(
+        default=None,
+        description="Optional private-root-relative context files loaded into the agent's role context",
+    )
+    knowledge: AgentPrivateKnowledgeConfig | None = Field(
+        default=None,
+        description="Optional requester-local knowledge indexed from the private root",
+    )
+
+    @field_validator("root")
+    @classmethod
+    def validate_private_root(cls, value: str | None) -> str | None:
+        """Private roots must stay relative so requester scoping remains deterministic."""
+        if value is None:
+            return None
+        return _validate_safe_relative_path(
+            value,
+            field_name="private.root",
+            reserved_first_parts=_RESERVED_PRIVATE_ROOT_FIRST_PARTS,
+        )
+
+    @field_validator("template_dir")
+    @classmethod
+    def validate_template_dir(cls, value: str | None) -> str | None:
+        """Normalize configured template directories."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = "private.template_dir must not be empty"
+            raise ValueError(msg)
+        return stripped
+
+    @field_validator("context_files")
+    @classmethod
+    def validate_private_context_files(cls, value: list[str] | None) -> list[str] | None:
+        """Private context files must stay inside the private root."""
+        if value is None:
+            return None
+        return [_validate_safe_relative_path(path, field_name="private.context_files") for path in value]
 
 
 class AgentConfig(BaseModel):
@@ -42,6 +181,10 @@ class AgentConfig(BaseModel):
     memory_file_path: str | None = Field(
         default=None,
         description="Workspace-relative directory inside this agent's canonical workspace to use for file memory instead of the default memory_files/agent_<name>/",
+    )
+    private: AgentPrivateConfig | None = Field(
+        default=None,
+        description="Optional requester-private state materialized per worker scope",
     )
     knowledge_bases: list[str] = Field(
         default_factory=list,
@@ -105,6 +248,12 @@ class AgentConfig(BaseModel):
     def _check_history_config(self) -> Self:
         if self.num_history_runs is not None and self.num_history_messages is not None:
             msg = "num_history_runs and num_history_messages are mutually exclusive"
+            raise ValueError(msg)
+        if self.private is not None and self.worker_scope is not None:
+            msg = "agents.<name>.private.per replaces agents.<name>.worker_scope; configure only one"
+            raise ValueError(msg)
+        if self.private is not None and self.memory_file_path is not None:
+            msg = "agents.<name>.private replaces agents.<name>.memory_file_path; configure only one"
             raise ValueError(msg)
         return self
 

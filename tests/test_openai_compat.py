@@ -35,6 +35,12 @@ def _runtime_paths() -> object:
     return resolve_runtime_paths(config_path=Path(__file__))
 
 
+def _knowledge_manager(knowledge: object) -> MagicMock:
+    manager = MagicMock()
+    manager.get_knowledge.return_value = knowledge
+    return manager
+
+
 @pytest.fixture
 def test_config() -> Config:
     """Create a minimal test config with a few agents."""
@@ -2325,13 +2331,10 @@ class TestTeamCompletion:
             knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
         )
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-
         with (
             patch("mindroom.api.openai_compat.create_agent") as mock_create,
             patch("mindroom.api.openai_compat.get_model_instance"),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat._resolve_knowledge", return_value=mock_knowledge),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")
@@ -2399,13 +2402,11 @@ class TestKnowledgeIntegration:
     def test_knowledge_passed_when_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed to ai_response when agent has knowledge_bases."""
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=_knowledge_manager(mock_knowledge)),
         ):
             mock_ai.return_value = "Response with knowledge"
 
@@ -2482,8 +2483,6 @@ class TestKnowledgeIntegration:
         from agno.run.agent import RunContentEvent  # noqa: PLC0415
 
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
 
         async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Streamed!")
@@ -2491,7 +2490,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
             patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=_knowledge_manager(mock_knowledge)),
         ):
             response = knowledge_app_client.post(
                 "/v1/chat/completions",
@@ -2519,26 +2518,25 @@ class TestKnowledgeIntegration:
         app = FastAPI()
         app.include_router(router)
 
-        mock_manager_docs = MagicMock()
         mock_knowledge_docs = MagicMock()
         mock_knowledge_docs.vector_db = MagicMock()
         mock_knowledge_docs.max_results = 5
-        mock_manager_docs.get_knowledge.return_value = mock_knowledge_docs
 
-        mock_manager_wiki = MagicMock()
         mock_knowledge_wiki = MagicMock()
         mock_knowledge_wiki.vector_db = MagicMock()
         mock_knowledge_wiki.max_results = 10
-        mock_manager_wiki.get_knowledge.return_value = mock_knowledge_wiki
 
-        def fake_get_manager(base_id: str) -> MagicMock | None:
-            return {"docs": mock_manager_docs, "wiki": mock_manager_wiki}.get(base_id)
+        def fake_get_knowledge_manager(base_id: str) -> MagicMock | None:
+            knowledge = {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
+            if knowledge is None:
+                return None
+            return _knowledge_manager(knowledge)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, _runtime_paths())),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_knowledge_manager),
             patch.dict("os.environ", {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"}),
         ):
             mock_ai.return_value = "Merged knowledge response"

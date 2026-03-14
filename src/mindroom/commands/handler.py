@@ -28,6 +28,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_exec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     import nio
     import structlog
@@ -35,7 +36,6 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
 
@@ -58,6 +58,7 @@ class CommandHandlerContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    storage_path: Path
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -215,7 +216,12 @@ def _collect_agent_toolkits(
 ) -> list[tuple[str, Toolkit]]:
     resolved_storage_path = runtime_paths.storage_root
     worker_tools = config.get_agent_worker_tools(agent_name)
-    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        storage_path=resolved_storage_path,
+        config_path=runtime_paths.config_path,
+    )
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
@@ -360,6 +366,7 @@ async def _run_skill_command_tool(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
+    storage_path: Path | None = None,
     command_tool: str,
     skill_name: str,
     args_text: str,
@@ -381,13 +388,23 @@ async def _run_skill_command_tool(
             tenant_id=os.getenv("CUSTOMER_ID"),
             account_id=os.getenv("ACCOUNT_ID"),
         )
+    effective_runtime_paths = (
+        runtime_paths
+        if storage_path is None or storage_path == runtime_paths.storage_root
+        else RuntimePaths(
+            config_path=runtime_paths.config_path,
+            config_dir=runtime_paths.config_dir,
+            env_path=runtime_paths.env_path,
+            storage_root=storage_path,
+        )
+    )
 
     try:
         with tool_execution_identity(execution_identity):
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,
-                runtime_paths,
+                effective_runtime_paths,
             )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
@@ -586,6 +603,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         config=context.config,
                         runtime_paths=context.runtime_paths,
                         agent_name=target_agent,
+                        storage_path=context.storage_path,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
                         args_text=args_text,

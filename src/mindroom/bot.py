@@ -72,7 +72,11 @@ from mindroom.thread_utils import (
     should_agent_respond,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    get_tool_execution_identity,
+    tool_execution_identity,
+)
 
 from . import constants, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
@@ -107,7 +111,13 @@ from .constants import (
     get_runtime_paths,
     resolve_avatar_path,
 )
-from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .knowledge.manager import ensure_agent_knowledge_managers
+from .knowledge.utils import (
+    MultiKnowledgeVectorDb,
+    bound_knowledge_managers,
+    get_knowledge_for_base,
+    resolve_agent_knowledge,
+)
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -138,6 +148,7 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -427,28 +438,49 @@ class AgentBot:
             return agent_config.show_tool_calls
         return self.config.defaults.show_tool_calls
 
-    def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
-        """Get shared knowledge instance for a configured knowledge base."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return None
-        manager = orchestrator.knowledge_managers.get(base_id)
-        if manager is None:
-            return None
-        return manager.get_knowledge()
-
     def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to one or more knowledge bases."""
+        """Return the current knowledge assigned to one or more agent bases."""
+        execution_identity = get_tool_execution_identity()
+
+        def _shared_manager(base_id: str) -> KnowledgeManager | None:
+            if self.orchestrator is None:
+                return None
+            return self.orchestrator.knowledge_managers.get(base_id)
+
         return resolve_agent_knowledge(
             agent_name,
             self.config,
-            self._get_shared_knowledge,
+            lambda base_id: get_knowledge_for_base(
+                base_id,
+                config=self.config,
+                storage_path=self.storage_path,
+                shared_manager_lookup=_shared_manager,
+                execution_identity=execution_identity,
+            ),
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
                 knowledge_bases=missing_base_ids,
             ),
         )
+
+    async def _ensure_request_knowledge_managers(
+        self,
+        agent_names: list[str],
+        execution_identity: ToolExecutionIdentity,
+    ) -> dict[str, KnowledgeManager]:
+        """Ensure and collect managers needed for the current request scope."""
+        managers: dict[str, KnowledgeManager] = {}
+        for agent_name in agent_names:
+            managers.update(
+                await ensure_agent_knowledge_managers(
+                    agent_name,
+                    self.config,
+                    self.storage_path,
+                    execution_identity=execution_identity,
+                ),
+            )
+        return managers
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
@@ -1708,6 +1740,7 @@ class AgentBot:
             user_id=requester_user_id,
             session_id=session_id,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(agent_names, execution_identity)
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1720,7 +1753,11 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                        bound_knowledge_managers(request_knowledge_managers),
+                    ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=model_message,
@@ -1759,7 +1796,11 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                        bound_knowledge_managers(request_knowledge_managers),
+                    ):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
@@ -1928,7 +1969,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -1950,12 +1990,21 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
+        )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                    bound_knowledge_managers(request_knowledge_managers),
+                ):
+                    knowledge = self._knowledge_for_agent(self.agent_name)
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2044,7 +2093,6 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2067,6 +2115,7 @@ class AgentBot:
             session_id=session_id,
             agent_name=agent_name,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers([agent_name], execution_identity)
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
@@ -2077,7 +2126,12 @@ class AgentBot:
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         async with typing_indicator(self.client, room_id):
-            with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+            with (
+                tool_execution_identity(execution_identity),
+                tool_runtime_context(tool_context),
+                bound_knowledge_managers(request_knowledge_managers),
+            ):
+                knowledge = self._knowledge_for_agent(agent_name)
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
@@ -2215,7 +2269,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
@@ -2238,11 +2291,20 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
+        )
         run_metadata_content: dict[str, Any] = {}
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                    bound_knowledge_managers(request_knowledge_managers),
+                ):
+                    knowledge = self._knowledge_for_agent(self.agent_name)
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2739,7 +2801,7 @@ class AgentBot:
                 session_id=session_id,
             )
             with tool_execution_identity(execution_identity):
-                storage = create_session_storage(self.agent_name, self.storage_path)
+                storage = create_session_storage(self.agent_name, self.storage_path, self.config)
                 removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(
@@ -2769,6 +2831,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

@@ -3,21 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
+from mindroom.knowledge.manager import get_knowledge_manager
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Mapping
+    from pathlib import Path
 
     from agno.knowledge.document import Document
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+_BOUND_KNOWLEDGE_MANAGERS: ContextVar[dict[str, KnowledgeManager] | None] = ContextVar(
+    "bound_knowledge_managers",
+    default=None,
+)
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -30,6 +41,56 @@ class _KnowledgeVectorDb(Protocol):
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]: ...
+
+
+def get_bound_knowledge_manager(base_id: str) -> KnowledgeManager | None:
+    """Return a request-scoped manager bound for this base ID, if any."""
+    managers = _BOUND_KNOWLEDGE_MANAGERS.get()
+    if managers is None:
+        return None
+    return managers.get(base_id)
+
+
+@contextmanager
+def bound_knowledge_managers(managers: Mapping[str, KnowledgeManager] | None) -> Iterator[None]:
+    """Bind ensured managers to the current async execution scope."""
+    if not managers:
+        yield
+        return
+
+    current = _BOUND_KNOWLEDGE_MANAGERS.get()
+    merged = dict(current) if current is not None else {}
+    merged.update(managers)
+    token = _BOUND_KNOWLEDGE_MANAGERS.set(merged)
+    try:
+        yield
+    finally:
+        _BOUND_KNOWLEDGE_MANAGERS.reset(token)
+
+
+def get_knowledge_for_base(
+    base_id: str,
+    *,
+    config: Config,
+    storage_path: Path,
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> Knowledge | None:
+    """Resolve one configured base ID to its current Knowledge instance."""
+    manager: KnowledgeManager | None
+    manager = get_bound_knowledge_manager(base_id)
+    if manager is None:
+        manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+    if manager is None:
+        manager = get_knowledge_manager(
+            base_id,
+            config=config,
+            storage_path=storage_path,
+            execution_identity=execution_identity,
+        )
+    if manager is None and config.get_private_knowledge_base_agent(base_id) is None:
+        manager = get_knowledge_manager(base_id)
+    return manager.get_knowledge() if manager is not None else None
 
 
 @dataclass
@@ -148,13 +209,13 @@ def resolve_agent_knowledge(
     on_missing_bases: Callable[[list[str]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or not agent_config.knowledge_bases:
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
         return None
 
     missing_base_ids: list[str] = []
     knowledges: list[Knowledge] = []
-    for base_id in agent_config.knowledge_bases:
+    for base_id in base_ids:
         knowledge = get_knowledge(base_id)
         if knowledge is None:
             missing_base_ids.append(base_id)

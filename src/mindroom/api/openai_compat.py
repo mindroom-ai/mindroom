@@ -705,9 +705,14 @@ async def chat_completions(
         stream=req.stream,
         session_id=session_id,
     )
+    execution_identity = _build_tool_execution_identity(
+        agent_name=agent_name,
+        session_id=session_id,
+    )
 
     # Initialize shared knowledge managers once per request (idempotent).
-    # Team and single-agent paths both rely on this for knowledge resolution.
+    # `/v1` only supports shared/unscoped agent state today, so private
+    # requester-local knowledge is intentionally out of scope here.
     try:
         await _ensure_knowledge_initialized(config, runtime_paths)
     except Exception:
@@ -716,10 +721,6 @@ async def chat_completions(
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-        )
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
                 team_name,
@@ -752,10 +753,6 @@ async def chat_completions(
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
 
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-        )
         if req.stream:
             response = await _stream_completion(
                 agent_name,

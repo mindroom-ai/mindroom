@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
 import pytest
 from pydantic import ValidationError
 
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -16,12 +18,16 @@ from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     _create_embedder,
+    ensure_agent_knowledge_managers,
     get_knowledge_manager,
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
 )
+from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -115,6 +121,30 @@ class _DummyChromaDb:
         return True
 
 
+def _mind_private_agent(
+    *,
+    watch: bool,
+    template_dir: str,
+    git: KnowledgeGitConfig | None = None,
+) -> AgentConfig:
+    """Return a worker-scoped private Mind agent config for knowledge tests."""
+    return AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        private=AgentPrivateConfig(
+            per="user",
+            root="mind_data",
+            template_dir=template_dir,
+            context_files=["SOUL.md"],
+            knowledge=AgentPrivateKnowledgeConfig(
+                path="memory",
+                watch=watch,
+                git=git,
+            ),
+        ),
+    )
+
+
 def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Config:
     memory: dict[str, object] | None = None
     if embedder_dimensions is not None:
@@ -202,7 +232,12 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
             "research": KnowledgeBaseConfig(path="knowledge", watch=False),
         },
     )
-    manager = KnowledgeManager(base_id="research", config=config, runtime_paths=runtime_paths)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        storage_path=runtime_paths.storage_root,
+        knowledge_path=(config_dir / "knowledge").resolve(),
+    )
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
 
@@ -218,13 +253,20 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
 
     storage_path = tmp_path / "storage"
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", storage_path)
+    storage_path = runtime_paths.storage_root
+    knowledge_path = (tmp_path / "knowledge").resolve()
     config_1536 = _make_config(tmp_path / "knowledge", embedder_dimensions=1536)
     config_3072 = _make_config(tmp_path / "knowledge", embedder_dimensions=3072)
 
-    manager = KnowledgeManager(base_id="research", config=config_1536, runtime_paths=runtime_paths)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config_1536,
+        storage_path=storage_path,
+        knowledge_path=knowledge_path,
+    )
 
-    assert not manager.matches(config_3072, runtime_paths)
-    assert manager.needs_full_reindex(config_3072, runtime_paths)
+    assert not manager.matches(config_3072, storage_path, knowledge_path)
+    assert manager.needs_full_reindex(config_3072, storage_path, knowledge_path)
 
 
 def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
@@ -237,6 +279,7 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     storage_path = tmp_path / "storage"
+    knowledge_path = (tmp_path / "knowledge").resolve()
     implicit_default = Config(
         agents={},
         models={},
@@ -270,10 +313,15 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
     )
 
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", storage_path)
-    manager = KnowledgeManager(base_id="research", config=implicit_default, runtime_paths=runtime_paths)
+    manager = KnowledgeManager(
+        base_id="research",
+        config=implicit_default,
+        storage_path=runtime_paths.storage_root,
+        knowledge_path=knowledge_path,
+    )
 
-    assert manager.matches(explicit_default, runtime_paths)
-    assert not manager.needs_full_reindex(explicit_default, runtime_paths)
+    assert manager.matches(explicit_default, storage_path, knowledge_path)
+    assert not manager.needs_full_reindex(explicit_default, storage_path, knowledge_path)
 
 
 def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -675,6 +723,668 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     sync_indexed_files.assert_awaited_once()
 
     await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private knowledge should copy the configured template into requester-scoped roots."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=alice_identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+
+        assert get_knowledge_manager(private_base_id) is None
+
+        alice_manager = get_knowledge_manager(
+            private_base_id,
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=alice_identity,
+        )
+        bob_manager = get_knowledge_manager(
+            private_base_id,
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=bob_identity,
+        )
+
+        assert alice_manager is not None
+        assert bob_manager is not None
+        assert alice_manager is not bob_manager
+
+        alice_worker_key = resolve_worker_key("user", alice_identity)
+        bob_worker_key = resolve_worker_key("user", bob_identity)
+        assert alice_worker_key is not None
+        assert bob_worker_key is not None
+
+        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+        assert alice_manager.knowledge_path == (alice_workspace / "memory").resolve()
+        assert bob_manager.knowledge_path == (bob_workspace / "memory").resolve()
+        assert (alice_workspace / "SOUL.md").exists()
+        assert (alice_workspace / "MEMORY.md").exists()
+        assert (bob_workspace / "SOUL.md").exists()
+        assert (bob_workspace / "MEMORY.md").exists()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_private_knowledge_single_file_target_indexes_without_creating_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private knowledge paths may point to a single file inside the private root."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir(
+        files={
+            "USER.md": "Private user profile.\n",
+            "MEMORY.md": "# Memory\n",
+        },
+    )
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    knowledge=AgentPrivateKnowledgeConfig(path="USER.md", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        manager = managers[private_base_id]
+
+        worker_key = resolve_worker_key("user", identity)
+        assert worker_key is not None
+        knowledge_file = worker_root_path(tmp_path, worker_key) / "mind_data" / "USER.md"
+
+        assert manager.knowledge_path == knowledge_file.resolve()
+        assert knowledge_file.is_file()
+        assert manager.list_files() == [knowledge_file.resolve()]
+        assert _DummyChromaDb.metadatas == [
+            {
+                "source_path": "USER.md",
+                "source_mtime_ns": knowledge_file.stat().st_mtime_ns,
+                "source_size": knowledge_file.stat().st_size,
+            },
+        ]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassified_as_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing dotted directory names should stay directory-like instead of being forced into file mode."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "nested" / "docs.v1"
+    config = Config(
+        agents={
+            "researcher": AgentConfig(
+                display_name="Researcher",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+        },
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        manager = managers["docs"]
+
+        assert docs_path.parent.is_dir()
+        assert not docs_path.exists()
+        assert manager.list_files() == []
+
+        docs_path.mkdir(parents=True, exist_ok=True)
+        guide_path = docs_path / "guide.md"
+        guide_path.write_text("Shared docs.\n", encoding="utf-8")
+
+        assert await manager.index_file(guide_path, upsert=True)
+        assert manager.list_files() == [guide_path.resolve()]
+        assert _DummyChromaDb.metadatas == [
+            {
+                "source_path": "guide.md",
+                "source_mtime_ns": guide_path.stat().st_mtime_ns,
+                "source_size": guide_path.stat().st_size,
+            },
+        ]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_worker_scoped_private_knowledge_refreshes_on_access_without_background_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Worker-scoped private knowledge should refresh on access instead of starting persistent watchers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(watch=True, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert sync_indexed_files.await_count == 2
+        start_watcher.assert_not_awaited()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_background_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Worker-scoped Git knowledge should refresh on access instead of starting git polling tasks."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(
+                watch=True,
+                template_dir=str(template_dir),
+                git=KnowledgeGitConfig(
+                    repo_url="https://github.com/example/memory.git",
+                    branch="main",
+                    poll_interval_seconds=30,
+                ),
+            ),
+        },
+        models={},
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    sync_indexed_files = AsyncMock()
+    start_watcher = AsyncMock()
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+    monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert sync_git_repository.await_count == 2
+        sync_indexed_files.assert_not_awaited()
+        start_watcher.assert_not_awaited()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Static manager initialization should not tear down live scoped private managers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        scoped_manager = managers[private_base_id]
+
+        static_managers = await initialize_knowledge_managers(config, tmp_path, reindex_on_create=False)
+        resolved_manager = get_knowledge_manager(
+            private_base_id,
+            config=config,
+            storage_path=tmp_path,
+            execution_identity=identity,
+        )
+
+        assert static_managers == {}
+        assert resolved_manager is scoped_manager
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ensure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared-base lookups should find managers created through ensure_agent_knowledge_managers()."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = Config(
+        agents={
+            "researcher": AgentConfig(
+                display_name="Researcher",
+                knowledge_bases=["docs"],
+            ),
+        },
+        models={},
+        knowledge_bases={
+            "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
+        },
+    )
+
+    try:
+        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        manager = managers["docs"]
+        knowledge = get_knowledge_for_base("docs", config=config, storage_path=tmp_path)
+
+        assert knowledge is manager.get_knowledge()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_knowledge_managers_removes_private_scoped_managers_when_private_knowledge_is_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Config reload should tear down scoped private managers once the agent drops private knowledge."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config_with_private = Config(
+        agents={
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+    config_without_private = Config(
+        agents={
+            "mind": AgentConfig(display_name="Mind"),
+        },
+        models={},
+    )
+    private_base_id = config_with_private.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers("mind", config_with_private, tmp_path, execution_identity=identity)
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_with_private,
+                storage_path=tmp_path,
+                execution_identity=identity,
+            )
+            is not None
+        )
+
+        await initialize_knowledge_managers(config_without_private, tmp_path, reindex_on_create=False)
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_with_private,
+                storage_path=tmp_path,
+                execution_identity=identity,
+            )
+            is None
+        )
+        assert get_knowledge_manager(private_base_id) is None
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_private_scoped_knowledge_manager_cache_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Older scoped private managers should be evicted instead of accumulating forever."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 2)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                private=AgentPrivateConfig(
+                    per="room_thread",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    context_files=["SOUL.md"],
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    identities = [
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=thread_id,
+            resolved_thread_id=thread_id,
+            session_id=f"session-{thread_id}",
+        )
+        for thread_id in ("thread-1", "thread-2", "thread-3")
+    ]
+
+    try:
+        for identity in identities:
+            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[0],
+            )
+            is None
+        )
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[1],
+            )
+            is not None
+        )
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=identities[2],
+            )
+            is not None
+        )
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_request_bound_private_manager_survives_cache_eviction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """An in-flight request should keep using the manager it already ensured."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 1)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                memory_backend="file",
+                private=AgentPrivateConfig(
+                    per="room_thread",
+                    root="mind_data",
+                    template_dir=str(template_dir),
+                    context_files=["SOUL.md"],
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                ),
+            ),
+        },
+        models={},
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="thread-alice",
+        resolved_thread_id="thread-alice",
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="thread-bob",
+        resolved_thread_id="thread-bob",
+        session_id="session-bob",
+    )
+
+    try:
+        alice_managers = await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            tmp_path,
+            execution_identity=alice_identity,
+        )
+        assert private_base_id in alice_managers
+
+        with bound_knowledge_managers(alice_managers):
+            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+            assert (
+                get_knowledge_for_base(
+                    private_base_id,
+                    config=config,
+                    storage_path=tmp_path,
+                    execution_identity=alice_identity,
+                )
+                is not None
+            )
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config,
+                storage_path=tmp_path,
+                execution_identity=alice_identity,
+            )
+            is None
+        )
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_indexes_files_after_initial_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first git sync should index all tracked files cloned into a fresh workspace."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    def _run_git(*args: str) -> None:
+        subprocess.run(list(args), cwd=remote_repo, check=True, capture_output=True, text=True)
+
+    remote_repo = tmp_path / "remote"
+    remote_repo.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(_run_git, "git", "init", "-b", "main")
+    await asyncio.to_thread(_run_git, "git", "config", "user.email", "tests@example.com")
+    await asyncio.to_thread(_run_git, "git", "config", "user.name", "MindRoom Tests")
+    (remote_repo / "doc.md").write_text("hello", encoding="utf-8")
+    await asyncio.to_thread(_run_git, "git", "add", "doc.md")
+    await asyncio.to_thread(_run_git, "git", "commit", "-m", "init")
+
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(tmp_path / "knowledge"),
+                watch=False,
+                git=KnowledgeGitConfig(
+                    repo_url=str(remote_repo),
+                    branch="main",
+                    poll_interval_seconds=30,
+                ),
+            ),
+        },
+    )
+
+    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+
+    result = await manager.sync_git_repository()
+
+    assert result == {"updated": True, "changed_count": 1, "removed_count": 0}
+    assert manager._indexed_files == {"doc.md"}
+    assert _DummyChromaDb.metadatas == [
+        {
+            "source_path": "doc.md",
+            "source_mtime_ns": (manager.knowledge_path / "doc.md").stat().st_mtime_ns,
+            "source_size": (manager.knowledge_path / "doc.md").stat().st_size,
+        },
+    ]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.memory.functions import (
     add_agent_memory,
@@ -24,11 +25,14 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
+    resolve_worker_key,
     tool_execution_identity,
+    worker_root_path,
 )
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
@@ -172,6 +176,64 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(
     assert any(result.get("memory") == "Alice-authored shared memory" for result in bob_results)
     assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
     assert (agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_root(
+    storage_path: Path,
+    config: Config,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    template_dir = build_private_template_dir(
+        files={
+            "SOUL.md": "Template soul.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+        context_files=["SOUL.md"],
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    with tool_execution_identity(alice_identity):
+        await add_agent_memory("Alice workspace memory", "general", storage_path, config)
+        alice_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
+
+    with tool_execution_identity(bob_identity):
+        bob_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
+
+    assert any(result.get("memory") == "Alice workspace memory" for result in alice_results)
+    assert not any(result.get("memory") == "Alice workspace memory" for result in bob_results)
+
+    alice_worker_key = resolve_worker_key("user", alice_identity)
+    assert alice_worker_key is not None
+    alice_memory_file = worker_root_path(storage_path, alice_worker_key) / "mind_data" / "MEMORY.md"
+    assert alice_memory_file.exists()
+    assert "Alice workspace memory" in alice_memory_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

@@ -226,11 +226,12 @@ def _coerce_agent_session(raw_session: object) -> AgentSession | None:
 
 
 def _load_agent_session(
+    config: Config,
     storage_path: Path,
     agent_name: str,
     session_id: str,
 ) -> AgentSession | None:
-    storage = create_session_storage(agent_name, storage_path)
+    storage = create_session_storage(agent_name, storage_path, config)
     raw_session = storage.get_session(session_id, SessionType.AGENT)
     return _coerce_agent_session(raw_session)
 
@@ -494,6 +495,7 @@ class MemoryAutoFlushWorker:
                 continue
 
             session = _load_agent_session(
+                config,
                 self.storage_path,
                 agent_name,
                 session_id,
@@ -594,6 +596,7 @@ class MemoryAutoFlushWorker:
 
         latest_session_updated_at: int | None = None
         latest_session = _load_agent_session(
+            config,
             self.storage_path,
             agent_name,
             session_id,
@@ -649,6 +652,7 @@ class MemoryAutoFlushWorker:
     ) -> bool:
         effective_storage_path = self.storage_path
         session = _load_agent_session(
+            config,
             self.storage_path,
             agent_name,
             session_id,

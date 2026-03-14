@@ -148,7 +148,7 @@ async def test_worker_respects_batch_limits(
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
-        lambda _storage, _agent, _sid, **_kwargs: fake_session,
+        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -208,7 +208,7 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
-        lambda _storage, _agent, _sid, **_kwargs: fake_session,
+        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -244,7 +244,7 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
-        lambda _storage, _agent, _sid, **_kwargs: fake_session,
+        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
     )
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._extract_memory_summary",
@@ -324,7 +324,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         session_id="s1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
+    def _load_session(_config: object, _storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="important detail")],
@@ -384,7 +384,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         session_id="s1",
     )
 
-    def _load_session(_storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
+    def _load_session(_config: object, _storage: Path, _agent: str, _sid: str, **_kwargs: object) -> _FakeSession:
         return _FakeSession(
             updated_at=session_updated_at,
             messages=[_FakeMessage(role="user", content="no durable memory here")],

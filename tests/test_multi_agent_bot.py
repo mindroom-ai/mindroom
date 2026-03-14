@@ -29,6 +29,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.knowledge.utils import bound_knowledge_managers
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
@@ -339,6 +340,33 @@ class TestAgentBot:
         ]
         research_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
         legal_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
+
+    def test_knowledge_for_agent_prefers_request_bound_manager(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Request-bound managers should win over later cache lookups."""
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research"],
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
+            },
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        cached_manager = MagicMock()
+        cached_manager.get_knowledge.return_value = object()
+        bot.orchestrator = MagicMock(knowledge_managers={"research": cached_manager})
+
+        expected_knowledge = object()
+        bound_manager = MagicMock()
+        bound_manager.get_knowledge.return_value = expected_knowledge
+
+        with bound_knowledge_managers({"research": bound_manager}):
+            assert bot._knowledge_for_agent("calculator") is expected_knowledge
+
+        bound_manager.get_knowledge.assert_called_once_with()
+        cached_manager.get_knowledge.assert_not_called()
 
     def test_multi_knowledge_vector_db_interleaves_sync_results(self) -> None:
         """Round-robin merge should include top results from each knowledge base."""

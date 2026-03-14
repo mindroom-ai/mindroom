@@ -12,13 +12,15 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge.manager import get_knowledge_manager
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import ensure_agent_knowledge_managers
+from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base, resolve_agent_knowledge
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.manager import KnowledgeManager
 
 logger = get_logger(__name__)
 
@@ -82,29 +84,41 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
-            knowledge = resolve_agent_knowledge(
+            execution_identity = get_tool_execution_identity()
+            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_agent_knowledge_managers(
                 agent_name,
                 self._config,
-                lambda base_id: (
-                    manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None
-                ),
+                self._runtime_paths.storage_root,
+                execution_identity=execution_identity,
             )
-            agent = create_agent(
-                agent_name,
-                self._config,
-                runtime_paths=self._runtime_paths,
-                knowledge=knowledge,
-                include_interactive_questions=False,
-                delegation_depth=self._delegation_depth + 1,
-            )
-            logger.info(
-                "Delegating task",
-                from_agent=self._agent_name,
-                to_agent=agent_name,
-                depth=self._delegation_depth + 1,
-                task_preview=task[:100],
-            )
-            response = await agent.arun(task)
+
+            with bound_knowledge_managers(request_knowledge_managers):
+                knowledge = resolve_agent_knowledge(
+                    agent_name,
+                    self._config,
+                    lambda base_id: get_knowledge_for_base(
+                        base_id,
+                        config=self._config,
+                        storage_path=self._runtime_paths.storage_root,
+                        execution_identity=execution_identity,
+                    ),
+                )
+                agent = create_agent(
+                    agent_name,
+                    self._config,
+                    runtime_paths=self._runtime_paths,
+                    knowledge=knowledge,
+                    include_interactive_questions=False,
+                    delegation_depth=self._delegation_depth + 1,
+                )
+                logger.info(
+                    "Delegating task",
+                    from_agent=self._agent_name,
+                    to_agent=agent_name,
+                    depth=self._delegation_depth + 1,
+                    task_preview=task[:100],
+                )
+                response = await agent.arun(task)
         except Exception as e:
             logger.exception(
                 "Delegation failed",
