@@ -16,7 +16,6 @@ from ._policy import (
     get_team_ids_for_agent,
     mutation_target_storage_paths,
     resolve_context_storage_path,
-    room_scope_user_id,
 )
 from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
@@ -347,55 +346,12 @@ async def delete_mem0_agent_memory(
     raise MemoryNotFoundError(memory_id)
 
 
-async def add_mem0_room_memory(
-    content: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str | None,
-    metadata: dict | None,
-    create_memory: _MemoryFactory,
-) -> None:
-    """Add one mem0 memory for a room scope."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
-    memory = await create_memory(resolved_storage_path, config)
-
-    metadata = dict(metadata or {})
-    metadata["room_id"] = room_id
-    if agent_name:
-        metadata["contributed_by"] = agent_name
-
-    messages = [{"role": "user", "content": content}]
-    await memory.add(messages, user_id=room_scope_user_id(room_id), metadata=metadata)
-    logger.debug("Room memory added", room_id=room_id)
-
-
-async def search_mem0_room_memories(
-    query: str,
-    room_id: str,
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str | None,
-    limit: int,
-    create_memory: _MemoryFactory,
-) -> list[MemoryResult]:
-    """Search mem0 memories stored for a room scope."""
-    resolved_storage_path = resolve_context_storage_path(storage_path, config, agent_name=agent_name)
-    memory = await create_memory(resolved_storage_path, config)
-    results = _mem0_results(await memory.search(query, user_id=room_scope_user_id(room_id), limit=limit))
-    logger.debug("Room memories found", count=len(results), room_id=room_id)
-    return results
-
-
 async def store_mem0_conversation_memory(
     messages: list[dict],
     agent_name: str | list[str],
     storage_path: Path,
     session_id: str,
     config: Config,
-    room_id: str | None,
     *,
     replica_key: str | None,
     create_memory: _MemoryFactory,
@@ -425,18 +381,6 @@ async def store_mem0_conversation_memory(
         failure_log = "Failed to add memory"
         failure_context = {"agent": agent_name}
 
-    room_scope_id: str | None = None
-    room_metadata: dict[str, object] | None = None
-    if room_id:
-        contributed_by = agent_name if isinstance(agent_name, str) else f"team:{','.join(agent_name)}"
-        room_metadata = {
-            "type": "conversation",
-            "session_id": session_id,
-            "room_id": room_id,
-            "contributed_by": contributed_by,
-        }
-        room_scope_id = room_scope_user_id(room_id)
-
     for target_storage_path in target_storage_paths:
         memory = await create_memory(target_storage_path, config)
         await _add_mem0_scope_messages(
@@ -447,15 +391,6 @@ async def store_mem0_conversation_memory(
             failure_log=failure_log,
             failure_context=failure_context,
         )
-        if room_scope_id is not None and room_metadata is not None:
-            await _add_mem0_scope_messages(
-                memory=memory,
-                messages=messages,
-                user_id=room_scope_id,
-                metadata=room_metadata,
-                failure_log="Failed to add room memory",
-                failure_context={"room_id": room_id},
-            )
 
     if isinstance(agent_name, list):
         logger.info(
@@ -466,6 +401,3 @@ async def store_mem0_conversation_memory(
         )
     else:
         logger.info("Memory added", agent=agent_name)
-
-    if room_id:
-        logger.debug("Room memory added", room_id=room_id, storage_targets=len(target_storage_paths))

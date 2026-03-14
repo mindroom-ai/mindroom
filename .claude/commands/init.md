@@ -76,7 +76,7 @@ Read and understand the MindRoom project structure:
    - Mindroom's custom commands in chat are prefixed with "!" (e.g., "!help", "!schedule")
    - Asyncio for concurrent operations
    - Per-thread memory and conversation tracking
-   - Dual memory system: agent memory + room memory
+   - Persistent memory system: agent memory + team memory
    - 100+ tool integrations available in `src/mindroom/tools/`
 
 5. **Key Files and Modules**
