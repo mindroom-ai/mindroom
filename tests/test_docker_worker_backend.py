@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -464,6 +468,67 @@ def _backend(
         lambda container: (f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute"),
     )
     return backend, fake_client, sync_calls
+
+
+def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) -> dict[str, object]:
+    script = (
+        textwrap.dedent(
+            """
+        import json
+        from pathlib import Path
+
+        import yaml
+
+        from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
+        from mindroom.workers.backends.docker_projection import DockerProjectionManager
+        from mindroom.workers.backends.local import local_worker_state_paths_for_root
+
+        tmp_path = Path(__WORKSPACE_ROOT__)
+        config = _DockerWorkerBackendConfig(
+            image="ghcr.io/mindroom-ai/mindroom:latest",
+            worker_port=8766,
+            storage_mount_path="/app/worker",
+            config_path="/app/config-host/config.yaml",
+            host_config_path=tmp_path / "config.yaml",
+            idle_timeout_seconds=60.0,
+            ready_timeout_seconds=5.0,
+            name_prefix="mindroom-worker",
+            publish_host="127.0.0.1",
+            endpoint_host="127.0.0.1",
+            user="1000:1000",
+            extra_env={},
+            extra_labels={},
+        )
+        manager = DockerProjectionManager(config=config, projected_configs_root=tmp_path / "projections")
+        paths = local_worker_state_paths_for_root(tmp_path / "workers" / "worker-a")
+        projection = manager.projected_config(
+            paths,
+            worker_key="v1:default:shared:alpha",
+            materialize=False,
+        )
+        projected_config = yaml.safe_load(projection.projected_yaml)
+        print(
+            json.dumps(
+                {
+                    "projection_root": projection.root.name,
+                    "knowledge_bases": list(projected_config["knowledge_bases"]),
+                },
+            ),
+        )
+        """,
+        )
+        .lstrip()
+        .replace("__WORKSPACE_ROOT__", json.dumps(str(workspace_root)))
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONHASHSEED": hash_seed},
+        text=True,
+    )
+    return json.loads(completed.stdout)
 
 
 def test_docker_backend_ensures_worker_container_and_bind_mount(
@@ -1001,6 +1066,41 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:
+    """Projection hashes should not change across interpreter restarts for the same config."""
+    (tmp_path / "kb_a").mkdir()
+    (tmp_path / "kb_a" / "a.txt").write_text("a\n", encoding="utf-8")
+    (tmp_path / "kb_b").mkdir()
+    (tmp_path / "kb_b" / "b.txt").write_text("b\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        """
+knowledge_bases:
+  a:
+    path: ./kb_a
+  b:
+    path: ./kb_b
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [a, b]
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    first_signature = _projection_signature_for_hash_seed("1", tmp_path)
+    second_signature = _projection_signature_for_hash_seed("2", tmp_path)
+
+    assert first_signature == second_signature
+    assert first_signature["knowledge_bases"] == ["a", "b"]
 
 
 def test_docker_backend_rebuilds_incomplete_projection_snapshot(

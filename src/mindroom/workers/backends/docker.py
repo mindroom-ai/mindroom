@@ -757,7 +757,7 @@ class DockerWorkerBackend:
                 continue
             writable = mount.get("RW")
             if isinstance(writable, bool):
-                return writable is (not read_only)
+                return writable == (not read_only)
             mode = mount.get("Mode")
             if isinstance(mode, str):
                 return "ro" in mode if read_only else "ro" not in mode

@@ -19,6 +19,8 @@ from mindroom.constants import resolve_config_relative_path
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
@@ -71,6 +73,17 @@ def _projection_path_with_suffix(relative_path: PurePosixPath, *, suffix: str) -
     else:
         name = f"{relative_path.name}-{suffix}"
     return relative_path.with_name(name)
+
+
+def _ordered_unique_nonempty_strings(values: Iterable[object]) -> tuple[str, ...]:
+    ordered_values: list[str] = []
+    seen_values: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip() or value in seen_values:
+            continue
+        seen_values.add(value)
+        ordered_values.append(value)
+    return tuple(ordered_values)
 
 
 def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
@@ -390,8 +403,8 @@ class DockerProjectionManager:
         worker_key: str | None,
         paths: LocalWorkerStatePaths,
         *,
-        projected_agent_names: set[str] | None,
-        projected_knowledge_base_ids: set[str] | None,
+        projected_agent_names: tuple[str, ...] | None,
+        projected_knowledge_base_ids: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
@@ -428,8 +441,8 @@ class DockerProjectionManager:
         self,
         config_data: dict[str, object],
         *,
-        projected_agent_names: set[str] | None,
-        projected_knowledge_base_ids: set[str] | None,
+        projected_agent_names: tuple[str, ...] | None,
+        projected_knowledge_base_ids: tuple[str, ...] | None,
     ) -> None:
         raw_agents = config_data.get("agents")
         if isinstance(raw_agents, dict) and projected_agent_names is not None:
@@ -474,7 +487,7 @@ class DockerProjectionManager:
         config_data: dict[str, object],
         *,
         worker_key: str | None,
-    ) -> set[str] | None:
+    ) -> tuple[str, ...] | None:
         if worker_key is None:
             return None
 
@@ -492,24 +505,24 @@ class DockerProjectionManager:
                 default_worker_scope,
             )
             if self._worker_key_targets_agent(worker_key, agent_name=agent_name, worker_scope=worker_scope):
-                return {agent_name}
+                return (agent_name,)
         return None
 
     def _projected_knowledge_base_ids(
         self,
         config_data: dict[str, object],
         *,
-        agent_names: set[str] | None,
-    ) -> set[str] | None:
+        agent_names: tuple[str, ...] | None,
+    ) -> tuple[str, ...] | None:
         if agent_names is None:
             return None
 
         raw_agents = config_data.get("agents")
         if not isinstance(raw_agents, dict):
-            return set()
+            return ()
 
         agents = cast("dict[object, object]", raw_agents)
-        projected_knowledge_base_ids: set[str] = set()
+        projected_knowledge_base_ids: list[str] = []
         for agent_name in agent_names:
             raw_agent = agents.get(agent_name)
             if not isinstance(raw_agent, dict):
@@ -517,10 +530,10 @@ class DockerProjectionManager:
             raw_knowledge_bases = cast("dict[str, object]", raw_agent).get("knowledge_bases")
             if not isinstance(raw_knowledge_bases, list):
                 continue
-            projected_knowledge_base_ids.update(
-                base_id for base_id in raw_knowledge_bases if isinstance(base_id, str) and base_id.strip()
+            projected_knowledge_base_ids.extend(
+                knowledge_base_id for knowledge_base_id in raw_knowledge_bases if isinstance(knowledge_base_id, str)
             )
-        return projected_knowledge_base_ids
+        return _ordered_unique_nonempty_strings(projected_knowledge_base_ids)
 
     def _default_projected_worker_scope(self, config_data: dict[str, object]) -> str | None:
         raw_defaults = config_data.get("defaults")
@@ -597,7 +610,7 @@ class DockerProjectionManager:
         self,
         config_data: dict[str, object],
         host_config_path: Path,
-        projected_knowledge_base_ids: set[str] | None,
+        projected_knowledge_base_ids: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
@@ -630,7 +643,7 @@ class DockerProjectionManager:
         config_data: dict[str, object],
         host_config_path: Path,
         paths: LocalWorkerStatePaths,
-        projected_agent_names: set[str] | None,
+        projected_agent_names: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
