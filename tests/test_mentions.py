@@ -4,13 +4,29 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import mindroom.matrix.identity as matrix_identity
+from mindroom import constants as constants_mod
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.matrix.mentions import format_message_with_mentions, parse_mentions_in_text
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 
 if TYPE_CHECKING:
-    from _pytest.monkeypatch import MonkeyPatch
+    from pathlib import Path
+
+
+def _make_config(*, runtime_paths: constants_mod.RuntimePaths | None = None) -> Config:
+    config = Config(
+        agents={
+            "calculator": AgentConfig(display_name="Calculator"),
+            "general": AgentConfig(display_name="General"),
+            "code": AgentConfig(display_name="Code"),
+            "email": AgentConfig(display_name="Email"),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    )
+    config._runtime_paths = runtime_paths
+    return config
 
 
 class TestMentionParsing:
@@ -18,7 +34,7 @@ class TestMentionParsing:
 
     def test_parse_single_mention(self) -> None:
         """Test parsing a single agent mention."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "Hey @calculator can you help with this?"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -28,7 +44,7 @@ class TestMentionParsing:
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "@calculator and @general please work together on this"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -41,7 +57,7 @@ class TestMentionParsing:
 
     def test_parse_with_full_mention(self) -> None:
         """Test parsing when full @mindroom_agent format is used."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "Ask @mindroom_calculator for help"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -51,7 +67,7 @@ class TestMentionParsing:
 
     def test_parse_with_domain(self) -> None:
         """Test parsing when mention already has domain."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "Ask @mindroom_calculator:matrix.org for help"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -60,10 +76,15 @@ class TestMentionParsing:
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
 
-    def test_parse_with_namespaced_full_mention(self, monkeypatch: MonkeyPatch) -> None:
+    def test_parse_with_namespaced_full_mention(self, tmp_path: Path) -> None:
         """Full localparts that include namespace suffix should resolve to configured agents."""
-        monkeypatch.setattr(matrix_identity, "runtime_mindroom_namespace", lambda **_kwargs: "a1b2c3d4")
-        config = Config.from_yaml()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_NAMESPACE": "a1b2c3d4"},
+        )
+        config = _make_config(runtime_paths=runtime_paths)
 
         text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -73,7 +94,7 @@ class TestMentionParsing:
 
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "Hey @calculator"
         processed, mentions, markdown = parse_mentions_in_text(text, "matrix.org", config)
@@ -83,7 +104,7 @@ class TestMentionParsing:
 
     def test_ignore_unknown_mentions(self) -> None:
         """Test that unknown agents are not converted."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "@calculator is real but @unknown is not"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -93,7 +114,7 @@ class TestMentionParsing:
 
     def test_ignore_user_mentions(self) -> None:
         """Test that user mentions are ignored."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "@mindroom_user_123 and @calculator"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -103,7 +124,7 @@ class TestMentionParsing:
 
     def test_no_duplicate_mentions(self) -> None:
         """Test that duplicate mentions are handled."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "@calculator help! @calculator are you there?"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -113,7 +134,7 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions(self) -> None:
         """Test the full content creation with mentions."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         content = format_message_with_mentions(
             config,
@@ -134,7 +155,7 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_includes_tool_trace(self) -> None:
         """Structured tool traces should be attached to message content when provided."""
-        config = Config.from_yaml()
+        config = _make_config()
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file=a.py")]
 
         content = format_message_with_mentions(
@@ -150,7 +171,7 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_merges_extra_content(self) -> None:
         """Custom metadata should be merged with structured tool trace content."""
-        config = Config.from_yaml()
+        config = _make_config()
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
         content = format_message_with_mentions(
@@ -167,7 +188,7 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_preserves_inherited_mentions(self) -> None:
         """Inherited mentions should survive even when the new text adds no mentions."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         content = format_message_with_mentions(
             config,
@@ -180,7 +201,7 @@ class TestMentionParsing:
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         text = "This has no mentions"
         processed, mentions, markdown = parse_mentions_in_text(text, "localhost", config)
@@ -190,7 +211,7 @@ class TestMentionParsing:
 
     def test_mention_in_middle_of_word(self) -> None:
         """Test that mentions in middle of words are not parsed."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         # The regex should require word boundaries
         text = "Use decode@code function"
@@ -202,7 +223,7 @@ class TestMentionParsing:
 
     def test_case_insensitive_mentions(self) -> None:
         """Test that mentions are case-insensitive."""
-        config = Config.from_yaml()
+        config = _make_config()
 
         # Test various capitalizations
         test_cases = [

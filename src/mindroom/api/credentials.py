@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -28,6 +28,9 @@ from mindroom.tool_system.worker_routing import (
     worker_scope_allows_shared_only_integrations,
 )
 
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
 _pending_oauth_state_lock = threading.Lock()
@@ -45,6 +48,12 @@ class _PendingOAuthState:
 
 
 _pending_oauth_states: dict[str, _PendingOAuthState] = {}
+
+
+class _CredentialsApiState(Protocol):
+    """Typed subset of FastAPI app state used by credentials routes."""
+
+    runtime_paths: RuntimePaths
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +77,10 @@ class RequestCredentialsTarget:
     worker_scope: WorkerScope | None
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
+
+
+def _request_runtime_paths(request: Request) -> RuntimePaths:
+    return cast("_CredentialsApiState", request.app.state).runtime_paths
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -189,7 +202,9 @@ def resolve_request_credentials_target(
     """Resolve the credential storage target for one authenticated dashboard request."""
     _reject_raw_worker_targeting(request)
 
-    base_manager = credentials_manager or get_credentials_manager()
+    base_manager = credentials_manager or get_credentials_manager(
+        storage_root=_request_runtime_paths(request).storage_root,
+    )
 
     if not agent_name:
         return RequestCredentialsTarget(
@@ -202,7 +217,7 @@ def resolve_request_credentials_target(
 
     from mindroom.api.main import load_runtime_config  # noqa: PLC0415
 
-    config, _ = load_runtime_config()
+    config, _ = load_runtime_config(_request_runtime_paths(request))
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 

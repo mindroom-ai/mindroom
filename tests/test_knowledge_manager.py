@@ -302,7 +302,7 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
         },
     )
 
-    assert _create_embedder(config) is sentinel
+    assert _create_embedder(config, resolve_runtime_paths()) is sentinel
     assert captured == {
         "model": "sentence-transformers/all-MiniLM-L6-v2",
         "dimensions": 384,

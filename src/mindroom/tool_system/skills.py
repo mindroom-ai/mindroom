@@ -55,7 +55,13 @@ class _MindroomSkillsLoader(SkillLoader):
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
         env_vars = os.environ if self.env_vars is None else self.env_vars
-        credential_keys = self.credential_keys if self.credential_keys is not None else _collect_credential_keys()
+        credential_keys = (
+            self.credential_keys
+            if self.credential_keys is not None
+            else _collect_credential_keys(
+                self.config,
+            )
+        )
         config_data = self.config.model_dump()
         allowlist_set = set(self.allowlist or [])
 
@@ -100,7 +106,7 @@ def build_agent_skills(
         config=config,
         allowlist=agent_config.skills,
         env_vars=env_vars,
-        credential_keys=credential_keys,
+        credential_keys=credential_keys if credential_keys is not None else _collect_credential_keys(config),
     )
     return Skills(loaders=[loader])
 
@@ -156,7 +162,7 @@ def resolve_skill_command_spec(  # noqa: C901
         return None
 
     env_vars = os.environ if env_vars is None else env_vars
-    credential_keys = credential_keys if credential_keys is not None else _collect_credential_keys()
+    credential_keys = credential_keys if credential_keys is not None else _collect_credential_keys(config)
     config_data = config.model_dump()
 
     resolved: _SkillCommandSpec | None = None
@@ -602,8 +608,14 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
     return bool(current)
 
 
-def _collect_credential_keys() -> set[str]:
-    credentials_manager = get_credentials_manager()
+def _collect_credential_keys(config: Config) -> set[str]:
+    runtime_paths = config.runtime_paths
+    if runtime_paths is None:
+        msg = "_collect_credential_keys() requires a Config loaded with runtime paths"
+        raise RuntimeError(msg)
+    credentials_manager = get_credentials_manager(
+        storage_root=runtime_paths.storage_root,
+    )
     keys: set[str] = set()
     for service in credentials_manager.list_services():
         credentials = credentials_manager.load_credentials(service) or {}

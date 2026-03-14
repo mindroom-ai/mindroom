@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,7 +21,11 @@ def test_google_wrappers_reject_isolating_worker_scopes(
 ) -> None:
     """Google-backed tools are intentionally unsupported for isolating worker scopes."""
     with pytest.raises(ValueError, match="worker_scope=shared"):
-        tool_class(worker_scope=worker_scope, routing_agent_name="general")
+        tool_class(
+            credentials_manager=MagicMock(),
+            worker_scope=worker_scope,
+            routing_agent_name="general",
+        )
 
 
 @pytest.mark.parametrize(

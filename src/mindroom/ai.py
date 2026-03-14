@@ -493,7 +493,7 @@ def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
-def _set_api_key_env_var(provider: str) -> None:
+def _set_api_key_env_var(provider: str, *, runtime_paths: RuntimePaths) -> None:
     """Set environment variable for a provider from CredentialsManager.
 
     Since we sync from .env to CredentialsManager on startup,
@@ -501,6 +501,7 @@ def _set_api_key_env_var(provider: str) -> None:
 
     Args:
         provider: Provider name (e.g., 'openai', 'anthropic')
+        runtime_paths: Explicit runtime context for credentials and env resolution.
 
     """
     env_vars = {
@@ -513,7 +514,7 @@ def _set_api_key_env_var(provider: str) -> None:
         return
 
     # Get API key from CredentialsManager (which has been synced from .env)
-    api_key = get_api_key_for_provider(canonical_provider)
+    api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
 
     # Set environment variable if key exists
     if api_key:
@@ -521,7 +522,14 @@ def _set_api_key_env_var(provider: str) -> None:
         logger.debug(f"Set {env_vars[canonical_provider]} from CredentialsManager")
 
 
-def _create_model_for_provider(provider: str, model_id: str, model_config: ModelConfig, extra_kwargs: dict) -> Model:
+def _create_model_for_provider(
+    provider: str,
+    model_id: str,
+    model_config: ModelConfig,
+    extra_kwargs: dict,
+    *,
+    runtime_paths: RuntimePaths,
+) -> Model:
     """Create a model instance for a specific provider.
 
     Args:
@@ -529,6 +537,7 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         model_id: The model identifier
         model_config: The model configuration object
         extra_kwargs: Additional keyword arguments for the model
+        runtime_paths: Explicit runtime context for provider credentials and host resolution.
 
     Returns:
         Instantiated model for the provider
@@ -543,7 +552,7 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     if canonical_provider == "ollama":
         # Priority: model config > env/CredentialsManager > default
         # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host() or "http://localhost:11434"
+        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
         logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
@@ -551,7 +560,9 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     if canonical_provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None) or get_api_key_for_provider(canonical_provider)
+        api_key = extra_kwargs.pop("api_key", None)
+        if not api_key:
+            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
@@ -576,12 +587,18 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     raise ValueError(msg)
 
 
-def get_model_instance(config: Config, model_name: str = "default") -> Model:
+def get_model_instance(
+    config: Config,
+    model_name: str = "default",
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> Model:
     """Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
         model_name: Name of the model configuration to use (default: "default")
+        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
 
     Returns:
         Instantiated model
@@ -604,8 +621,13 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
+    resolved_runtime_paths = runtime_paths or config.runtime_paths
+    if resolved_runtime_paths is None:
+        msg = "get_model_instance() requires explicit runtime_paths or a Config loaded with runtime paths"
+        raise RuntimeError(msg)
+
     # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_credentials_manager()
+    creds_manager = get_credentials_manager(storage_root=resolved_runtime_paths.storage_root)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
     model_api_key = model_creds.get("api_key") if model_creds else None
 
@@ -613,9 +635,15 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
         extra_kwargs["api_key"] = model_api_key
     else:
         # Set environment variable from CredentialsManager for Agno to use
-        _set_api_key_env_var(provider)
+        _set_api_key_env_var(provider, runtime_paths=resolved_runtime_paths)
 
-    return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
+    return _create_model_for_provider(
+        provider,
+        model_id,
+        model_config,
+        extra_kwargs,
+        runtime_paths=resolved_runtime_paths,
+    )
 
 
 def _format_messages_context(messages: list[dict[str, Any]], header: str, prompt: str) -> str:

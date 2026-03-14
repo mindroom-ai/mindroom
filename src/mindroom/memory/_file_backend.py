@@ -48,7 +48,10 @@ def _file_memory_root(
 ) -> Path:
     configured_path = config.memory.file.path if use_configured_path else None
     if configured_path:
-        return resolve_config_relative_path(configured_path)
+        return resolve_config_relative_path(
+            configured_path,
+            runtime_paths=config.require_runtime_paths(),
+        )
     return (storage_path.expanduser().resolve() / FILE_MEMORY_DEFAULT_DIRNAME).resolve()
 
 

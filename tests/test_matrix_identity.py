@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
-import mindroom.matrix.identity as matrix_identity
+from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -15,6 +17,9 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestMatrixID:
@@ -80,17 +85,29 @@ class TestMatrixID:
         assert mid.full_id == f"@mindroom_router:{domain}"
         assert mid.agent_name(self.config) == "router"
 
-    def test_namespaced_agent_localpart_and_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_namespaced_agent_localpart_and_parsing(self, tmp_path: Path) -> None:
         """Agent IDs should use and require configured namespace suffixes."""
-        monkeypatch.setattr(matrix_identity, "runtime_mindroom_namespace", lambda **_kwargs: "a1b2c3d4")
-        domain = self.config.domain
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_NAMESPACE": "a1b2c3d4"},
+        )
+        config = Config(
+            agents=self.config.agents,
+            teams=self.config.teams,
+            room_models=self.config.room_models,
+            models=self.config.models,
+        )
+        config._runtime_paths = runtime_paths
+        domain = config.domain
 
-        assert agent_username_localpart("calculator") == "mindroom_calculator_a1b2c3d4"
+        assert agent_username_localpart("calculator", runtime_paths=runtime_paths) == "mindroom_calculator_a1b2c3d4"
         namespaced_id = MatrixID.parse(f"@mindroom_calculator_a1b2c3d4:{domain}")
-        assert namespaced_id.agent_name(self.config) == "calculator"
+        assert namespaced_id.agent_name(config) == "calculator"
 
         legacy_id = MatrixID.parse(f"@mindroom_calculator:{domain}")
-        assert legacy_id.agent_name(self.config) is None
+        assert legacy_id.agent_name(config) is None
 
 
 class TestThreadStateKey:

@@ -10,7 +10,6 @@ from typing import Literal
 import yaml
 from agno.tools import Toolkit
 
-from mindroom import constants
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -77,14 +76,14 @@ class ConfigManagerTools(Toolkit):
     number of tools to reduce cognitive load on AI models.
     """
 
-    def __init__(self, config_path: Path | None = None) -> None:
+    def __init__(self, config_path: Path) -> None:
         """Initialize the ConfigManager toolkit.
 
         Args:
-            config_path: Optional path to configuration file
+            config_path: Path to configuration file
 
         """
-        self.config_path = constants.runtime_config_path(config_path)
+        self.config_path = Path(config_path).expanduser().resolve()
         self._mindroom_docs: str | None = None
         self._help_text: str | None = None
 

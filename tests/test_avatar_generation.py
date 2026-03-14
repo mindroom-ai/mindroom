@@ -21,10 +21,30 @@ def _workspace_avatar_path(
     entity_type: str,
     entity_name: str,
     *,
+    runtime_paths: constants_mod.RuntimePaths | None = None,
     config_path: Path | None = None,
 ) -> Path:
+    del runtime_paths
     del config_path
     return tmp_path / "avatars" / entity_type / f"{entity_name}.png"
+
+
+def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> constants_mod.RuntimePaths:
+    """Build explicit runtime paths for avatar-generation tests."""
+    return constants_mod.resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
+
+
+def _config_with_runtime_paths(
+    raw_config: dict[str, object],
+    tmp_path: Path,
+) -> generate_avatars.Config:
+    runtime_paths = _runtime_paths(tmp_path)
+    config = generate_avatars.Config.model_validate(raw_config, context={"runtime_paths": runtime_paths})
+    config._runtime_paths = runtime_paths
+    return config
 
 
 @pytest.fixture
@@ -34,20 +54,22 @@ def workspace_avatar_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pat
     monkeypatch.setattr(
         generate_avatars,
         "workspace_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+        lambda entity_type, entity_name, *, runtime_paths=None, config_path=None: _workspace_avatar_path(
             tmp_path,
             entity_type,
             entity_name,
+            runtime_paths=runtime_paths,
             config_path=config_path,
         ),
     )
     monkeypatch.setattr(
         generate_avatars,
         "resolve_avatar_path",
-        lambda entity_type, entity_name, *, config_path=None: _workspace_avatar_path(
+        lambda entity_type, entity_name, *, runtime_paths=None, config_path=None: _workspace_avatar_path(
             tmp_path,
             entity_type,
             entity_name,
+            runtime_paths=runtime_paths,
             config_path=config_path,
         ),
     )
@@ -181,8 +203,10 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         entity_type: str,
         entity_name: str,
         *,
+        runtime_paths: constants_mod.RuntimePaths | None = None,
         config_path: Path | None = None,
     ) -> Path:
+        del runtime_paths
         del config_path
         return bundled_root / entity_type / f"{entity_name}.png"
 
@@ -221,13 +245,13 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_e
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", lambda **_kwargs: pytest.fail("generation should be skipped"))
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
 
-    await generate_avatars.run_avatar_generation()
+    await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
 
 @pytest.mark.asyncio
@@ -255,8 +279,10 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
         entity_type: str,
         entity_name: str,
         *,
+        runtime_paths: constants_mod.RuntimePaths | None = None,
         config_path: Path | None = None,
     ) -> Path:
+        del runtime_paths
         del config_path
         return workspace_root / entity_type / f"{entity_name}.png"
 
@@ -264,15 +290,17 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
         entity_type: str,
         entity_name: str,
         *,
+        runtime_paths: constants_mod.RuntimePaths | None = None,
         config_path: Path | None = None,
     ) -> Path:
+        del runtime_paths
         del config_path
         return bundled_root / entity_type / f"{entity_name}.png"
 
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
     )
     monkeypatch.setattr(generate_avatars, "workspace_avatar_path", _workspace_path)
     monkeypatch.setattr(generate_avatars, "resolve_avatar_path", _resolve_avatar_path)
@@ -285,7 +313,7 @@ async def test_run_avatar_generation_skips_google_key_when_all_managed_avatars_a
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    await generate_avatars.run_avatar_generation()
+    await generate_avatars.run_avatar_generation(_runtime_paths(tmp_path))
 
     assert not (workspace_root / "agents" / "general.png").exists()
     assert not (workspace_root / "rooms" / "lobby.png").exists()
@@ -315,7 +343,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(
         generate_avatars.genai,
@@ -326,7 +354,7 @@ async def test_run_avatar_generation_raises_when_missing_avatars_still_fail_gene
     monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
 
     with pytest.raises(generate_avatars.AvatarGenerationError, match="Avatar generation failed"):
-        await generate_avatars.run_avatar_generation()
+        await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
 
@@ -353,9 +381,7 @@ async def test_run_avatar_generation_accepts_null_optional_sections(
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
-    constants_mod.set_runtime_paths(config_path=config_path)
-
-    await generate_avatars.run_avatar_generation()
+    await generate_avatars.run_avatar_generation(_runtime_paths(tmp_path, config_path=config_path))
 
 
 @pytest.mark.asyncio
@@ -417,7 +443,7 @@ async def test_generate_avatar_writes_generated_image(monkeypatch: pytest.Monkey
     generate_content = AsyncMock(return_value=image_response)
     client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
 
-    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args: avatar_path)
+    monkeypatch.setattr(generate_avatars, "get_avatar_path", lambda *_args, **_kwargs: avatar_path)
     monkeypatch.setattr(generate_avatars, "generate_prompt", AsyncMock(return_value="avatar prompt"))
 
     await generate_avatars.generate_avatar(
@@ -467,7 +493,10 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     async def _generate_avatar(
         _client: object,
         target: generate_avatars.AvatarTarget,
+        *,
+        runtime_paths: constants_mod.RuntimePaths | None = None,
     ) -> None:
+        del runtime_paths
         avatar_path = workspace_avatar_dir / target.entity_type / f"{target.entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"generated")
@@ -482,7 +511,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
     monkeypatch.setattr(generate_avatars.genai, "Client", _make_client)
     monkeypatch.setattr(generate_avatars, "generate_avatar", generated)
@@ -492,7 +521,7 @@ async def test_run_avatar_generation_includes_team_rooms_and_root_space(
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("GOOGLE_API_KEY_FILE", str(api_key_file))
 
-    await generate_avatars.run_avatar_generation()
+    await generate_avatars.run_avatar_generation(_runtime_paths(workspace_avatar_dir.parent))
 
     generated_entities = {(call.args[1].entity_type, call.args[1].entity_name) for call in generated.await_args_list}
     assert ("rooms", "lobby") in generated_entities
@@ -547,15 +576,16 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
     client = SimpleNamespace(close=AsyncMock())
     set_room_avatar_from_file = AsyncMock(return_value=True)
 
-    def _get_room_id(room_name: str) -> str | None:
+    def _get_room_id(room_name: str, *, runtime_paths: constants_mod.RuntimePaths | None = None) -> str | None:
+        del runtime_paths
         return "!war:localhost" if room_name == "war_room" else None
 
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(generate_avatars, "get_room_id", _get_room_id)
@@ -565,7 +595,7 @@ async def test_set_room_avatars_in_matrix_includes_team_rooms_and_root_space(
         lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
-    await generate_avatars.set_room_avatars_in_matrix()
+    await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
     synced_targets = {(call.args[1], call.args[2].name) for call in set_room_avatar_from_file.await_args_list}
     assert ("!war:localhost", "war_room.png") in synced_targets
@@ -610,15 +640,15 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", AsyncMock(return_value=False))
     monkeypatch.setattr(
         generate_avatars,
         "get_room_id",
-        lambda room_name: "!war:localhost" if room_name == "war_room" else None,
+        lambda room_name, **_kwargs: "!war:localhost" if room_name == "war_room" else None,
     )
     monkeypatch.setattr(
         generate_avatars.constants,
@@ -630,7 +660,7 @@ async def test_set_room_avatars_in_matrix_raises_when_room_avatar_updates_fail(
         generate_avatars.AvatarSyncError,
         match=r"Failed to set avatars for: room 'war_room'",
     ):
-        await generate_avatars.set_room_avatars_in_matrix()
+        await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
     client.close.assert_awaited_once()
 
@@ -672,9 +702,9 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(generate_avatars, "login_agent_user", AsyncMock(return_value=client))
     monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_room_avatar_from_file)
     monkeypatch.setattr(
@@ -683,7 +713,7 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
         lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
-    await generate_avatars.set_room_avatars_in_matrix()
+    await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
 
     synced_targets = {(call.args[1], call.args[2].name) for call in set_room_avatar_from_file.await_args_list}
     assert ("!space:localhost", "root_space.png") not in synced_targets
@@ -693,21 +723,23 @@ async def test_set_room_avatars_in_matrix_skips_stale_root_space_when_disabled(
 @pytest.mark.asyncio
 async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Standalone avatar sync should fail fast until MindRoom has initialized the router account."""
     state = SimpleNamespace(get_account=lambda _key: None)
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
         match="No router account found in Matrix state",
     ):
-        await generate_avatars.set_room_avatars_in_matrix()
+        await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 
 @pytest.mark.asyncio
 async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Router login failures should surface as AvatarSyncError for the CLI."""
     raw_config = {
@@ -728,9 +760,9 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
     monkeypatch.setattr(
         generate_avatars,
         "load_validated_config",
-        lambda *_args, **_kwargs: generate_avatars.Config.model_validate(raw_config),
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, tmp_path),
     )
-    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda: state))
+    monkeypatch.setattr(generate_avatars.MatrixState, "load", staticmethod(lambda **_kwargs: state))
     monkeypatch.setattr(
         generate_avatars,
         "login_agent_user",
@@ -746,4 +778,4 @@ async def test_set_room_avatars_in_matrix_wraps_router_login_failures(
         generate_avatars.AvatarSyncError,
         match="Failed to log in as router for avatar sync",
     ):
-        await generate_avatars.set_room_avatars_in_matrix()
+        await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))

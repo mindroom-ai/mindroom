@@ -153,11 +153,10 @@ def test_ensure_writable_config_path_seeds_from_template(
     writable_config = tmp_path / "data" / "config.yaml"
     template_config = tmp_path / "template.yaml"
     template_config.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
-
-    constants.set_runtime_paths(config_path=writable_config)
     monkeypatch.setenv("MINDROOM_CONFIG_TEMPLATE", str(template_config))
+    runtime_paths = constants.resolve_runtime_paths(config_path=writable_config)
 
-    assert constants.ensure_writable_config_path() is True
+    assert constants.ensure_writable_config_path(runtime_paths=runtime_paths) is True
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
@@ -202,8 +201,8 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
         await callback()
         stop_event.set()
 
-    constants.set_runtime_paths(config_path=config_path)
-    main.app.state.runtime_paths = constants.get_runtime_paths()
+    runtime_paths = constants.set_runtime_paths(config_path=config_path)
+    main.app.state.runtime_paths = runtime_paths
     monkeypatch.setattr(main, "watch_file", _fake_watch_file)
     monkeypatch.setattr(main, "_load_config_from_file", lambda _runtime_paths: watched_paths.append(Path("loaded")))
 
@@ -260,7 +259,7 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     """Background worker cleanup should no-op when no backend is configured."""
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda **_kwargs: False)
 
-    assert main._cleanup_workers_once() == 0
+    assert main._cleanup_workers_once(main.app.state.runtime_paths) == 0
 
 
 def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,7 +285,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda **_kwargs: True)
     monkeypatch.setattr(main, "get_primary_worker_manager", lambda **_kwargs: _FakeWorkerManager())
 
-    assert main._cleanup_workers_once() == 1
+    assert main._cleanup_workers_once(main.app.state.runtime_paths) == 1
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1158,8 +1157,8 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    constants.set_runtime_paths(config_path=temp_config_file)
-    main.app.state.runtime_paths = constants.get_runtime_paths()
+    runtime_paths = constants.set_runtime_paths(config_path=temp_config_file)
+    main.app.state.runtime_paths = runtime_paths
     monkeypatch.setattr(main, "_MINDROOM_API_KEY", "test-key")
     main._load_config_from_file(main.app.state.runtime_paths)
     return TestClient(main.app)

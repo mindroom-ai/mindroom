@@ -54,7 +54,12 @@ async def test_router_gets_all_configured_rooms(
     """Test that the router agent is configured to join all rooms from agents and teams."""
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        *,
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -84,7 +89,12 @@ def test_team_bot_uses_defaults_streaming_setting(
     """Team bots should inherit defaults.enable_streaming from config."""
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        *,
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -130,7 +140,12 @@ async def test_router_joins_rooms_on_start(
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        *,
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -201,7 +216,12 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        *,
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
@@ -279,7 +299,12 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("mindroom.matrix.users._ensure_all_agent_users", mock_ensure_all_agent_users)
 
-    def mock_resolve_room_aliases(aliases: list[str]) -> list[str]:
+    def mock_resolve_room_aliases(
+        aliases: list[str],
+        *,
+        runtime_paths: object | None = None,
+    ) -> list[str]:
+        del runtime_paths
         return list(aliases)
 
     monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)

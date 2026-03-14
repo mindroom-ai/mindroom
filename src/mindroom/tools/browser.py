@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
 
 if TYPE_CHECKING:
     from mindroom.custom_tools.browser import BrowserTools
@@ -24,6 +24,15 @@ if TYPE_CHECKING:
     icon_color="text-orange-500",
     dependencies=["playwright"],
     docs_url="https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+    config_fields=[
+        ConfigField(
+            name="output_dir",
+            label="Output Directory",
+            type="text",
+            required=False,
+            description="Optional directory for browser screenshots, PDFs, and downloads.",
+        ),
+    ],
 )
 def browser_tools() -> type[BrowserTools]:
     """Return Browser tools with OpenClaw-style action routing."""

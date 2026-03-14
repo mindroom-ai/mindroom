@@ -27,8 +27,7 @@ from mindroom.constants import (
     activate_runtime_paths,
     config_search_locations,
     env_key_for_provider,
-    exported_env_value,
-    get_runtime_paths,
+    exported_process_env,
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
@@ -207,7 +206,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return get_runtime_paths().config_path.resolve()
+    return resolve_runtime_paths(process_env=exported_process_env()).config_path.resolve()
 
 
 def _activate_cli_runtime(
@@ -216,25 +215,26 @@ def _activate_cli_runtime(
     storage_path: Path | None = None,
 ) -> RuntimePaths:
     """Create the CLI runtime context once and return it for explicit threading."""
-    active_runtime_paths = get_runtime_paths()
-    configured_config_path = (exported_env_value("MINDROOM_CONFIG_PATH") or "").strip()
+    process_env = exported_process_env()
     if path is not None:
-        resolved_config_path = path.expanduser().resolve()
-    elif configured_config_path:
-        resolved_config_path = Path(configured_config_path).expanduser().resolve()
-    else:
-        resolved_config_path = active_runtime_paths.config_path
+        filtered_process_env = {
+            key: value
+            for key, value in process_env.items()
+            if key not in {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"}
+        }
+        return activate_runtime_paths(
+            resolve_runtime_paths(
+                config_path=path.expanduser().resolve(),
+                storage_path=storage_path,
+                process_env=filtered_process_env,
+            ),
+        )
 
-    configured_storage_path = (exported_env_value("MINDROOM_STORAGE_PATH") or "").strip()
-    if storage_path is not None:
-        resolved_storage_path = storage_path
-    elif path is not None or configured_config_path or configured_storage_path:
-        resolved_storage_path = None
-    else:
-        resolved_storage_path = active_runtime_paths.storage_root
     return activate_runtime_paths(
-        config_path=resolved_config_path,
-        storage_path=resolved_storage_path,
+        resolve_runtime_paths(
+            storage_path=storage_path,
+            process_env=process_env,
+        ),
     )
 
 
@@ -535,7 +535,7 @@ def _load_config_quiet(
 def _find_missing_env_keys(
     config: Config,
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     providers_used: set[str] = {model.provider for model in config.models.values()}
@@ -600,7 +600,7 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
     return aliases.get(profile.strip().lower())
 
 
-def _check_env_keys(config: Config, *, runtime_paths: RuntimePaths | None = None) -> None:
+def _check_env_keys(config: Config, *, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
     missing = _find_missing_env_keys(config, runtime_paths=runtime_paths)
     if missing:

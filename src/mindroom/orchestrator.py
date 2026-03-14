@@ -44,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import RuntimePaths, get_runtime_paths
+from .constants import RuntimePaths, resolve_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -103,7 +103,7 @@ class MultiAgentOrchestrator:
 
     def __post_init__(self) -> None:
         """Store a canonical absolute storage path to survive runtime cwd changes."""
-        self.runtime_paths = self.runtime_paths or get_runtime_paths(
+        self.runtime_paths = self.runtime_paths or resolve_runtime_paths(
             config_path=self.config_path,
             storage_path=self.storage_path,
         )
@@ -670,15 +670,16 @@ class MultiAgentOrchestrator:
         config = self._require_config()
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
-            bot.rooms = resolve_room_aliases(room_aliases)
+            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self._require_runtime_paths())
 
         async def _ensure_internal_user_memberships() -> None:
-            all_rooms = load_rooms()
+            all_rooms = load_rooms(runtime_paths=self._require_runtime_paths())
             all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
             if all_room_ids and config.mindroom_user is not None:
                 await ensure_user_in_rooms(
                     constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
                     all_room_ids,
+                    runtime_paths=self._require_runtime_paths(),
                 )
 
         # First invitation and join pass for rooms the router already manages.
@@ -782,7 +783,7 @@ class MultiAgentOrchestrator:
             return authorized_user_ids
         assert router_bot.client is not None
 
-        state = MatrixState.load()
+        state = MatrixState.load(runtime_paths=self._require_runtime_paths())
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if config.mindroom_user is None or not user_account:
             return authorized_user_ids
@@ -940,10 +941,16 @@ async def _watch_skills_task(orchestrator: MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(host: str, port: int, log_level: str) -> None:
+async def _run_api_server(
+    host: str,
+    port: int,
+    log_level: str,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
     from mindroom.api.main import app as api_app  # noqa: PLC0415
 
+    api_app.state.runtime_paths = runtime_paths
     config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     await server.serve()
@@ -1016,7 +1023,11 @@ async def main(
             # Optionally run the bundled dashboard/API server alongside the orchestrator.
             logger.info("Starting bundled dashboard/API server on %s:%d", api_host, api_port)
             auxiliary_specs.append(
-                ("bundled API server", lambda: _run_api_server(api_host, api_port, log_level), "api_server_supervisor"),
+                (
+                    "bundled API server",
+                    lambda: _run_api_server(api_host, api_port, log_level, runtime_paths),
+                    "api_server_supervisor",
+                ),
             )
 
         for task_name, operation, supervisor_name in auxiliary_specs:

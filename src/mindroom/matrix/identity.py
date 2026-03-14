@@ -29,7 +29,9 @@ def _normalize_namespace(namespace: str | None) -> str | None:
 
 
 def mindroom_namespace(*, runtime_paths: RuntimePaths | None = None) -> str | None:
-    """Return the configured installation namespace, if any."""
+    """Return the configured installation namespace for one explicit runtime context."""
+    if runtime_paths is None:
+        return None
     return _normalize_namespace(runtime_mindroom_namespace(runtime_paths=runtime_paths))
 
 
@@ -235,7 +237,7 @@ def extract_server_name_from_homeserver(
     from the actual Matrix server name.
     """
     # Check for explicit server name override (for federation/docker setups)
-    if server_name := runtime_matrix_server_name(runtime_paths=runtime_paths):
+    if runtime_paths is not None and (server_name := runtime_matrix_server_name(runtime_paths=runtime_paths)):
         return server_name
 
     # Otherwise extract from homeserver URL

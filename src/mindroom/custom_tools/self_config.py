@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path  # noqa: TC003
+from pathlib import Path
 from typing import Literal
 
 import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom import constants
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
@@ -24,9 +23,9 @@ _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 class SelfConfigTools(Toolkit):
     """Tools that let an agent read and modify its own configuration only."""
 
-    def __init__(self, agent_name: str, config_path: Path | None = None) -> None:
+    def __init__(self, agent_name: str, config_path: Path) -> None:
         self.agent_name = agent_name
-        self.config_path = constants.runtime_config_path(config_path)
+        self.config_path = Path(config_path).expanduser().resolve()
         super().__init__(
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],

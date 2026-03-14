@@ -128,20 +128,20 @@ def _settings_key(
     )
 
 
-def _create_embedder(config: Config) -> Embedder:
+def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
 
     if provider == "openai":
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai"),
+            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )
 
     if provider == "ollama":
-        host = get_ollama_host() or embedder_config.host or "http://localhost:11434"
+        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or "http://localhost:11434"
         return OllamaEmbedder(id=embedder_config.model, host=host)
 
     if provider == "sentence_transformers":
@@ -171,12 +171,19 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
-def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> str:
+def _authenticated_repo_url(
+    repo_url: str,
+    credentials_service: str | None,
+    *,
+    runtime_paths: RuntimePaths,
+) -> str:
     """Inject HTTPS credentials from CredentialsManager into a repository URL."""
     if not credentials_service:
         return repo_url
 
-    credentials = get_credentials_manager().load_credentials(credentials_service) or {}
+    credentials = (
+        get_credentials_manager(storage_root=runtime_paths.storage_root).load_credentials(credentials_service) or {}
+    )
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")
@@ -317,7 +324,7 @@ class KnowledgeManager:
             collection=_collection_name(self.base_id),
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config),
+            embedder=_create_embedder(self.config, self.runtime_paths),
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
@@ -429,7 +436,11 @@ class KnowledgeManager:
         git_dir = self.knowledge_path / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+            expected_remote = _authenticated_repo_url(
+                git_config.repo_url,
+                git_config.credentials_service,
+                runtime_paths=self.runtime_paths,
+            )
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             await self._run_git(["checkout", git_config.branch])
@@ -443,7 +454,11 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         self.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
-        clone_url = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+        clone_url = _authenticated_repo_url(
+            git_config.repo_url,
+            git_config.credentials_service,
+            runtime_paths=self.runtime_paths,
+        )
         await self._run_git(
             [
                 "clone",

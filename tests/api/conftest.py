@@ -43,8 +43,8 @@ def test_client(temp_config_file: Path) -> TestClient:
     from mindroom import constants  # noqa: PLC0415
     from mindroom.api import main  # noqa: PLC0415
 
-    constants.set_runtime_paths(config_path=temp_config_file)
-    main.app.state.runtime_paths = constants.get_runtime_paths()
+    runtime_paths = constants.set_runtime_paths(config_path=temp_config_file)
+    main.app.state.runtime_paths = runtime_paths
 
     # Force reload of config
     main._load_config_from_file(main.app.state.runtime_paths)

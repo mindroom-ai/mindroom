@@ -15,13 +15,14 @@ from urllib.parse import urlparse
 import httpx
 import typer
 
-from mindroom import constants
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import console
+from .config import _activate_cli_runtime, console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.constants import RuntimePaths
 
 _CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-cinny:latest"
 _CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
@@ -72,6 +73,7 @@ def local_stack_setup(
     ),
 ) -> None:
     """Start local Synapse + MindRoom Cinny using Docker only."""
+    runtime_paths = _activate_cli_runtime()
     _require_supported_platform()
     _require_binary("docker", "Docker is required but was not found in PATH.")
 
@@ -82,7 +84,11 @@ def local_stack_setup(
 
     _wait_for_matrix_homeserver(homeserver_url)
 
-    cinny_config_path = _write_local_cinny_config(homeserver_url, inferred_server_name)
+    cinny_config_path = _write_local_cinny_config(
+        homeserver_url,
+        inferred_server_name,
+        runtime_paths=runtime_paths,
+    )
     console.print(f"Cinny config written: [dim]{cinny_config_path}[/dim]")
 
     cinny_url = f"http://localhost:{cinny_port}"
@@ -98,6 +104,7 @@ def local_stack_setup(
         homeserver_url=homeserver_url,
         cinny_url=cinny_url,
         server_name=inferred_server_name,
+        config_path=runtime_paths.config_path,
         persist_env=persist_env,
         cinny_container_name=cinny_container_name,
         synapse_dir=synapse_dir,
@@ -114,7 +121,12 @@ def _infer_server_name(homeserver_url: str) -> str:
     return parsed.hostname
 
 
-def _write_local_cinny_config(homeserver_url: str, server_name: str) -> Path:
+def _write_local_cinny_config(
+    homeserver_url: str,
+    server_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+) -> Path:
     """Write a minimal Cinny config for local MindRoom development."""
     config = {
         "defaultHomeserver": 0,
@@ -130,15 +142,20 @@ def _write_local_cinny_config(homeserver_url: str, server_name: str) -> Path:
         "sidebar": {"showExploreCommunity": False, "showAddSpace": False},
         "auth": {"hideServerPickerWhenSingle": True},
     }
-    target = constants.get_runtime_paths().storage_root / "local" / "cinny-config.json"
+    target = runtime_paths.storage_root / "local" / "cinny-config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"{json.dumps(config, indent=2)}\n", encoding="utf-8")
     return target
 
 
-def _persist_local_matrix_env(homeserver_url: str, server_name: str) -> Path:
+def _persist_local_matrix_env(
+    homeserver_url: str,
+    server_name: str,
+    *,
+    config_path: Path,
+) -> Path:
     """Write local Matrix settings to .env next to the active config file."""
-    env_path = constants.runtime_config_path().parent / ".env"
+    env_path = config_path.expanduser().resolve().parent / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
 
@@ -254,6 +271,7 @@ def _print_local_stack_summary(
     homeserver_url: str,
     cinny_url: str,
     server_name: str,
+    config_path: Path,
     persist_env: bool,
     cinny_container_name: str,
     synapse_dir: Path,
@@ -265,7 +283,11 @@ def _print_local_stack_summary(
     console.print(f"  Cinny:   {cinny_url}")
     console.print(f"  Server:  {server_name}")
     if persist_env:
-        env_path = _persist_local_matrix_env(homeserver_url, server_name)
+        env_path = _persist_local_matrix_env(
+            homeserver_url,
+            server_name,
+            config_path=config_path,
+        )
         console.print(f"  Env:     {env_path}")
         console.print("\nRun MindRoom backend:")
         console.print("  uv run mindroom run")

@@ -210,13 +210,21 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     def _lookup_tool(
         name: str,
         *,
+        credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del tool_init_overrides, runtime_overrides, worker_tools_override, worker_scope, routing_agent_name
+        del (
+            credentials_manager,
+            tool_init_overrides,
+            runtime_overrides,
+            worker_tools_override,
+            worker_scope,
+            routing_agent_name,
+        )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
@@ -667,6 +675,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
     def _get_tool_by_name(
         tool_name: str,
         *,
+        credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         worker_tools_override: list[str] | None = None,
@@ -678,7 +687,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
             tool_name,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
-            credentials_manager=credentials_manager,
+            credentials_manager=cast("CredentialsManager", credentials_manager),
         )
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
@@ -1443,7 +1452,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
             include_interactive_questions=False,
         )
 
-    mock_get_model_instance.assert_called_once_with(config, "m1")
+    mock_get_model_instance.assert_called_once_with(config, "m1", runtime_paths=_runtime_paths(tmp_path))
     assert mock_agent_class.call_count == 1
     assert mock_storage.call_count >= 2
     assert mock_culture_manager_class.call_args is not None

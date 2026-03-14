@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
@@ -297,7 +300,13 @@ class TestExecuteScheduledWorkflow:
     async def test_execute_workflow_with_agents(self) -> None:
         """Test executing a workflow that mentions agents."""
         client = AsyncMock()
-        config = MagicMock()  # Add a mock config
+        config = Config(
+            agents={
+                "research": AgentConfig(display_name="Research"),
+                "analyst": AgentConfig(display_name="Analyst"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        )
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -321,8 +330,8 @@ class TestExecuteScheduledWorkflow:
             assert call_args[0][0] == client  # client
             assert call_args[0][1] == "!room:server"  # room_id
             content = call_args[0][2]
-            assert "@research" in content["body"]
-            assert "@analyst" in content["body"]
+            assert config.ids["research"].full_id in content["body"]
+            assert config.ids["analyst"].full_id in content["body"]
             assert content["m.relates_to"]["event_id"] == "$thread123"
             assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 

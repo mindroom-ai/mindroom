@@ -30,60 +30,58 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
 @pytest.fixture
 def ha_tools_with_mocked_creds(mock_credentials_manager: CredentialsManager) -> HomeAssistantTools:
     """Create HomeAssistantTools instance with mocked credentials."""
-    with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
-        mock_get_manager.return_value = mock_credentials_manager
-        return HomeAssistantTools()
+    return HomeAssistantTools(credentials_manager=mock_credentials_manager)
 
 
 class TestHomeAssistantTools:
     """Test suite for Home Assistant tools."""
 
-    def test_initialization(self) -> None:
+    def test_initialization(self, mock_credentials_manager: CredentialsManager) -> None:
         """Test HomeAssistantTools initialization."""
-        with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
-            mock_manager = MagicMock()
-            mock_manager.shared_manager.return_value = mock_manager
-            mock_get_manager.return_value = mock_manager
+        ha_tools = HomeAssistantTools(credentials_manager=mock_credentials_manager)
 
-            ha_tools = HomeAssistantTools()
+        assert ha_tools.name == "homeassistant"
+        assert len(ha_tools.tools) == 11
 
-            # Verify credentials manager was obtained
-            mock_get_manager.assert_called_once()
+        expected_methods = [
+            "get_entity_state",
+            "list_entities",
+            "turn_on",
+            "turn_off",
+            "toggle",
+            "set_brightness",
+            "set_color",
+            "set_temperature",
+            "activate_scene",
+            "trigger_automation",
+            "call_service",
+        ]
+        method_names = [tool.__name__ for tool in ha_tools.tools]
+        for expected in expected_methods:
+            assert expected in method_names
 
-            # Verify tools were registered
-            assert ha_tools.name == "homeassistant"
-            assert len(ha_tools.tools) == 11
-
-            # Verify all expected methods are registered
-            expected_methods = [
-                "get_entity_state",
-                "list_entities",
-                "turn_on",
-                "turn_off",
-                "toggle",
-                "set_brightness",
-                "set_color",
-                "set_temperature",
-                "activate_scene",
-                "trigger_automation",
-                "call_service",
-            ]
-            method_names = [tool.__name__ for tool in ha_tools.tools]
-            for expected in expected_methods:
-                assert expected in method_names
-
-    def test_tool_metadata_passes_worker_scope_to_wrapper(self) -> None:
+    def test_tool_metadata_passes_worker_scope_to_wrapper(self, mock_credentials_manager: CredentialsManager) -> None:
         """Tool construction must propagate worker routing metadata into the wrapper."""
-        tool = get_tool_by_name("homeassistant", worker_scope="shared", routing_agent_name="general")
+        tool = get_tool_by_name(
+            "homeassistant",
+            credentials_manager=mock_credentials_manager,
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
 
         assert isinstance(tool, HomeAssistantTools)
         assert tool._worker_scope == "shared"
         assert tool._routing_agent_name == "general"
 
-    def test_tool_metadata_rejects_isolating_worker_scope(self) -> None:
+    def test_tool_metadata_rejects_isolating_worker_scope(self, mock_credentials_manager: CredentialsManager) -> None:
         """Home Assistant tools are intentionally unsupported for isolating worker scopes."""
         with pytest.raises(ValueError, match="worker_scope=shared"):
-            get_tool_by_name("homeassistant", worker_scope="user", routing_agent_name="general")
+            get_tool_by_name(
+                "homeassistant",
+                credentials_manager=mock_credentials_manager,
+                worker_scope="user",
+                routing_agent_name="general",
+            )
 
     def test_load_config_with_stored_credentials(
         self,
@@ -102,45 +100,38 @@ class TestHomeAssistantTools:
 
     def test_load_config_without_credentials(self) -> None:
         """Test loading configuration when no credentials exist."""
-        with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
-            mock_manager = MagicMock()
-            mock_manager.load_credentials.return_value = None
-            mock_manager.shared_manager.return_value = mock_manager
-            mock_get_manager.return_value = mock_manager
+        mock_manager = MagicMock()
+        mock_manager.load_credentials.return_value = None
+        mock_manager.shared_manager.return_value = mock_manager
 
-            ha_tools = HomeAssistantTools()
-            config = ha_tools._load_config()
+        ha_tools = HomeAssistantTools(credentials_manager=mock_manager)
+        config = ha_tools._load_config()
 
-            assert config is None
+        assert config is None
 
     @pytest.mark.asyncio
     async def test_api_request_without_config(self) -> None:
         """Test API request when no configuration exists."""
-        with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
-            mock_manager = MagicMock()
-            mock_manager.load_credentials.return_value = None
-            mock_manager.shared_manager.return_value = mock_manager
-            mock_get_manager.return_value = mock_manager
+        mock_manager = MagicMock()
+        mock_manager.load_credentials.return_value = None
+        mock_manager.shared_manager.return_value = mock_manager
 
-            ha_tools = HomeAssistantTools()
-            result = await ha_tools._api_request("GET", "/api/states")
+        ha_tools = HomeAssistantTools(credentials_manager=mock_manager)
+        result = await ha_tools._api_request("GET", "/api/states")
 
-            assert result == {"error": "Home Assistant is not configured. Please connect through the dashboard."}
+        assert result == {"error": "Home Assistant is not configured. Please connect through the dashboard."}
 
     @pytest.mark.asyncio
     async def test_api_request_missing_credentials(self) -> None:
         """Test API request with incomplete credentials."""
-        with patch("mindroom.custom_tools.homeassistant.get_credentials_manager") as mock_get_manager:
-            mock_manager = MagicMock()
-            # Missing access_token
-            mock_manager.load_credentials.return_value = {"instance_url": "http://localhost"}
-            mock_manager.shared_manager.return_value = mock_manager
-            mock_get_manager.return_value = mock_manager
+        mock_manager = MagicMock()
+        mock_manager.load_credentials.return_value = {"instance_url": "http://localhost"}
+        mock_manager.shared_manager.return_value = mock_manager
 
-            ha_tools = HomeAssistantTools()
-            result = await ha_tools._api_request("GET", "/api/states")
+        ha_tools = HomeAssistantTools(credentials_manager=mock_manager)
+        result = await ha_tools._api_request("GET", "/api/states")
 
-            assert result == {"error": "Missing Home Assistant credentials"}
+        assert result == {"error": "Missing Home Assistant credentials"}
 
     @pytest.mark.asyncio
     async def test_api_request_success(self, ha_tools_with_mocked_creds: HomeAssistantTools) -> None:

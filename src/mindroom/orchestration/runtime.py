@@ -34,7 +34,7 @@ STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 
 
 def _matrix_homeserver_startup_timeout_seconds_from_env(
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> int | None:
     """Return the startup wait timeout from the environment, if configured."""
     raw_timeout = (
@@ -144,7 +144,7 @@ async def run_with_retry(
 
 async def wait_for_matrix_homeserver(
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
     timeout_seconds: float | None = None,
     request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
     retry_interval_seconds: float = _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS,

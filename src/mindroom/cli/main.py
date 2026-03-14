@@ -121,7 +121,7 @@ def run(
 
 def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
-    ensure_writable_config_path()
+    ensure_writable_config_path(runtime_paths=runtime_paths)
 
     config_path = runtime_paths.config_path
     if not config_path.exists():
@@ -183,11 +183,11 @@ async def _run(
     except KeyboardInterrupt:
         console.print("\nStopped")
     except ConnectionError as exc:
-        _print_connection_error(exc)
+        _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc)
+            _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
 
@@ -204,7 +204,7 @@ def avatars_generate() -> None:
     try:
         from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
 
-        asyncio.run(run_avatar_generation())
+        asyncio.run(run_avatar_generation(runtime_paths))
     except AvatarGenerationError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -219,16 +219,16 @@ def avatars_sync() -> None:
     try:
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
 
-        asyncio.run(set_room_avatars_in_matrix())
+        asyncio.run(set_room_avatars_in_matrix(runtime_paths))
     except AvatarSyncError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except ConnectionError as exc:
-        _print_connection_error(exc)
+        _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc)
+            _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
 
@@ -359,9 +359,9 @@ def _print_pairing_success_with_exports(
     console.print("  uv run mindroom run")
 
 
-def _local_client_fingerprint(*, config_path: Path | None = None) -> str:
+def _local_client_fingerprint(*, config_path: Path) -> str:
     """Return a stable, non-secret local fingerprint."""
-    resolved_config_path = (config_path or constants.runtime_config_path()).expanduser().resolve()
+    resolved_config_path = config_path.expanduser().resolve()
     raw = f"{socket.gethostname()}:{resolved_config_path}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -385,13 +385,14 @@ def _print_missing_config_error() -> None:
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
-def _print_connection_error(exc: BaseException) -> None:
+def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> None:
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
     console.print(
-        f"  2. MATRIX_HOMESERVER is set correctly (current: {constants.runtime_matrix_homeserver()})",
+        "  2. MATRIX_HOMESERVER is set correctly "
+        f"(current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
     )
     console.print("  3. The server is reachable from this machine")
 

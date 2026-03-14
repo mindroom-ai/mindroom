@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mindroom.workers.backend import WorkerBackendError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -161,7 +165,11 @@ class _KubernetesWorkerBackendConfig:
         )
 
 
-def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
+def kubernetes_backend_config_signature(
+    *,
+    auth_token: str | None,
+    storage_root: Path | None = None,
+) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
     config = _KubernetesWorkerBackendConfig.from_env()
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
@@ -190,4 +198,5 @@ def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str,
         extra_labels_json,
         config.owner_deployment_name or "",
         auth_token or "",
+        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )

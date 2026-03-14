@@ -99,24 +99,37 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
 
 @pytest.fixture(autouse=True)
 def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure config.domain defaults to 'localhost' for tests.
+    """Keep test runtime defaults isolated from shell-level runtime overrides.
 
-    Tests use ':localhost' Matrix IDs.  Without this, an env-level
-    MATRIX_HOMESERVER (e.g. pointing at a staging server) would cause
-    agent_name() domain checks to fail.
+    Tests use ':localhost' Matrix IDs and non-namespaced localparts unless they
+    explicitly opt into a different runtime context.
     """
     monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.delenv("MATRIX_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
+    monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_paths() -> Generator[None, None, None]:
+def _reset_runtime_paths(tmp_path_factory: pytest.TempPathFactory) -> Generator[None, None, None]:
     """Restore the process-wide runtime path context after each test."""
     from mindroom import constants  # noqa: PLC0415
 
-    original = constants.get_runtime_paths()
+    original = constants._active_runtime_paths_or_none()
+    assert original is not None
     original_env = os.environ.copy()
+    runtime_root = tmp_path_factory.mktemp("runtime-context")
+    config_path = runtime_root / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    isolated_runtime_paths = constants.resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    constants.activate_runtime_paths(runtime_paths=isolated_runtime_paths)
     yield
-    constants._set_active_runtime_paths(original)
+    constants.activate_runtime_paths(runtime_paths=original)
     os.environ.clear()
     os.environ.update(original_env)
 

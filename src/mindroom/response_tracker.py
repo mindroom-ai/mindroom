@@ -9,7 +9,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
-from mindroom import constants
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -32,7 +31,7 @@ class ResponseTracker:
     """Track which event IDs have been responded to by an agent."""
 
     agent_name: str
-    base_path: Path = field(default_factory=constants.tracking_dir)
+    base_path: Path
     _responses: dict[str, _ResponseRecord] = field(default_factory=dict, init=False)
     _responses_file: Path = field(init=False)
     _thread_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)

@@ -8,10 +8,11 @@ import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 import yaml
 from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
@@ -26,9 +27,6 @@ from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
 
-if TYPE_CHECKING:
-    import pytest
-
 runner = CliRunner()
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -38,12 +36,31 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def _set_cli_runtime_paths(config_path: Path, *, storage_path: Path | None = None) -> None:
-    constants_module.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+@pytest.fixture(autouse=True)
+def _clear_runtime_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
 
-def _set_doctor_runtime_paths(config_path: Path, *, storage_path: Path | None = None) -> None:
-    constants_module.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+def _runtime_path_env(config_path: Path, *, storage_path: Path | None = None) -> dict[str, str]:
+    env = {"MINDROOM_CONFIG_PATH": str(config_path.resolve())}
+    if storage_path is not None:
+        env["MINDROOM_STORAGE_PATH"] = str(storage_path.resolve())
+    return env
+
+
+def _invoke_with_runtime(
+    args: list[str],
+    config_path: Path,
+    *,
+    storage_path: Path | None = None,
+    env: dict[str, str] | None = None,
+    **kwargs: object,
+) -> object:
+    command_env = _runtime_path_env(config_path, storage_path=storage_path)
+    if env:
+        command_env.update(env)
+    return cast("object", runner.invoke(app, args, env=command_env, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +213,15 @@ class TestConfigInit:
     def test_init_without_path_uses_detected_default_location(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Config init without --path should write to the detected config location."""
         default_cfg = tmp_path / ".mindroom" / "config.yaml"
-        monkeypatch.setattr(
-            "mindroom.cli.config.get_runtime_paths",
-            lambda: constants_module.resolve_runtime_paths(config_path=default_cfg),
+        result = runner.invoke(
+            app,
+            ["config", "init"],
+            env={"MINDROOM_CONFIG_PATH": str(default_cfg)},
+            input="openai\n",
         )
-
-        result = runner.invoke(app, ["config", "init"], input="openai\n")
 
         assert result.exit_code == 0
         assert default_cfg.exists()
@@ -665,8 +681,7 @@ class TestRunErrorHandling:
 
     def test_run_missing_config(self, tmp_path: Path) -> None:
         """Run shows friendly error when config is missing."""
-        _set_cli_runtime_paths(tmp_path / "no_such_config.yaml")
-        result = runner.invoke(app, ["run"])
+        result = _invoke_with_runtime(["run"], tmp_path / "no_such_config.yaml")
         assert result.exit_code == 1
         assert "No config.yaml found" in result.output
         assert "mindroom config init" in result.output
@@ -675,8 +690,7 @@ class TestRunErrorHandling:
         """Run shows friendly error when config is invalid."""
         bad_cfg = tmp_path / "config.yaml"
         bad_cfg.write_text("agents: not_a_dict\n")
-        _set_cli_runtime_paths(bad_cfg)
-        result = runner.invoke(app, ["run"])
+        result = _invoke_with_runtime(["run"], bad_cfg)
         assert result.exit_code == 1
         assert "Invalid configuration" in result.output
 
@@ -693,13 +707,12 @@ class TestRunErrorHandling:
             "matrix_space:\n  enabled: false\n"
             "authorization:\n  global_users: []\n",
         )
-        _set_cli_runtime_paths(cfg)
 
         with patch(
             "mindroom.avatar_generation.run_avatar_generation",
             AsyncMock(side_effect=AvatarGenerationError("Avatar generation failed. See errors above.")),
         ):
-            result = runner.invoke(app, ["avatars", "generate"])
+            result = _invoke_with_runtime(["avatars", "generate"], cfg)
 
         assert result.exit_code == 1
         assert "Avatar generation failed" in _strip_ansi(result.output)
@@ -754,10 +767,9 @@ class TestRunApiFlags:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run"])
+            result = _invoke_with_runtime(["run"], cfg)
         assert result.exit_code == 0
         mock_main.assert_awaited_once()
         kwargs = mock_main.call_args
@@ -774,10 +786,9 @@ class TestRunApiFlags:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--no-api"])
+            result = _invoke_with_runtime(["run", "--no-api"], cfg)
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api"] is False
 
@@ -790,10 +801,9 @@ class TestRunApiFlags:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
-            result = runner.invoke(app, ["run", "--api-port", "9000", "--api-host", "127.0.0.1"])
+            result = _invoke_with_runtime(["run", "--api-port", "9000", "--api-host", "127.0.0.1"], cfg)
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
@@ -812,7 +822,6 @@ class TestRunApiFlags:
             "matrix_space:\n  enabled: false\n",
         )
         runtime_storage = tmp_path / "runtime-storage"
-        _set_cli_runtime_paths(cfg)
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
         monkeypatch.setattr(constants_module, "STORAGE_PATH", constants_module.STORAGE_PATH)
         monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", constants_module.STORAGE_PATH_OBJ)
@@ -829,12 +838,15 @@ class TestRunApiFlags:
             assert runtime_storage.resolve() == constants_module.STORAGE_PATH_OBJ
             assert str(runtime_storage.resolve()) == constants_module.STORAGE_PATH
             assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
-            assert ResponseTracker("agent").base_path == runtime_storage.resolve() / "tracking"
-            MatrixState().save()
+            assert (
+                ResponseTracker("agent", base_path=runtime_storage.resolve() / "tracking").base_path
+                == runtime_storage.resolve() / "tracking"
+            )
+            MatrixState().save(runtime_paths=runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
-            result = runner.invoke(app, ["run", "--storage-path", str(runtime_storage)])
+            result = _invoke_with_runtime(["run", "--storage-path", str(runtime_storage)], cfg)
 
         assert result.exit_code == 0
         mock_main.assert_awaited_once()
@@ -860,12 +872,12 @@ class TestAvatarsCommands:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
         run_avatar_generation = AsyncMock()
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
-            result = runner.invoke(app, ["avatars", "generate"])
+            result = _invoke_with_runtime(["avatars", "generate"], cfg)
         assert result.exit_code == 0
-        run_avatar_generation.assert_awaited_once_with()
+        run_avatar_generation.assert_awaited_once()
+        assert run_avatar_generation.await_args.args[0].config_path == cfg.resolve()
 
     def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path) -> None:
         """Avatar sync command should invoke the Matrix sync workflow."""
@@ -876,14 +888,14 @@ class TestAvatarsCommands:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
         set_room_avatars_in_matrix = AsyncMock()
 
         with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
-            result = runner.invoke(app, ["avatars", "sync"])
+            result = _invoke_with_runtime(["avatars", "sync"], cfg)
 
         assert result.exit_code == 0
-        set_room_avatars_in_matrix.assert_awaited_once_with()
+        set_room_avatars_in_matrix.assert_awaited_once()
+        assert set_room_avatars_in_matrix.await_args.args[0].config_path == cfg.resolve()
 
     def test_avatars_sync_reports_sync_failure(self, tmp_path: Path) -> None:
         """Unexpected avatar sync failures should propagate for debugging."""
@@ -894,13 +906,11 @@ class TestAvatarsCommands:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
-
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=RuntimeError("boom")),
         ):
-            result = runner.invoke(app, ["avatars", "sync"])
+            result = _invoke_with_runtime(["avatars", "sync"], cfg)
 
         assert result.exit_code == 1
         assert isinstance(result.exception, RuntimeError)
@@ -918,13 +928,11 @@ class TestAvatarsCommands:
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n",
         )
-        _set_cli_runtime_paths(cfg)
-
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=AvatarSyncError("No router account found in Matrix state.")),
         ):
-            result = runner.invoke(app, ["avatars", "sync"])
+            result = _invoke_with_runtime(["avatars", "sync"], cfg)
 
         assert result.exit_code == 1
         assert "No router account found in Matrix state." in _strip_ansi(result.output)
@@ -985,12 +993,11 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # for default memory embedder
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "✓" in result.output
         assert "✗" not in result.output
@@ -1026,7 +1033,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
@@ -1046,7 +1052,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.console.status", _status)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert len(status_messages) == 6
         assert any("Matrix homeserver" in msg for msg in status_messages)
@@ -1054,10 +1060,9 @@ class TestDoctor:
 
     def test_missing_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports failure when config file is missing."""
-        _set_doctor_runtime_paths(tmp_path / "missing.yaml", storage_path=tmp_path / "storage")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], tmp_path / "missing.yaml", storage_path=tmp_path / "storage")
         assert result.exit_code == 1
         assert "Config file not found" in result.output
 
@@ -1066,10 +1071,9 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: not_a_dict\n")
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "Config invalid" in result.output
 
@@ -1078,12 +1082,11 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "ANTHROPIC_API_KEY not set" in result.output
         assert "3 warnings" in result.output
@@ -1093,11 +1096,10 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        _set_cli_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_fail(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "Matrix homeserver unreachable" in result.output
 
@@ -1105,20 +1107,18 @@ class TestDoctor:
         """Doctor reports failure when storage directory is not writable."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
-        _set_doctor_runtime_paths(cfg, storage_path=Path("/proc/fake_mindroom_storage"))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=Path("/proc/fake_mindroom_storage"))
         assert result.exit_code == 1
         assert "Storage not writable" in result.output
 
     def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor skips config-validation and provider checks when config is missing."""
-        _set_doctor_runtime_paths(tmp_path / "missing.yaml", storage_path=tmp_path / "storage")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], tmp_path / "missing.yaml", storage_path=tmp_path / "storage")
         assert "Config valid" not in result.output
         assert "Providers:" not in result.output
         assert "API key" not in result.output
@@ -1128,7 +1128,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-invalid")
         monkeypatch.setattr(
             "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
@@ -1142,7 +1141,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "API key invalid" in result.output
 
@@ -1158,12 +1157,11 @@ class TestDoctor:
             "router:\n  model: default\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "anthropic (2 models)" in result.output
         assert "openai (1 model)" in result.output
@@ -1177,7 +1175,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -1204,7 +1201,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
         assert called["model_id"] == "claude-sonnet-4-6"
@@ -1230,7 +1227,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_MULTI_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -1256,7 +1252,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _FakeVertexModel)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-4-6" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
@@ -1272,7 +1268,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
         monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID_FILE", raising=False)
         monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
@@ -1280,7 +1275,7 @@ class TestDoctor:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "vertexai_claude: could not validate connection" in result.output
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
@@ -1295,7 +1290,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -1318,7 +1312,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _MissingCredentialsModel)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "vertexai_claude: could not validate connection" in result.output
         assert "ADC" in result.output
@@ -1333,7 +1327,6 @@ class TestDoctor:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -1357,7 +1350,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.VertexAIClaude", _RejectedModel)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
         assert "vertexai_claude connection failed for claude-sonnet-4-6" in result.output
         assert "HTTP 403" in result.output
@@ -1376,7 +1369,6 @@ class TestDoctor:
             "router:\n  model: default\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
         monkeypatch.setattr(
             "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
@@ -1393,7 +1385,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.get", _mock_get)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "API key valid" in result.output
         # Should validate against the custom base_url, not api.openai.com
@@ -1418,11 +1410,10 @@ class TestDoctor:
             "      host: http://localhost:11434\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "Memory embedder: ollama reachable" in result.output
 
@@ -1444,12 +1435,11 @@ class TestDoctor:
             "      model: gpt-4o-mini\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "Memory LLM: openai/gpt-4o-mini API key valid" in result.output
         assert "Memory embedder:" in result.output
@@ -1472,12 +1462,11 @@ class TestDoctor:
             "      model: gpt-4o-mini\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         _patch_homeserver_ok(monkeypatch)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
 
@@ -1500,7 +1489,6 @@ class TestDoctor:
             "      host: http://llama.local/v1\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
@@ -1513,7 +1501,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "embeddings endpoint reachable" in result.output
         assert any(url.endswith("/embeddings") for url in called_urls)
@@ -1537,7 +1525,6 @@ class TestDoctor:
             "      host: http://llama.local/v1\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
@@ -1548,7 +1535,7 @@ class TestDoctor:
 
         monkeypatch.setattr("mindroom.cli.doctor.httpx.post", _mock_post)
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "could not reach embeddings" in result.output
         assert "endpoint (http://llama.local/v1)" in result.output
@@ -1573,7 +1560,6 @@ class TestDoctor:
             "      model: sentence-transformers/all-MiniLM-L6-v2\n",
         )
         storage = tmp_path / "storage"
-        _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
@@ -1587,7 +1573,7 @@ class TestDoctor:
             lambda _model: _FakeEmbedder(),
         )
 
-        result = runner.invoke(app, ["doctor"])
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         assert "sentence_transformers/sentence-transformers/all-MiniLM-L6-v2" in result.output
         assert "local model loaded" in result.output
@@ -1618,7 +1604,6 @@ class TestConnect:
             '    "*":\n'
             f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        _set_cli_runtime_paths(cfg)
         monkeypatch.setattr("mindroom.cli.main.socket.gethostname", lambda: "devbox")
 
         monkeypatch.setattr(
@@ -1642,15 +1627,9 @@ class TestConnect:
             ),
         )
 
-        result = runner.invoke(
-            app,
-            [
-                "connect",
-                "--pair-code",
-                "ABCD-EFGH",
-                "--provisioning-url",
-                "https://provisioning.example",
-            ],
+        result = _invoke_with_runtime(
+            ["connect", "--pair-code", "ABCD-EFGH", "--provisioning-url", "https://provisioning.example"],
+            cfg,
         )
 
         assert result.exit_code == 0
@@ -1689,7 +1668,6 @@ class TestConnect:
             "  global_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        _set_cli_runtime_paths(default_cfg)
         monkeypatch.setattr(
             "mindroom.cli.main.httpx.post",
             lambda *_a, **_kw: httpx.Response(
@@ -1703,8 +1681,7 @@ class TestConnect:
             ),
         )
 
-        result = runner.invoke(
-            app,
+        result = _invoke_with_runtime(
             [
                 "connect",
                 "--pair-code",
@@ -1714,6 +1691,7 @@ class TestConnect:
                 "--path",
                 str(target_cfg),
             ],
+            default_cfg,
         )
 
         assert result.exit_code == 0
@@ -1733,7 +1711,6 @@ class TestConnect:
         """--no-persist-env should print export commands and avoid writing .env."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        _set_cli_runtime_paths(cfg)
         monkeypatch.setattr(
             "mindroom.cli.main.httpx.post",
             lambda *_a, **_kw: httpx.Response(
@@ -1747,8 +1724,7 @@ class TestConnect:
             ),
         )
 
-        result = runner.invoke(
-            app,
+        result = _invoke_with_runtime(
             [
                 "connect",
                 "--pair-code",
@@ -1757,6 +1733,7 @@ class TestConnect:
                 "https://provisioning.example",
                 "--no-persist-env",
             ],
+            cfg,
         )
 
         assert result.exit_code == 0
@@ -1776,7 +1753,6 @@ class TestConnect:
         """Provisioning URL default should be read at command runtime."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        _set_cli_runtime_paths(cfg)
         monkeypatch.setenv("MINDROOM_PROVISIONING_URL", "https://env-provisioning.example")
 
         called: dict[str, object] = {}
@@ -1796,15 +1772,7 @@ class TestConnect:
 
         monkeypatch.setattr("mindroom.cli.main.httpx.post", _fake_post)
 
-        result = runner.invoke(
-            app,
-            [
-                "connect",
-                "--pair-code",
-                "ABCD-EFGH",
-                "--no-persist-env",
-            ],
-        )
+        result = _invoke_with_runtime(["connect", "--pair-code", "ABCD-EFGH", "--no-persist-env"], cfg)
 
         assert result.exit_code == 0
         assert called["url"] == "https://env-provisioning.example/v1/local-mindroom/pair/complete"
@@ -1827,7 +1795,6 @@ class TestConnect:
             "  global_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
-        _set_cli_runtime_paths(cfg)
         monkeypatch.setattr(
             "mindroom.cli.main.httpx.post",
             lambda *_a, **_kw: httpx.Response(
@@ -1841,15 +1808,9 @@ class TestConnect:
             ),
         )
 
-        result = runner.invoke(
-            app,
-            [
-                "connect",
-                "--pair-code",
-                "ABCD-EFGH",
-                "--provisioning-url",
-                "https://provisioning.example",
-            ],
+        result = _invoke_with_runtime(
+            ["connect", "--pair-code", "ABCD-EFGH", "--provisioning-url", "https://provisioning.example"],
+            cfg,
         )
 
         assert result.exit_code == 0
@@ -1865,7 +1826,6 @@ class TestConnect:
         """Connect should pass MATRIX_SSL_VERIFY through to httpx.post."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        _set_cli_runtime_paths(cfg)
         monkeypatch.setattr("mindroom.cli.main.constants.runtime_matrix_ssl_verify", lambda *_args, **_kwargs: False)
 
         called: dict[str, object] = {}
@@ -1885,8 +1845,7 @@ class TestConnect:
 
         monkeypatch.setattr("mindroom.cli.main.httpx.post", _fake_post)
 
-        result = runner.invoke(
-            app,
+        result = _invoke_with_runtime(
             [
                 "connect",
                 "--pair-code",
@@ -1895,6 +1854,7 @@ class TestConnect:
                 "https://provisioning.example",
                 "--no-persist-env",
             ],
+            cfg,
         )
 
         assert result.exit_code == 0
@@ -1918,8 +1878,7 @@ class TestLocalStackSetup:
         (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-
-        _set_cli_runtime_paths(cfg, storage_path=tmp_path / "mindroom_data")
+        storage_path = tmp_path / "mindroom_data"
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
@@ -1936,8 +1895,7 @@ class TestLocalStackSetup:
 
         monkeypatch.setattr("mindroom.cli.local_stack.subprocess.run", _fake_run)
 
-        result = runner.invoke(
-            app,
+        result = _invoke_with_runtime(
             [
                 "local-stack-setup",
                 "--synapse-dir",
@@ -1947,6 +1905,8 @@ class TestLocalStackSetup:
                 "--cinny-container-name",
                 "mindroom-cinny-test",
             ],
+            cfg,
+            storage_path=storage_path,
         )
 
         assert result.exit_code == 0
@@ -1954,7 +1914,7 @@ class TestLocalStackSetup:
         assert any(cmd[:3] == ["docker", "rm", "-f"] for cmd in commands)
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
-        cinny_config = tmp_path / "mindroom_data" / "local" / "cinny-config.json"
+        cinny_config = storage_path / "local" / "cinny-config.json"
         assert cinny_config.exists()
         config = json.loads(cinny_config.read_text())
         assert config["homeserverList"] == ["http://localhost:8008"]
@@ -1972,8 +1932,7 @@ class TestLocalStackSetup:
         """--skip-synapse should not run docker compose up."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-
-        _set_cli_runtime_paths(cfg, storage_path=tmp_path / "mindroom_data")
+        storage_path = tmp_path / "mindroom_data"
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
@@ -1990,7 +1949,7 @@ class TestLocalStackSetup:
 
         monkeypatch.setattr("mindroom.cli.local_stack.subprocess.run", _fake_run)
 
-        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse"])
+        result = _invoke_with_runtime(["local-stack-setup", "--skip-synapse"], cfg, storage_path=storage_path)
 
         assert result.exit_code == 0
         assert ["docker", "compose", "up", "-d"] not in commands
@@ -2000,8 +1959,7 @@ class TestLocalStackSetup:
         """--no-persist-env should not write .env and should print inline env usage."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-
-        _set_cli_runtime_paths(cfg, storage_path=tmp_path / "mindroom_data")
+        storage_path = tmp_path / "mindroom_data"
         monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
         monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
         monkeypatch.setattr(
@@ -2014,7 +1972,11 @@ class TestLocalStackSetup:
             lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
         )
 
-        result = runner.invoke(app, ["local-stack-setup", "--skip-synapse", "--no-persist-env"])
+        result = _invoke_with_runtime(
+            ["local-stack-setup", "--skip-synapse", "--no-persist-env"],
+            cfg,
+            storage_path=storage_path,
+        )
 
         assert result.exit_code == 0
         assert not (tmp_path / ".env").exists()

@@ -15,16 +15,15 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom import constants
 from mindroom.constants import env_flag
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.credentials import load_scoped_credentials
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
     resolve_worker_key,
-    shared_storage_root,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -37,6 +36,7 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.credentials import CredentialsManager
     from mindroom.workers.manager import WorkerManager
 
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
@@ -178,14 +178,16 @@ def _collect_credential_overrides(
     tool_name: str,
     function_name: str,
     *,
+    credentials_manager: CredentialsManager | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
 ) -> dict[str, object]:
+    if credentials_manager is None:
+        return {}
     services = _credential_services_for_call(tool_name, function_name)
     if not services:
         return {}
 
-    credentials_manager = get_credentials_manager()
     merged_overrides: dict[str, object] = {}
     for service in services:
         credentials = load_scoped_credentials(
@@ -204,6 +206,7 @@ def _create_credential_lease(
     *,
     lease_url: str,
     headers: Mapping[str, str],
+    credentials_manager: CredentialsManager | None,
     tool_name: str,
     function_name: str,
     worker_scope: WorkerScope | None,
@@ -212,6 +215,7 @@ def _create_credential_lease(
     credential_overrides = _collect_credential_overrides(
         tool_name,
         function_name,
+        credentials_manager=credentials_manager,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
     )
@@ -295,7 +299,13 @@ def _build_worker_routing_payload(
 
 
 def _get_worker_manager() -> WorkerManager:
-    return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
+    context = get_tool_runtime_context()
+    storage_root = context.storage_path if context is not None else None
+    return get_primary_worker_manager(
+        proxy_url=_PROXY_URL,
+        proxy_token=_PROXY_TOKEN,
+        storage_root=storage_root,
+    )
 
 
 def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:
@@ -306,13 +316,10 @@ def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str,
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
-def _current_shared_storage_root() -> Path:
-    return shared_storage_root(constants.get_runtime_paths().storage_root)
-
-
 def _portable_tool_init_overrides(
     tool_init_overrides: dict[str, object] | None,
     *,
+    shared_storage_root_path: Path | None,
     worker_key: str | None,
 ) -> dict[str, object] | None:
     """Rewrite storage-root absolute base_dir values only for worker-keyed requests."""
@@ -330,7 +337,10 @@ def _portable_tool_init_overrides(
     if not base_dir.is_absolute():
         return portable_overrides
 
-    shared_root = _current_shared_storage_root().resolve()
+    if shared_storage_root_path is None:
+        return portable_overrides
+
+    shared_root = shared_storage_root_path.resolve()
     with suppress(ValueError):
         portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
     return portable_overrides
@@ -381,6 +391,8 @@ def _call_proxy_sync(
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -412,6 +424,7 @@ def _call_proxy_sync(
         worker_key = worker_payload.get("worker_key")
         portable_tool_init_overrides = _portable_tool_init_overrides(
             tool_init_overrides,
+            shared_storage_root_path=shared_storage_root_path,
             worker_key=worker_key if isinstance(worker_key, str) else None,
         )
         if portable_tool_init_overrides:
@@ -427,6 +440,7 @@ def _call_proxy_sync(
                 client,
                 lease_url=lease_url,
                 headers=headers,
+                credentials_manager=credentials_manager,
                 tool_name=tool_name,
                 function_name=function_name,
                 worker_scope=worker_scope,
@@ -461,6 +475,8 @@ def _wrap_sync_function(
     tool_name: str,
     function_name: str,
     *,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -475,6 +491,8 @@ def _wrap_sync_function(
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -489,6 +507,8 @@ def _wrap_async_function(
     tool_name: str,
     function_name: str,
     *,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -504,6 +524,8 @@ def _wrap_async_function(
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -517,6 +539,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
@@ -539,6 +563,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -550,6 +576,8 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,

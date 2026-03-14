@@ -83,16 +83,16 @@ IncludeCancelled = Annotated[bool, Query(description="Include cancelled schedule
 CancelRoomId = Annotated[str, Query(description="Room ID or alias containing the task")]
 
 
-def _resolve_room_id(room_id_or_alias: str) -> str:
+def _resolve_room_id(room_id_or_alias: str, *, runtime_paths: RuntimePaths) -> str:
     """Resolve room aliases (e.g. lobby) to room IDs when available."""
-    resolved = resolve_room_aliases([room_id_or_alias])
+    resolved = resolve_room_aliases([room_id_or_alias], runtime_paths=runtime_paths)
     return resolved[0] if resolved else room_id_or_alias
 
 
-def _configured_room_ids(runtime_config: Config) -> list[str]:
+def _configured_room_ids(runtime_config: Config, *, runtime_paths: RuntimePaths) -> list[str]:
     """Return configured rooms resolved to Matrix room IDs."""
     configured_rooms = sorted(runtime_config.get_all_configured_rooms())
-    resolved_rooms = resolve_room_aliases(configured_rooms)
+    resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)
     # Keep order while de-duplicating
     return list(dict.fromkeys(resolved_rooms))
 
@@ -111,7 +111,11 @@ def _cron_schedule_from_expression(cron_expression: str) -> CronSchedule:
     return CronSchedule(minute=minute, hour=hour, day=day, month=month, weekday=weekday)
 
 
-def _to_response_task(task: ScheduledTaskRecord) -> ScheduledTaskResponse:
+def _to_response_task(
+    task: ScheduledTaskRecord,
+    *,
+    runtime_paths: RuntimePaths,
+) -> ScheduledTaskResponse:
     """Map an internal scheduled task record to the API response model."""
     workflow = task.workflow
     cron_expression = workflow.cron_schedule.to_cron_string() if workflow.cron_schedule else None
@@ -133,7 +137,7 @@ def _to_response_task(task: ScheduledTaskRecord) -> ScheduledTaskResponse:
     return ScheduledTaskResponse(
         task_id=task.task_id,
         room_id=task.room_id,
-        room_alias=get_room_alias_from_id(task.room_id),
+        room_alias=get_room_alias_from_id(task.room_id, runtime_paths=runtime_paths),
         status=task.status,
         schedule_type=workflow.schedule_type,
         execute_at=workflow.execute_at,
@@ -247,7 +251,11 @@ async def list_schedules(
 
     runtime_paths = api_runtime_paths(request)
     runtime_config, _ = load_runtime_config(runtime_paths)
-    room_ids = [_resolve_room_id(room_id)] if room_id else _configured_room_ids(runtime_config)
+    room_ids = (
+        [_resolve_room_id(room_id, runtime_paths=runtime_paths)]
+        if room_id
+        else _configured_room_ids(runtime_config, runtime_paths=runtime_paths)
+    )
 
     if not room_ids:
         return ListSchedulesResponse(timezone=runtime_config.timezone, tasks=[])
@@ -261,7 +269,7 @@ async def list_schedules(
                 room_id=resolved_room_id,
                 include_non_pending=include_cancelled,
             )
-            tasks.extend(_to_response_task(task) for task in room_tasks)
+            tasks.extend(_to_response_task(task, runtime_paths=runtime_paths) for task in room_tasks)
     finally:
         await client.close()
 
@@ -280,7 +288,7 @@ async def update_schedule(
 
     runtime_paths = api_runtime_paths(api_request)
     runtime_config, _ = load_runtime_config(runtime_paths)
-    resolved_room_id = _resolve_room_id(request.room_id)
+    resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
     try:
@@ -302,7 +310,7 @@ async def update_schedule(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
-        return _to_response_task(updated_task)
+        return _to_response_task(updated_task, runtime_paths=runtime_paths)
     finally:
         await client.close()
 
@@ -317,7 +325,7 @@ async def cancel_schedule(
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    resolved_room_id = _resolve_room_id(room_id)
+    resolved_room_id = _resolve_room_id(room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
     try:

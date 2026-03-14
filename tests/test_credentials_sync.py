@@ -1,10 +1,12 @@
 """Tests for credentials sync functionality."""
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from mindroom import constants as constants_mod
 from mindroom.credentials import CredentialsManager
 from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
@@ -12,6 +14,16 @@ from mindroom.credentials_sync import (
     get_ollama_host,
     sync_env_to_credentials,
 )
+
+
+def _runtime_paths(storage_root: Path) -> constants_mod.RuntimePaths:
+    config_path = storage_root / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    return constants_mod.resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_root,
+        process_env=dict(os.environ),
+    )
 
 
 class TestCredentialsSync:
@@ -44,9 +56,10 @@ class TestCredentialsSync:
         # Mock get_credentials_manager to use our temp directory
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = CredentialsManager(base_path=temp_credentials_dir)
+            runtime_paths = _runtime_paths(temp_credentials_dir.parent)
 
             # Run sync
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=runtime_paths)
 
             # Verify files were created
             openai_file = temp_credentials_dir / "openai_credentials.json"
@@ -86,7 +99,7 @@ class TestCredentialsSync:
 
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             assert cm.get_api_key("openai") == "ui-set-key"
 
@@ -104,7 +117,7 @@ class TestCredentialsSync:
 
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             assert cm.get_api_key("openai") == "legacy-key"
 
@@ -121,7 +134,7 @@ class TestCredentialsSync:
 
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             assert cm.get_api_key("openai") == "new-env-key"
 
@@ -141,7 +154,7 @@ class TestCredentialsSync:
             mock_get_cm.return_value = cm
 
             # Run sync
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             # Verify only valid key was synced
             assert cm.get_api_key("openai") == "valid-key"
@@ -158,7 +171,7 @@ class TestCredentialsSync:
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             cm = CredentialsManager(base_path=temp_credentials_dir)
             mock_get_cm.return_value = cm
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             github_private = cm.load_credentials("github_private")
             assert github_private == {
@@ -183,7 +196,7 @@ class TestCredentialsSync:
 
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
-            sync_env_to_credentials()
+            sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
             github_private = cm.load_credentials("github_private")
             assert github_private is not None
@@ -195,33 +208,35 @@ class TestCredentialsSync:
         # Set up test data
         credentials_manager.set_api_key("openai", "test-openai-key")
         credentials_manager.set_api_key("google", "test-google-key")
+        runtime_paths = _runtime_paths(credentials_manager.storage_root)
 
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = credentials_manager
 
             # Test normal providers
-            assert get_api_key_for_provider("openai") == "test-openai-key"
-            assert get_api_key_for_provider("google") == "test-google-key"
+            assert get_api_key_for_provider("openai", runtime_paths=runtime_paths) == "test-openai-key"
+            assert get_api_key_for_provider("google", runtime_paths=runtime_paths) == "test-google-key"
 
             # Test gemini alias for google
-            assert get_api_key_for_provider("gemini") == "test-google-key"
+            assert get_api_key_for_provider("gemini", runtime_paths=runtime_paths) == "test-google-key"
 
             # Test ollama returns None
-            assert get_api_key_for_provider("ollama") is None
+            assert get_api_key_for_provider("ollama", runtime_paths=runtime_paths) is None
 
             # Test non-existent provider
-            assert get_api_key_for_provider("anthropic") is None
+            assert get_api_key_for_provider("anthropic", runtime_paths=runtime_paths) is None
 
     def test_get_ollama_host(self, credentials_manager: CredentialsManager) -> None:
         """Test getting Ollama host configuration."""
         # Test when no Ollama config exists
+        runtime_paths = _runtime_paths(credentials_manager.storage_root)
         with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = credentials_manager
-            assert get_ollama_host() is None
+            assert get_ollama_host(runtime_paths=runtime_paths) is None
 
             # Set Ollama host
             credentials_manager.save_credentials("ollama", {"host": "http://localhost:11434"})
-            assert get_ollama_host() == "http://localhost:11434"
+            assert get_ollama_host(runtime_paths=runtime_paths) == "http://localhost:11434"
 
     def test_all_env_vars_mapped(self) -> None:
         """Test that all expected environment variables are in the mapping."""
@@ -247,9 +262,10 @@ class TestCredentialsSync:
             mock_get_cm.return_value = cm
 
             # Run sync multiple times
-            sync_env_to_credentials()
-            sync_env_to_credentials()
-            sync_env_to_credentials()
+            runtime_paths = _runtime_paths(temp_credentials_dir.parent)
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+            sync_env_to_credentials(runtime_paths=runtime_paths)
+            sync_env_to_credentials(runtime_paths=runtime_paths)
 
             # Should still have the same value
             assert cm.get_api_key("openai") == "test-key"

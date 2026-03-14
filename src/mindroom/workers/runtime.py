@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import os
 import threading
+from typing import TYPE_CHECKING
 
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 from mindroom.workers.manager import WorkerManager
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
@@ -63,12 +67,13 @@ def _primary_worker_backend_config_signature(
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None,
 ) -> tuple[str, ...]:
     backend_name = primary_worker_backend_name()
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
-        return kubernetes_backend_config_signature(auth_token=proxy_token)
+        return kubernetes_backend_config_signature(auth_token=proxy_token, storage_root=storage_root)
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
@@ -77,6 +82,7 @@ def _build_primary_worker_manager(
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None,
 ) -> WorkerManager:
     backend_name = primary_worker_backend_name()
     if backend_name == "static_runner":
@@ -87,7 +93,10 @@ def _build_primary_worker_manager(
             ),
         )
     if backend_name == "kubernetes":
-        return WorkerManager(KubernetesWorkerBackend.from_env(auth_token=proxy_token))
+        if storage_root is None:
+            msg = "Kubernetes worker backend requires an explicit runtime storage root."
+            raise WorkerBackendError(msg)
+        return WorkerManager(KubernetesWorkerBackend.from_env(auth_token=proxy_token, storage_root=storage_root))
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
@@ -96,6 +105,7 @@ def get_primary_worker_manager(
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None = None,
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
@@ -103,12 +113,14 @@ def get_primary_worker_manager(
     config_signature = _primary_worker_backend_config_signature(
         proxy_url=proxy_url,
         proxy_token=proxy_token,
+        storage_root=storage_root,
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
         if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
             _PRIMARY_WORKER_MANAGER = _build_primary_worker_manager(
                 proxy_url=proxy_url,
                 proxy_token=proxy_token,
+                storage_root=storage_root,
             )
             _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
     return _PRIMARY_WORKER_MANAGER

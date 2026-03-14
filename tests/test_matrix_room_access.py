@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
 from tests.conftest import TEST_ACCESS_TOKEN
@@ -30,6 +31,20 @@ class _FakeHttpResponse:
 
     def release(self) -> None:
         self.released = True
+
+
+def _config_with_runtime_paths(
+    tmp_path: Path,
+    **config_data: object,
+) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config.model_validate(config_data, context={"runtime_paths": runtime_paths})
+    config._runtime_paths = runtime_paths
+    return config
 
 
 def test_matrix_room_access_defaults() -> None:
@@ -131,11 +146,13 @@ async def test_configure_managed_room_access_invite_only_override(monkeypatch: p
 @pytest.mark.parametrize(("reconcile_existing", "expected_calls"), [(False, 0), (True, 1)])
 async def test_existing_room_reconciliation_respects_flag(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     reconcile_existing: bool,
     expected_calls: int,
 ) -> None:
     """Existing room updates should be gated behind `reconcile_existing_rooms`."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": reconcile_existing,
@@ -170,9 +187,13 @@ async def test_existing_room_reconciliation_respects_flag(
 
 
 @pytest.mark.asyncio
-async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Newly created managed rooms should apply access policy when multi-user mode is enabled."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -293,9 +314,13 @@ async def test_set_room_directory_visibility_releases_response_on_success() -> N
 
 
 @pytest.mark.asyncio
-async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_existing_room_reconciliation_skipped_when_not_joined(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Reconciliation should not run when the service account cannot join the room."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": True,
@@ -330,9 +355,13 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_existing_room_reconciliation_runs_after_later_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Reconciliation should run on a later retry once the service account is joined."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": True,

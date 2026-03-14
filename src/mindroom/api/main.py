@@ -59,7 +59,7 @@ def _worker_cleanup_interval_seconds() -> float:
     return max(0.0, interval)
 
 
-def _cleanup_workers_once() -> int:
+def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     if not primary_worker_backend_available(
         proxy_url=sandbox_proxy_module._PROXY_URL,
@@ -70,6 +70,7 @@ def _cleanup_workers_once() -> int:
     worker_manager = get_primary_worker_manager(
         proxy_url=sandbox_proxy_module._PROXY_URL,
         proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+        storage_root=runtime_paths.storage_root,
     )
     cleaned_workers = worker_manager.cleanup_idle_workers()
     if cleaned_workers:
@@ -81,7 +82,7 @@ def _cleanup_workers_once() -> int:
     return len(cleaned_workers)
 
 
-async def _worker_cleanup_loop(stop_event: asyncio.Event) -> None:
+async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
     """Periodically clean idle workers in the primary runtime."""
     interval_seconds = _worker_cleanup_interval_seconds()
     if interval_seconds <= 0:
@@ -93,15 +94,19 @@ async def _worker_cleanup_loop(stop_event: asyncio.Event) -> None:
             break
         except TimeoutError:
             try:
-                await asyncio.to_thread(_cleanup_workers_once)
+                await asyncio.to_thread(_cleanup_workers_once, runtime_paths)
             except Exception:
                 logger.exception("Background worker cleanup failed")
 
 
-def api_runtime_paths(request: Request | None = None) -> constants.RuntimePaths:
-    """Return the API app's committed runtime paths."""
-    app_state = cast("_ApiState", request.app.state if request is not None else app.state)
-    return app_state.runtime_paths
+def api_runtime_paths(request: Request) -> constants.RuntimePaths:
+    """Return the API request's committed runtime paths."""
+    return cast("_ApiState", request.app.state).runtime_paths
+
+
+def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
+    """Return the committed runtime paths for one API app instance."""
+    return cast("_ApiState", api_app.state).runtime_paths
 
 
 async def _watch_config(
@@ -120,8 +125,7 @@ async def _watch_config(
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
-    runtime_paths = constants.get_runtime_paths()
-    _app.state.runtime_paths = runtime_paths
+    runtime_paths = _app_runtime_paths(_app)
     print(f"Loading config from: {runtime_paths.config_path}")
     print(f"Config exists: {runtime_paths.config_path.exists()}")
 
@@ -131,7 +135,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     stop_event = asyncio.Event()
     watch_task = asyncio.create_task(_watch_config(stop_event, runtime_paths))
-    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event))
+    worker_cleanup_task = asyncio.create_task(_worker_cleanup_loop(stop_event, runtime_paths))
 
     yield
 
@@ -145,7 +149,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
-app.state.runtime_paths = constants.get_runtime_paths()
+app.state.runtime_paths = constants.resolve_runtime_paths(process_env=constants.exported_process_env())
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(
@@ -170,11 +174,10 @@ _PLATFORM_LOGIN_URL = os.getenv("MINDROOM_PLATFORM_LOGIN_URL")
 
 
 def load_runtime_config(
-    runtime_paths: constants.RuntimePaths | None = None,
+    runtime_paths: constants.RuntimePaths,
 ) -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
-    resolved_runtime_paths = runtime_paths or api_runtime_paths()
-    return Config.from_yaml(runtime_paths=resolved_runtime_paths), resolved_runtime_paths.config_path
+    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths.config_path
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -205,11 +208,10 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
 
 def _save_config_to_file(
     config: dict[str, Any],
-    runtime_paths: constants.RuntimePaths | None = None,
+    runtime_paths: constants.RuntimePaths,
 ) -> None:
     """Save config to YAML file with deterministic ordering."""
-    resolved_runtime_paths = runtime_paths or api_runtime_paths()
-    config_path = resolved_runtime_paths.config_path
+    config_path = runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         yaml.dump(
@@ -230,6 +232,7 @@ config_lock = threading.Lock()
 def _run_config_write[T](
     mutate: Callable[[], T],
     *,
+    runtime_paths: constants.RuntimePaths,
     error_prefix: str,
     save_payload: dict[str, Any] | None = None,
 ) -> T:
@@ -237,7 +240,10 @@ def _run_config_write[T](
     try:
         with config_lock:
             result = mutate()
-            _save_config_to_file(config if save_payload is None else save_payload)
+            _save_config_to_file(
+                config if save_payload is None else save_payload,
+                runtime_paths=runtime_paths,
+            )
             return result
     except HTTPException:
         raise
@@ -405,12 +411,11 @@ def _sanitize_next_path(next_path: str | None) -> str:
 
 def _render_standalone_login_page(
     next_path: str,
-    runtime_paths: constants.RuntimePaths | None = None,
+    runtime_paths: constants.RuntimePaths,
 ) -> str:
     """Return the standalone dashboard login page."""
     escaped_next_path = html.escape(next_path, quote=True)
-    resolved_runtime_paths = runtime_paths or api_runtime_paths()
-    env_path = html.escape(str(resolved_runtime_paths.env_path))
+    env_path = html.escape(str(runtime_paths.env_path))
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -561,11 +566,10 @@ async def verify_user(
     return auth_user
 
 
-def _load_config_from_file(runtime_paths: constants.RuntimePaths | None = None) -> None:
+def _load_config_from_file(runtime_paths: constants.RuntimePaths) -> None:
     """Load config from YAML file."""
     global config
-    resolved_runtime_paths = runtime_paths or api_runtime_paths()
-    config_path = resolved_runtime_paths.config_path
+    config_path = runtime_paths.config_path
     try:
         with config_path.open() as f, config_lock:
             config = yaml.safe_load(f)
@@ -574,10 +578,13 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths | None = None) 
         print(f"Error loading config: {e}")
 
 
-constants.ensure_writable_config_path(create_minimal=True)
+constants.ensure_writable_config_path(
+    create_minimal=True,
+    runtime_paths=_app_runtime_paths(app),
+)
 
 # Load initial config
-_load_config_from_file(app.state.runtime_paths)
+_load_config_from_file(_app_runtime_paths(app))
 
 # Include routers
 app.include_router(credentials_router, dependencies=[Depends(verify_user)])
@@ -668,7 +675,12 @@ async def save_config(new_config: Config, _user: Annotated[dict, Depends(verify_
     def mutate() -> None:
         config.update(config_dict)
 
-    _run_config_write(mutate, error_prefix="Failed to save configuration", save_payload=config_dict)
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to save configuration",
+        save_payload=config_dict,
+    )
     return {"success": True}
 
 
@@ -698,7 +710,11 @@ async def update_agent(
             config["agents"] = {}
         config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
 
-    _run_config_write(mutate, error_prefix="Failed to save agent")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to save agent",
+    )
     return {"success": True}
 
 
@@ -714,7 +730,11 @@ async def create_agent(agent_data: dict[str, Any], _user: Annotated[dict, Depend
         config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
         return agent_id
 
-    agent_id = _run_config_write(mutate, error_prefix="Failed to create agent")
+    agent_id = _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to create agent",
+    )
     return {"id": agent_id, "success": True}
 
 
@@ -727,7 +747,11 @@ async def delete_agent(agent_id: str, _user: Annotated[dict, Depends(verify_user
             raise HTTPException(status_code=404, detail="Agent not found")
         del config["agents"][agent_id]
 
-    _run_config_write(mutate, error_prefix="Failed to delete agent")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to delete agent",
+    )
     return {"success": True}
 
 
@@ -757,7 +781,11 @@ async def update_team(
             config["teams"] = {}
         config["teams"][team_id] = _sanitize_entity_payload(team_data)
 
-    _run_config_write(mutate, error_prefix="Failed to save team")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to save team",
+    )
     return {"success": True}
 
 
@@ -773,7 +801,11 @@ async def create_team(team_data: dict[str, Any], _user: Annotated[dict, Depends(
         config["teams"][team_id] = _sanitize_entity_payload(team_data)
         return team_id
 
-    team_id = _run_config_write(mutate, error_prefix="Failed to create team")
+    team_id = _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to create team",
+    )
     return {"id": team_id, "success": True}
 
 
@@ -786,7 +818,11 @@ async def delete_team(team_id: str, _user: Annotated[dict, Depends(verify_user)]
             raise HTTPException(status_code=404, detail="Team not found")
         del config["teams"][team_id]
 
-    _run_config_write(mutate, error_prefix="Failed to delete team")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to delete team",
+    )
     return {"success": True}
 
 
@@ -811,7 +847,11 @@ async def update_model(
             config["models"] = {}
         config["models"][model_id] = model_data
 
-    _run_config_write(mutate, error_prefix="Failed to save model")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to save model",
+    )
     return {"success": True}
 
 
@@ -833,7 +873,11 @@ async def update_room_models(
     def mutate() -> None:
         config["room_models"] = room_models
 
-    _run_config_write(mutate, error_prefix="Failed to save room models")
+    _run_config_write(
+        mutate,
+        runtime_paths=_app_runtime_paths(app),
+        error_prefix="Failed to save room models",
+    )
     return {"success": True}
 
 

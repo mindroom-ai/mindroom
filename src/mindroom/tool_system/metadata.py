@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from loguru import logger
 
 from mindroom.config.main import Config
+from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+    from mindroom.credentials import CredentialsManager
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -116,11 +117,19 @@ def _add_worker_context_init_kwargs(
     tool_class: type[Toolkit],
     *,
     init_kwargs: dict[str, object],
+    credentials_manager: CredentialsManager | None,
+    runtime_overrides: dict[str, object] | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
 ) -> None:
     """Inject worker-routing constructor args when a toolkit supports them."""
     init_signature = inspect.signature(tool_class.__init__)
+    if credentials_manager is not None and "credentials_manager" in init_signature.parameters:
+        init_kwargs["credentials_manager"] = credentials_manager
+    if runtime_overrides:
+        for key, value in runtime_overrides.items():
+            if key in init_signature.parameters and key not in init_kwargs:
+                init_kwargs[key] = value
     if "worker_scope" in init_signature.parameters:
         init_kwargs["worker_scope"] = worker_scope
     if "routing_agent_name" in init_signature.parameters:
@@ -132,6 +141,7 @@ def _build_tool_instance(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    credentials_manager: CredentialsManager | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -151,16 +161,16 @@ def _build_tool_instance(
         raise ValueError(msg)
 
     tool_class = _TOOL_REGISTRY[tool_name]()
-    creds_manager = get_credentials_manager()
     credentials = (
         load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
-            credentials_manager=creds_manager,
+            credentials_manager=credentials_manager,
         )
-        or {}
-    )
+        if credentials_manager is not None
+        else {}
+    ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
@@ -174,6 +184,8 @@ def _build_tool_instance(
     _add_worker_context_init_kwargs(
         tool_class,
         init_kwargs=init_kwargs,
+        credentials_manager=credentials_manager,
+        runtime_overrides=runtime_overrides,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
     )
@@ -181,13 +193,20 @@ def _build_tool_instance(
     toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
+    shared_storage_root_path = None
+    if isinstance(runtime_overrides, dict):
+        candidate_shared_storage_root = runtime_overrides.get("shared_storage_root")
+        if isinstance(candidate_shared_storage_root, Path):
+            shared_storage_root_path = candidate_shared_storage_root
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
+        credentials_manager=credentials_manager,
         tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        shared_storage_root_path=shared_storage_root_path,
     )
 
 
@@ -196,6 +215,7 @@ def get_tool_by_name(
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    credentials_manager: CredentialsManager | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -213,6 +233,7 @@ def get_tool_by_name(
         tool_name,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
+        credentials_manager=credentials_manager,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
@@ -417,6 +438,11 @@ def ensure_tool_registry_loaded(
         config = Config.from_yaml(config_path)
 
     if config is None:
+        return
+
+    runtime_paths = config.runtime_paths
+    if runtime_paths is not None:
+        load_plugins(config, runtime_paths=runtime_paths)
         return
 
     load_plugins(config, config_path=config_path)

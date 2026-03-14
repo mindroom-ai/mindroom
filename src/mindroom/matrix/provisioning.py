@@ -7,29 +7,29 @@ from typing import Literal
 
 import httpx
 
-from mindroom.constants import RuntimePaths, runtime_env_value, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.matrix.client import matrix_startup_error
 
 
-def provisioning_url_from_env(*, runtime_paths: RuntimePaths | None = None) -> str | None:
+def provisioning_url_from_env(*, runtime_paths: RuntimePaths) -> str | None:
     """Get hosted provisioning API base URL from environment if configured."""
-    url = (runtime_env_value("MINDROOM_PROVISIONING_URL", runtime_paths=runtime_paths) or "").strip()
+    url = (runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "").strip()
     return url.rstrip("/") or None
 
 
-def registration_token_from_env(*, runtime_paths: RuntimePaths | None = None) -> str | None:
+def registration_token_from_env(*, runtime_paths: RuntimePaths) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = (runtime_env_value("MATRIX_REGISTRATION_TOKEN", runtime_paths=runtime_paths) or "").strip()
+    token = (runtime_paths.env_value("MATRIX_REGISTRATION_TOKEN") or "").strip()
     return token or None
 
 
 def _local_provisioning_client_credentials_from_env(
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str, str] | None:
     """Get local provisioning client credentials from environment if configured."""
-    client_id = (runtime_env_value("MINDROOM_LOCAL_CLIENT_ID", runtime_paths=runtime_paths) or "").strip()
-    client_secret = (runtime_env_value("MINDROOM_LOCAL_CLIENT_SECRET", runtime_paths=runtime_paths) or "").strip()
+    client_id = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID") or "").strip()
+    client_secret = (runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_SECRET") or "").strip()
     if not client_id and not client_secret:
         return None
     if not client_id or not client_secret:
@@ -46,7 +46,7 @@ def required_local_provisioning_client_credentials_for_registration(
     *,
     provisioning_url: str | None,
     registration_token: str | None,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str, str] | None:
     """Resolve required local provisioning credentials when using hosted registration."""
     if registration_token or not provisioning_url:
@@ -79,7 +79,7 @@ async def register_user_via_provisioning_service(
     username: str,
     password: str,
     display_name: str,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> _ProvisioningRegisterResult:
     """Register an agent account via provisioning service server-side flow."""
     url = f"{provisioning_url}/v1/local-mindroom/register-agent"

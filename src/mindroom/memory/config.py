@@ -44,10 +44,9 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
 
     """
     app_config = config
-    creds_manager = get_credentials_manager()
-
     # Canonicalize once so Chroma path is independent of runtime cwd changes.
     resolved_storage_path = storage_path.expanduser().resolve()
+    creds_manager = get_credentials_manager(storage_root=resolved_storage_path)
 
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"

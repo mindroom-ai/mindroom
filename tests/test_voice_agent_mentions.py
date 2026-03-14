@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.voice_handler import (
     _is_speculative_command_rewrite,
     _process_transcription,
@@ -15,20 +16,28 @@ from mindroom.voice_handler import (
 )
 
 
+def _voice_config(agent_display_names: dict[str, str]) -> Config:
+    config = Config(
+        agents={
+            agent_name: AgentConfig(display_name=display_name)
+            for agent_name, display_name in agent_display_names.items()
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    )
+    config.voice.intelligence.model = "test-model"
+    return config
+
+
 @pytest.mark.asyncio
 async def test_voice_correctly_formats_agent_mentions() -> None:
     """Test that voice processing uses correct agent names, not display names."""
     # Create a config with an agent that has different name and display name
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "home": MagicMock(spec=AgentConfig, display_name="HomeAssistant"),
-        "research": MagicMock(spec=AgentConfig, display_name="Research Agent"),
-    }
-    config.teams = {}
-    # Mock the voice configuration
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "home": "HomeAssistant",
+            "research": "Research Agent",
+        },
+    )
 
     # Mock the Agent to return a response that tests our prompt
     # The AI should understand to use @home not @homeassistant
@@ -83,16 +92,12 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
 @pytest.mark.asyncio
 async def test_voice_prompt_includes_correct_agent_format() -> None:
     """Test that the AI prompt correctly shows agent names vs display names."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "home": MagicMock(spec=AgentConfig, display_name="HomeAssistant"),
-        "calc": MagicMock(spec=AgentConfig, display_name="Calculator"),
-    }
-    config.teams = {}
-    # Mock the voice configuration
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "home": "HomeAssistant",
+            "calc": "Calculator",
+        },
+    )
 
     # Capture the prompt sent to the AI
     captured_prompt = None
@@ -125,15 +130,12 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
 @pytest.mark.asyncio
 async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
     """Test that room-scoped entities are the only entities listed in the prompt."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
-        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
-    }
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "openclaw": "OpenClaw",
+            "code": "CodeAgent",
+        },
+    )
 
     captured_prompt = None
 
@@ -168,15 +170,12 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
     """Test that configured but unavailable entities are not left as mentions."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
-        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
-    }
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "openclaw": "OpenClaw",
+            "code": "CodeAgent",
+        },
+    )
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,

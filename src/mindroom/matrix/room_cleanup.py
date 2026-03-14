@@ -21,18 +21,21 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_usernames() -> set[str]:
+def _get_all_known_bot_usernames(*, runtime_paths: RuntimePaths | None = None) -> set[str]:
     """Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:
         Set of all known bot usernames
 
     """
-    state = MatrixState.load()
+    if runtime_paths is None:
+        return set()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     bot_usernames = set()
 
     # Get all agent accounts from state
@@ -76,7 +79,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     # Get configured bots for this room
     configured_bots = config.get_configured_bots_for_room(room_id)
-    known_bot_usernames = _get_all_known_bot_usernames()
+    known_bot_usernames = _get_all_known_bot_usernames(runtime_paths=config.require_runtime_paths())
 
     kicked_bots = []
 

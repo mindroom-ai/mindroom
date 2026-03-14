@@ -67,6 +67,11 @@ def load_plugins(
     if not plugin_paths:
         set_plugin_skill_roots([])
         return []
+    if runtime_paths is None and config_path is None:
+        runtime_paths = config.runtime_paths
+    if runtime_paths is None and config_path is None:
+        msg = "load_plugins() requires explicit runtime_paths or config_path when plugins are configured"
+        raise RuntimeError(msg)
 
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
@@ -92,6 +97,9 @@ def _resolve_plugin_root(
     runtime_paths: RuntimePaths | None = None,
     config_path: Path | None = None,
 ) -> Path:
+    if runtime_paths is None and config_path is None:
+        msg = "_resolve_plugin_root() requires explicit runtime_paths or config_path"
+        raise RuntimeError(msg)
     relative = resolve_config_relative_path(plugin_path, runtime_paths=runtime_paths, config_path=config_path)
     if relative.exists():
         return relative

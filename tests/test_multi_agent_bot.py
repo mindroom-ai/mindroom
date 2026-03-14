@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -27,7 +28,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -176,11 +177,17 @@ class TestAgentBot:
 
     @staticmethod
     def _runtime_paths(storage_path: Path) -> RuntimePaths:
-        return resolve_runtime_paths(storage_path=storage_path)
+        return resolve_runtime_paths(
+            config_path=storage_path / "config.yaml",
+            storage_path=storage_path,
+            process_env={},
+        )
 
     @classmethod
     def _config_for_storage(cls, storage_path: Path) -> Config:
-        return Config.from_yaml(runtime_paths=cls._runtime_paths(storage_path))
+        config = cls.create_mock_config()
+        config._runtime_paths = cls._runtime_paths(storage_path)
+        return config
 
     @staticmethod
     def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> MagicMock:
@@ -2166,6 +2173,7 @@ class TestAgentBot:
             },
             authorization={"default_room_access": True},
         )
+        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         config.ids = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
             "general": MatrixID.from_username("mindroom_general", "localhost"),
@@ -2577,7 +2585,7 @@ class TestAgentBot:
     ) -> None:
         """Test agent bot thread response behavior based on agent participation."""
         # Use the helper method to create mock config
-        config = self.create_mock_config()
+        config = self._config_for_storage(tmp_path)
         mock_load_config.return_value = config
 
         # Mock get_model_instance to return a mock model
@@ -2843,6 +2851,7 @@ class TestMultiAgentOrchestrator:
                 "default_room_access": False,
             },
         )
+        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = config
 
@@ -2892,6 +2901,7 @@ class TestMultiAgentOrchestrator:
                 "default_room_access": False,
             },
         )
+        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = config
 
@@ -2929,6 +2939,7 @@ class TestMultiAgentOrchestrator:
             },
             authorization={"default_room_access": False},
         )
+        config._runtime_paths = TestAgentBot._runtime_paths(tmp_path)
         orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
         orchestrator.config = config
 
@@ -3114,14 +3125,13 @@ class TestMultiAgentOrchestrator:
     async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
         """Initialize should load the exact config file owned by the orchestrator."""
         config_path = tmp_path / "custom-config.yaml"
-        mock_config = MagicMock()
-        mock_config.agents = {}
-        mock_config.teams = {}
+        mock_config = Config(router=RouterConfig(model="default"))
 
         with (
             patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch.object(MultiAgentOrchestrator, "_create_managed_bot"),
         ):
             orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
             await orchestrator.initialize()
@@ -3240,6 +3250,7 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_returns_when_versions(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The homeserver wait should return as soon as `/versions` succeeds."""
@@ -3262,42 +3273,75 @@ class TestMultiAgentOrchestrator:
                 return httpx.Response(200, json={"versions": ["v1.1"]}, request=request)
 
         monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
 
-        await wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
+        await wait_for_matrix_homeserver(
+            runtime_paths=runtime_paths,
+            timeout_seconds=0.1,
+            retry_interval_seconds=0,
+        )
 
         assert calls == 1
 
     def test_matrix_homeserver_startup_timeout_defaults_to_infinite(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Unset or zero startup timeouts should wait forever."""
         monkeypatch.delenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", raising=False)
-        assert _matrix_homeserver_startup_timeout_seconds_from_env() is None
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
+        assert _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths) is None
 
         monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "0")
-        assert _matrix_homeserver_startup_timeout_seconds_from_env() is None
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
+        assert _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths) is None
 
     def test_matrix_homeserver_startup_timeout_reads_positive_seconds(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A positive timeout env var should bound the startup wait."""
         monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "45")
-        assert _matrix_homeserver_startup_timeout_seconds_from_env() == 45
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
+        assert _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths) == 45
 
     def test_matrix_homeserver_startup_timeout_rejects_negative_values(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Negative timeout values are invalid."""
         monkeypatch.setenv("MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS", "-1")
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
         with pytest.raises(ValueError, match="must be 0 or a positive integer"):
-            _matrix_homeserver_startup_timeout_seconds_from_env()
+            _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths)
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_retries_on_connection_errors(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Transient transport failures should be retried until `/versions` succeeds."""
@@ -3328,14 +3372,24 @@ class TestMultiAgentOrchestrator:
                 return response
 
         monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
 
-        await wait_for_matrix_homeserver(timeout_seconds=0.1, retry_interval_seconds=0)
+        await wait_for_matrix_homeserver(
+            runtime_paths=runtime_paths,
+            timeout_seconds=0.1,
+            retry_interval_seconds=0,
+        )
 
         assert responses == []
 
     @pytest.mark.asyncio
     async def test_wait_for_matrix_homeserver_times_out_when_never_ready(
         self,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The homeserver wait should fail fast when `/versions` never becomes valid."""
@@ -3355,9 +3409,18 @@ class TestMultiAgentOrchestrator:
                 return httpx.Response(503, text="starting", request=request)
 
         monkeypatch.setattr("mindroom.orchestration.runtime.httpx.AsyncClient", _FakeAsyncClient)
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env=dict(os.environ),
+        )
 
         with pytest.raises(TimeoutError, match="Timed out waiting for Matrix homeserver"):
-            await wait_for_matrix_homeserver(timeout_seconds=0.01, retry_interval_seconds=0.001)
+            await wait_for_matrix_homeserver(
+                runtime_paths=runtime_paths,
+                timeout_seconds=0.01,
+                retry_interval_seconds=0.001,
+            )
 
     @pytest.mark.asyncio
     async def test_schedule_knowledge_refresh_retries_until_success(self, tmp_path: Path) -> None:

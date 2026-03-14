@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
-def get_secret_from_env(name: str, *, runtime_paths: RuntimePaths | None = None) -> str | None:
+def get_secret_from_env(name: str, *, runtime_paths: RuntimePaths) -> str | None:
     """Read a secret from NAME or NAME_FILE.
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
@@ -40,7 +40,7 @@ def get_secret_from_env(name: str, *, runtime_paths: RuntimePaths | None = None)
     return None
 
 
-def _sync_github_private_credentials(*, runtime_paths: RuntimePaths | None = None) -> bool:
+def _sync_github_private_credentials(*, runtime_paths: RuntimePaths) -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
     github_token = get_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
     if not github_token:
@@ -49,7 +49,7 @@ def _sync_github_private_credentials(*, runtime_paths: RuntimePaths | None = Non
 
     os.environ["GITHUB_TOKEN"] = github_token
 
-    creds_manager = get_credentials_manager()
+    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     existing = creds_manager.load_credentials("github_private")
     if existing is not None:
         source = existing.get("_source")
@@ -73,7 +73,7 @@ def _sync_github_private_credentials(*, runtime_paths: RuntimePaths | None = Non
     return True
 
 
-def sync_env_to_credentials(*, runtime_paths: RuntimePaths | None = None) -> None:
+def sync_env_to_credentials(*, runtime_paths: RuntimePaths) -> None:
     """Sync API keys from environment variables into CredentialsManager.
 
     - If no credential file exists for a service, seed it from .env.
@@ -85,7 +85,7 @@ def sync_env_to_credentials(*, runtime_paths: RuntimePaths | None = None) -> Non
     Environment variables are always exported to ``os.environ`` so that
     libraries like mem0 can pick them up regardless.
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
@@ -131,7 +131,7 @@ def sync_env_to_credentials(*, runtime_paths: RuntimePaths | None = None) -> Non
         logger.debug("No credentials to sync from environment")
 
 
-def get_api_key_for_provider(provider: str) -> str | None:
+def get_api_key_for_provider(provider: str, *, runtime_paths: RuntimePaths) -> str | None:
     """Get API key for a provider, checking CredentialsManager first.
 
     Since we sync from .env to CredentialsManager on startup,
@@ -139,12 +139,13 @@ def get_api_key_for_provider(provider: str) -> str | None:
 
     Args:
         provider: The provider name (e.g., 'openai', 'anthropic')
+        runtime_paths: Explicit runtime context for credential lookup.
 
     Returns:
         The API key if found, None otherwise
 
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
 
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
@@ -157,14 +158,14 @@ def get_api_key_for_provider(provider: str) -> str | None:
     return creds_manager.get_api_key(provider)
 
 
-def get_ollama_host() -> str | None:
+def get_ollama_host(*, runtime_paths: RuntimePaths) -> str | None:
     """Get Ollama host configuration.
 
     Returns:
         The Ollama host URL if configured, None otherwise
 
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     ollama_creds = creds_manager.load_credentials("ollama")
     if ollama_creds:
         return ollama_creds.get("host")

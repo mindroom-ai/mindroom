@@ -385,7 +385,7 @@ async def _process_transcription(
         agent_list = (
             "\n".join(
                 [
-                    f"  - @{name} or @{agent_username_localpart(name)} (spoken as: {agent_display_names[name]})"
+                    f"  - @{name} or @{agent_username_localpart(name, runtime_paths=config.runtime_paths)} (spoken as: {agent_display_names[name]})"
                     for name in agent_names
                 ],
             )

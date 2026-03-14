@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import nio
 import pytest
 
+from mindroom import constants as constants_mod
 from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
@@ -16,6 +17,17 @@ from mindroom.matrix.users import AgentMatrixUser
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    config._runtime_paths = constants_mod.resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={},
+    )
+    return config
 
 
 class TestPresenceDetection:
@@ -209,14 +221,17 @@ class TestBotIntegration:
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                    model="gpt-4",
-                    rooms=["#test:localhost"],
-                ),
-            },
+        config = _attach_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        model="gpt-4",
+                        rooms=["#test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
 
         agent_user = AgentMatrixUser(
@@ -271,14 +286,17 @@ class TestBotIntegration:
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                    model="gpt-4",
-                    rooms=["#test:localhost"],
-                ),
-            },
+        config = _attach_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        model="gpt-4",
+                        rooms=["#test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
         )
 
         agent_user = AgentMatrixUser(

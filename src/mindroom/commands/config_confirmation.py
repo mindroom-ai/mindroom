@@ -385,6 +385,7 @@ async def handle_confirmation_reaction(
         response_text = await apply_config_change(
             pending_change.config_path,
             pending_change.new_value,
+            runtime_paths=bot.runtime_paths,
         )
 
         logger.info(

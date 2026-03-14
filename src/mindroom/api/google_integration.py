@@ -388,11 +388,12 @@ async def configure(credentials: dict[str, str]) -> dict[str, Any]:
 
 
 @router.post("/reset")
-async def reset() -> dict[str, Any]:
+async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
     try:
         # Remove credentials using the manager
-        get_credentials_manager().delete_credentials("google")
+        runtime_paths = request.app.state.runtime_paths
+        get_credentials_manager(storage_root=runtime_paths.storage_root).delete_credentials("google")
 
         # Remove from environment variables
         if _ENV_PATH.exists():

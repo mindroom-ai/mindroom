@@ -239,9 +239,21 @@ def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
     return _CONFIG_PATH_PLACEHOLDER_PATTERN.sub(_replace, value)
 
 
-def runtime_config_path(config_path: Path | None = None) -> Path:
-    """Return the active runtime config path or one explicit config path."""
-    return get_runtime_paths(config_path=config_path).config_path
+def runtime_config_path(
+    config_path: Path | None = None,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> Path:
+    """Return one explicit runtime config path."""
+    if runtime_paths is not None and config_path is not None:
+        msg = "Pass either runtime_paths or config_path to runtime_config_path(), not both"
+        raise ValueError(msg)
+    if runtime_paths is not None:
+        return runtime_paths.config_path
+    if config_path is not None:
+        return Path(config_path).expanduser().resolve()
+    msg = "runtime_config_path() requires explicit runtime_paths or config_path"
+    raise ValueError(msg)
 
 
 def exported_env_value(name: str, *, default: str | None = None) -> str | None:
@@ -249,26 +261,31 @@ def exported_env_value(name: str, *, default: str | None = None) -> str | None:
     return _copy_process_env().get(name, default)
 
 
+def process_env_value(name: str, *, default: str | None = None) -> str | None:
+    """Read one raw process env value, including runtime-synced injections."""
+    return os.environ.get(name, default)
+
+
+def exported_process_env() -> dict[str, str]:
+    """Return the currently exported env snapshot, excluding runtime-synced injections."""
+    return _copy_process_env()
+
+
 def runtime_env_value(
     name: str,
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
     default: str | None = None,
 ) -> str | None:
     """Resolve one runtime env value from the runtime context contract."""
-    paths = runtime_paths or get_runtime_paths()
-    if runtime_paths is None and name not in _RUNTIME_PATH_ENV_KEYS:
-        process_env = _copy_process_env()
-        if name in process_env:
-            return process_env[name]
-    return paths.env_value(name, default=default)
+    return runtime_paths.env_value(name, default=default)
 
 
 def runtime_env_flag(
     name: str,
     *,
     default: bool = False,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
     value = runtime_env_value(name, runtime_paths=runtime_paths)
@@ -277,7 +294,7 @@ def runtime_env_flag(
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths | None = None) -> str:
+def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
     return (
         runtime_env_value(
@@ -289,17 +306,17 @@ def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths | None = None) -> s
     )
 
 
-def runtime_matrix_ssl_verify(*, runtime_paths: RuntimePaths | None = None) -> bool:
+def runtime_matrix_ssl_verify(*, runtime_paths: RuntimePaths) -> bool:
     """Return whether Matrix HTTPS requests should verify certificates."""
     return runtime_env_flag("MATRIX_SSL_VERIFY", default=True, runtime_paths=runtime_paths)
 
 
-def runtime_matrix_server_name(*, runtime_paths: RuntimePaths | None = None) -> str | None:
+def runtime_matrix_server_name(*, runtime_paths: RuntimePaths) -> str | None:
     """Return the optional Matrix server-name override for one runtime context."""
     return runtime_env_value("MATRIX_SERVER_NAME", runtime_paths=runtime_paths)
 
 
-def runtime_mindroom_namespace(*, runtime_paths: RuntimePaths | None = None) -> str | None:
+def runtime_mindroom_namespace(*, runtime_paths: RuntimePaths) -> str | None:
     """Return the optional installation namespace for one runtime context."""
     value = runtime_env_value("MINDROOM_NAMESPACE", runtime_paths=runtime_paths)
     if value is None:
@@ -308,7 +325,7 @@ def runtime_mindroom_namespace(*, runtime_paths: RuntimePaths | None = None) -> 
     return normalized or None
 
 
-def runtime_ai_cache_enabled(*, runtime_paths: RuntimePaths | None = None) -> bool:
+def runtime_ai_cache_enabled(*, runtime_paths: RuntimePaths) -> bool:
     """Return whether the AI response cache is enabled for one runtime context."""
     return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
 
@@ -319,51 +336,40 @@ def get_runtime_paths(
     storage_path: Path | None = None,
     process_env: dict[str, str] | None = None,
 ) -> RuntimePaths:
-    """Return the active runtime paths or resolve an explicit temporary context."""
+    """Resolve one explicit runtime context."""
     if config_path is None and storage_path is None and process_env is None:
-        return _ACTIVE_RUNTIME_PATHS
+        msg = "get_runtime_paths() requires explicit config_path, storage_path, or process_env"
+        raise ValueError(msg)
     return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env=process_env)
 
 
-def runtime_storage_root(*, runtime_paths: RuntimePaths | None = None) -> Path:
-    """Return the active or explicit runtime storage root."""
-    if runtime_paths is None:
-        return STORAGE_PATH_OBJ
+def runtime_storage_root(*, runtime_paths: RuntimePaths) -> Path:
+    """Return the storage root for one explicit runtime context."""
     return runtime_paths.storage_root
 
 
-def matrix_state_file(*, runtime_paths: RuntimePaths | None = None) -> Path:
+def matrix_state_file(*, runtime_paths: RuntimePaths) -> Path:
     """Return the matrix-state file for one runtime context."""
-    if runtime_paths is None:
-        return MATRIX_STATE_FILE
     return runtime_paths.storage_root / "matrix_state.yaml"
 
 
-def tracking_dir(*, runtime_paths: RuntimePaths | None = None) -> Path:
+def tracking_dir(*, runtime_paths: RuntimePaths) -> Path:
     """Return the tracking directory for one runtime context."""
-    if runtime_paths is None:
-        return TRACKING_DIR
     return runtime_paths.storage_root / "tracking"
 
 
-def memory_dir(*, runtime_paths: RuntimePaths | None = None) -> Path:
+def memory_dir(*, runtime_paths: RuntimePaths) -> Path:
     """Return the shared memory directory for one runtime context."""
-    if runtime_paths is None:
-        return _MEMORY_DIR
     return runtime_paths.storage_root / "memory"
 
 
-def credentials_dir(*, runtime_paths: RuntimePaths | None = None) -> Path:
+def credentials_dir(*, runtime_paths: RuntimePaths) -> Path:
     """Return the credentials directory for one runtime context."""
-    if runtime_paths is None:
-        return CREDENTIALS_DIR
     return runtime_paths.storage_root / "credentials"
 
 
-def encryption_keys_dir(*, runtime_paths: RuntimePaths | None = None) -> Path:
+def encryption_keys_dir(*, runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
-    if runtime_paths is None:
-        return ENCRYPTION_KEYS_DIR
     return runtime_paths.storage_root / "encryption_keys"
 
 
@@ -400,12 +406,11 @@ def activate_runtime_paths(
         sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
         return _set_active_runtime_paths(runtime_paths)
 
-    active_runtime_paths = _active_runtime_paths_or_none()
-    resolved_config_path = config_path
-    if resolved_config_path is None and active_runtime_paths is not None:
-        resolved_config_path = active_runtime_paths.config_path
+    if config_path is None:
+        msg = "activate_runtime_paths() requires explicit runtime_paths or config_path"
+        raise ValueError(msg)
     paths = resolve_runtime_paths(
-        config_path=resolved_config_path,
+        config_path=config_path,
         storage_path=storage_path,
     )
     sync_runtime_env_to_process(paths, sync_path_env=True)
@@ -426,7 +431,10 @@ def resolve_config_relative_path(
     if runtime_paths is not None and config_path is not None:
         msg = "Pass either runtime_paths or config_path to resolve_config_relative_path(), not both"
         raise ValueError(msg)
-    paths = runtime_paths or get_runtime_paths(config_path=config_path)
+    if runtime_paths is None and config_path is None:
+        msg = "resolve_config_relative_path() requires explicit runtime_paths or config_path"
+        raise ValueError(msg)
+    paths = runtime_paths or resolve_runtime_paths(config_path=config_path)
     unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), paths)).expanduser()
     if unresolved.is_absolute():
         return unresolved.resolve()
@@ -438,16 +446,34 @@ def _docker_container_enabled() -> bool:
     return os.getenv("DOCKER_CONTAINER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _use_storage_path_for_workspace_assets(config_path: Path | None = None) -> bool:
+def _use_storage_path_for_workspace_assets(
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    config_path: Path | None = None,
+) -> bool:
     """Return whether writable workspace assets should live under persistent storage."""
+    if runtime_paths is not None and config_path is not None:
+        msg = "Pass either runtime_paths or config_path to _use_storage_path_for_workspace_assets(), not both"
+        raise ValueError(msg)
+    if runtime_paths is None and config_path is None:
+        msg = "_use_storage_path_for_workspace_assets() requires explicit runtime_paths or config_path"
+        raise ValueError(msg)
     if not _docker_container_enabled():
         return False
-    if config_path is None:
+    if runtime_paths is not None:
         return True
-    return config_path.expanduser().resolve() == get_runtime_paths().config_path
+    assert config_path is not None
+    exported_config_path = exported_env_value("MINDROOM_CONFIG_PATH")
+    if exported_config_path is None:
+        return False
+    return config_path.expanduser().resolve() == Path(exported_config_path).expanduser().resolve()
 
 
-def avatars_dir(*, config_path: Path | None = None) -> Path:
+def avatars_dir(
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    config_path: Path | None = None,
+) -> Path:
     """Return the writable avatars directory for the active workspace.
 
     Source checkouts keep avatars next to the active config file so generated
@@ -456,8 +482,14 @@ def avatars_dir(*, config_path: Path | None = None) -> Path:
     config-adjacent writes would be ephemeral; in that case, store writable
     overrides under the persistent MindRoom storage root instead.
     """
-    paths = get_runtime_paths(config_path=config_path)
-    if _use_storage_path_for_workspace_assets(config_path):
+    if runtime_paths is not None and config_path is not None:
+        msg = "Pass either runtime_paths or config_path to avatars_dir(), not both"
+        raise ValueError(msg)
+    if runtime_paths is None and config_path is None:
+        msg = "avatars_dir() requires explicit runtime_paths or config_path"
+        raise ValueError(msg)
+    paths = runtime_paths or resolve_runtime_paths(config_path=config_path)
+    if _use_storage_path_for_workspace_assets(runtime_paths=runtime_paths, config_path=config_path):
         return paths.storage_root / "avatars"
     return paths.config_dir / "avatars"
 
@@ -471,16 +503,18 @@ def workspace_avatar_path(
     entity_type: str,
     entity_name: str,
     *,
+    runtime_paths: RuntimePaths | None = None,
     config_path: Path | None = None,
 ) -> Path:
     """Return the writable workspace avatar path for a managed entity."""
-    return avatars_dir(config_path=config_path) / entity_type / f"{entity_name}.png"
+    return avatars_dir(runtime_paths=runtime_paths, config_path=config_path) / entity_type / f"{entity_name}.png"
 
 
 def resolve_avatar_path(
     entity_type: str,
     entity_name: str,
     *,
+    runtime_paths: RuntimePaths | None = None,
     config_path: Path | None = None,
 ) -> Path:
     """Return the best available avatar path for a managed entity.
@@ -490,7 +524,12 @@ def resolve_avatar_path(
     If neither exists, return the intended workspace path so callers that write
     new avatars know where to place them.
     """
-    workspace_path = workspace_avatar_path(entity_type, entity_name, config_path=config_path)
+    workspace_path = workspace_avatar_path(
+        entity_type,
+        entity_name,
+        runtime_paths=runtime_paths,
+        config_path=config_path,
+    )
     if workspace_path.exists():
         return workspace_path
 
@@ -519,17 +558,19 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
 _ACTIVE_RUNTIME_PATHS = _set_active_runtime_paths(resolve_runtime_paths())
 
 
-def set_runtime_storage_path(storage_path: Path) -> Path:
+def set_runtime_storage_path(storage_path: Path, *, runtime_paths: RuntimePaths) -> Path:
     """Update the process-wide runtime storage root.
 
     `mindroom run --storage-path ...` should behave the same as setting
     `MINDROOM_STORAGE_PATH` before startup, so runtime code only has one
     storage-root contract to reason about.
     """
-    return activate_runtime_paths(
-        config_path=get_runtime_paths().config_path,
+    updated_runtime_paths = resolve_runtime_paths(
+        config_path=runtime_paths.config_path,
         storage_path=storage_path,
-    ).storage_root
+        process_env=dict(runtime_paths.process_env),
+    )
+    return activate_runtime_paths(runtime_paths=updated_runtime_paths).storage_root
 
 
 def set_runtime_paths(
@@ -656,19 +697,22 @@ def safe_replace(tmp_path: Path, target_path: Path) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-def ensure_writable_config_path(*, create_minimal: bool = False) -> bool:
+def ensure_writable_config_path(
+    *,
+    create_minimal: bool = False,
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Ensure the writable config path exists when running from a managed template.
 
     Returns whether a config file exists after the call.
     """
-    paths = get_runtime_paths()
-    config_path = paths.config_path
+    config_path = runtime_paths.config_path
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     if config_path.exists():
         return True
 
-    template_env = runtime_env_value("MINDROOM_CONFIG_TEMPLATE")
+    template_env = runtime_env_value("MINDROOM_CONFIG_TEMPLATE", runtime_paths=runtime_paths)
     template_path = Path(template_env).expanduser().resolve() if template_env else config_path
     if template_path != config_path and template_path.exists():
         shutil.copyfile(template_path, config_path)

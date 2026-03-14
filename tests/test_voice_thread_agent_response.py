@@ -11,7 +11,9 @@ import pytest
 from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -42,7 +44,12 @@ def mock_home_bot() -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = Config.from_yaml()
+    config = Config(
+        agents={
+            "home": AgentConfig(display_name="HomeAssistant", rooms=["!test:server"]),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()

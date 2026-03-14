@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from mindroom.authorization import (
@@ -11,8 +13,11 @@ from mindroom.authorization import (
 )
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
-from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.state import MatrixRoom, MatrixState
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
@@ -295,9 +300,13 @@ def test_room_specific_permissions_support_full_alias() -> None:
     )
 
 
-def test_room_specific_permissions_support_managed_room_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_room_specific_permissions_support_managed_room_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Room permissions should allow using a managed room key alias."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={
             "assistant": {
                 "display_name": "Assistant",
@@ -322,7 +331,7 @@ def test_room_specific_permissions_support_managed_room_key(monkeypatch: pytest.
             ),
         },
     )
-    monkeypatch.setattr("mindroom.authorization.MatrixState.load", lambda: state)
+    monkeypatch.setattr("mindroom.authorization.MatrixState.load", lambda **_kwargs: state)
 
     assert is_authorized_sender("@bob:example.com", config, "!lobby:example.com")
     assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")
@@ -632,7 +641,7 @@ def test_agent_reply_permissions_domain_pattern_after_alias_resolution() -> None
 
 def test_agent_reply_permissions_reject_unknown_entity() -> None:
     """Unknown keys in agent_reply_permissions should fail config validation."""
-    with pytest.raises(ValueError, match="authorization.agent_reply_permissions contains unknown entities"):
+    with pytest.raises(ValueError, match=r"authorization\.agent_reply_permissions contains unknown entities"):
         Config(
             agents={
                 "assistant": {
@@ -777,3 +786,12 @@ def test_duplicate_bridge_alias_rejected() -> None:
                 "@bob:example.com": ["@telegram_111:example.com"],
             },
         )
+
+
+def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
+    config_path = tmp_path / "config.yaml"
+    storage_path = tmp_path / "mindroom_data"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+    config = Config(**config_data)
+    config._runtime_paths = runtime_paths
+    return config

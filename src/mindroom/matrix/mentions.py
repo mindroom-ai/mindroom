@@ -77,7 +77,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
     # Try to find the agent (case-insensitive), accepting optional namespace suffix.
     candidate_names = [name]
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths=config.runtime_paths)
     if namespace:
         suffix = f"_{namespace}"
         if name.lower().endswith(suffix):
@@ -97,7 +97,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
     if agent_name:
         agent_config = config.agents[agent_name]
-        user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
+        user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths=config.runtime_paths).full_id
         return (original, user_id, agent_config.display_name)
 
     return None

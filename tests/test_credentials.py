@@ -10,7 +10,6 @@ import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
-from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import (
     _DEDICATED_WORKER_KEY_ENV,
     _DEDICATED_WORKER_ROOT_ENV,
@@ -43,10 +42,13 @@ def credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
 class TestCredentialsManager:
     """Test suite for CredentialsManager."""
 
-    def test_initialization_default_path(self) -> None:
-        """Test that default path is created correctly."""
-        manager = CredentialsManager()
-        assert manager.base_path == CREDENTIALS_DIR
+    def test_initialization_explicit_runtime_path(self, tmp_path: Path) -> None:
+        """Test that credentials managers use an explicitly resolved runtime root."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+        manager = CredentialsManager(constants_mod.credentials_dir(runtime_paths=runtime_paths))
+        assert manager.base_path == tmp_path / "credentials"
         assert manager.base_path.exists()
 
     def test_initialization_custom_path(self, temp_credentials_dir: Path) -> None:
@@ -558,16 +560,16 @@ class TestGlobalCredentialsManager:
         mindroom.credentials._credentials_manager = None
         mindroom.credentials._credentials_manager_signature = None
 
-    def test_get_credentials_manager_singleton(self) -> None:
+    def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
         """Test that get_credentials_manager returns the same instance."""
-        manager1 = get_credentials_manager()
-        manager2 = get_credentials_manager()
+        manager1 = get_credentials_manager(storage_root=tmp_path)
+        manager2 = get_credentials_manager(storage_root=tmp_path)
         assert manager1 is manager2
 
-    def test_global_manager_default_path(self) -> None:
-        """Test that global manager uses the default path."""
-        manager = get_credentials_manager()
-        assert manager.base_path == CREDENTIALS_DIR
+    def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
+        """Test that global manager uses the provided storage root."""
+        manager = get_credentials_manager(storage_root=tmp_path)
+        assert manager.base_path == tmp_path / "credentials"
 
     def test_global_manager_uses_explicit_shared_credentials_path(
         self,
@@ -586,7 +588,7 @@ class TestGlobalCredentialsManager:
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
         monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(shared_path))
 
-        manager = get_credentials_manager()
+        manager = get_credentials_manager(storage_root=storage_path)
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
@@ -602,10 +604,10 @@ class TestGlobalCredentialsManager:
         second_root = tmp_path / "two"
 
         constants_mod.set_runtime_paths(config_path=config_path, storage_path=first_root)
-        manager_one = get_credentials_manager()
+        manager_one = get_credentials_manager(storage_root=first_root)
 
         constants_mod.set_runtime_paths(config_path=config_path, storage_path=second_root)
-        manager_two = get_credentials_manager()
+        manager_two = get_credentials_manager(storage_root=second_root)
 
         assert manager_one.base_path == first_root / "credentials"
         assert manager_two.base_path == second_root / "credentials"
@@ -639,7 +641,7 @@ class TestGlobalCredentialsManager:
         monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
         mindroom.credentials._credentials_manager = None
 
-        manager = get_credentials_manager()
+        manager = get_credentials_manager(storage_root=worker_root)
         loaded_credentials = load_scoped_credentials(
             "google",
             worker_scope="shared",

@@ -110,8 +110,14 @@ def test_load_config_uses_dynamic_runtime_config_path(
     )
     runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
     monkeypatch.setattr(constants, "_ACTIVE_RUNTIME_PATHS", runtime_paths)
+    request = Request(
+        {
+            "type": "http",
+            "app": type("_App", (), {"state": type("_State", (), {"runtime_paths": runtime_paths})()})(),
+        },
+    )
 
-    config, resolved_runtime_paths = openai_compat._load_config()
+    config, resolved_runtime_paths = openai_compat._load_config(request)
 
     assert resolved_runtime_paths.config_path == config_path.resolve()
     assert "only_alt" in config.agents

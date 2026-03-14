@@ -155,8 +155,6 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     )
 
     monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda name: name == tool_name)
-    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
-
     try:
         tool = get_tool_by_name(tool_name)
         assert isinstance(tool, DummyToolkit)
@@ -198,8 +196,6 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     )
 
     monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda _name: False)
-    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
-
     try:
         with pytest.raises(ImportError, match="dependency missing forever"):
             get_tool_by_name(tool_name)

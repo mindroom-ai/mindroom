@@ -12,9 +12,21 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.users import AgentMatrixUser
 from tests.conftest import TEST_PASSWORD
+
+
+def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config(**config_data)
+    config._runtime_paths = runtime_paths
+    return config
 
 
 @pytest.mark.asyncio
@@ -24,7 +36,8 @@ class TestDMPreservationDuringCleanup:
     async def test_agent_cleanup_preserves_dm_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() preserves DM rooms when DMs are enabled."""
         # Create config with DMs enabled
-        config = Config(
+        config = _config_with_runtime_paths(
+            tmp_path,
             agents={
                 "test_agent": AgentConfig(
                     display_name="Test Agent",
@@ -76,7 +89,8 @@ class TestDMPreservationDuringCleanup:
     async def test_agent_cleanup_leaves_all_rooms(self, tmp_path: Path) -> None:
         """Test that AgentBot.cleanup() leaves all non-DM rooms."""
         # Create config
-        config = Config(
+        config = _config_with_runtime_paths(
+            tmp_path,
             agents={
                 "test_agent": AgentConfig(
                     display_name="Test Agent",
@@ -124,10 +138,11 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured1:server" in leave_calls
             assert "!unconfigured2:server" in leave_calls
 
-    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
+    async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup skips DM rooms (unconfigured rooms) when DM mode is enabled."""
         client = AsyncMock()
-        config = Config(
+        config = _config_with_runtime_paths(
+            tmp_path,
             agents={
                 "configured_agent": AgentConfig(
                     display_name="Configured Agent",
@@ -151,10 +166,11 @@ class TestDMPreservationDuringCleanup:
             # Should not even try to kick
             assert not client.room_kick.called
 
-    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
+    async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:
         """Test that orphaned bot cleanup processes rooms when DM mode is disabled."""
         client = AsyncMock()
-        config = Config(
+        config = _config_with_runtime_paths(
+            tmp_path,
             agents={
                 "configured_agent": AgentConfig(
                     display_name="Configured Agent",
@@ -195,10 +211,11 @@ class TestDMPreservationDuringCleanup:
                 reason="Bot no longer configured for this room",
             )
 
-    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:  # noqa: ARG002
+    async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:
         """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
         client = AsyncMock()
-        config = Config(
+        config = _config_with_runtime_paths(
+            tmp_path,
             agents={
                 "agent": AgentConfig(
                     display_name="Agent",

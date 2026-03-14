@@ -34,7 +34,18 @@ def setup_test_bot(
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
     if config is None:
-        config = Config.from_yaml()
+        agents: dict[str, AgentConfig] = {}
+        if agent.agent_name != "router":
+            agents[agent.agent_name] = AgentConfig(
+                display_name=agent.display_name,
+                rooms=[room_id],
+            )
+        config = Config(
+            agents=agents,
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            router=RouterConfig(model="default"),
+            authorization={"default_room_access": True},
+        )
 
     bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
     bot.client = AsyncMock()

@@ -104,8 +104,8 @@ from .constants import (
     ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
-    get_runtime_paths,
     resolve_avatar_path,
+    resolve_runtime_paths,
 )
 from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
 from .logging_config import emoji, get_logger
@@ -232,10 +232,11 @@ def create_bot_for_entity(
 
     """
     enable_streaming = config.defaults.enable_streaming
+    runtime_paths = config.runtime_paths
 
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
-        rooms = resolve_room_aliases(list(all_room_aliases))
+        rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths=runtime_paths)
         return AgentBot(
             agent_user,
             storage_path,
@@ -247,7 +248,7 @@ def create_bot_for_entity(
 
     if entity_name in config.teams:
         team_config = config.teams[entity_name]
-        rooms = resolve_room_aliases(team_config.rooms)
+        rooms = resolve_room_aliases(team_config.rooms, runtime_paths=runtime_paths)
         # Convert team member agent names into canonical agent Matrix IDs.
         # Team streaming resolves config agents from these IDs, so they must keep
         # the `mindroom_` prefix used by MatrixID.from_agent().
@@ -269,7 +270,7 @@ def create_bot_for_entity(
 
     if entity_name in config.agents:
         agent_config = config.agents[entity_name]
-        rooms = resolve_room_aliases(agent_config.rooms)
+        rooms = resolve_room_aliases(agent_config.rooms, runtime_paths=runtime_paths)
         return AgentBot(
             agent_user,
             storage_path,
@@ -392,7 +393,7 @@ class AgentBot:
         runtime_paths = self.config.runtime_paths
         if runtime_paths is not None:
             return runtime_paths
-        return get_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
+        return resolve_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
 
     def _resolve_reply_thread_id(
         self,
@@ -527,7 +528,7 @@ class AgentBot:
         if self.agent_name == ROUTER_AGENT_NAME:
             # The router is the long-lived manager of the root Space even though it is
             # not part of the normal configured room list for conversational routing.
-            root_space_id = MatrixState.load().space_room_id
+            root_space_id = MatrixState.load(runtime_paths=self.runtime_paths).space_room_id
             if root_space_id is not None:
                 configured_rooms.add(root_space_id)
 
@@ -558,7 +559,7 @@ class AgentBot:
             return
 
         entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        avatar_path = resolve_avatar_path(entity_type, self.agent_name)
+        avatar_path = resolve_avatar_path(entity_type, self.agent_name, runtime_paths=self.runtime_paths)
 
         if avatar_path.exists():
             try:

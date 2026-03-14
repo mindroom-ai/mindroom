@@ -14,7 +14,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
-import mindroom.constants as constants_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded
@@ -803,11 +802,13 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
 ) -> None:
     """Worker requests should validate canonical agent roots against the default storage root."""
     _set_sandbox_token(monkeypatch)
-    storage_root = tmp_path / "default-storage"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+    storage_root = tmp_path / "mindroom_data"
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
     monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
-    monkeypatch.setattr(constants_module, "STORAGE_PATH_OBJ", storage_root)
 
     canonical_base_dir = agent_workspace_root_path(storage_root, "general") / "mind_data"
     response = runner_client.post(

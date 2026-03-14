@@ -12,6 +12,7 @@ from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -27,19 +28,31 @@ if TYPE_CHECKING:
 
 
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(storage_path=storage_path)
+    config_path = storage_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+
+
+def _make_config(storage_path: Path) -> Config:
+    config = Config(
+        agents={
+            "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+            "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+        },
+        teams={},
+        models={"default": ModelConfig(provider="test", id="test-model")},
+        authorization=AuthorizationConfig(default_room_access=True),
+    )
+    config._runtime_paths = _runtime_paths(storage_path)
+    return config
 
 
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
-    # Import here to get the actual domain from environment
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="calculator",
-        user_id=f"@mindroom_calculator:{config.domain}",
+        user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -49,13 +62,9 @@ def mock_calculator_agent() -> AgentMatrixUser:
 @pytest.fixture
 def mock_general_agent() -> AgentMatrixUser:
     """Create a mock general agent user."""
-    # Import here to get the actual domain from environment
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="general",
-        user_id=f"@mindroom_general:{config.domain}",
+        user_id="@mindroom_general:localhost",
         display_name="GeneralAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -82,7 +91,7 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
+        config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
@@ -169,7 +178,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
+        config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
@@ -208,15 +217,8 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 ) -> None:
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
-    mock_config = Config(
-        agents={
-            "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-            "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
-    )
+    mock_config = _make_config(tmp_path)
+    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.domain
@@ -238,7 +240,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_login.return_value = mock_client
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
-        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
+        config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
 
@@ -523,7 +525,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
+        config = _make_config(tmp_path)
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
         await bot.start()

@@ -504,7 +504,7 @@ def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
         Model name to use
 
     """
-    room_alias = get_room_alias_from_id(room_id)
+    room_alias = get_room_alias_from_id(room_id, runtime_paths=config.runtime_paths)
 
     if room_alias and room_alias in config.room_models:
         model = config.room_models[room_alias]

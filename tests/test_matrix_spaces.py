@@ -8,6 +8,7 @@ import nio
 import pytest
 import yaml
 
+from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import client as matrix_client
@@ -15,6 +16,17 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.identity import managed_space_alias_localpart, mindroom_namespace
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import MultiAgentOrchestrator
+
+
+def _config_with_runtime_paths(tmp_path, **config_data: object) -> Config:  # noqa: ANN001
+    runtime_paths = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    config = Config(**config_data)
+    config._runtime_paths = runtime_paths
+    return config
 
 
 def test_matrix_space_defaults() -> None:
@@ -38,7 +50,9 @@ def test_matrix_space_yaml_null_uses_defaults(tmp_path) -> None:  # noqa: ANN001
 
 def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path) -> None:  # noqa: ANN001
     """Older matrix state files without `space_room_id` should still load cleanly."""
+    config_path = tmp_path / "config.yaml"
     state_path = tmp_path / "matrix_state.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     state_path.write_text(
         yaml.safe_dump(
             {
@@ -48,9 +62,8 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
         ),
         encoding="utf-8",
     )
-
-    with patch("mindroom.constants.MATRIX_STATE_FILE", state_path):
-        state = MatrixState.load()
+    runtime_paths = constants.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+    state = MatrixState.load(runtime_paths=runtime_paths)
 
     assert state.space_room_id is None
     assert state.rooms["lobby"].room_id == "!lobby:example.com"
@@ -143,14 +156,15 @@ async def test_add_room_to_space_writes_child_link_when_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_creates_space_links_rooms_and_persists_state() -> None:
+async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tmp_path) -> None:  # noqa: ANN001
     """Enabled root Space support should create the Space, persist it, and link rooms."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
     state = MatrixState()
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )
@@ -172,7 +186,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state() 
 
     assert space_id == "!space:localhost"
     assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state)
+    mock_save.assert_called_once_with(state, runtime_paths=config.runtime_paths)
     mock_create.assert_awaited_once()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "MindRoom")
     assert mock_add.await_args_list == [
@@ -185,11 +199,12 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state() 
         avatar_category="spaces",
         avatar_name="root_space",
         context="root_space",
+        runtime_paths=config.runtime_paths,
     )
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_resolves_existing_alias_without_recreating() -> None:
+async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_path) -> None:  # noqa: ANN001
     """Existing root Spaces should be resolved by alias and reused."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
@@ -200,7 +215,8 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
         servers=["localhost"],
     )
     state = MatrixState()
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True, "name": "Workspace"},
     )
@@ -219,7 +235,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
 
     assert space_id == "!space:localhost"
     assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state)
+    mock_save.assert_called_once_with(state, runtime_paths=config.runtime_paths)
     mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace")
@@ -230,11 +246,12 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating() ->
         avatar_category="spaces",
         avatar_name="root_space",
         context="root_space",
+        runtime_paths=config.runtime_paths,
     )
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() -> None:
+async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tmp_path) -> None:  # noqa: ANN001
     """A private existing root Space should not be reused if the router cannot join it."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
@@ -245,7 +262,8 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() 
         servers=["localhost"],
     )
     state = MatrixState()
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True, "name": "Workspace"},
     )
@@ -273,13 +291,14 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join() 
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_returns_none_when_name_write_fails() -> None:
+async def test_ensure_root_space_returns_none_when_name_write_fails(tmp_path) -> None:  # noqa: ANN001
     """If the router lacks permission to set the space name, reconciliation should bail out."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.rooms = {"!space:localhost": MagicMock()}
     state = MatrixState(space_room_id="!space:localhost")
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )
@@ -299,13 +318,14 @@ async def test_ensure_root_space_returns_none_when_name_write_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ensure_root_space_returns_none_when_child_link_fails() -> None:
+async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) -> None:  # noqa: ANN001
     """If the router cannot add child links, reconciliation should fail."""
     client = AsyncMock()
     client.homeserver = "http://localhost:8008"
     client.rooms = {"!space:localhost": MagicMock()}
     state = MatrixState(space_room_id="!space:localhost")
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )

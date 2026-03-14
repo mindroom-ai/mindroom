@@ -127,9 +127,10 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
 
-    config, config_path = load_runtime_config()
+    runtime_paths = api_runtime_paths(request)
+    config, config_path = load_runtime_config(runtime_paths)
     ensure_tool_registry_loaded(config, config_path=config_path)
     tools = export_tools_metadata()
     worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None

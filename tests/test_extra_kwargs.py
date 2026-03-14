@@ -11,6 +11,19 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import resolve_runtime_paths
+
+
+def _config_with_runtime_paths(config_data: dict[str, object]) -> Config:
+    runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(**config_data)
+    config._runtime_paths = runtime_paths
+    return config
 
 
 def test_model_config_with_extra_kwargs() -> None:
@@ -131,20 +144,18 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config = _config_with_runtime_paths(config_data)
 
     # Get the model instance
     model = get_model_instance(config, "test_model")
 
     # Check that the model has the correct parameters
     assert model.id == "openai/gpt-4"
-    assert hasattr(model, "request_params")
     assert model.request_params is not None
     assert model.request_params["provider"]["order"] == ["Cerebras"]
     assert model.request_params["provider"]["allow_fallbacks"] is False
 
     # Check that temperature was also passed
-    assert hasattr(model, "temperature")
     assert model.temperature == 0.8
 
 
@@ -190,7 +201,7 @@ def test_different_providers_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config = _config_with_runtime_paths(config_data)
 
     # Test OpenAI model
     openai_model = get_model_instance(config, "openai_model")
@@ -233,7 +244,7 @@ def test_model_without_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config = _config_with_runtime_paths(config_data)
 
     # Should work without any issues
     model = get_model_instance(config, "simple_model")
@@ -271,7 +282,7 @@ def test_vertexai_claude_provider() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config = _config_with_runtime_paths(config_data)
     model = get_model_instance(config, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)

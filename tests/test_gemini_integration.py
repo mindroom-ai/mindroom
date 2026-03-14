@@ -1,11 +1,26 @@
 """Tests for Google Gemini integration."""
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.mindroom.ai import get_model_instance
 from src.mindroom.config.main import Config
+from src.mindroom.constants import resolve_runtime_paths
+
+
+def _config_with_runtime_paths() -> Config:
+    runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config()
+    config._runtime_paths = runtime_paths
+    return config
 
 
 class TestGeminiIntegration:
@@ -13,7 +28,7 @@ class TestGeminiIntegration:
 
     def test_gemini_provider_creates_gemini_instance(self) -> None:
         """Test that 'gemini' provider creates a Gemini instance."""
-        config = Config()
+        config = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
@@ -30,7 +45,7 @@ class TestGeminiIntegration:
 
     def test_google_provider_creates_gemini_instance(self) -> None:
         """Test that 'google' provider also creates a Gemini instance."""
-        config = Config()
+        config = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="google",
@@ -47,7 +62,7 @@ class TestGeminiIntegration:
 
     def test_gemini_api_key_environment_variable(self) -> None:
         """Test that GOOGLE_API_KEY is set from credentials manager."""
-        config = Config()
+        config = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
@@ -61,11 +76,11 @@ class TestGeminiIntegration:
             with patch.dict("os.environ", {}, clear=True):
                 get_model_instance(config, "test_model")
                 # Check that the API key was retrieved for gemini
-                mock_get_api_key.assert_called_with("gemini")
+                mock_get_api_key.assert_called_with("gemini", runtime_paths=config.runtime_paths)
 
     def test_unsupported_provider_raises_error(self) -> None:
         """Test that unsupported providers raise appropriate errors."""
-        config = Config()
+        config = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="unsupported_provider",
@@ -79,7 +94,7 @@ class TestGeminiIntegration:
 
     def test_gemini_models_in_config(self) -> None:
         """Test that Gemini models can be configured properly."""
-        config = Config()
+        config = _config_with_runtime_paths()
 
         # Test various Gemini model configurations
         gemini_configs = [

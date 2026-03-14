@@ -102,7 +102,7 @@ async def _get_agent_matrix_rooms(
     configured_room_aliases = agent_data.get("rooms", [])
 
     # Resolve room aliases to room IDs for comparison
-    configured_room_ids = resolve_room_aliases(configured_room_aliases)
+    configured_room_ids = resolve_room_aliases(configured_room_aliases, runtime_paths=runtime_paths)
 
     # Calculate unconfigured rooms (joined but not in config)
     unconfigured_rooms = [room for room in joined_rooms if room not in configured_room_ids]
@@ -174,11 +174,12 @@ async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse
 
 
 @router.post("/rooms/leave")
-async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
+async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -> dict[str, bool]:
     """Make an agent or team leave a specific room.
 
     Args:
         request: Contains the agent/team ID and room ID
+        api_request: FastAPI request carrying the API runtime context
 
     Returns:
         Success status
@@ -194,7 +195,7 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
 
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    runtime_paths = api_runtime_paths()
+    runtime_paths = api_runtime_paths(api_request)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
 
     # Create or get the Matrix user for this configured entity.
@@ -220,11 +221,12 @@ async def leave_room_endpoint(request: RoomLeaveRequest) -> dict[str, bool]:
 
 
 @router.post("/rooms/leave-bulk")
-async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
+async def leave_rooms_bulk(requests: list[RoomLeaveRequest], api_request: Request) -> dict[str, Any]:
     """Make multiple agents leave multiple rooms.
 
     Args:
         requests: List of leave requests
+        api_request: FastAPI request carrying the API runtime context
 
     Returns:
         Results for each request
@@ -233,7 +235,7 @@ async def leave_rooms_bulk(requests: list[RoomLeaveRequest]) -> dict[str, Any]:
     results = []
     for request in requests:
         try:
-            await leave_room_endpoint(request)
+            await leave_room_endpoint(request, api_request)
             results.append({"agent_id": request.agent_id, "room_id": request.room_id, "success": True})
         except HTTPException as e:
             results.append(

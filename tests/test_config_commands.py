@@ -252,12 +252,12 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
     ) as mock_handle_config_command:
         await handle_command(context=context, room=room, event=event, command=command)
 
-    mock_handle_config_command.assert_awaited_once_with("show", config_path)
+    mock_handle_config_command.assert_awaited_once_with("show", runtime_paths=context.runtime_paths)
 
 
 @pytest.mark.asyncio
-async def test_handle_config_command_uses_active_runtime_config_path_when_unspecified(tmp_path: Path) -> None:
-    """Direct config commands should default to the active runtime config file."""
+async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path) -> None:
+    """Direct config commands should use the provided runtime context."""
     config_path = tmp_path / "runtime-config.yaml"
     config_path.write_text(
         yaml.dump(
@@ -269,9 +269,12 @@ async def test_handle_config_command_uses_active_runtime_config_path_when_unspec
         ),
         encoding="utf-8",
     )
-    constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    runtime_paths = constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
 
-    response, change_info = await handle_config_command("get agents.test_agent.display_name")
+    response, change_info = await handle_config_command(
+        "get agents.test_agent.display_name",
+        runtime_paths=runtime_paths,
+    )
 
     assert "Runtime Agent" in response
     assert change_info is None

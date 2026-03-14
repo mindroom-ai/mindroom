@@ -19,6 +19,7 @@ from agno.session.agent import AgentSession
 from mindroom import agent_prompts, constants
 from mindroom import tools as _tools_module  # noqa: F401
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.credentials import get_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -27,6 +28,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
+    shared_storage_root,
 )
 
 if TYPE_CHECKING:
@@ -383,6 +385,8 @@ def build_agent_toolkit(
     agent_config = config.get_agent(agent_name)
     storage_path = runtime_paths.storage_root
     config_path = runtime_paths.config_path
+    credentials_manager = get_credentials_manager(storage_root=storage_path)
+    shared_storage_path = shared_storage_root(storage_path)
 
     if tool_name == "memory":
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
@@ -425,11 +429,17 @@ def build_agent_toolkit(
 
     return get_tool_by_name(
         tool_name,
+        credentials_manager=credentials_manager,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
             workspace_path=tool_init_context.workspace_path,
         ),
-        runtime_overrides={"config_path": config_path},
+        runtime_overrides={
+            "config_path": config_path,
+            "credentials_manager": credentials_manager,
+            "output_dir": storage_path / "browser",
+            "shared_storage_root": shared_storage_path,
+        },
         worker_tools_override=worker_tools,
         worker_scope=tool_init_context.worker_scope,
         routing_agent_name=agent_name,
@@ -782,7 +792,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, agent_config.model)
+    model = get_model_instance(config, agent_config.model, runtime_paths=resolved_runtime_paths)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
     skills = build_agent_skills(agent_name, config)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -173,7 +174,11 @@ def _backend(
         extra_labels={"mindroom.ai/tenant": "test"},
         owner_deployment_name=owner_deployment_name,
     )
-    backend = KubernetesWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    backend = KubernetesWorkerBackend(
+        config=config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=Path("mindroom-test-storage").resolve(),
+    )
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
     backend._resources.apps_api = apps_api
@@ -627,7 +632,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
 def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> None:
     """Long prefixes must still preserve the per-worker digest so names remain unique."""
     long_prefix = "mindroom-worker-prefix-that-is-intentionally-way-too-long-for-a-kubernetes-name"
-    backend, apps_api, _core_api = _backend(name_prefix=long_prefix)
+    backend, _apps_api, _core_api = _backend(name_prefix=long_prefix)
 
     first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=20.0)

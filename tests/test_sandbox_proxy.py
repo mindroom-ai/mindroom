@@ -128,7 +128,6 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "all")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -141,7 +140,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         ),
     )
 
-    tool = get_tool_by_name("calculator")
+    tool = get_tool_by_name("calculator", credentials_manager=fake_credentials)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -254,11 +253,11 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
     monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {"calculator.add": ("openai",)})
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.get_credentials_manager", lambda: fake_credentials)
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name(
         "calculator",
+        credentials_manager=fake_credentials,
         worker_tools_override=["calculator"],
         worker_scope="user",
         routing_agent_name="code",
@@ -635,10 +634,10 @@ class TestWorkerToolsOverride:
         monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
         fake_credentials = FakeCredentialsManager({})
-        monkeypatch.setattr("mindroom.custom_tools.homeassistant.get_credentials_manager", lambda: fake_credentials)
 
         tool = get_tool_by_name(
             "homeassistant",
+            credentials_manager=fake_credentials,
             worker_tools_override=["homeassistant"],
             worker_scope="shared",
             routing_agent_name="general",
@@ -716,15 +715,10 @@ class TestWorkerToolsOverride:
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _recording_client_class(captured=captured),
         )
-        monkeypatch.setattr(
-            sandbox_proxy_module,
-            "_current_shared_storage_root",
-            lambda: Path("/srv/mindroom"),
-        )
-
         tool = get_tool_by_name(
             "coding",
             tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
+            runtime_overrides={"shared_storage_root": Path("/srv/mindroom")},
             worker_tools_override=["coding"],
             worker_scope="shared",
             routing_agent_name="general",
