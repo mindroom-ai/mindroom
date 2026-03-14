@@ -78,6 +78,13 @@ def _storage_root_from_env_path(env_path: Path) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _runtime_env_file_values(paths: RuntimePaths) -> dict[str, str]:
+    """Read string env values from one runtime-adjacent `.env` file."""
+    if not paths.env_path.is_file():
+        return {}
+    return {key: value for key, value in dotenv_values(paths.env_path).items() if isinstance(value, str)}
+
+
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -105,12 +112,17 @@ def resolve_runtime_paths(
     )
 
 
-def load_runtime_env(paths: RuntimePaths, *, sync_path_env: bool = True) -> None:
+def load_runtime_env(
+    paths: RuntimePaths,
+    *,
+    sync_path_env: bool = True,
+    override_existing: bool = False,
+) -> None:
     """Load a runtime-adjacent env file without giving it ambient path authority."""
-    if paths.env_path.is_file():
-        for key, value in dotenv_values(paths.env_path).items():
-            if key is None or value is None or key in _RUNTIME_PATH_ENV_KEYS:
-                continue
+    for key, value in _runtime_env_file_values(paths).items():
+        if key in _RUNTIME_PATH_ENV_KEYS:
+            continue
+        if override_existing or key not in os.environ:
             os.environ[key] = value
     if sync_path_env:
         os.environ["MINDROOM_CONFIG_PATH"] = str(paths.config_path)
@@ -124,6 +136,60 @@ def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
     expanded = expanded.replace("${MINDROOM_STORAGE_PATH}", str(paths.storage_root))
     expanded = expanded.replace("$MINDROOM_STORAGE_PATH", str(paths.storage_root))
     return os.path.expandvars(expanded)
+
+
+def runtime_config_path(config_path: Path | None = None) -> Path:
+    """Return the active runtime config path or one explicit config path."""
+    return get_runtime_paths(config_path=config_path).config_path
+
+
+def runtime_env_value(
+    name: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    default: str | None = None,
+) -> str | None:
+    """Resolve one runtime env value from explicit process env, then config-adjacent `.env`."""
+    paths = runtime_paths or get_runtime_paths()
+
+    if name == "MINDROOM_CONFIG_PATH":
+        return str(paths.config_path)
+    if name == "MINDROOM_STORAGE_PATH":
+        return str(paths.storage_root)
+
+    configured_value = os.getenv(name)
+    if configured_value is not None:
+        return configured_value
+
+    file_value = _runtime_env_file_values(paths).get(name)
+    if file_value is not None:
+        return file_value
+    return default
+
+
+def runtime_env_flag(
+    name: str,
+    *,
+    default: bool = False,
+    runtime_paths: RuntimePaths | None = None,
+) -> bool:
+    """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
+    value = runtime_env_value(name, runtime_paths=runtime_paths)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def runtime_matrix_homeserver(*, runtime_paths: RuntimePaths | None = None) -> str:
+    """Return the effective Matrix homeserver for one runtime context."""
+    return (
+        runtime_env_value(
+            "MATRIX_HOMESERVER",
+            runtime_paths=runtime_paths,
+            default="http://localhost:8008",
+        )
+        or "http://localhost:8008"
+    )
 
 
 def get_runtime_paths(

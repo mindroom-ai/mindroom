@@ -186,6 +186,52 @@ class TestResolveConfigRelativePath:
         )
         assert resolved == custom_storage.resolve() / "kb"
 
+    def test_config_from_yaml_does_not_override_existing_shell_env(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config loads should not mutate already-exported process env values."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            "OPENAI_API_KEY=from-file\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "from-shell")
+
+        Config.from_yaml(config_path)
+
+        assert constants_mod.runtime_env_value("OPENAI_API_KEY") == "from-shell"
+
+    def test_config_domain_uses_sibling_env_matrix_homeserver(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Config.domain should resolve MATRIX_HOMESERVER from the explicit config's sibling `.env`."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text(
+            "MATRIX_HOMESERVER=https://example.org\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+
+        config = Config.from_yaml(config_path)
+
+        assert config.domain == "example.org"
+
 
 class TestResolveAvatarPath:
     """Tests for resolve_avatar_path()."""

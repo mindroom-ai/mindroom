@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import pytest
@@ -715,6 +716,11 @@ class TestWorkerToolsOverride:
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _recording_client_class(captured=captured),
         )
+        monkeypatch.setattr(
+            sandbox_proxy_module,
+            "_current_shared_storage_root",
+            lambda: Path("/srv/mindroom"),
+        )
 
         tool = get_tool_by_name(
             "coding",
@@ -774,4 +780,50 @@ class TestWorkerToolsOverride:
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
         assert captured["json"]["tool_init_overrides"] == {
             "base_dir": "/mindroom_data/agents/general/workspace/mind_data",
+        }
+
+    def test_proxy_preserves_unrelated_absolute_base_dir_for_worker_key(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Worker-keyed requests must not retarget unrelated absolute paths that merely contain `agents`."""
+        captured: dict[str, Any] = {}
+        unrelated_base_dir = tmp_path / "demo" / "agents" / "general" / "workspace"
+
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_URL", "http://sandbox:8765")
+        monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", "test-token")
+        monkeypatch.setattr(sandbox_proxy_module, "_EXECUTION_MODE", "off")
+        monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
+        monkeypatch.setattr(sandbox_proxy_module, "_CREDENTIAL_POLICY", {})
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+
+        tool = get_tool_by_name(
+            "coding",
+            tool_init_overrides={"base_dir": str(unrelated_base_dir)},
+            worker_tools_override=["coding"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        with tool_execution_identity(execution_identity):
+            result = entrypoint(path=".")
+
+        assert result == "sandbox-result"
+        assert captured["json"]["tool_init_overrides"] == {
+            "base_dir": str(unrelated_base_dir),
         }

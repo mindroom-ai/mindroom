@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -19,11 +19,10 @@ from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
-    MATRIX_HOMESERVER,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     get_runtime_paths,
-    load_runtime_env,
+    runtime_matrix_homeserver,
     safe_replace,
 )
 from mindroom.logging_config import get_logger
@@ -122,6 +121,8 @@ def _router_agents_for_room(
 
 class Config(BaseModel):
     """Complete configuration from YAML."""
+
+    _runtime_paths: RuntimePaths | None = PrivateAttr(default=None)
 
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
@@ -321,7 +322,9 @@ class Config(BaseModel):
         """Extract the domain from the MATRIX_HOMESERVER."""
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        return extract_server_name_from_homeserver(MATRIX_HOMESERVER)
+        return extract_server_name_from_homeserver(
+            runtime_matrix_homeserver(runtime_paths=self._runtime_paths),
+        )
 
     @cached_property
     def ids(self) -> dict[str, MatrixID]:
@@ -365,7 +368,6 @@ class Config(BaseModel):
         """Create a Config instance from YAML data."""
         resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
         path = resolved_runtime_paths.config_path
-        load_runtime_env(resolved_runtime_paths, sync_path_env=False)
 
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
@@ -391,6 +393,7 @@ class Config(BaseModel):
             data["matrix_space"] = {}
 
         config = cls(**data)
+        config._runtime_paths = resolved_runtime_paths
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config

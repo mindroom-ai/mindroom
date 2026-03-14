@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from mindroom import constants as constants_mod
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -38,6 +39,21 @@ def _make_config(
 
 class TestGetOwnConfig:
     """Tests for SelfConfigTools.get_own_config."""
+
+    def test_init_uses_active_runtime_config_path(self, tmp_path: Path) -> None:
+        """Default initialization should follow the active runtime config path."""
+        _, config_path = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write things")},
+        )
+        try:
+            constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+
+            tool = SelfConfigTools(agent_name="writer")
+
+            assert tool.config_path == config_path.resolve()
+            assert "Writer" in tool.get_own_config()
+        finally:
+            config_path.unlink(missing_ok=True)
 
     def test_get_own_config(self) -> None:
         """Agent should see its own config as YAML."""

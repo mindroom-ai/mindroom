@@ -199,10 +199,7 @@ class CredentialsManager:
 
 
 def _default_credentials_base_path() -> Path:
-    storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if storage_path:
-        return Path(storage_path).expanduser().resolve() / "credentials"
-    return constants.CREDENTIALS_DIR
+    return constants.get_runtime_paths().storage_root / "credentials"
 
 
 def _default_shared_credentials_base_path(base_path: Path) -> Path:
@@ -226,6 +223,7 @@ def _current_dedicated_worker_root() -> Path | None:
 
 # Global instance for convenience (lazy initialization)
 _credentials_manager: CredentialsManager | None = None
+_credentials_manager_signature: tuple[Path, Path, str | None, Path | None] | None = None
 
 
 def get_credentials_manager() -> CredentialsManager:
@@ -235,9 +233,20 @@ def get_credentials_manager() -> CredentialsManager:
         The global CredentialsManager instance
 
     """
-    global _credentials_manager
-    if _credentials_manager is None:
+    global _credentials_manager, _credentials_manager_signature
+
+    base_path = _default_credentials_base_path()
+    shared_base_path = _default_shared_credentials_base_path(base_path)
+    current_signature = (
+        base_path,
+        shared_base_path,
+        _current_dedicated_worker_key(),
+        _current_dedicated_worker_root(),
+    )
+
+    if _credentials_manager is None or _credentials_manager_signature != current_signature:
         _credentials_manager = CredentialsManager()
+        _credentials_manager_signature = current_signature
     return _credentials_manager
 
 

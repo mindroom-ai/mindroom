@@ -9,8 +9,8 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from mindroom import constants
 from mindroom.config.main import Config
-from mindroom.constants import CONFIG_PATH
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -165,7 +165,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
     """
     operation, args = _parse_config_args(args_text)
-    path = config_path or CONFIG_PATH
+    path = constants.runtime_config_path(config_path)
 
     # Load current config
     config = Config.from_yaml(path)
@@ -292,7 +292,7 @@ async def apply_config_change(
         Success or error message
 
     """
-    path = config_file_path or CONFIG_PATH
+    path = constants.runtime_config_path(config_file_path)
 
     try:
         # Load the current configuration

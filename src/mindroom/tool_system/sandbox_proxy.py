@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -306,21 +307,7 @@ def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str,
 
 
 def _current_shared_storage_root() -> Path:
-    configured_storage_path = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if configured_storage_path:
-        return shared_storage_root(Path(configured_storage_path))
-    return shared_storage_root(constants.STORAGE_PATH_OBJ)
-
-
-def _agent_tree_relative_path(path: Path) -> str | None:
-    """Return a portable path rooted at the shared agents/ tree when possible."""
-    try:
-        agent_index = path.parts.index("agents")
-    except ValueError:
-        return None
-    if agent_index >= len(path.parts) - 1:
-        return None
-    return Path(*path.parts[agent_index:]).as_posix()
+    return shared_storage_root(constants.get_runtime_paths().storage_root)
 
 
 def _portable_tool_init_overrides(
@@ -344,11 +331,8 @@ def _portable_tool_init_overrides(
         return portable_overrides
 
     shared_root = _current_shared_storage_root().resolve()
-    try:
+    with suppress(ValueError):
         portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
-    except ValueError:
-        if relative_agent_path := _agent_tree_relative_path(base_dir.resolve()):
-            portable_overrides["base_dir"] = relative_agent_path
     return portable_overrides
 
 

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from mindroom import constants as constants_mod
 from mindroom.commands.config_commands import (
     _format_value,
     _get_nested_value,
@@ -252,6 +253,28 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         await handle_command(context=context, room=room, event=event, command=command)
 
     mock_handle_config_command.assert_awaited_once_with("show", config_path)
+
+
+@pytest.mark.asyncio
+async def test_handle_config_command_uses_active_runtime_config_path_when_unspecified(tmp_path: Path) -> None:
+    """Direct config commands should default to the active runtime config file."""
+    config_path = tmp_path / "runtime-config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "agents": {"test_agent": {"display_name": "Runtime Agent", "role": "test"}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+
+    response, change_info = await handle_config_command("get agents.test_agent.display_name")
+
+    assert "Runtime Agent" in response
+    assert change_info is None
 
 
 @pytest.mark.asyncio
