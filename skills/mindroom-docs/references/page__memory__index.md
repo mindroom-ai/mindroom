@@ -66,9 +66,10 @@ Example:
 memory:
   backend: file
   file:
-    path: ./mindroom_data/memory_files
     max_entrypoint_lines: 200
 ```
+
+`memory.file.path` is an optional fallback root for direct file-memory paths. It does not relocate canonical agent or team file memory. Use `agents.<name>.memory_file_path` to place an agent's file memory inside its workspace.
 
 Per-agent override example:
 
@@ -95,8 +96,8 @@ Agent file memory is stored under each agent's storage directory by default:
 
 Team file memory is mirrored under each participating agent's storage directory:
 
-- `team_<sorted_members>/MEMORY.md`
-- `team_<sorted_members>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
+- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
 
 ## File Auto-Flush Worker
 
