@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import mindroom.api.knowledge as knowledge_api
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
 
 if TYPE_CHECKING:
@@ -75,15 +76,17 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
 
 def test_knowledge_root_resolves_relative_path_from_config_dir(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Knowledge API should resolve relative base paths from the config directory."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     config = _knowledge_config(path=Path("knowledge"))
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_dir / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
 
-    root = knowledge_api._knowledge_root(config, "research")
+    root = knowledge_api._knowledge_root(config, "research", runtime_paths.config_path)
 
     assert root == (config_dir / "knowledge").resolve()
 
@@ -270,12 +273,17 @@ def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path)
 
     config_old = _knowledge_config(old_path)
     config_new = _knowledge_config(new_path)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage_path)
 
     async def _run() -> None:
         try:
-            await initialize_knowledge_managers(config_old, storage_path, start_watchers=False, reindex_on_create=False)
-            with patch("mindroom.api.knowledge.STORAGE_PATH_OBJ", storage_path):
-                manager = await knowledge_api._ensure_manager(config_new, "research")
+            await initialize_knowledge_managers(
+                config_old,
+                runtime_paths,
+                start_watchers=False,
+                reindex_on_create=False,
+            )
+            manager = await knowledge_api._ensure_manager(config_new, "research", runtime_paths)
             assert manager is not None
             assert manager.knowledge_path == new_path.resolve()
         finally:

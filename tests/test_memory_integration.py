@@ -11,6 +11,7 @@ from agno.models.ollama import Ollama
 
 from mindroom.ai import ai_response
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,6 +43,10 @@ class TestMemoryIntegration:
         """Load config for testing."""
         return Config.from_yaml()
 
+    @staticmethod
+    def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+        return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+
     @pytest.mark.asyncio
     async def test_ai_response_with_memory(
         self,
@@ -61,7 +66,7 @@ class TestMemoryIntegration:
                 agent_name="calculator",
                 prompt="What is 2+2?",
                 session_id="test_session",
-                storage_path=tmp_path,
+                runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
                 room_id="!test:room",
             )
@@ -98,7 +103,7 @@ class TestMemoryIntegration:
                 agent_name="general",
                 prompt="Hello",
                 session_id="test_session",
-                storage_path=tmp_path,
+                runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
                 room_id=None,
             )
@@ -123,7 +128,7 @@ class TestMemoryIntegration:
                 agent_name="general",
                 prompt="Test",
                 session_id="session",
-                storage_path=tmp_path,
+                runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
 
@@ -150,7 +155,7 @@ class TestMemoryIntegration:
                 agent_name="general",
                 prompt="Remember this: A=1",
                 session_id="session1",
-                storage_path=tmp_path,
+                runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
 
@@ -167,7 +172,7 @@ class TestMemoryIntegration:
                 agent_name="general",
                 prompt="What is A?",
                 session_id="session2",
-                storage_path=tmp_path,
+                runtime_paths=self._runtime_paths(tmp_path),
                 config=config,
             )
 

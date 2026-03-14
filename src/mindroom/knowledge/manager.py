@@ -25,7 +25,7 @@ from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
-from mindroom.constants import resolve_config_relative_path
+from mindroom.constants import RuntimePaths, get_runtime_paths, resolve_config_relative_path
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import (
@@ -34,8 +34,7 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
-from mindroom.workspaces import resolve_agent_workspace
+from mindroom.workspaces import resolve_agent_private_state_storage_path, resolve_agent_workspace
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -56,8 +55,43 @@ _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
 
 
-def _resolve_knowledge_path(path: str) -> Path:
-    return resolve_config_relative_path(path)
+def _resolve_knowledge_path(
+    path: str,
+    runtime_paths: RuntimePaths,
+) -> Path:
+    return resolve_config_relative_path(path, config_path=runtime_paths.config_path)
+
+
+def _runtime_paths_with_storage_root(config: Config, storage_path: Path) -> RuntimePaths:
+    base_runtime_paths = config._runtime_paths or get_runtime_paths(storage_path=storage_path)
+    return RuntimePaths(
+        config_path=base_runtime_paths.config_path,
+        config_dir=base_runtime_paths.config_dir,
+        env_path=base_runtime_paths.env_path,
+        storage_root=storage_path.expanduser().resolve(),
+    )
+
+
+def _match_paths(
+    config: Config,
+    base_id: str,
+    storage_path: Path | RuntimePaths,
+    knowledge_path: Path | None,
+) -> tuple[Path, Path]:
+    if isinstance(storage_path, RuntimePaths):
+        runtime_paths = storage_path
+        if knowledge_path is None:
+            resolved_storage_path, resolved_knowledge_path = _resolve_effective_knowledge_path(
+                config,
+                runtime_paths,
+                base_id,
+            )
+            return resolved_storage_path, resolved_knowledge_path
+        return runtime_paths.storage_root, knowledge_path
+    if knowledge_path is None:
+        msg = f"Knowledge path is required when matching manager '{base_id}' against a storage root"
+        raise ValueError(msg)
+    return storage_path, knowledge_path
 
 
 def _knowledge_path_kind(
@@ -326,25 +360,25 @@ def _should_incrementally_sync_on_access(
 
 def _resolve_manager_storage_path(
     config: Config,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     base_id: str,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     if effective_agent_name is None:
-        return storage_path.expanduser().resolve()
-    return resolve_agent_state_storage_path(
-        agent_name=effective_agent_name,
-        base_storage_path=storage_path.expanduser().resolve(),
-        config=config,
+        return runtime_paths.storage_root.expanduser().resolve()
+    return resolve_agent_private_state_storage_path(
+        effective_agent_name,
+        config,
+        base_storage_path=runtime_paths.storage_root.expanduser().resolve(),
         execution_identity=execution_identity,
     ).resolve()
 
 
 def _resolve_effective_knowledge_path(
     config: Config,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     base_id: str,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -354,12 +388,12 @@ def _resolve_effective_knowledge_path(
     effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     resolved_storage_path = _resolve_manager_storage_path(
         config,
-        storage_path,
+        runtime_paths,
         base_id,
         execution_identity=execution_identity,
     )
     if effective_agent_name is None:
-        knowledge_path = _resolve_knowledge_path(base_config.path).resolve()
+        knowledge_path = _resolve_knowledge_path(base_config.path, runtime_paths).resolve()
         if create:
             _ensure_knowledge_path_ready(
                 base_config.path,
@@ -371,9 +405,10 @@ def _resolve_effective_knowledge_path(
     workspace = resolve_agent_workspace(
         effective_agent_name,
         config,
-        base_storage_path=storage_path,
+        base_storage_path=runtime_paths.storage_root,
         execution_identity=execution_identity,
         create=create,
+        config_path=runtime_paths.config_path,
     )
     if workspace is None:
         msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
@@ -391,7 +426,7 @@ def _resolve_effective_knowledge_path(
 
 def _knowledge_manager_key(
     config: Config,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     base_id: str,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -399,7 +434,7 @@ def _knowledge_manager_key(
 ) -> tuple[KnowledgeManagerKey, Path, Path]:
     resolved_storage_path, knowledge_path = _resolve_effective_knowledge_path(
         config,
-        storage_path,
+        runtime_paths,
         base_id,
         execution_identity=execution_identity,
         create=create,
@@ -421,8 +456,9 @@ class KnowledgeManager:
 
     base_id: str
     config: Config
-    storage_path: Path
+    storage_path: Path | None = None
     knowledge_path: Path | None = None
+    runtime_paths: RuntimePaths | None = None
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
@@ -439,10 +475,22 @@ class KnowledgeManager:
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
-        if self.knowledge_path is None:
-            self.knowledge_path = _resolve_knowledge_path(self.config.get_knowledge_base_config(self.base_id).path)
-        self.knowledge_path = self.knowledge_path.resolve()
         base_config = self.config.get_knowledge_base_config(self.base_id)
+        if self.runtime_paths is not None:
+            if self.storage_path is None:
+                self.storage_path = self.runtime_paths.storage_root
+            if self.knowledge_path is None:
+                self.knowledge_path = _resolve_knowledge_path(base_config.path, self.runtime_paths)
+        elif self.storage_path is not None and self.knowledge_path is None:
+            self.knowledge_path = _resolve_knowledge_path(
+                base_config.path,
+                _runtime_paths_with_storage_root(self.config, self.storage_path),
+            )
+        if self.storage_path is None or self.knowledge_path is None:
+            msg = f"Knowledge manager '{self.base_id}' requires storage_path and knowledge_path"
+            raise ValueError(msg)
+        self.storage_path = self.storage_path.resolve()
+        self.knowledge_path = self.knowledge_path.resolve()
         _ensure_knowledge_path_ready(
             base_config.path,
             self.knowledge_path,
@@ -508,17 +556,39 @@ class KnowledgeManager:
             return knowledge_source
         return knowledge_source.parent
 
-    def matches(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
+    def matches(
+        self,
+        config: Config,
+        storage_path: Path | RuntimePaths,
+        knowledge_path: Path | None = None,
+    ) -> bool:
         """Return True when manager settings match the provided config."""
-        return self._settings == _settings_key(config, storage_path, self.base_id, knowledge_path)
+        resolved_storage_path, resolved_knowledge_path = _match_paths(
+            config,
+            self.base_id,
+            storage_path,
+            knowledge_path,
+        )
+        return self._settings == _settings_key(config, resolved_storage_path, self.base_id, resolved_knowledge_path)
 
-    def needs_full_reindex(self, config: Config, storage_path: Path, knowledge_path: Path) -> bool:
+    def needs_full_reindex(
+        self,
+        config: Config,
+        storage_path: Path | RuntimePaths,
+        knowledge_path: Path | None = None,
+    ) -> bool:
         """Return True when index-affecting settings changed."""
+        resolved_storage_path, resolved_knowledge_path = _match_paths(
+            config,
+            self.base_id,
+            storage_path,
+            knowledge_path,
+        )
         return self._indexing_settings != _indexing_settings_key(
             config,
-            storage_path,
+            resolved_storage_path,
             self.base_id,
-            knowledge_path,
+            resolved_knowledge_path,
         )
 
     def get_knowledge(self) -> Knowledge:
@@ -1268,6 +1338,7 @@ async def ensure_agent_knowledge_managers(
     if not base_ids:
         return {}
 
+    runtime_paths = _runtime_paths_with_storage_root(config, storage_path)
     managers: dict[str, KnowledgeManager] = {}
     for base_id in base_ids:
         start_background_watchers = _should_start_background_watchers(
@@ -1277,7 +1348,7 @@ async def ensure_agent_knowledge_managers(
         )
         key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
             config,
-            storage_path,
+            runtime_paths,
             base_id,
             execution_identity=execution_identity,
             create=True,
@@ -1301,8 +1372,7 @@ async def ensure_agent_knowledge_managers(
 
 async def initialize_knowledge_managers(
     config: Config,
-    storage_path: Path,
-    *,
+    runtime_paths: RuntimePaths,
     start_watchers: bool = False,
     reindex_on_create: bool = True,
 ) -> dict[str, KnowledgeManager]:
@@ -1320,7 +1390,7 @@ async def initialize_knowledge_managers(
     for base_id in sorted(configured_base_ids):
         key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
             config,
-            storage_path,
+            runtime_paths,
             base_id,
             create=True,
         )
@@ -1365,7 +1435,7 @@ def get_knowledge_manager(
         try:
             key, _, _ = _knowledge_manager_key(
                 config,
-                storage_path,
+                _runtime_paths_with_storage_root(config, storage_path),
                 base_id,
                 execution_identity=execution_identity,
             )

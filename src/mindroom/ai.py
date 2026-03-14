@@ -33,7 +33,7 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
@@ -852,7 +852,7 @@ async def _cached_agent_run(
 async def _prepare_agent_and_prompt(
     agent_name: str,
     prompt: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     knowledge: Knowledge | None = None,
@@ -868,6 +868,7 @@ async def _prepare_agent_and_prompt(
         (empty when using the fallback path).
 
     """
+    storage_path = runtime_paths.storage_root
     enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config)
 
     unseen_event_ids: list[str] = []
@@ -900,7 +901,7 @@ async def _prepare_agent_and_prompt(
     agent = create_agent(
         agent_name,
         config,
-        storage_path=storage_path,
+        runtime_paths=runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
@@ -912,7 +913,7 @@ async def ai_response(
     agent_name: str,
     prompt: str,
     session_id: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
@@ -931,7 +932,7 @@ async def ai_response(
         agent_name: Name of the agent to use
         prompt: User prompt
         session_id: Session ID for conversation tracking
-        storage_path: Path for storing agent data
+        runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
@@ -955,13 +956,14 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
-            storage_path,
+            runtime_paths,
             config,
             thread_history,
             knowledge,
@@ -1116,7 +1118,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     agent_name: str,
     prompt: str,
     session_id: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     config: Config,
     thread_history: list[dict[str, Any]] | None = None,
     room_id: str | None = None,
@@ -1137,7 +1139,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         agent_name: Name of the agent to use
         prompt: User prompt
         session_id: Session ID for conversation tracking
-        storage_path: Path for storing agent data
+        runtime_paths: Runtime config/storage paths for agent data and config-aware tools
         config: Application configuration
         thread_history: Optional thread history
         room_id: Optional Matrix room ID for caller context
@@ -1159,13 +1161,14 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     """
     logger.info("AI streaming request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails
     try:
         agent, full_prompt, unseen_event_ids = await _prepare_agent_and_prompt(
             agent_name,
             prompt,
-            storage_path,
+            runtime_paths,
             config,
             thread_history,
             knowledge,

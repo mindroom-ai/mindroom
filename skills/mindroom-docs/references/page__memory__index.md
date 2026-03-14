@@ -5,7 +5,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to point an individual file-backed agent at a custom workspace directory. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -66,9 +66,10 @@ Example:
 memory:
   backend: file
   file:
-    path: ./mindroom_data/memory_files
     max_entrypoint_lines: 200
 ```
+
+`memory.file.path` is an optional fallback root for direct file-memory paths. It does not relocate canonical agent or team file memory. Use `agents.<name>.memory_file_path` to place an agent's file memory inside its workspace.
 
 Per-agent override example:
 
@@ -81,10 +82,10 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
-    memory_file_path: ./openclaw_data
+    memory_file_path: mind_data
 ```
 
-`memory_file_path` is resolved relative to `config.yaml`. When set, the agent uses that directory as its memory scope instead of `<storage_path>/memory_files/agent_<name>/`. For requester-private agents, use `private` instead of `memory_file_path` when you need per-requester file-memory isolation.
+`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`. For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`. Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`. Absolute paths and `..` traversal are rejected. For requester-private agents, use `private` instead of `memory_file_path` when you need per-requester file-memory isolation.
 
 Private instance example:
 
@@ -104,12 +105,15 @@ In this setup, each requester gets their own private `mind_data/` root inside th
 
 ### File layout
 
-Under `memory.file.path` (or `<storage_path>/memory_files` by default), MindRoom stores per-scope folders such as:
+Agent file memory is stored under each agent's storage directory by default:
 
-- `agent_<name>/MEMORY.md`
-- `agent_<name>/memory/YYYY-MM-DD.md`
-- `team_<sorted_members>/MEMORY.md`
-- `team_<sorted_members>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
+- `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
+
+Team file memory is mirrored under each participating agent's storage directory:
+
+- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
+- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
 
 ## File Auto-Flush Worker
 

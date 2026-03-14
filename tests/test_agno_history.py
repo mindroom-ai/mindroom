@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -13,6 +14,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.ollama import Ollama
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
@@ -36,12 +38,22 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 # ---------------------------------------------------------------------------
 # Config tests
 # ---------------------------------------------------------------------------
+
+
+def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> RuntimePaths:
+    base_path = Path(str(tmp_path))
+    return resolve_runtime_paths(
+        config_path=config_path or base_path / "config.yaml",
+        storage_path=base_path,
+    )
 
 
 def test_mindroom_forces_agno_telemetry_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,7 +502,7 @@ class TestPrepareAgentAndPrompt:
             _agent, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -519,7 +531,7 @@ class TestPrepareAgentAndPrompt:
             _agent, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -548,7 +560,7 @@ class TestPrepareAgentAndPrompt:
             _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -570,13 +582,62 @@ class TestPrepareAgentAndPrompt:
             _, _prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id=None,
             )
             mock_stuff.assert_called_once()
             assert unseen_ids == []
+
+    @pytest.mark.asyncio
+    async def test_prepare_agent_and_prompt_reloads_context_files_for_next_reply(
+        self,
+        config: Config,
+        tmp_path: Path,
+    ) -> None:
+        """Editing a context file should affect the next reply preparation without restart."""
+        config.agents["general"].memory_backend = "file"
+        config.agents["general"].memory_file_path = "mind_data"
+        config.agents["general"].context_files = ["mind_data/SOUL.md"]
+        config.agents["general"].tools = []
+        config.agents["general"].include_default_tools = False
+
+        workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+        workspace.mkdir(parents=True, exist_ok=True)
+        soul_path = workspace / "SOUL.md"
+        soul_path.write_text("First context version.", encoding="utf-8")
+
+        with (
+            patch("mindroom.ai.build_memory_enhanced_prompt", new_callable=AsyncMock, return_value="enhanced"),
+            patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
+        ):
+            first_agent, first_prompt, first_unseen = await _prepare_agent_and_prompt(
+                "general",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                session_id=None,
+            )
+
+            soul_path.write_text("Second context version.", encoding="utf-8")
+
+            second_agent, second_prompt, second_unseen = await _prepare_agent_and_prompt(
+                "general",
+                "test",
+                _runtime_paths(tmp_path),
+                config,
+                session_id=None,
+            )
+
+        assert "First context version." in first_agent.role
+        assert "Second context version." not in first_agent.role
+        assert "Second context version." in second_agent.role
+        assert "First context version." not in second_agent.role
+        assert first_prompt == "enhanced"
+        assert second_prompt == "enhanced"
+        assert first_unseen == []
+        assert second_unseen == []
 
     @pytest.mark.asyncio
     async def test_openai_compat_with_prior_runs_skips_stuffing(self, config: Config, tmp_path: object) -> None:
@@ -598,7 +659,7 @@ class TestPrepareAgentAndPrompt:
             _, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -627,7 +688,7 @@ class TestPrepareAgentAndPrompt:
             _, prompt, unseen_ids = await _prepare_agent_and_prompt(
                 "calculator",
                 "test",
-                tmp_path,
+                _runtime_paths(tmp_path),
                 config,
                 thread_history=thread_history,
                 session_id="sid",
@@ -665,7 +726,7 @@ class TestMetadataPassing:
                 agent_name="calculator",
                 prompt="test",
                 session_id="sid",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
                 reply_to_event_id="$trigger",
             )
@@ -695,7 +756,7 @@ class TestMetadataPassing:
                 agent_name="calculator",
                 prompt="test",
                 session_id="sid",
-                storage_path=tmp_path,
+                runtime_paths=_runtime_paths(tmp_path),
                 config=config,
             )
 
@@ -759,7 +820,7 @@ class TestEditRemovesStaleRun:
         )
 
         config = Mock()
-        config.agents = {"test_agent": Mock(knowledge_bases=[])}
+        config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
         config.domain = "example.com"
         config.ids = {}
         config.get_agent_knowledge_base_ids.return_value = []
@@ -849,7 +910,7 @@ class TestEditRemovesStaleRun:
         )
 
         config = Mock()
-        config.agents = {"test_agent": Mock(knowledge_bases=[])}
+        config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
         config.domain = "example.com"
         config.ids = {}
         config.get_agent_knowledge_base_ids.return_value = []

@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.memory import MemoryBackend  # noqa: TC001
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
+from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
@@ -155,6 +155,8 @@ class AgentPrivateConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Configuration for a single agent."""
 
+    model_config = ConfigDict(validate_assignment=True)
+
     display_name: str = Field(description="Human-readable name for the agent")
     role: str = Field(default="", description="Description of the agent's purpose")
     tools: list[str] = Field(default_factory=list, description="List of tool names")
@@ -178,7 +180,7 @@ class AgentConfig(BaseModel):
     )
     memory_file_path: str | None = Field(
         default=None,
-        description="Custom directory to use as the file-memory scope for this agent instead of the default <root>/agent_<name>/",
+        description="Workspace-relative directory inside this agent's canonical workspace to use for file memory instead of the default memory_files/agent_<name>/",
     )
     private: AgentPrivateConfig | None = Field(
         default=None,
@@ -190,7 +192,7 @@ class AgentConfig(BaseModel):
     )
     context_files: list[str] = Field(
         default_factory=list,
-        description="File paths read at agent init and prepended to role context",
+        description="Workspace-relative file paths loaded into each freshly built agent instance and prepended to role context",
     )
     thread_mode: Literal["thread", "room"] = Field(
         default="thread",
@@ -231,7 +233,7 @@ class AgentConfig(BaseModel):
     )
     worker_scope: WorkerScope | None = Field(
         default=None,
-        description="Worker scope for routed tools: user, user_agent, room_thread, or shared",
+        description="Worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
     )
     allow_self_config: bool | None = Field(
         default=None,
@@ -286,6 +288,20 @@ class AgentConfig(BaseModel):
             msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
         return knowledge_bases
+
+    @field_validator("memory_file_path")
+    @classmethod
+    def validate_memory_file_path(cls, value: str | None) -> str | None:
+        """Ensure agent file-memory paths stay inside the canonical workspace."""
+        if value is None:
+            return value
+        return agent_workspace_relative_path(value).as_posix()
+
+    @field_validator("context_files")
+    @classmethod
+    def validate_context_files(cls, values: list[str]) -> list[str]:
+        """Ensure configured context files stay inside the canonical workspace."""
+        return [agent_workspace_relative_path(value).as_posix() for value in values]
 
 
 class TeamConfig(BaseModel):

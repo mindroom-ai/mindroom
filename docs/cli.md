@@ -122,7 +122,7 @@ Start MindRoom with your configuration.
 │                                          [default: INFO]                               │
 │ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
 │                                          (state, sessions, tracking)                   │
-│                                          [default: mindroom_data]                      │
+│                                          [default: None]                               │
 │ --api               --no-api             Start the bundled dashboard/API server        │
 │                                          alongside the bot                             │
 │                                          [default: api]                                │

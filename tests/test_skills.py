@@ -13,6 +13,7 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_command_tool
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
@@ -26,6 +27,7 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.skills import build_agent_skills, resolve_skill_command_spec
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_workspace_root_path,
     get_tool_execution_identity,
     resolve_worker_key,
     tool_execution_identity,
@@ -37,6 +39,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.skills import Skills
+
+
+def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> RuntimePaths:
+    return resolve_runtime_paths(
+        config_path=config_path or storage_path / "config.yaml",
+        storage_path=storage_path,
+    )
 
 
 def _write_skill(
@@ -345,7 +354,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
         captured_calls.append((tool_name, dict(kwargs)))
         return object()
 
-    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
 
     runtime_storage_path = tmp_path / "runtime_storage"
     config = _base_config(["dispatch"])
@@ -366,11 +375,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     )
 
     with tool_execution_identity(identity):
-        toolkits = _collect_agent_toolkits(
-            config,
-            "code",
-            storage_path=runtime_storage_path,
-        )
+        toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage_path))
 
     expected_workspace = resolve_agent_workspace(
         "code",
@@ -384,7 +389,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     assert expected_workspace.root.is_dir()
     assert [tool_name for tool_name, _ in toolkits] == ["coding", "shell"]
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
-    assert overrides_by_tool["coding"] is None
+    assert overrides_by_tool["coding"] == {"base_dir": str(expected_workspace.root)}
     assert overrides_by_tool["shell"] == {"base_dir": str(expected_workspace.root)}
 
 
@@ -408,7 +413,7 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
         captured_calls.append((tool_name, dict(kwargs)))
         return DemoTools()
 
-    monkeypatch.setattr("mindroom.commands.handler.get_tool_by_name", fake_get_tool_by_name)
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
 
     runtime_storage_path = tmp_path / "runtime_storage"
     config = _base_config(["dispatch"])
@@ -419,6 +424,7 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
 
     result = await _run_skill_command_tool(
         config=config,
+        runtime_paths=_runtime_paths(runtime_storage_path),
         agent_name="code",
         storage_path=runtime_storage_path,
         command_tool="shell.demo",
@@ -452,9 +458,105 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
     assert expected_workspace is not None
     overrides_by_tool = {tool_name: kwargs.get("tool_init_overrides") for tool_name, kwargs in captured_calls}
     assert overrides_by_tool == {
-        "coding": None,
+        "coding": {"base_dir": str(expected_workspace.root)},
         "shell": {"base_dir": str(expected_workspace.root)},
     }
+
+
+def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Skill command dispatch should respect the bot runtime storage path."""
+    captured_calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
+        captured_calls.append((tool_name, dict(kwargs)))
+        return object()
+
+    monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
+
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].memory_file_path = "./mind_data"
+    config.agents["code"].tools = ["coding"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].worker_scope = "shared"
+    config.agents["code"].worker_tools = ["coding"]
+
+    runtime_storage = tmp_path / "runtime-storage"
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    expected_workspace = agent_workspace_root_path(runtime_storage, "code") / "mind_data"
+
+    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
+    with tool_execution_identity(identity):
+        toolkits = _collect_agent_toolkits(
+            config,
+            "code",
+            _runtime_paths(runtime_storage, config_path=config_dir / "config.yaml"),
+        )
+
+    assert [tool_name for tool_name, _ in toolkits] == ["coding"]
+    assert captured_calls[0][1]["tool_init_overrides"] == {"base_dir": str(expected_workspace)}
+    assert expected_workspace.is_dir()
+
+
+def test_collect_agent_toolkits_supports_agent_only_toolkits(tmp_path: Path) -> None:
+    """Skill command dispatch should build the same agent-only toolkits as create_agent()."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].memory_backend = "file"
+    config.agents["code"].tools = ["memory", "self_config", "delegate"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["memory", "self_config", "delegate"]
+    assert toolkits_by_name["memory"].name == "memory"
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["memory"]._storage_path == runtime_storage
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
+
+
+def test_collect_agent_toolkits_supports_implicit_agent_only_toolkits(tmp_path: Path) -> None:
+    """Implicit delegate/self_config toolkits should match create_agent() behavior."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = []
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].allow_self_config = True
+    config.agents["code"].delegate_to = ["reviewer"]
+    config.agents["reviewer"] = AgentConfig(
+        display_name="Reviewer",
+        role="",
+        tools=[],
+    )
+
+    runtime_storage = tmp_path / "runtime-storage"
+    toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage))
+
+    toolkits_by_name = dict(toolkits)
+    assert [tool_name for tool_name, _ in toolkits] == ["delegate", "self_config"]
+    assert toolkits_by_name["delegate"].name == "delegate"
+    assert toolkits_by_name["self_config"].name == "self_config"
+    assert toolkits_by_name["delegate"]._runtime_paths.storage_root == runtime_storage
 
 
 @pytest.mark.asyncio
@@ -486,6 +588,7 @@ async def test_skill_command_tool_dispatch() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -530,6 +633,7 @@ async def test_skill_command_tool_dispatch_uses_default_tools() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -580,6 +684,7 @@ async def test_skill_command_tool_dispatch_sets_execution_identity() -> None:
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="demo",
             skill_name="dispatch",
@@ -638,6 +743,7 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
             monkeypatch.setenv("ACCOUNT_ID", "account-456")
             result = await _run_skill_command_tool(
                 config=config,
+                runtime_paths=resolve_runtime_paths(),
                 agent_name="code",
                 command_tool="demo",
                 skill_name="dispatch",
@@ -653,6 +759,28 @@ async def test_skill_command_tool_dispatch_preserves_tenant_scoped_worker_key() 
         TOOL_METADATA.update(original_metadata)
 
     assert result == "v1:tenant-123:user_agent:@alice:example.org:code"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_threads_config_path_to_self_config(tmp_path: Path) -> None:
+    """Skill-dispatched self_config should use the same config file path as normal agent creation."""
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["self_config"]
+    config.agents["code"].include_default_tools = False
+    config.agents["code"].display_name = "Skill Config Writer"
+    config_path = tmp_path / "config.yaml"
+    config.save_to_yaml(config_path)
+
+    result = await _run_skill_command_tool(
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
+        agent_name="code",
+        command_tool="get_own_config",
+        skill_name="dispatch",
+        args_text="",
+    )
+
+    assert "Skill Config Writer" in result
 
 
 @pytest.mark.asyncio
@@ -730,6 +858,7 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
 
         result = await _run_skill_command_tool(
             config=config,
+            runtime_paths=resolve_runtime_paths(),
             agent_name="code",
             command_tool="lookup",
             skill_name="dispatch",

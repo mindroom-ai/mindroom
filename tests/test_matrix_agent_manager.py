@@ -116,7 +116,7 @@ class TestMatrixUserManagement:
 
     def test_load_matrix_users(self, temp_matrix_users_file: Path) -> None:
         """Test loading matrix users from file."""
-        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", temp_matrix_users_file):
+        with patch("mindroom.constants.MATRIX_STATE_FILE", temp_matrix_users_file):
             state = MatrixState.load()
 
         assert "bot" in state.accounts
@@ -127,7 +127,7 @@ class TestMatrixUserManagement:
     def test_load_matrix_users_no_file(self, tmp_path: Path) -> None:
         """Test loading matrix users when file doesn't exist."""
         missing_file = tmp_path / "missing_matrix_state.yaml"
-        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", missing_file):
+        with patch("mindroom.constants.MATRIX_STATE_FILE", missing_file):
             state = MatrixState.load()
         assert state.accounts == {}
         assert state.rooms == {}
@@ -136,7 +136,7 @@ class TestMatrixUserManagement:
         """Test saving matrix users to file."""
         file_path = tmp_path / "test_users.yaml"
 
-        with patch("mindroom.matrix.state.MATRIX_STATE_FILE", file_path):
+        with patch("mindroom.constants.MATRIX_STATE_FILE", file_path):
             state = MatrixState()
             state.add_account("agent_test", "mindroom_test", "test_pass")
             state.save()

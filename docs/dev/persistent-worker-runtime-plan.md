@@ -1,102 +1,114 @@
 # Persistent Worker Runtime Plan
 
-Last updated: 2026-03-11
+Last updated: 2026-03-13
 Owner: MindRoom backend
-Status: Phases 1-3 are complete in code.
-Phase 4 is in progress.
-The backend-neutral worker contract, lifecycle handling, and default routing policy are implemented.
-The built-in Kubernetes provider is also implemented and deployment-wired.
-What remains is production hardening, richer metrics, operator documentation, dedicated-worker production validation, and deferred product-boundary decisions around `/v1` identity and credential defaults.
+Status: Phase 1 is complete.
+Phase 2 is partially complete.
+Canonical per-agent state ownership is implemented, but per-agent filesystem visibility for agent-isolated scopes is not fully enforced yet.
+Phase 3 is complete.
+Phase 4 provider and operator hardening is still in progress.
+The backend-neutral worker contract, lifecycle handling, default routing policy, and Kubernetes provider implementation all exist.
+Worker runtimes remain non-authoritative execution environments for caches, temporary files, and provider metadata.
 
 ## Objective
 
 Implement persistent worker-scoped execution environments for MindRoom tools.
 Keep the visible agent as the shared product abstraction users talk to.
-Move mutable execution state into worker-owned storage selected per tool call by policy.
-Support user-isolated, room-isolated, and shared collaboration modes without building one full MindRoom runtime per user.
+Each agent has one canonical state root.
+That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state.
+All worker scopes read and write that same agent state root.
+`worker_scope` controls execution isolation and reuse, not state ownership.
+Support requester-isolated and shared runtime execution without building one full MindRoom runtime per user.
+
+## Non-Negotiable Invariants
+
+- Each agent has one canonical state root.
+- The files under that root are the real files, not copies, seeds, mirrors, or alternate authoritative locations.
+- `context_files` and `memory_file_path` must resolve inside the agent's canonical workspace.
+- `worker_scope` does not change which files are authoritative.
+- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only be able to see agent A's canonical state root plus their own worker runtime root.
+- `user` is different.
+- If `user` remains supported for filesystem-capable worker tools, it is explicitly a per-requester multi-agent workstation mode rather than an agent-isolated mode.
+- `base_dir`, current working directory, and other tool init hints are convenience defaults rather than security boundaries.
+- If a backend exposes the broader shared agent-state tree to a runtime that is supposed to be agent-isolated, that backend does not satisfy this plan.
 
 ## Why This Is Split Into Phases
 
 Phase 1 proves the core architecture can route generic tool calls into persistent scoped workers.
-Phase 2 makes all mutable state obey the same scope so the system becomes correct rather than merely demonstrable.
+Phase 2 makes all durable agent state obey the same authoritative root and makes agent-isolated scopes see only the agent roots they are allowed to touch.
 Phase 3 introduces the backend/provider abstraction, lifecycle model, policy surface, and observability once the state model is sound.
 Phase 4 adds production provider implementations against that abstraction, including Kubernetes.
 Doing the work in this order prevents expensive lifecycle and deployment work from being built on top of an unproven routing model.
 
 ## Current Status
 
-Phase 1 is implemented and already useful for proving persistent tool execution.
-The implementation provides generic worker routing for tool calls rather than a `shell`-only special case.
-The implementation validates persistence with `shell`, `file`, and `python`.
-Phase 2 has been smoke-validated in GKE on the shared provider shape of one shared MindRoom pod, one shared sandbox-runner sidecar, and one shared PVC.
-That smoke validation confirmed same-worker-key persistence across turns, isolation across different worker keys, persistent Python environments, and survival of worker-owned state across pod replacement.
-The implementation carries execution identity from Matrix and from the currently permitted `/v1` surface into worker-routing decisions.
-The implementation persists worker workspace, cache, and Python packages inside worker-owned state.
-The implementation aligns file-backed memory reads and writes with worker-owned state for worker-scoped agents.
-For file-backed agents that set `memory_file_path`, local workspace-aware tools now derive their base directory from that same path.
-Worker-routed scoped tools still execute against the resolved worker workspace, so the agent-level workspace hint does not bypass worker-owned state.
-Sessions, learning, and most credentials are now worker-scope-aware.
-Phase 3 is implemented in code.
-The worker backend contract, worker manager facade, worker handle model, and handle-based routed execution are the active runtime architecture.
-The primary runtime now ships built-in `static_runner` and `kubernetes` backends behind the same contract.
-The primary runtime exposes backend-neutral worker observability and cleanup endpoints through `/api/workers`.
-The primary runtime also runs optional background idle cleanup using the configured backend.
-The built-in default worker-routing policy now comes from per-tool metadata plus agent/default `worker_tools` overrides rather than only from environment-driven sandbox selection.
-Phase 4 has started.
-The built-in Kubernetes backend now provisions dedicated worker Deployments and Services, mounts durable worker state from the shared PVC by worker subpath, waits for readiness, records failure metadata, and evicts idle workers by scaling them to zero while keeping state.
-The current codebase and test suite therefore already include a production-provider implementation, even though some rollout and operator work remains.
-This document does not claim a recent dedicated-worker GKE smoke or soak validation for the Kubernetes backend.
+Phase 1 is complete.
+Phase 2 is only partially complete.
+The current codebase routes tool calls into persistent workers and resolves durable agent state through one canonical root per agent across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
+That fixes state ownership, but it does not yet fully fix filesystem visibility for agent-isolated scopes.
+Dedicated Kubernetes workers now narrow mounts for `shared`, `user_agent`, and unscoped dedicated execution, but shared-runner and local worker paths still expose broader shared storage than this plan allows for agent-isolated scopes.
+Phase 3 is complete because the worker backend contract, lifecycle model, default routing policy, and observability surfaces all exist.
+Dedicated Kubernetes workers are provisioned today and rely on the same agent-owned state model while keeping worker-local runtime caches isolated by worker key.
+Phase 4 remains in progress as provider hardening, operator guidance, metrics, and broader rollout validation continue.
 Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools remain shared-only.
 Those integrations are supported only for agents without worker routing or with `worker_scope=shared`.
 Dashboard credential management is intentionally limited to unscoped agents and agents with `worker_scope=shared`.
-The dashboard does not manage credentials for `user`, `user_agent`, or `room_thread` workers.
+The dashboard does not manage credentials for `user` or `user_agent` workers.
 The `/v1` API remains intentionally restricted to unscoped agents and agents with `worker_scope=shared` until trusted requester identity is solved.
 
 ## Product Boundary
 
 - Agent means the visible MindRoom entity with prompt, model, tool config, Matrix identity, and public behavior.
-- Worker means the hidden persistent execution environment that owns mutable runtime state.
-- Worker scope means the policy that decides which worker should execute a given tool call.
+- Agent state root means the one canonical storage root for an agent's authoritative files and durable state.
+- Worker means the hidden execution runtime that runs proxied tools and may keep non-authoritative runtime caches.
+- Worker scope means the policy that decides which runtime should execute a given tool call and when that runtime is reused.
 - Primary runtime means the shared MindRoom process that handles ingress, orchestration, routing, prompt assembly, and tool dispatch.
 
 ## Core Design Decisions
 
 - Tool routing must be generic and live in the common tool execution layer.
 - The design must not depend on container writable layers for persistence.
-- Mutable state owned by tools must live in the same worker scope that executes those tools.
+- Agent-owned state must not be re-keyed by worker scope.
+- `worker_scope` must only determine runtime execution isolation and reuse.
+- Worker runtimes may keep local caches, temporary files, Python environments, and provider metadata, but those files are not authoritative agent state.
 - Public shared agents must remain possible.
 - User isolation must be possible without spawning one full MindRoom runtime per user.
 - Worker scope must be configurable per agent rather than globally fixed.
 - Tools that require host-only services such as the Matrix client must remain runnable in the primary runtime.
 - Credentials must become scope-aware rather than globally loaded by service name.
+- Concurrent access to canonical agent state is expected and must be handled deliberately.
 
 ## User-Facing Outcomes
 
 - A user can install a package in one turn and use it in a later turn.
 - A user can create files in one turn and read them in a later turn.
 - A shared public agent can still exist in a public room.
-- Two users talking to the same agent can land in different workers when the scope requires isolation.
-- Collaborative behavior can still use shared mutable state when the scope is `room_thread` or `shared`.
-- Editable file-backed memory stays consistent across turns because reads and writes come from the same worker-owned state.
+- Two users talking to the same agent can land in different runtimes when the scope requires isolation.
+- Those different runtimes still read and write the same canonical agent state root for that agent.
+- A file edit made through one runtime is visible from every other runtime that executes the same agent.
+- Context files, workspace files, file-backed memory, mem0-backed state, sessions, and learning stay consistent because they all come from the same canonical agent state root.
 
 ## Non-Goals
 
 - Do not build one full MindRoom runtime per user.
 - Do not create a fresh container per tool call.
 - Do not special-case the architecture around only `shell`, `file`, or `python`.
-- Do not support split-brain mutable state where worker tools edit one copy and prompt assembly reads another.
+- Do not support split-brain mutable state where one runtime edits one copy and another runtime reads a different authoritative copy.
 - Do not promise durable background processes as a product contract until a dedicated supervisor exists.
 
 ## Scope Semantics
 
-- `user` means the same requester gets the same worker across all agents that use the `user` scope in the same tenant.
-- `user_agent` means the same requester gets a separate worker for each agent.
-- `room_thread` means all tool execution within the same room thread shares one worker.
-- `shared` means everyone using that agent shares one worker.
-- `user` is the default isolation choice when users need a personal coding environment that survives across agents.
-- `user_agent` is the default isolation choice when agents need separate package or filesystem state.
-- `room_thread` is the default collaborative choice when a thread should accumulate shared runtime state.
-- `shared` is the explicit opt-in mode for globally shared worker state.
+- `shared` means one runtime may be reused by many callers for the same agent, and all of them use that agent's canonical state root.
+- `user` means one persistent runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents it executes.
+- `user_agent` means runtimes are isolated per requester and agent, but every runtime for that agent still reads and writes the same canonical agent state root.
+- Unscoped dedicated execution still uses the same canonical agent state root for the addressed agent.
+- `shared`, `user`, `user_agent`, and unscoped dedicated execution differ in runtime isolation and reuse.
+- They do not change which files are authoritative for the agent.
+- `shared`, `user_agent`, and unscoped dedicated execution for agent A must only expose agent A's canonical state root plus the runtime's own worker root.
+- `user` is therefore a trust-sharing mode rather than an agent-level filesystem isolation boundary for filesystem-capable worker tools.
+- Multiple agents may run inside that runtime.
+- Those agents may access each other's mounted files inside that runtime.
+- Use `user_agent` when you need hard per-agent runtime reuse and per-agent filesystem visibility.
 
 ## Worker Key Resolution
 
@@ -107,11 +119,10 @@ The current canonical shape is versioned and string-based so it can evolve witho
 - `shared` resolves to `v1:<tenant>:shared:<agent>`.
 - `user` resolves to `v1:<tenant>:user:<requester>`.
 - `user_agent` resolves to `v1:<tenant>:user_agent:<requester>:<agent>`.
-- `room_thread` resolves to `v1:<tenant>:room_thread:<room>:<thread>`.
 
 ## Execution Identity
 
-Every tool call needs a serializable execution identity that contains only the information needed for routing and scoped state resolution.
+Every tool call needs a serializable execution identity that contains only the information needed for routing, runtime selection, and credential policy.
 Execution identity must not contain process-local objects such as the Matrix client, the whole config object, or other non-serializable services.
 
 The execution identity should contain these fields.
@@ -134,10 +145,9 @@ Current `/v1` behavior only allows unscoped agents and agents with `worker_scope
 That restriction is intentional and remains in place until trusted requester identity is solved.
 User-scoped `/v1` workers do not currently ship as a supported product behavior.
 Future `/v1` support should allow additional worker scopes only when a trusted authenticated principal is present.
-One intended final rule is that `shared` and possibly session-derived `room_thread` can work without a trusted user principal, while `user` and `user_agent` require one.
-That `room_thread` expansion is not implemented today and should not be treated as current `/v1` behavior.
+One intended final rule is that `shared` can work without a trusted user principal, while `user` and `user_agent` require one.
 The dashboard also has an authenticated user identity, but that identity is a dashboard principal rather than the Matrix requester identity used by runtime worker routing.
-That means the dashboard must not read or write credentials for `user`, `user_agent`, or `room_thread` workers until there is a deliberate identity-linking model for those scopes.
+That means the dashboard must not read or write credentials for `user` or `user_agent` workers until there is a deliberate identity-linking model for those scopes.
 
 ## Tool Execution Policy
 
@@ -183,7 +193,7 @@ The worker manager and backend contract must provide these responsibilities.
 - Touch or refresh worker liveness.
 - Track liveness and startup state.
 - Enforce idle timeout and cleanup policy.
-- Support worker eviction while preserving worker-owned state by default.
+- Support worker eviction while preserving canonical agent state and any separately retained worker runtime caches by policy.
 - Expose worker metadata for observability and debugging.
 - Work with both local and hosted providers without leaking infrastructure details into core routing code.
 
@@ -199,60 +209,63 @@ The minimum useful worker handle should contain these fields.
 - `expires_at`
 - `debug_metadata`
 
-## Worker Storage Layout
+## Agent And Worker Storage Layout
 
-All mutable worker state must live on mounted storage under a worker-owned root.
-The exact on-disk layout can stay simple as long as ownership boundaries are clear.
+Authoritative agent state and worker runtime state are different things.
+Every agent gets one canonical agent state root.
+Every runtime gets its own worker runtime root.
+Only the agent state root is authoritative for agent files and durable agent state.
 
 The recommended layout is:
 
 ```text
-<base_storage>/workers/<worker_dir>/
-  workspace/
-  venv/
-  cache/
-  sessions/
-  learning/
-  memory/
-  credentials/
-  metadata/
+<base_storage>/
+  agents/<agent_name>/
+    workspace/
+    context/
+    memory/
+    mem0/
+    sessions/
+    learning/
+  workers/<worker_dir>/
+    venv/
+    cache/
+    tmp/
+    metadata/
 ```
 
-What Phase 2 proved is worker-keyed state resolution plus runtime overrides that make mutable state land in the correct worker-owned locations.
-MindRoom core should describe the ownership boundary in those terms rather than assume one blanket implementation such as "the worker process always runs with worker root as `MINDROOM_STORAGE_PATH`."
-Concrete providers may realize the same contract through storage-path overrides, tool runtime overrides, mounted volumes, or other provider-specific mechanisms.
-The worker workspace should remain at `<worker_root>/workspace`.
-The persistent Python environment should remain at `<worker_root>/venv`.
-Caches should stay inside `<worker_root>/cache`.
-Non-secret tool init overrides such as `base_dir` are allowed only as a narrow transport mechanism for workspace-aware tools.
+Concrete providers may realize the same contract through mounts, path overrides, bind propagation, or other provider-specific mechanisms.
+If a runtime needs direct filesystem access to agent state, it must mount or otherwise resolve the same canonical agent state root used by every other runtime for that agent.
+Worker-local copies of agent files are not authoritative.
+The worker runtime root should remain the home for caches, virtualenvs, scratch files, and provider metadata.
+Non-secret tool init overrides such as `base_dir` are allowed only as a narrow transport mechanism for pointing tools at the canonical agent workspace.
 Those overrides must be explicitly whitelisted, type-validated before toolkit construction, and rejected with a client error when malformed.
-For worker-routed execution, runtime worker workspace resolution remains authoritative over any forwarded tool init override.
+Mounting the entire shared `agents/` tree into an agent-isolated runtime is incorrect even if tools start in the right `base_dir`.
+For `shared`, `user_agent`, and unscoped dedicated execution, the runtime must only see the addressed agent root.
+For `user`, the runtime may intentionally see more than one agent root, but only because that mode is explicitly defined as a multi-agent workstation.
 
 ## Memory Design
 
-If worker-routed tools can edit memory, memory reads during prompt assembly must resolve against the same worker-owned storage.
-The current implementation already does this for file-backed memory.
-The full design should keep file-backed memory as the only worker-editable memory backend until another backend has a deliberate synchronization model.
-
-The final memory rules are:
-
-- Worker-scoped agents that allow worker-editable memory must use `memory.backend=file`.
-- File memory for worker-scoped agents resolves relative to the worker storage root.
-- Shared agent memory outside worker scope remains supported for non-worker-routed agents.
-- Shell and file tools must not directly mutate non-file memory backends.
+All agent memory backends must resolve through the canonical agent state root.
+File-backed memory, mem0-backed state, and any future worker-editable memory backends must not fork by worker scope.
+Prompt assembly and tool execution must read the same memory view across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
+Logical scoping inside the memory data model may still exist, but storage authority remains the canonical agent state root.
 
 ## Sessions And Learning
 
-Sessions and learning are already worker-scope-aware.
-The storage resolver now chooses paths from the same worker-owned state boundary when a worker-scoped agent is active.
-That remains a path-resolution concern rather than something duplicated across call sites.
+Sessions, history databases, and learning databases are agent-owned durable state.
+They should resolve from the canonical agent state root rather than from worker runtime roots.
+Workers may cache handles or derived in-memory context, but the authoritative on-disk state is per-agent and shared across scopes.
+If requester-, room-, or thread-level distinctions are needed, they should be encoded in record keys or table contents rather than in filesystem ownership.
 
-The steady-state rules are:
+## Concurrency And Consistency
 
-- Session SQLite paths resolve into worker-owned state when the active agent has a worker scope.
-- Learning SQLite paths resolve into worker-owned state when the active agent has a worker scope.
-- Non-worker-scoped agents continue using the existing shared per-agent locations.
-- Prompt assembly and tool execution must agree on the same session and learning scope.
+Multiple runtimes may access the same canonical agent state root concurrently.
+This is expected for `user` and `user_agent` scopes.
+The design must make concurrent writes explicit rather than treating them as an edge case.
+Simple workspace files may use last-write-wins semantics when that is acceptable.
+Sensitive artifacts must use storage engines or locking strategies that tolerate concurrent writers.
+This requirement applies to SQLite databases, memory entrypoint files, structured metadata files, and any other agent-owned file that can be mutated by more than one runtime.
 
 ## Credentials And Leases
 
@@ -269,7 +282,7 @@ The target credentials model is:
 - Leased credentials never become part of the model prompt or normal tool arguments.
 
 OAuth-heavy dashboard integrations are an explicit exception to isolated worker scopes.
-Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user`, `user_agent`, and `room_thread`.
+Google Services, Spotify, Home Assistant, and the Google-backed `gmail`, `google_calendar`, and `google_sheets` tools are intentionally unsupported for `user` and `user_agent`.
 They only support unscoped agents and agents with `worker_scope=shared`.
 The credential-backed `gmail`, `google_calendar`, `google_sheets`, and `homeassistant` tools also stay local even for `worker_scope=shared` rather than being routed through the sandbox runner.
 This keeps the generic worker-routing model clean while the dashboard OAuth connect and callback model remains shared-scope only.
@@ -288,13 +301,13 @@ The current product rule is:
 
 - Unscoped agents can use the dashboard credential UI.
 - Agents with `worker_scope=shared` can use the dashboard credential UI.
-- Agents with `worker_scope=user`, `worker_scope=user_agent`, or `worker_scope=room_thread` must treat credentials as runtime-owned state.
+- Agents with `worker_scope=user` or `worker_scope=user_agent` must treat credentials as runtime-owned state.
 - Shared-only integrations are hidden or disabled for unsupported worker scopes.
 - `/api/tools` may still render a read-only view for unsupported scopes, but it must not imply that dashboard edits will affect the live runtime worker.
 
 ## Provider Model
 
-MindRoom core owns worker scope semantics, execution identity resolution, worker key resolution, tool routing policy, and worker-owned state semantics.
+MindRoom core owns worker scope semantics, execution identity resolution, worker key resolution, tool routing policy, and the separation between canonical agent state and worker runtime state.
 MindRoom core must not leak provider-specific lifecycle details into the generic routing layer.
 MindRoom core now ships the interface and the built-in `static_runner` and `kubernetes` backends needed for current development and hosted deployment shapes.
 The local development model, the shared sandbox-runner deployment, and the dedicated Kubernetes-worker deployment are providers behind the same worker backend contract.
@@ -303,17 +316,20 @@ A future external provider or controller can still consume the same contract wit
 
 ## Local Provider
 
-The local provider should preserve the current Phase 2 behavior of one primary MindRoom runtime plus a shared sandbox-runner that realizes logical workers from worker keys.
-The local provider may realize many logical workers inside one runtime process as long as worker-owned state remains isolated by worker key.
+The local provider should preserve the current behavior of one primary MindRoom runtime plus a shared sandbox-runner that realizes logical workers from worker keys.
+The local provider may realize many logical workers inside one runtime process as long as runtime caches remain isolated by worker key and the canonical agent state root remains shared per agent.
 The local provider should support introspection of active workers and cleanup of idle workers for debugging.
 
 ## Kubernetes Provider
 
 The Kubernetes provider is implemented against the worker backend contract introduced in Phase 3.
-The current implementation creates dedicated worker Deployments and Services, mounts durable worker-owned storage from the shared PVC via worker-specific subpaths, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
+The current implementation creates dedicated worker Deployments and Services, propagates the shared sandbox token, and waits for readiness before returning a worker handle.
+The current implementation already provisions dedicated worker Deployments and Services and routes them through the canonical agent-state model.
+For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes backend now mounts only the addressed agent root plus the worker runtime root.
+`user` intentionally remains broader and mounts the shared `agents/` tree as a multi-agent workstation mode.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
-Each Kubernetes worker still needs durable worker-owned storage and an authenticated internal endpoint, and the current implementation satisfies that contract.
+Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical agent state roots it executes against, as well as an authenticated internal endpoint.
 
 ## Provider Interface Contract
 
@@ -343,25 +359,27 @@ If background execution is later supported, worker metadata should track process
 
 ## Security And Isolation Rules
 
-- Worker state must be isolated by mounted storage boundaries rather than only by logical path conventions.
+- Agent-isolated workers must be isolated by mounted storage boundaries rather than only by logical path conventions.
 - Worker endpoints must be internal-only and authenticated.
 - Logs and metrics should prefer worker-key hashes or short IDs rather than raw user identifiers.
 - Shared scopes must be explicit rather than accidental fallbacks.
 - A requester must never be able to route into another requester's worker by supplying untrusted identity fields.
 - Credentials should only be loaded into the worker scope that is allowed to use them.
-- Worker-owned mutable state must never silently fall back to shared primary-runtime state.
+- Authoritative agent state must never silently fork into worker-local copies.
+- Mounting the full shared agent-state tree into a `shared`, `user_agent`, or unscoped dedicated worker is a bug, not an acceptable simplification.
+- Setting `base_dir` or the current working directory to the correct agent workspace is not enough if the runtime can still traverse to other agent roots.
 
 ## State Initialization Policy
 
-Adopting worker scope is a clean break from old shared agent-scoped mutable state.
-The system does not migrate or import old sessions, learning data, or file memory into worker-owned storage.
+Adopting worker scope must not create a new authoritative copy of agent state.
+The system should preserve one canonical agent state root regardless of which runtime scope executes the tools.
 
 The initialization rules are:
 
-- Agents without worker scope keep existing storage untouched.
-- Agents that opt into any worker scope start with fresh worker-owned mutable state.
-- `shared`, `user`, `user_agent`, and `room_thread` all use newly scoped storage rather than automatic migration.
-- No explicit import flow is part of the current design.
+- Switching an agent between `shared`, `user`, `user_agent`, and unscoped dedicated execution keeps the same canonical agent state root.
+- Agent-owned files must be addressed directly inside the canonical agent workspace, with no bootstrap copies or alternate authoritative locations.
+- Worker runtime roots may always be recreated from scratch.
+- Existing shared agent storage should be the migration target whenever a scoped implementation previously forked state by worker key.
 - No compatibility fallback remains between legacy sandbox config and `worker_tools`.
 
 ## Observability
@@ -382,30 +400,31 @@ At minimum we need:
 
 ## What Is Left Now
 
-The remaining work is no longer core routing architecture.
-It is productionization, deferred policy decisions, and operator experience.
+The next work item is to realign the implementation with the clarified filesystem-visibility invariant.
+Productionization work still matters, but it should not continue on top of the wrong storage model.
 
-1. Trusted `/v1` identity for isolating worker scopes.
+1. Enforce per-agent filesystem visibility in every worker backend path.
+   `shared`, `user_agent`, and unscoped dedicated execution for agent A must only see agent A's canonical state root plus their own worker runtime root.
+   `user` may remain broader only if it is intentionally kept as a multi-agent workstation mode.
+
+2. Keep canonical agent state separate from worker runtime state in every provider path.
+   Providers may still provision isolated runtimes and caches per worker key.
+   They must not satisfy agent isolation merely by setting `base_dir` inside a broader shared mount.
+
+3. Decide and implement the concurrency model for shared agent state.
+   Some files may tolerate last-write-wins behavior.
+   Sensitive artifacts need locking or a storage engine that already handles concurrent writers.
+
+4. Revisit trusted `/v1` identity for isolating worker scopes.
    Current `/v1` requests still build execution identity with `requester_id=None`, and the API intentionally only supports unscoped agents and `worker_scope=shared`.
-   Remaining work is to decide the authenticated principal source for `/v1`, decide whether `room_thread` should key from conversation or session identity, and then safely enable additional scopes.
+   Remaining work is to decide the authenticated principal source for `/v1` and then safely enable additional scopes.
 
-2. Finalize explicit credential policy defaults.
-   Credentials are already scope-aware and leased to workers, but the long-term default policy by tool class is still not fully codified as a first-class model.
-   The main remaining decision is when worker-routed tools should default to `user`, `shared`, or another explicit credential scope.
-
-3. Add aggregate metrics and dashboards.
+5. Add aggregate metrics and dashboards.
    We still need counters and histograms for worker creation and reuse, startup latency, idle eviction counts, execute requests by tool and scope, and credential lease issuance and expiry.
    The current `/api/workers` surfaces are useful for debugging but are not sufficient for fleet-level observability.
 
-4. Do dedicated-worker production validation beyond unit and integration coverage.
-   The Kubernetes backend is implemented and tested, but this document should still treat dedicated-worker GKE smoke and soak validation as remaining rollout work unless and until it is recorded explicitly.
-   The most valuable checks are end-to-end persistence across worker recreation, failure injection, restart handling, and concurrency or capacity behavior under real cluster conditions.
-
-5. Finish operator-facing documentation.
-   We still need final docs for retention and cleanup behavior per provider, storage layout and PVC expectations, deployment mode selection, and incident handling for stuck or unhealthy workers.
-
-6. Decide optional product affordances.
-   Open decisions remain around user-facing worker reset commands, long-term retention controls, and whether any of that should surface in the dashboard or chat UX.
+6. Finish operator-facing documentation and dedicated-worker production validation.
+   We still need final docs for retention and cleanup behavior per provider, storage layout and PVC expectations, deployment mode selection, incident handling for stuck or unhealthy workers, per-agent mount expectations, and concurrency behavior under real cluster conditions.
 
 ## Operational Policies
 
@@ -425,16 +444,20 @@ Unit tests should cover:
 - Identity derivation.
 - Credentials scope selection.
 - Policy decisions for local versus worker-routed tools.
+- Mount selection and filesystem visibility rules per scope.
 
 Integration tests should cover:
 
 - Package persistence across turns.
 - File persistence across turns.
-- File memory persistence across turns.
-- Session persistence in scoped workers.
-- Learning persistence in scoped workers.
-- Isolation between two users of the same public agent.
-- Shared collaboration in `room_thread` and `shared` scopes.
+- File memory persistence across turns and across runtime scopes for the same agent.
+- Mem0-backed state persistence across runtime scopes for the same agent.
+- Session persistence across runtime scopes for the same agent.
+- Learning persistence across runtime scopes for the same agent.
+- A file edit performed by one runtime becomes visible to another runtime executing the same agent.
+- Shared collaboration in the `shared` scope.
+- A `shared` or `user_agent` worker for agent A cannot read or modify agent B's files by path.
+- A `user` worker may access multiple agent roots only when that behavior is explicitly configured and documented as trust-sharing mode.
 
 System tests should cover:
 
@@ -447,10 +470,14 @@ System tests should cover:
 
 - A user can install a package in one turn and use it later.
 - A user can create files in one turn and use them later.
-- File-backed memory edited from tools is visible in later turns from the same worker scope.
-- Session and learning state follow the same worker scope as the tool execution environment.
-- Two users of the same shared agent do not see each other's workspace, credentials, or worker-owned memory when the scope is isolating.
-- Collaborative modes remain possible for `room_thread` and `shared`.
+- File-backed memory edited from tools is visible in later turns from every runtime scope that executes the same agent.
+- Mem0-backed state is visible from every runtime scope that executes the same agent.
+- Session and learning state follow the agent's canonical state root rather than the worker runtime root.
+- Two users of the same agent can execute in different runtimes when the scope is isolating, but they still see the same agent-owned files and memory for that agent.
+- A `shared` or `user_agent` runtime for agent A cannot inspect or modify agent B's files through the filesystem.
+- Unscoped dedicated execution for agent A cannot inspect or modify agent B's files through the filesystem.
+- `user` is either intentionally documented as a multi-agent workstation mode or removed for filesystem-capable worker tools.
+- Collaborative modes remain possible for `shared`.
 - Tools that require primary-runtime services continue working locally.
 - The routing layer remains generic for any worker-routed tool.
 
@@ -461,21 +488,26 @@ System tests should cover:
 Phase 1 is complete.
 Phase 1 introduced `worker_scope`, worker key resolution, execution identity propagation, and generic worker-routed tool dispatch.
 Phase 1 validated persistence with `shell`, `file`, and `python`.
-Phase 1 aligned file-backed memory with worker-owned storage.
+Phase 1 introduced the first path-alignment work for worker-routed memory, which later evolved into the canonical agent-state work delivered in Phase 2.
 
-### Phase 2: Scope-Aware Mutable State
+### Phase 2: Agent-Owned Canonical State And Filesystem Visibility
 
-Phase 2 implemented the core scope-aware state changes needed for worker routing correctness.
-Phase 2 is the correctness phase.
+Phase 2 is partially complete.
+Canonical agent-owned state is implemented.
+Per-agent filesystem visibility for agent-isolated scopes is still missing in some backend paths.
+Phase 2 remains the correctness phase.
 
-Phase 2 delivered:
+Phase 2 already delivered:
 
-- Add worker-aware session storage resolvers.
-- Add worker-aware learning storage resolvers.
-- Refactor credentials storage and lookup to be scope-aware.
-- Refactor credential lease issuance to target the resolved worker endpoint.
-- Enforce file-backed memory for worker-editable agents.
-- Block direct worker mutation of unsupported memory backends.
+- Canonical agent-state resolution that is independent of worker scope.
+- Routing `context_files`, workspace files, file-backed memory, mem0-backed state, sessions, and learning through that canonical agent state root.
+- Separation of canonical agent state from worker runtime caches, virtualenvs, scratch files, and provider metadata.
+
+Phase 2 remaining work is:
+
+- Ensure `shared`, `user_agent`, and unscoped dedicated execution only expose the addressed agent root plus the worker runtime root.
+- Treat `user` as a deliberate multi-agent workstation mode if it remains supported for filesystem-capable worker tools.
+- Add explicit concurrent-writer handling for sensitive agent-owned artifacts.
 - Keep Google Services, Spotify, Home Assistant, and the Google-backed tools shared-only until there is a dedicated scoped OAuth binding model.
 - Keep dashboard credential management limited to unscoped and `shared` agents until there is a trusted identity-linking model between dashboard users and runtime worker requesters.
 
@@ -514,26 +546,26 @@ Phase 4 remaining work is:
 
 ## Recommended Immediate Next Step
 
-The next step is to finish the remaining productionization work rather than redesign the routing model again.
-The highest-value targets are richer metrics, dedicated-worker GKE smoke and soak validation, provider and incident documentation, and the deferred `/v1` identity plus credential-policy decisions.
+The next step is to enforce the filesystem visibility half of the model that is still missing in current backends.
+The highest-value target is to make `shared`, `user_agent`, and unscoped dedicated execution expose only the addressed agent root plus the worker runtime root, while keeping `user` explicitly broader only if that mode is intentionally retained.
 
 ## File Map For Remaining Work
 
-- `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and scoped path helpers.
+- `src/mindroom/tool_system/worker_routing.py` is the source of truth for execution identity, scope semantics, worker keys, and the worker-path plumbing that must stay aligned with canonical agent-owned state and per-agent visibility rules.
 - `src/mindroom/tool_system/metadata.py` is the source of truth for per-tool default execution targets and for the built-in default worker-routing policy.
-- `src/mindroom/agents.py` now resolves session and learning storage through worker-aware paths and remains the place to keep agent construction aligned with scoped state.
+- `src/mindroom/agents.py` already targets canonical agent-owned state and should stay aligned with the no-copy, workspace-relative contract.
 - `src/mindroom/credentials.py` is now scope-aware and remains the place where runtime credential ownership rules should continue to consolidate.
 - `src/mindroom/api/openai_compat.py` keeps enforcing conservative `/v1` scope eligibility and trusted requester identity rules.
-- `src/mindroom/api/sandbox_runner.py` should remain an execution runtime component over the worker backend contract rather than a lifecycle owner.
+- `src/mindroom/api/sandbox_runner.py` is one of the main places that still needs tighter runtime filesystem visibility rules for agent-isolated scopes.
 - `src/mindroom/tool_system/sandbox_proxy.py` should resolve worker handles through the worker manager and stay free of provider-specific assumptions.
 - `src/mindroom/workers/` is now the home of the backend-neutral worker contract plus the built-in `static_runner` and `kubernetes` backends that ship with core.
+- `src/mindroom/workers/backends/kubernetes_resources.py` is the main Kubernetes manifest layer that must stop exposing broader shared storage to agent-isolated workers.
 - `src/mindroom/api/workers.py` and the background cleanup loop in `src/mindroom/api/main.py` are the current backend-neutral observability and lifecycle surfaces.
-- `cluster/k8s/instance/templates/deployment-mindroom.yaml` and related worker templates now encode both the shared-runner and dedicated Kubernetes-worker deployment shapes.
+- `cluster/k8s/instance/templates/deployment-mindroom.yaml` and related worker templates encode the shared-runner and dedicated Kubernetes-worker deployment shapes and must be checked against the per-agent mount rules in this plan.
 
 ## Open Decisions
 
 - Decide the exact authenticated identity source for `/v1` user-scoped workers.
 - Decide the final credential scope defaults for each class of worker-routed tool, with `user` as the current leading default when a trusted requester identity exists.
-- Decide whether `room_thread` on `/v1` should key from conversation ID, session ID, or a distinct thread identifier.
 - Decide the long-term worker retention policy for hosted deployments.
 - Decide whether explicit user-facing worker reset commands should exist in the product.

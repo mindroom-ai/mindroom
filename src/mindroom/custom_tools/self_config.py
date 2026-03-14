@@ -9,10 +9,10 @@ import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
+from mindroom import constants
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.constants import CONFIG_PATH
 from mindroom.custom_tools.config_manager import _is_known_tool_entry, validate_knowledge_bases
 from mindroom.logging_config import get_logger
 
@@ -26,7 +26,7 @@ class SelfConfigTools(Toolkit):
 
     def __init__(self, agent_name: str, config_path: Path | None = None) -> None:
         self.agent_name = agent_name
-        self.config_path = config_path or CONFIG_PATH
+        self.config_path = constants.runtime_config_path(config_path)
         super().__init__(
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
@@ -96,7 +96,7 @@ class SelfConfigTools(Toolkit):
             compress_tool_results: Compress tool results in history
             enable_session_summaries: Enable session summaries
             max_tool_calls_from_history: Max tool call messages replayed from history
-            context_files: File paths read at agent init
+            context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
         Returns:
             Success message with changes or an error message.
