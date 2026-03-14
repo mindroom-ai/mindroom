@@ -817,14 +817,15 @@ async def _cached_agent_run(
     full_prompt: str,
     session_id: str,
     agent_name: str,
-    storage_path: Path,
-    runtime_paths: RuntimePaths | None = None,
+    *,
+    runtime_paths: RuntimePaths,
     user_id: str | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
     # Skip cache when media is present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
     cache = (
@@ -967,7 +968,6 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
-    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
@@ -995,7 +995,6 @@ async def ai_response(
             full_prompt,
             session_id,
             agent_name,
-            storage_path,
             runtime_paths=runtime_paths,
             user_id=user_id,
             media=media_inputs,
@@ -1015,7 +1014,6 @@ async def ai_response(
                     fallback_prompt,
                     session_id,
                     agent_name,
-                    storage_path,
                     runtime_paths=runtime_paths,
                     user_id=user_id,
                     media=MediaInputs(),

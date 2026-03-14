@@ -698,7 +698,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config, config_path=resolved_runtime_paths.config_path)
+    load_plugins(config, runtime_paths=resolved_runtime_paths)
 
     tool_names = get_agent_toolkit_names(
         agent_name,

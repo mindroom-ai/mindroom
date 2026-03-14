@@ -379,6 +379,9 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths | None = None,
     ) -> Config:
         """Create a Config instance from YAML data."""
+        if runtime_paths is not None and config_path is not None:
+            msg = "Pass either runtime_paths or config_path to Config.from_yaml(), not both"
+            raise ValueError(msg)
         resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
         path = resolved_runtime_paths.config_path
 
@@ -410,6 +413,11 @@ class Config(BaseModel):
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config
+
+    @property
+    def runtime_paths(self) -> RuntimePaths | None:
+        """Return the runtime paths used to resolve this config, when available."""
+        return self._runtime_paths
 
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003
+from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -13,10 +14,40 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.identity import MatrixID
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+
+
+def _test_config(
+    tmp_path: Path,
+    *,
+    agent_names: tuple[str, ...] = ("test_agent",),
+    voice_enabled: bool = False,
+) -> Config:
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = RuntimePaths(
+        config_path=config_path,
+        config_dir=config_path.parent,
+        env_path=config_path.parent / ".env",
+        storage_root=tmp_path,
+        process_env=MappingProxyType({}),
+        env_file_values=MappingProxyType({"MATRIX_HOMESERVER": "https://example.com"}),
+    )
+    config = Config(
+        agents={
+            name: {
+                "display_name": name.replace("_", " ").title(),
+                "rooms": ["!test:example.com"],
+            }
+            for name in agent_names
+        },
+        voice={"enabled": voice_enabled},
+        authorization={"default_room_access": True, "agent_reply_permissions": {}},
+        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    )
+    config._runtime_paths = runtime_paths
+    return config
 
 
 @pytest.mark.asyncio
@@ -30,14 +61,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.get_agent_worker_scope.return_value = None
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
@@ -180,14 +204,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.get_agent_worker_scope.return_value = None
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
@@ -274,16 +291,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with multiple agents
-    config = Mock()
-    config.agents = {
-        "test_agent": Mock(knowledge_bases=[]),
-        "helper_agent": Mock(knowledge_bases=[]),
-    }
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, agent_names=("test_agent", "helper_agent"))
 
     # Create the bot
     bot = AgentBot(
@@ -443,13 +451,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.authorization = Mock()
-    config.authorization.is_authorized = Mock(return_value=True)
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
@@ -720,15 +722,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(
@@ -828,15 +822,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(
@@ -1019,15 +1005,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(

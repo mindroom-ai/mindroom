@@ -305,6 +305,18 @@ class TestResolveConfigRelativePath:
         with pytest.raises(ValueError, match="only support"):
             constants_mod.resolve_config_relative_path("${HOME}/kb", config_path=tmp_path / "config.yaml")
 
+    def test_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
+        """Config-relative resolution should not accept duplicated runtime context."""
+        config_path = tmp_path / "config.yaml"
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
+
+        with pytest.raises(ValueError, match="either runtime_paths or config_path"):
+            constants_mod.resolve_config_relative_path(
+                "knowledge",
+                config_path=config_path,
+                runtime_paths=runtime_paths,
+            )
+
     def test_config_from_yaml_loads_sibling_env_for_expansion(
         self,
         tmp_path: Path,
@@ -412,6 +424,18 @@ class TestResolveConfigRelativePath:
         config = Config.from_yaml(config_path)
 
         assert config.domain == "example.org"
+
+    def test_config_from_yaml_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
+        """Config loads should not accept duplicated runtime context."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
+
+        with pytest.raises(ValueError, match="either runtime_paths or config_path"):
+            Config.from_yaml(config_path, runtime_paths=runtime_paths)
 
     def test_ensure_writable_config_path_uses_active_runtime_template_env(self, tmp_path: Path) -> None:
         """Template seeding should honor MINDROOM_CONFIG_TEMPLATE from the active runtime `.env`."""

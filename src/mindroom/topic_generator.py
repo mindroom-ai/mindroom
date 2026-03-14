@@ -89,14 +89,14 @@ Generate the topic:"""
     )
 
     session_id = f"topic_{room_key}"
+    runtime_paths = constants.get_runtime_paths()
     try:
         response = await _cached_agent_run(
             agent=agent,
             full_prompt=prompt,
             session_id=session_id,
             agent_name="TopicGenerator",
-            storage_path=constants.get_runtime_paths().storage_root,
-            runtime_paths=constants.get_runtime_paths(),
+            runtime_paths=runtime_paths,
         )
     except Exception:
         logger.exception(f"Error generating topic for room {room_key}")

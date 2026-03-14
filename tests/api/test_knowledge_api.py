@@ -79,7 +79,7 @@ def test_knowledge_root_resolves_relative_path_from_config_dir(
         storage_path=tmp_path / "storage",
     )
 
-    root = knowledge_api._knowledge_root(config, "research", runtime_paths.config_path)
+    root = knowledge_api._knowledge_root(config, "research", runtime_paths)
 
     assert root == (config_dir / "knowledge").resolve()
 

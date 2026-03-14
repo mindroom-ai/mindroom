@@ -47,21 +47,8 @@ def _strip_agent_namespace_suffix(agent_identifier: str, *, runtime_paths: Runti
     return stripped or None
 
 
-def _config_contains_entity(container: object, entity_name: str) -> bool:
-    contains = getattr(container, "__contains__", None)
-    if contains is None:
-        return False
-    try:
-        return bool(contains(entity_name))
-    except TypeError:
-        return False
-
-
-def _runtime_paths_from_config(config: object) -> RuntimePaths | None:
-    runtime_paths = getattr(config, "_runtime_paths", None)
-    if isinstance(runtime_paths, RuntimePaths):
-        return runtime_paths
-    return None
+def _runtime_paths_from_config(config: Config) -> RuntimePaths | None:
+    return config.runtime_paths
 
 
 def managed_room_alias_localpart(room_key: str, *, runtime_paths: RuntimePaths | None = None) -> str:
@@ -148,14 +135,12 @@ class MatrixID:
         if name is None:
             return None
 
-        agents = getattr(config, "agents", {})
-        teams = getattr(config, "teams", {})
         # Special check for the router agent:
         # The router is a built-in agent that handles command routing and doesn't
         # appear in config.agents. Without this check, extract_agent_name() would
         # return None for router messages, causing other agents to incorrectly
         # respond to router's error messages (e.g., when schedule parsing fails).
-        if name == ROUTER_AGENT_NAME or _config_contains_entity(agents, name) or _config_contains_entity(teams, name):
+        if name == ROUTER_AGENT_NAME or name in config.agents or name in config.teams:
             return name
         return None
 

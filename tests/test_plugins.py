@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import mindroom.tool_system.plugins as plugin_module
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
@@ -176,3 +177,21 @@ def test_resolve_plugin_root_relative_to_config_dir_not_cwd(tmp_path: Path) -> N
         os.chdir(original_cwd)
 
     assert resolved == plugin_root.resolve()
+
+
+def test_load_plugins_accepts_runtime_paths(tmp_path: Path) -> None:
+    """Plugin loading should accept RuntimePaths directly without peeling out config_path."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo-plugin", "tools_module": None, "skills": []}),
+        encoding="utf-8",
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = Config(plugins=["./plugins/demo"])
+
+    plugins = load_plugins(config, runtime_paths=resolve_runtime_paths(config_path=config_path))
+
+    assert [plugin.name for plugin in plugins] == ["demo-plugin"]

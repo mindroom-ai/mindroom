@@ -36,14 +36,14 @@ def _load_runtime_config() -> tuple[Config, constants.RuntimePaths]:
 def _knowledge_root(
     config: Config,
     base_id: str,
-    config_path: Path,
+    runtime_paths: constants.RuntimePaths,
     *,
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
     root = constants.resolve_config_relative_path(
         config.knowledge_bases[base_id].path,
-        config_path=config_path,
+        runtime_paths=runtime_paths,
     )
     if create:
         root.mkdir(parents=True, exist_ok=True)
@@ -160,7 +160,7 @@ async def list_knowledge_bases() -> dict[str, Any]:
 
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
-        root = _knowledge_root(config, base_id, runtime_paths.config_path)
+        root = _knowledge_root(config, base_id, runtime_paths)
         manager = manager_map.get(base_id)
         if manager is None:
             file_count = len(_list_file_info(root)[0])
@@ -190,7 +190,7 @@ async def list_knowledge_bases() -> dict[str, Any]:
 async def list_knowledge_files(base_id: str) -> dict[str, Any]:
     """List all managed files currently present in one knowledge base folder."""
     config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    root = _knowledge_root(config, base_id, runtime_paths)
     manager = await _ensure_manager(config, base_id, runtime_paths)
     files, total_size = _list_file_info(root, manager.list_files() if manager is not None else None)
 
@@ -206,7 +206,7 @@ async def list_knowledge_files(base_id: str) -> dict[str, Any]:
 async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile], File(...)]) -> dict[str, Any]:
     """Upload one or more files into a knowledge base folder."""
     config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path, create=True)
+    root = _knowledge_root(config, base_id, runtime_paths, create=True)
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -248,7 +248,7 @@ async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile]
 async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
     """Delete one knowledge file from disk and from the vector index."""
     config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    root = _knowledge_root(config, base_id, runtime_paths)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
 
@@ -273,7 +273,7 @@ async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
 async def knowledge_status(base_id: str) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
     config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    root = _knowledge_root(config, base_id, runtime_paths)
     manager = await _ensure_manager(config, base_id, runtime_paths)
 
     if manager is not None:

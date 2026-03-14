@@ -10,7 +10,7 @@ from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.constants import resolve_config_relative_path
+from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.skills import set_plugin_skill_roots
 
@@ -56,9 +56,13 @@ _TOOL_MODULE_CACHE: dict[Path, float] = {}
 def load_plugins(
     config: Config,
     *,
+    runtime_paths: RuntimePaths | None = None,
     config_path: Path | None = None,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
+    if runtime_paths is not None and config_path is not None:
+        msg = "Pass either runtime_paths or config_path to load_plugins(), not both"
+        raise ValueError(msg)
     plugin_paths = config.plugins
     if not plugin_paths:
         set_plugin_skill_roots([])
@@ -68,7 +72,7 @@ def load_plugins(
     skill_roots: list[Path] = []
 
     for plugin_path in plugin_paths:
-        root = _resolve_plugin_root(plugin_path, config_path)
+        root = _resolve_plugin_root(plugin_path, runtime_paths=runtime_paths, config_path=config_path)
         plugin = _load_plugin(root)
         if plugin is None:
             continue
@@ -82,8 +86,13 @@ def load_plugins(
     return plugins
 
 
-def _resolve_plugin_root(plugin_path: str, config_path: Path | None) -> Path:
-    relative = resolve_config_relative_path(plugin_path, config_path=config_path)
+def _resolve_plugin_root(
+    plugin_path: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+    config_path: Path | None = None,
+) -> Path:
+    relative = resolve_config_relative_path(plugin_path, runtime_paths=runtime_paths, config_path=config_path)
     if relative.exists():
         return relative
 

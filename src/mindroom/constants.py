@@ -404,6 +404,9 @@ def resolve_config_relative_path(
     Config-relative paths may use `${MINDROOM_STORAGE_PATH}` or
     `${MINDROOM_CONFIG_PATH}` placeholders only.
     """
+    if runtime_paths is not None and config_path is not None:
+        msg = "Pass either runtime_paths or config_path to resolve_config_relative_path(), not both"
+        raise ValueError(msg)
     paths = runtime_paths or get_runtime_paths(config_path=config_path)
     unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), paths)).expanduser()
     if unresolved.is_absolute():

@@ -322,11 +322,12 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     config_path = tmp_path / "cfg" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config = Config.from_yaml()
+    runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
 
     with patch("mindroom.agents.SqliteDb"):
-        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path, config_path=config_path))
+        create_agent("general", config=config, runtime_paths=runtime_paths)
 
-    mock_load_plugins.assert_called_once_with(config, config_path=config_path)
+    mock_load_plugins.assert_called_once_with(config, runtime_paths=runtime_paths)
 
 
 def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
