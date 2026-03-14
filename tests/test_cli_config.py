@@ -613,7 +613,9 @@ class TestConfigValidate:
             "router:\n  model: default\n",
         )
         monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID_FILE", raising=False)
         monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION_FILE", raising=False)
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
@@ -621,6 +623,21 @@ class TestConfigValidate:
         assert "Missing environment variables" in result.output
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
+
+    def test_validate_uses_active_config_sibling_env_from_exported_config_path(self, tmp_path: Path) -> None:
+        """Config validate should honor the sibling .env of the exported active config path."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-8")
+
+        result = runner.invoke(app, ["config", "validate"], env={"MINDROOM_CONFIG_PATH": str(cfg)})
+
+        assert result.exit_code == 0
+        assert "Missing environment variables" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -806,7 +823,9 @@ class TestRunApiFlags:
         monkeypatch.setattr(constants_module, "ENCRYPTION_KEYS_DIR", constants_module.ENCRYPTION_KEYS_DIR)
 
         async def _fake_main(**kwargs: object) -> None:
-            assert kwargs["storage_path"] == runtime_storage.resolve()
+            runtime_paths = kwargs["runtime_paths"]
+            assert isinstance(runtime_paths, constants_module.RuntimePaths)
+            assert runtime_paths.storage_root == runtime_storage.resolve()
             assert runtime_storage.resolve() == constants_module.STORAGE_PATH_OBJ
             assert str(runtime_storage.resolve()) == constants_module.STORAGE_PATH
             assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
@@ -939,7 +958,7 @@ def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = httpx.Response(200, json={"versions": ["v1.1"]})
     monkeypatch.setattr(
         "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
-        lambda: "http://localhost:8008",
+        lambda *_args, **_kwargs: "http://localhost:8008",
     )
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", lambda *_a, **_kw: resp)
 
@@ -948,7 +967,7 @@ def _patch_homeserver_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch httpx.get to simulate an unreachable homeserver."""
     monkeypatch.setattr(
         "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
-        lambda: "http://localhost:8008",
+        lambda *_args, **_kwargs: "http://localhost:8008",
     )
 
     def _raise(*_a: object, **_kw: object) -> None:
@@ -981,6 +1000,26 @@ class TestDoctor:
         assert "Providers:" in result.output
         assert "anthropic (1 model)" in result.output
         assert "API key valid" in result.output
+
+    def test_doctor_uses_active_config_sibling_env_from_exported_config_path(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor should honor active-config sibling env keys without pre-activating runtime globals."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        (tmp_path / ".env").write_text(
+            "ANTHROPIC_API_KEY=sk-test\nOPENAI_API_KEY=sk-test\n",
+            encoding="utf-8",
+        )
+        _patch_homeserver_ok(monkeypatch)
+
+        result = runner.invoke(app, ["doctor"], env={"MINDROOM_CONFIG_PATH": str(cfg)})
+
+        assert result.exit_code == 0
+        assert "ANTHROPIC_API_KEY not set" not in result.output
+        assert "OPENAI_API_KEY not set" not in result.output
 
     def test_uses_status_for_steps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor wraps checks in status contexts for interactive progress feedback."""
@@ -1091,7 +1130,10 @@ class TestDoctor:
         storage = tmp_path / "storage"
         _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-invalid")
-        monkeypatch.setattr("mindroom.cli.doctor.constants.runtime_matrix_homeserver", lambda: "http://localhost:8008")
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
 
         def _mock_get(url: str, **_kw: object) -> httpx.Response:
             if "/_matrix/" in str(url):
@@ -1232,7 +1274,9 @@ class TestDoctor:
         storage = tmp_path / "storage"
         _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID_FILE", raising=False)
         monkeypatch.delenv("CLOUD_ML_REGION", raising=False)
+        monkeypatch.delenv("CLOUD_ML_REGION_FILE", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
 
@@ -1334,7 +1378,10 @@ class TestDoctor:
         storage = tmp_path / "storage"
         _set_doctor_runtime_paths(cfg, storage_path=storage)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
-        monkeypatch.setattr("mindroom.cli.doctor.constants.runtime_matrix_homeserver", lambda: "http://localhost:8008")
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: "http://localhost:8008",
+        )
 
         called_urls: list[str] = []
 
@@ -1819,7 +1866,7 @@ class TestConnect:
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
         _set_cli_runtime_paths(cfg)
-        monkeypatch.setattr("mindroom.cli.main.constants.runtime_matrix_ssl_verify", lambda: False)
+        monkeypatch.setattr("mindroom.cli.main.constants.runtime_matrix_ssl_verify", lambda *_args, **_kwargs: False)
 
         called: dict[str, object] = {}
 

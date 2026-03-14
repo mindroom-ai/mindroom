@@ -23,8 +23,11 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
+    RuntimePaths,
+    activate_runtime_paths,
     config_search_locations,
     env_key_for_provider,
+    exported_env_value,
     get_runtime_paths,
     resolve_runtime_paths,
 )
@@ -205,6 +208,34 @@ def _resolve_config_path(path: Path | None) -> Path:
     if path is not None:
         return path.expanduser().resolve()
     return get_runtime_paths().config_path.resolve()
+
+
+def _activate_cli_runtime(
+    path: Path | None = None,
+    *,
+    storage_path: Path | None = None,
+) -> RuntimePaths:
+    """Create the CLI runtime context once and return it for explicit threading."""
+    active_runtime_paths = get_runtime_paths()
+    configured_config_path = (exported_env_value("MINDROOM_CONFIG_PATH") or "").strip()
+    if path is not None:
+        resolved_config_path = path.expanduser().resolve()
+    elif configured_config_path:
+        resolved_config_path = Path(configured_config_path).expanduser().resolve()
+    else:
+        resolved_config_path = active_runtime_paths.config_path
+
+    configured_storage_path = (exported_env_value("MINDROOM_STORAGE_PATH") or "").strip()
+    if storage_path is not None:
+        resolved_storage_path = storage_path
+    elif path is not None or configured_config_path or configured_storage_path:
+        resolved_storage_path = None
+    else:
+        resolved_storage_path = active_runtime_paths.storage_root
+    return activate_runtime_paths(
+        config_path=resolved_config_path,
+        storage_path=resolved_storage_path,
+    )
 
 
 def _get_editor() -> str:
@@ -421,7 +452,8 @@ def config_validate(
     Parses the YAML config using Pydantic and reports errors in a friendly format.
     Also checks whether required API keys are set as environment variables.
     """
-    config_path = _resolve_config_path(path)
+    runtime_paths = _activate_cli_runtime(path)
+    config_path = runtime_paths.config_path
     console.print(f"Validating configuration: [bold]{config_path}[/bold]\n")
 
     if not config_path.exists():
@@ -430,7 +462,7 @@ def config_validate(
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(config_path)
+        config = _load_config_quiet(runtime_paths=runtime_paths)
     except ValidationError as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
@@ -446,7 +478,7 @@ def config_validate(
     console.print(f"  Rooms:  {len(rooms)} ({', '.join(sorted(rooms)) or 'none'})")
 
     # Check for missing API keys based on configured providers
-    _check_env_keys(config)
+    _check_env_keys(config, runtime_paths=runtime_paths)
 
 
 @config_app.command("path")
@@ -470,7 +502,11 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _load_config_quiet(path: Path) -> Config:
+def _load_config_quiet(
+    path: Path | None = None,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> Config:
     """Load config while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
@@ -488,24 +524,32 @@ def _load_config_quiet(path: Path) -> Config:
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
+        if runtime_paths is not None:
+            return Config.from_yaml(runtime_paths=runtime_paths)
         return Config.from_yaml(path)
     finally:
         if not was_configured:
             structlog.reset_defaults()
 
 
-def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
+def _find_missing_env_keys(
+    config: Config,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "vertexai_claude":
             missing.extend(
-                (provider, env_key) for env_key in VERTEXAI_CLAUDE_ENV_KEYS if not get_secret_from_env(env_key)
+                (provider, env_key)
+                for env_key in VERTEXAI_CLAUDE_ENV_KEYS
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
         env_key = env_key_for_provider(provider)
-        if env_key and not get_secret_from_env(env_key):
+        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
 
@@ -556,9 +600,9 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
     return aliases.get(profile.strip().lower())
 
 
-def _check_env_keys(config: Config) -> None:
+def _check_env_keys(config: Config, *, runtime_paths: RuntimePaths | None = None) -> None:
     """Warn about missing environment variables for configured providers."""
-    missing = _find_missing_env_keys(config)
+    missing = _find_missing_env_keys(config, runtime_paths=runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
         for provider, env_key in missing:

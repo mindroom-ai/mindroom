@@ -22,6 +22,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     get_runtime_paths,
+    resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
 )
@@ -48,6 +49,15 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "matrix_message",
 )
 logger = get_logger(__name__)
+
+_OPTIONAL_DICT_SECTION_NAMES = (
+    "teams",
+    "cultures",
+    "room_models",
+    "knowledge_bases",
+    "matrix_room_access",
+    "matrix_space",
+)
 
 
 def _resolve_agent_thread_mode(
@@ -87,6 +97,38 @@ def _resolve_agent_thread_mode(
             return overrides[override_key]
 
     return default_mode
+
+
+def _resolve_runtime_paths_for_config_load(
+    *,
+    config_path: Path | None,
+    runtime_paths: RuntimePaths | None,
+) -> RuntimePaths:
+    """Resolve the runtime context used to load one config file."""
+    if runtime_paths is not None:
+        return runtime_paths
+
+    active_runtime_paths = get_runtime_paths()
+    if config_path is None:
+        return active_runtime_paths
+
+    resolved_config_path = Path(config_path).expanduser().resolve()
+    if resolved_config_path == active_runtime_paths.config_path:
+        return active_runtime_paths
+
+    return resolve_runtime_paths(
+        config_path=resolved_config_path,
+        process_env=dict(active_runtime_paths.process_env),
+    )
+
+
+def _normalize_optional_config_sections(data: dict[str, object]) -> None:
+    """Replace explicit YAML nulls with the model's expected empty containers."""
+    for name in _OPTIONAL_DICT_SECTION_NAMES:
+        if data.get(name) is None:
+            data[name] = {}
+    if data.get("plugins") is None:
+        data["plugins"] = []
 
 
 def _router_agents_for_room(
@@ -382,7 +424,11 @@ class Config(BaseModel):
         if runtime_paths is not None and config_path is not None:
             msg = "Pass either runtime_paths or config_path to Config.from_yaml(), not both"
             raise ValueError(msg)
-        resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
+
+        resolved_runtime_paths = _resolve_runtime_paths_for_config_load(
+            config_path=config_path,
+            runtime_paths=runtime_paths,
+        )
         path = resolved_runtime_paths.config_path
 
         if not path.exists():
@@ -392,21 +438,7 @@ class Config(BaseModel):
         with path.open() as f:
             data = yaml.safe_load(f) or {}
 
-        # Handle None values for optional dictionaries
-        if data.get("teams") is None:
-            data["teams"] = {}
-        if data.get("cultures") is None:
-            data["cultures"] = {}
-        if data.get("room_models") is None:
-            data["room_models"] = {}
-        if data.get("plugins") is None:
-            data["plugins"] = []
-        if data.get("knowledge_bases") is None:
-            data["knowledge_bases"] = {}
-        if data.get("matrix_room_access") is None:
-            data["matrix_room_access"] = {}
-        if data.get("matrix_space") is None:
-            data["matrix_space"] = {}
+        _normalize_optional_config_sections(data)
 
         config = cls.model_validate(data, context={"runtime_paths": resolved_runtime_paths})
         config._runtime_paths = resolved_runtime_paths

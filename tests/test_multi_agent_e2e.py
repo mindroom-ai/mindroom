@@ -14,6 +14,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
@@ -23,6 +24,10 @@ from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+
+def _runtime_paths(storage_path: Path) -> RuntimePaths:
+    return resolve_runtime_paths(storage_path=storage_path)
 
 
 @pytest.fixture
@@ -77,7 +82,7 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
@@ -164,7 +169,7 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
         await bot.start()
@@ -233,7 +238,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_login.return_value = mock_client
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
-        config = Config.from_yaml()
+        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
 
@@ -518,7 +523,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = Config.from_yaml(runtime_paths=_runtime_paths(tmp_path))
 
         bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
         await bot.start()

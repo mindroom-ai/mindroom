@@ -13,9 +13,8 @@ from typing import Any
 import nio
 from nio import crypto
 
-from mindroom import constants
 from mindroom.config.matrix import RoomDirectoryVisibility, RoomJoinRule
-from mindroom.constants import runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.large_messages import prepare_large_message
@@ -51,9 +50,9 @@ def matrix_startup_error(
     return ValueError(message)
 
 
-def _maybe_ssl_context(homeserver: str) -> ssl_module.SSLContext | None:
+def _maybe_ssl_context(homeserver: str, runtime_paths: RuntimePaths | None = None) -> ssl_module.SSLContext | None:
     if homeserver.startswith("https://"):
-        if not runtime_matrix_ssl_verify():
+        if not runtime_matrix_ssl_verify(runtime_paths=runtime_paths):
             # Create context that disables verification for dev/self-signed certs
             ssl_context = ssl_module.create_default_context()
             ssl_context.check_hostname = False
@@ -70,6 +69,7 @@ def _create_matrix_client(
     user_id: str | None = None,
     access_token: str | None = None,
     store_path: str | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> nio.AsyncClient:
     """Create a Matrix client with consistent configuration.
 
@@ -78,17 +78,18 @@ def _create_matrix_client(
         user_id: Optional user ID for authenticated client
         access_token: Optional access token for authenticated client
         store_path: Optional path for encryption key storage (defaults to .nio_store/<user_id>)
+        runtime_paths: Optional explicit runtime context for SSL and storage resolution
 
     Returns:
         nio.AsyncClient: Configured Matrix client instance
 
     """
-    ssl_context = _maybe_ssl_context(homeserver)
+    ssl_context = _maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
 
     # Default store path for encryption support
     if store_path is None and user_id:
         safe_user_id = user_id.replace(":", "_").replace("@", "")
-        store_path = str(constants.encryption_keys_dir() / safe_user_id)
+        store_path = str(encryption_keys_dir(runtime_paths=runtime_paths) / safe_user_id)
         # Ensure the directory exists
         Path(store_path).mkdir(parents=True, exist_ok=True)
 
@@ -115,6 +116,7 @@ async def matrix_client(
     homeserver: str,
     user_id: str | None = None,
     access_token: str | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
     """Context manager for Matrix client that ensures proper cleanup.
 
@@ -122,6 +124,7 @@ async def matrix_client(
         homeserver: The Matrix homeserver URL
         user_id: Optional user ID for authenticated client
         access_token: Optional access token for authenticated client
+        runtime_paths: Optional explicit runtime context for SSL and storage resolution
 
     Yields:
         nio.AsyncClient: The Matrix client instance
@@ -131,7 +134,7 @@ async def matrix_client(
             response = await client.login(password="secret")
 
     """
-    client = _create_matrix_client(homeserver, user_id, access_token)
+    client = _create_matrix_client(homeserver, user_id, access_token, runtime_paths=runtime_paths)
 
     try:
         yield client
@@ -139,13 +142,19 @@ async def matrix_client(
         await client.close()
 
 
-async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient:
+async def login(
+    homeserver: str,
+    user_id: str,
+    password: str,
+    runtime_paths: RuntimePaths | None = None,
+) -> nio.AsyncClient:
     """Login to Matrix and return authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
         user_id: The full Matrix user ID (e.g., @user:localhost)
         password: The user's password
+        runtime_paths: Optional explicit runtime context for SSL and storage resolution
 
     Returns:
         Authenticated AsyncClient instance
@@ -154,7 +163,7 @@ async def login(homeserver: str, user_id: str, password: str) -> nio.AsyncClient
         ValueError: If login fails
 
     """
-    client = _create_matrix_client(homeserver, user_id)
+    client = _create_matrix_client(homeserver, user_id, runtime_paths=runtime_paths)
 
     response = await client.login(password)
     if isinstance(response, nio.LoginResponse):

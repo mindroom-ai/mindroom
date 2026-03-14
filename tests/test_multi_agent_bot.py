@@ -28,7 +28,13 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    ORIGINAL_SENDER_KEY,
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    resolve_runtime_paths,
+)
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
@@ -155,33 +161,26 @@ class _FailingStubVectorDb:
 class TestAgentBot:
     """Test cases for AgentBot class."""
 
-    def create_mock_config(self) -> MagicMock:
-        """Create a mock config for testing."""
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["!test:localhost"]),
-        }
-        mock_config.teams = {}
+    @staticmethod
+    def create_mock_config() -> Config:
+        """Create a typed config for tests that do not need a runtime-bound YAML load."""
+        return Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        )
 
-        # Create a proper ModelConfig for the default model
-        default_model = ModelConfig(provider="test", id="test-model")
-        mock_config.models = {"default": default_model}
+    @staticmethod
+    def _runtime_paths(storage_path: Path) -> RuntimePaths:
+        return resolve_runtime_paths(storage_path=storage_path)
 
-        mock_config.router = MagicMock(model="default")
-        mock_config.get_all_configured_rooms = MagicMock(return_value=["!test:localhost"])
-
-        # Add the ids property for MatrixID lookups
-        mock_config.ids = {
-            "calculator": MatrixID(username="mindroom_calculator", domain="localhost"),
-            "general": MatrixID(username="mindroom_general", domain="localhost"),
-            "router": MatrixID(username="mindroom_router", domain="localhost"),
-        }
-        mock_config.domain = "localhost"
-        mock_config.authorization = AuthorizationConfig(default_room_access=True)
-        mock_config.get_mindroom_user_id = MagicMock(return_value="@mindroom_user:localhost")
-
-        return mock_config
+    @classmethod
+    def _config_for_storage(cls, storage_path: Path) -> Config:
+        return Config.from_yaml(runtime_paths=cls._runtime_paths(storage_path))
 
     @staticmethod
     def _make_handler_event(handler_name: str, *, sender: str, event_id: str) -> MagicMock:
@@ -460,7 +459,7 @@ class TestAgentBot:
         assert bot_no_stream.enable_streaming is False
 
     @pytest.mark.asyncio
-    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda: "http://localhost:8008")
+    @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_user")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
     @patch("mindroom.config.main.Config.from_yaml")
@@ -503,7 +502,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Permanent startup failures should stop retrying immediately."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
 
         with (
@@ -538,11 +537,7 @@ class TestAgentBot:
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
-            await main(
-                log_level="INFO",
-                storage_path=tmp_path,
-                api=False,
-            )
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
         mock_orchestrator.stop.assert_awaited_once()
         state = get_runtime_state()
@@ -585,7 +580,7 @@ class TestAgentBot:
             patch("mindroom.orchestrator._run_auxiliary_task_forever", side_effect=_run_auxiliary),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
-            await main(log_level="INFO", storage_path=tmp_path, api=False)
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
         assert watched_paths == [resolved_config_path]
 
@@ -608,7 +603,8 @@ class TestAgentBot:
             nonlocal observed_logging_root
             observed_logging_root = constants_module.STORAGE_PATH_OBJ
 
-        def _capture_credentials_sync() -> None:
+        def _capture_credentials_sync(*, runtime_paths: RuntimePaths) -> None:
+            del runtime_paths
             nonlocal observed_credentials_root
             observed_credentials_root = constants_module.STORAGE_PATH_OBJ
 
@@ -617,7 +613,7 @@ class TestAgentBot:
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
             patch("mindroom.orchestrator.MultiAgentOrchestrator", return_value=mock_orchestrator),
         ):
-            await main(log_level="INFO", storage_path=runtime_storage, api=False)
+            await main(log_level="INFO", runtime_paths=self._runtime_paths(runtime_storage), api=False)
 
         assert observed_logging_root == runtime_storage.resolve()
         assert observed_credentials_root == runtime_storage.resolve()
@@ -625,7 +621,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test stopping an agent bot."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -639,7 +635,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_invite(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test handling room invitations."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -657,7 +653,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_ignore_own(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test that agent ignores its own messages."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -678,7 +674,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test that agent ignores messages from other agents."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -725,7 +721,7 @@ class TestAgentBot:
         # Mock get_latest_thread_event_id_if_needed
         mock_get_latest_thread.return_value = "latest_thread_event"
 
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         mention_id = f"@mindroom_calculator:{config.domain}"
         agent_user = AgentMatrixUser(
             agent_name="calculator",
@@ -989,7 +985,7 @@ class TestAgentBot:
         async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
             yield
 
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
@@ -1033,7 +1029,7 @@ class TestAgentBot:
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
 
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
@@ -1198,7 +1194,7 @@ class TestAgentBot:
     @pytest.mark.asyncio
     async def test_agent_bot_on_message_not_mentioned(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
         """Test agent bot not responding when not mentioned."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
@@ -1442,7 +1438,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Image messages should call _generate_response with images payload."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -1528,7 +1524,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Media turns should include attachment IDs already referenced in thread history."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -1626,7 +1622,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Image download failure should still mark event as responded."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -1682,7 +1678,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """File messages should call _generate_response with a local media path in prompt."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -1774,7 +1770,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """File media persistence failure should still mark event as responded."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -1838,7 +1834,7 @@ class TestAgentBot:
             access_token="mock_test_token",  # noqa: S106
         )
 
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
@@ -1918,7 +1914,7 @@ class TestAgentBot:
             access_token="mock_test_token",  # noqa: S106
         )
 
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         config.ids = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
@@ -2426,7 +2422,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """After router routes an image, the selected agent should resolve it via attachments."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()
 
@@ -2790,7 +2786,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test that agent bot skips messages it has already responded to."""
-        config = Config.from_yaml()
+        config = self._config_for_storage(tmp_path)
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config)
         bot.client = AsyncMock()

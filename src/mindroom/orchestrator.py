@@ -44,7 +44,7 @@ from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
 from .config.main import Config
-from .constants import RuntimePaths, activate_runtime_paths, get_runtime_paths
+from .constants import RuntimePaths, get_runtime_paths
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -168,10 +168,11 @@ class MultiAgentOrchestrator:
             return
         # The user account is managed through the same Matrix account lifecycle as bots.
         user_account = await create_agent_user(
-            constants.runtime_matrix_homeserver(),
+            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
             INTERNAL_USER_AGENT_NAME,
             config.mindroom_user.display_name,
             username=config.mindroom_user.username,
+            runtime_paths=self._require_runtime_paths(),
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
@@ -435,9 +436,8 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        self.runtime_paths = activate_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
-        config = Config.from_yaml(runtime_paths=self.runtime_paths)
-        load_plugins(config, runtime_paths=self.runtime_paths)
+        config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
+        load_plugins(config, runtime_paths=self._require_runtime_paths())
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -600,9 +600,8 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        self.runtime_paths = activate_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
-        new_config = Config.from_yaml(runtime_paths=self.runtime_paths)
-        load_plugins(new_config, runtime_paths=self.runtime_paths)
+        new_config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
+        load_plugins(new_config, runtime_paths=self._require_runtime_paths())
 
         if not self.config:
             return await self._load_initial_config(new_config)
@@ -677,7 +676,10 @@ class MultiAgentOrchestrator:
             all_rooms = load_rooms()
             all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
             if all_room_ids and config.mindroom_user is not None:
-                await ensure_user_in_rooms(constants.runtime_matrix_homeserver(), all_room_ids)
+                await ensure_user_in_rooms(
+                    constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
+                    all_room_ids,
+                )
 
         # First invitation and join pass for rooms the router already manages.
         await self._ensure_room_invitations()
@@ -785,7 +787,10 @@ class MultiAgentOrchestrator:
         if config.mindroom_user is None or not user_account:
             return authorized_user_ids
 
-        server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
+        server_name = extract_server_name_from_homeserver(
+            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
+            runtime_paths=self._require_runtime_paths(),
+        )
         user_id = MatrixID.from_username(user_account.username, server_name).full_id
         authorized_user_ids.discard(user_id)
         for room_id in joined_rooms:
@@ -856,7 +861,10 @@ class MultiAgentOrchestrator:
         if not joined_rooms:
             return
 
-        server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
+        server_name = extract_server_name_from_homeserver(
+            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
+            runtime_paths=self._require_runtime_paths(),
+        )
         authorized_user_ids = get_authorized_user_ids_to_invite(config)
         authorized_user_ids = await self._invite_internal_user_to_rooms(
             config,
@@ -970,21 +978,21 @@ async def _run_auxiliary_task_forever(
 
 async def main(
     log_level: str,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     *,
     api: bool = True,
     api_port: int = 8765,
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
-    runtime_paths = activate_runtime_paths(storage_path=storage_path)
+    constants.activate_runtime_paths(runtime_paths=runtime_paths)
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.
     setup_logging(level=log_level)
 
     logger.info("Syncing API keys from environment to CredentialsManager...")
-    sync_env_to_credentials()
+    sync_env_to_credentials(runtime_paths=runtime_paths)
 
     # Ensure storage exists before any runtime components try to write into it.
     storage_path.mkdir(parents=True, exist_ok=True)

@@ -402,6 +402,33 @@ class TestResolveConfigRelativePath:
 
         assert constants_mod.runtime_env_value("OPENAI_API_KEY") == "from-shell"
 
+    def test_explicit_runtime_paths_use_process_env_for_non_path_values(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit RuntimePaths should carry non-path env values without ambient fallbacks."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={
+                "MINDROOM_NAMESPACE": "alpha1234",
+                "MATRIX_HOMESERVER": "https://hs.example",
+                "MATRIX_SERVER_NAME": "server.example",
+            },
+        )
+
+        config = Config.from_yaml(runtime_paths=runtime_paths)
+
+        assert constants_mod.runtime_mindroom_namespace(runtime_paths=runtime_paths) == "alpha1234"
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths=runtime_paths) == "https://hs.example"
+        assert constants_mod.runtime_matrix_server_name(runtime_paths=runtime_paths) == "server.example"
+        assert config.domain == "server.example"
+
     def test_config_domain_uses_sibling_env_matrix_homeserver(
         self,
         tmp_path: Path,
@@ -436,6 +463,41 @@ class TestResolveConfigRelativePath:
 
         with pytest.raises(ValueError, match="either runtime_paths or config_path"):
             Config.from_yaml(config_path, runtime_paths=runtime_paths)
+
+    def test_config_from_yaml_preserves_active_runtime_storage_override(self, tmp_path: Path) -> None:
+        """Reloading the active config by path should keep the active runtime storage root."""
+        config_path = tmp_path / "config.yaml"
+        storage_path = tmp_path / "override-storage"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+
+        constants_mod.activate_runtime_paths(config_path=config_path, storage_path=storage_path)
+
+        config = Config.from_yaml(config_path)
+
+        assert config.runtime_paths is not None
+        assert config.runtime_paths.storage_root == storage_path.resolve()
+
+    def test_activate_runtime_paths_preserves_active_config_path_when_only_storage_is_overridden(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Re-activating with only a storage override should not rediscover a different config file."""
+        config_path = tmp_path / "custom" / "config.yaml"
+        storage_path = tmp_path / "override-storage"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+
+        first = constants_mod.activate_runtime_paths(config_path=config_path, storage_path=storage_path)
+        second = constants_mod.activate_runtime_paths(storage_path=storage_path)
+
+        assert first.config_path == config_path.resolve()
+        assert second.config_path == config_path.resolve()
 
     def test_ensure_writable_config_path_uses_active_runtime_template_env(self, tmp_path: Path) -> None:
         """Template seeding should honor MINDROOM_CONFIG_TEMPLATE from the active runtime `.env`."""

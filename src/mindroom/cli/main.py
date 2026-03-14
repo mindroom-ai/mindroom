@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import socket
 import sys
 from pathlib import Path  # noqa: TC003
@@ -20,13 +19,13 @@ from mindroom import __version__, constants
 from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
-    set_runtime_storage_path,
 )
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
 from .config import (
+    _activate_cli_runtime,
     _check_env_keys,
     _format_validation_errors,
     _load_config_quiet,
@@ -38,6 +37,7 @@ from .local_stack import local_stack_setup
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -111,7 +111,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
-            storage_path=storage_path or constants.get_runtime_paths().storage_root,
+            storage_path=storage_path,
             api=api,
             api_port=api_port,
             api_host=api_host,
@@ -119,17 +119,17 @@ def run(
     )
 
 
-def _load_active_config_or_exit() -> Config:
+def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
     ensure_writable_config_path()
 
-    config_path = constants.runtime_config_path()
+    config_path = runtime_paths.config_path
     if not config_path.exists():
         _print_missing_config_error()
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(config_path)
+        config = _load_config_quiet(runtime_paths=runtime_paths)
     except ValidationError as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
@@ -143,18 +143,18 @@ def _load_active_config_or_exit() -> Config:
 
 async def _run(
     log_level: str,
-    storage_path: Path,
+    storage_path: Path | None,
     *,
     api: bool,
     api_port: int,
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    resolved_storage_path = set_runtime_storage_path(storage_path)
-    config = _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime(storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
-    _check_env_keys(config)
+    _check_env_keys(config, runtime_paths=runtime_paths)
 
     console.print(make_banner())
     console.print()
@@ -175,7 +175,7 @@ async def _run(
 
         await bot_main(
             log_level=log_level,
-            storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
             api=api,
             api_port=api_port,
             api_host=api_host,
@@ -198,7 +198,8 @@ app.command()(doctor)
 @avatars_app.command("generate")
 def avatars_generate() -> None:
     """Generate missing managed avatar files in the workspace."""
-    _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime()
+    _load_active_config_or_exit(runtime_paths)
 
     try:
         from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
@@ -212,7 +213,8 @@ def avatars_generate() -> None:
 @avatars_app.command("sync")
 def avatars_sync() -> None:
     """Sync configured room and root-space avatars to Matrix using the initialized router account."""
-    _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime()
+    _load_active_config_or_exit(runtime_paths)
 
     try:
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
@@ -266,14 +268,17 @@ def connect(
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
+    runtime_paths = _activate_cli_runtime(path)
     resolved_provisioning_url = (
-        provisioning_url or os.getenv("MINDROOM_PROVISIONING_URL", "https://mindroom.chat")
+        provisioning_url
+        or constants.runtime_env_value("MINDROOM_PROVISIONING_URL", runtime_paths=runtime_paths)
+        or "https://mindroom.chat"
     ).strip()
     if not resolved_provisioning_url:
         console.print("[red]Error:[/red] Invalid provisioning URL.")
         raise typer.Exit(1)
 
-    resolved_config_path = (path or constants.runtime_config_path()).expanduser().resolve()
+    resolved_config_path = runtime_paths.config_path
     normalized_client_name = client_name.strip() or socket.gethostname()
     try:
         credentials = cli_connect.complete_local_pairing(
@@ -281,7 +286,7 @@ def connect(
             pair_code=normalized_pair_code,
             client_name=normalized_client_name,
             client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
-            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(),
+            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
             post_request=httpx.post,
         )
     except (TypeError, ValueError) as exc:

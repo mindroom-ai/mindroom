@@ -8,7 +8,7 @@ import httpx
 import nio
 
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_ssl_verify
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix import provisioning
 from mindroom.matrix.client import (
@@ -93,11 +93,18 @@ def _save_agent_credentials(agent_name: str, username: str, password: str) -> No
     logger.info(f"Saved credentials for agent {agent_name}")
 
 
-async def _homeserver_requires_registration_token(homeserver: str) -> bool:
+async def _homeserver_requires_registration_token(
+    homeserver: str,
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> bool:
     """Check whether the homeserver advertises registration-token flow."""
     url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
     try:
-        async with httpx.AsyncClient(timeout=5, verify=runtime_matrix_ssl_verify()) as client:
+        async with httpx.AsyncClient(
+            timeout=5,
+            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+        ) as client:
             response = await client.post(url, json={})
             data = response.json()
     except (httpx.HTTPError, ValueError):
@@ -119,6 +126,8 @@ async def _registration_failure_message(
     response: nio.ErrorResponse,
     homeserver: str,
     registration_token: str | None,
+    *,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str | None:
     if (
         response.status_code == "M_FORBIDDEN"
@@ -130,7 +139,7 @@ async def _registration_failure_message(
     if (
         response.message == "unknown error"
         and not registration_token
-        and await _homeserver_requires_registration_token(homeserver)
+        and await _homeserver_requires_registration_token(homeserver, runtime_paths=runtime_paths)
     ):
         return (
             "Matrix homeserver requires registration tokens for account creation. "
@@ -148,6 +157,7 @@ async def _register_user_with_token(
     password: str,
     display_name: str,
     registration_token: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Register a user with token auth, supporting both direct and UIAA flows."""
     register_url = f"{homeserver.rstrip('/')}/_matrix/client/v3/register"
@@ -162,7 +172,10 @@ async def _register_user_with_token(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10, verify=runtime_matrix_ssl_verify()) as client:
+        async with httpx.AsyncClient(
+            timeout=10,
+            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+        ) as client:
             response = await client.post(register_url, json=request_payload)
     except httpx.HTTPError as exc:
         msg = f"Could not reach Matrix homeserver ({homeserver}) during registration: {exc}"
@@ -191,6 +204,7 @@ async def _register_user_with_token(
             password=password,
             display_name=display_name,
             registration_token=registration_token,
+            runtime_paths=runtime_paths,
         )
 
     return await _login_existing_user_or_raise_collision(
@@ -198,6 +212,7 @@ async def _register_user_with_token(
         user_id=user_id,
         password=password,
         display_name=display_name,
+        runtime_paths=runtime_paths,
     )
 
 
@@ -244,9 +259,11 @@ async def _register_user_with_token_via_nio(
     password: str,
     display_name: str,
     registration_token: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Fallback to matrix-nio's interactive registration for spec-strict homeservers."""
-    async with matrix_client(homeserver, user_id=user_id) as client:
+
+    async def _register_with_client(client: nio.AsyncClient) -> str:
         response = await client.register_with_token(
             username=username,
             password=password,
@@ -262,7 +279,14 @@ async def _register_user_with_token_via_nio(
             password=password,
             display_name=display_name,
             registration_token=registration_token,
+            runtime_paths=runtime_paths,
         )
+
+    if runtime_paths is None:
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            return await _register_with_client(client)
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
+        return await _register_with_client(client)
 
 
 def _account_collision_error(user_id: str, login_response: object) -> ValueError:
@@ -294,14 +318,22 @@ async def _login_existing_user(
     user_id: str,
     password: str,
     display_name: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> nio.LoginResponse | nio.LoginError:
     """Login an existing user with a fresh client and keep the display name synchronized."""
-    async with matrix_client(homeserver, user_id=user_id) as client:
+
+    async def _login_with_client(client: nio.AsyncClient) -> nio.LoginResponse | nio.LoginError:
         return await _login_and_sync_display_name(
             client=client,
             password=password,
             display_name=display_name,
         )
+
+    if runtime_paths is None:
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            return await _login_with_client(client)
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
+        return await _login_with_client(client)
 
 
 async def _login_existing_user_or_raise_collision(
@@ -310,14 +342,24 @@ async def _login_existing_user_or_raise_collision(
     user_id: str,
     password: str,
     display_name: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Login an existing user, sync display name, and fail permanently on collisions."""
-    login_response = await _login_existing_user(
-        homeserver=homeserver,
-        user_id=user_id,
-        password=password,
-        display_name=display_name,
-    )
+    if runtime_paths is None:
+        login_response = await _login_existing_user(
+            homeserver=homeserver,
+            user_id=user_id,
+            password=password,
+            display_name=display_name,
+        )
+    else:
+        login_response = await _login_existing_user(
+            homeserver=homeserver,
+            user_id=user_id,
+            password=password,
+            display_name=display_name,
+            runtime_paths=runtime_paths,
+        )
     if not isinstance(login_response, nio.LoginResponse):
         raise _account_collision_error(user_id, login_response)
     return user_id
@@ -351,6 +393,7 @@ async def _handle_register_response(
     password: str,
     display_name: str,
     registration_token: str | None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Handle a matrix-nio register response and finalize account setup."""
     if isinstance(response, nio.RegisterResponse):
@@ -376,7 +419,12 @@ async def _handle_register_response(
     if not isinstance(response, nio.ErrorResponse):
         msg = f"Failed to register user {username}: {response}"
         raise matrix_startup_error(msg)
-    failure_message = await _registration_failure_message(response, homeserver, registration_token)
+    failure_message = await _registration_failure_message(
+        response,
+        homeserver,
+        registration_token,
+        runtime_paths=runtime_paths,
+    )
     if failure_message:
         raise matrix_startup_error(failure_message, permanent=True)
     msg = f"Failed to register user {username}: {response}"
@@ -388,6 +436,7 @@ async def _register_user(
     username: str,
     password: str,
     display_name: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Register a new Matrix user account.
 
@@ -396,6 +445,7 @@ async def _register_user(
         username: The username for the Matrix account (without domain)
         password: The password for the account
         display_name: The display name for the user
+        runtime_paths: Optional explicit runtime context for env and SSL resolution
 
     Returns:
         The full Matrix user ID (e.g., @user:localhost)
@@ -406,20 +456,10 @@ async def _register_user(
     """
     server_name = extract_server_name_from_homeserver(homeserver)
     user_id = MatrixID.from_username(username, server_name).full_id
-    registration_token = provisioning.registration_token_from_env()
+    registration_token = provisioning.registration_token_from_env(runtime_paths=runtime_paths)
 
-    provisioning_result = await _register_user_via_provisioning_if_configured(
-        homeserver=homeserver,
-        user_id=user_id,
-        username=username,
-        password=password,
-        display_name=display_name,
-        registration_token=registration_token,
-    )
-    if provisioning_result is not None:
-        return provisioning_result
-    if registration_token:
-        return await _register_user_with_token(
+    if runtime_paths is None:
+        provisioning_result = await _register_user_via_provisioning_if_configured(
             homeserver=homeserver,
             user_id=user_id,
             username=username,
@@ -427,12 +467,52 @@ async def _register_user(
             display_name=display_name,
             registration_token=registration_token,
         )
+    else:
+        provisioning_result = await _register_user_via_provisioning_if_configured(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=registration_token,
+            runtime_paths=runtime_paths,
+        )
+    if provisioning_result is not None:
+        return provisioning_result
+    if registration_token:
+        if runtime_paths is None:
+            return await _register_user_with_token(
+                homeserver=homeserver,
+                user_id=user_id,
+                username=username,
+                password=password,
+                display_name=display_name,
+                registration_token=registration_token,
+            )
+        return await _register_user_with_token(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+            registration_token=registration_token,
+            runtime_paths=runtime_paths,
+        )
+    if runtime_paths is None:
+        return await _register_user_without_token(
+            homeserver=homeserver,
+            user_id=user_id,
+            username=username,
+            password=password,
+            display_name=display_name,
+        )
     return await _register_user_without_token(
         homeserver=homeserver,
         user_id=user_id,
         username=username,
         password=password,
         display_name=display_name,
+        runtime_paths=runtime_paths,
     )
 
 
@@ -444,26 +524,40 @@ async def _register_user_via_provisioning_if_configured(
     password: str,
     display_name: str,
     registration_token: str | None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str | None:
     """Register through the provisioning service when local client creds are configured."""
-    provisioning_url = provisioning.provisioning_url_from_env()
+    provisioning_url = provisioning.provisioning_url_from_env(runtime_paths=runtime_paths)
     creds = provisioning.required_local_provisioning_client_credentials_for_registration(
         provisioning_url=provisioning_url,
         registration_token=registration_token,
+        runtime_paths=runtime_paths,
     )
     if not (creds and provisioning_url):
         return None
 
     client_id, client_secret = creds
-    provisioning_result = await provisioning.register_user_via_provisioning_service(
-        provisioning_url=provisioning_url,
-        client_id=client_id,
-        client_secret=client_secret,
-        homeserver=homeserver,
-        username=username,
-        password=password,
-        display_name=display_name,
-    )
+    if runtime_paths is None:
+        provisioning_result = await provisioning.register_user_via_provisioning_service(
+            provisioning_url=provisioning_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            homeserver=homeserver,
+            username=username,
+            password=password,
+            display_name=display_name,
+        )
+    else:
+        provisioning_result = await provisioning.register_user_via_provisioning_service(
+            provisioning_url=provisioning_url,
+            client_id=client_id,
+            client_secret=client_secret,
+            homeserver=homeserver,
+            username=username,
+            password=password,
+            display_name=display_name,
+            runtime_paths=runtime_paths,
+        )
     if provisioning_result.status == "created":
         logger.info(f"✅ Successfully registered user via provisioning service: {provisioning_result.user_id}")
         return provisioning_result.user_id
@@ -476,11 +570,19 @@ async def _register_user_via_provisioning_if_configured(
             expected_user_id=user_id,
         )
     logger.info(f"User {login_user_id} already exists (provisioning service)")
+    if runtime_paths is None:
+        return await _login_existing_user_or_raise_collision(
+            homeserver=homeserver,
+            user_id=login_user_id,
+            password=password,
+            display_name=display_name,
+        )
     return await _login_existing_user_or_raise_collision(
         homeserver=homeserver,
         user_id=login_user_id,
         password=password,
         display_name=display_name,
+        runtime_paths=runtime_paths,
     )
 
 
@@ -491,9 +593,11 @@ async def _register_user_without_token(
     username: str,
     password: str,
     display_name: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> str:
     """Register directly against the Matrix homeserver without token auth."""
-    async with matrix_client(homeserver, user_id=user_id) as client:
+
+    async def _register_with_client(client: nio.AsyncClient) -> str:
         response = await client.register(
             username=username,
             password=password,
@@ -508,7 +612,65 @@ async def _register_user_without_token(
             password=password,
             display_name=display_name,
             registration_token=None,
+            runtime_paths=runtime_paths,
         )
+
+    if runtime_paths is None:
+        async with matrix_client(homeserver, user_id=user_id) as client:
+            return await _register_with_client(client)
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
+        return await _register_with_client(client)
+
+
+async def _register_user_for_runtime(
+    *,
+    homeserver: str,
+    username: str,
+    password: str,
+    display_name: str,
+    runtime_paths: RuntimePaths | None = None,
+) -> None:
+    """Register one Matrix user using the optional explicit runtime context."""
+    if runtime_paths is None:
+        await _register_user(
+            homeserver=homeserver,
+            username=username,
+            password=password,
+            display_name=display_name,
+        )
+        return
+    await _register_user(
+        homeserver=homeserver,
+        username=username,
+        password=password,
+        display_name=display_name,
+        runtime_paths=runtime_paths,
+    )
+
+
+async def _login_existing_user_for_runtime(
+    *,
+    homeserver: str,
+    user_id: str,
+    password: str,
+    display_name: str,
+    runtime_paths: RuntimePaths | None = None,
+) -> nio.LoginResponse | nio.LoginError:
+    """Login one Matrix user using the optional explicit runtime context."""
+    if runtime_paths is None:
+        return await _login_existing_user(
+            homeserver=homeserver,
+            user_id=user_id,
+            password=password,
+            display_name=display_name,
+        )
+    return await _login_existing_user(
+        homeserver=homeserver,
+        user_id=user_id,
+        password=password,
+        display_name=display_name,
+        runtime_paths=runtime_paths,
+    )
 
 
 async def create_agent_user(
@@ -516,6 +678,7 @@ async def create_agent_user(
     agent_name: str,
     agent_display_name: str,
     username: str | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> AgentMatrixUser:
     """Create or retrieve a Matrix user account for an agent.
 
@@ -524,6 +687,7 @@ async def create_agent_user(
         agent_name: The internal agent name (e.g., 'calculator')
         agent_display_name: The display name for the agent (e.g., 'CalculatorAgent')
         username: Optional explicit Matrix username localpart to use
+        runtime_paths: Optional explicit runtime context for env and SSL resolution
 
     Returns:
         AgentMatrixUser object with account details
@@ -563,18 +727,20 @@ async def create_agent_user(
     user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
     if registration_needed:
-        await _register_user(
+        await _register_user_for_runtime(
             homeserver=homeserver,
             username=matrix_username,
             password=password,
             display_name=agent_display_name,
+            runtime_paths=runtime_paths,
         )
     else:
-        login_response = await _login_existing_user(
+        login_response = await _login_existing_user_for_runtime(
             homeserver=homeserver,
             user_id=user_id,
             password=password,
             display_name=agent_display_name,
+            runtime_paths=runtime_paths,
         )
         if not isinstance(login_response, nio.LoginResponse):
             logger.info(
@@ -582,11 +748,12 @@ async def create_agent_user(
                 agent_name=agent_name,
                 user_id=user_id,
             )
-            await _register_user(
+            await _register_user_for_runtime(
                 homeserver=homeserver,
                 username=matrix_username,
                 password=password,
                 display_name=agent_display_name,
+                runtime_paths=runtime_paths,
             )
 
     # Save credentials only after registration/verification succeeds.
@@ -602,12 +769,17 @@ async def create_agent_user(
     )
 
 
-async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.AsyncClient:
+async def login_agent_user(
+    homeserver: str,
+    agent_user: AgentMatrixUser,
+    runtime_paths: RuntimePaths | None = None,
+) -> nio.AsyncClient:
     """Login an agent user and return the authenticated client.
 
     Args:
         homeserver: The Matrix homeserver URL
         agent_user: The agent user to login
+        runtime_paths: Optional explicit runtime context for env and SSL resolution
 
     Returns:
         Authenticated AsyncClient instance
@@ -616,7 +788,15 @@ async def login_agent_user(homeserver: str, agent_user: AgentMatrixUser) -> nio.
         ValueError: If login fails
 
     """
-    client = await login(homeserver, agent_user.user_id, agent_user.password)
+    if runtime_paths is None:
+        client = await login(homeserver, agent_user.user_id, agent_user.password)
+    else:
+        client = await login(
+            homeserver,
+            agent_user.user_id,
+            agent_user.password,
+            runtime_paths=runtime_paths,
+        )
     agent_user.access_token = client.access_token
     return client
 

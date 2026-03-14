@@ -2,32 +2,34 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Literal
 
 import httpx
 
-from mindroom.constants import runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_env_value, runtime_matrix_ssl_verify
 from mindroom.matrix.client import matrix_startup_error
 
 
-def provisioning_url_from_env() -> str | None:
+def provisioning_url_from_env(*, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Get hosted provisioning API base URL from environment if configured."""
-    url = os.getenv("MINDROOM_PROVISIONING_URL", "").strip()
+    url = (runtime_env_value("MINDROOM_PROVISIONING_URL", runtime_paths=runtime_paths) or "").strip()
     return url.rstrip("/") or None
 
 
-def registration_token_from_env() -> str | None:
+def registration_token_from_env(*, runtime_paths: RuntimePaths | None = None) -> str | None:
     """Get MATRIX_REGISTRATION_TOKEN from environment if configured."""
-    token = os.getenv("MATRIX_REGISTRATION_TOKEN", "").strip()
+    token = (runtime_env_value("MATRIX_REGISTRATION_TOKEN", runtime_paths=runtime_paths) or "").strip()
     return token or None
 
 
-def _local_provisioning_client_credentials_from_env() -> tuple[str, str] | None:
+def _local_provisioning_client_credentials_from_env(
+    *,
+    runtime_paths: RuntimePaths | None = None,
+) -> tuple[str, str] | None:
     """Get local provisioning client credentials from environment if configured."""
-    client_id = os.getenv("MINDROOM_LOCAL_CLIENT_ID", "").strip()
-    client_secret = os.getenv("MINDROOM_LOCAL_CLIENT_SECRET", "").strip()
+    client_id = (runtime_env_value("MINDROOM_LOCAL_CLIENT_ID", runtime_paths=runtime_paths) or "").strip()
+    client_secret = (runtime_env_value("MINDROOM_LOCAL_CLIENT_SECRET", runtime_paths=runtime_paths) or "").strip()
     if not client_id and not client_secret:
         return None
     if not client_id or not client_secret:
@@ -44,12 +46,13 @@ def required_local_provisioning_client_credentials_for_registration(
     *,
     provisioning_url: str | None,
     registration_token: str | None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[str, str] | None:
     """Resolve required local provisioning credentials when using hosted registration."""
     if registration_token or not provisioning_url:
         return None
 
-    creds = _local_provisioning_client_credentials_from_env()
+    creds = _local_provisioning_client_credentials_from_env(runtime_paths=runtime_paths)
     if creds is None:
         msg = (
             "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "
@@ -76,6 +79,7 @@ async def register_user_via_provisioning_service(
     username: str,
     password: str,
     display_name: str,
+    runtime_paths: RuntimePaths | None = None,
 ) -> _ProvisioningRegisterResult:
     """Register an agent account via provisioning service server-side flow."""
     url = f"{provisioning_url}/v1/local-mindroom/register-agent"
@@ -90,7 +94,10 @@ async def register_user_via_provisioning_service(
         "display_name": display_name,
     }
     try:
-        async with httpx.AsyncClient(timeout=10, verify=runtime_matrix_ssl_verify()) as client:
+        async with httpx.AsyncClient(
+            timeout=10,
+            verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+        ) as client:
             response = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         msg = f"Could not reach provisioning service ({provisioning_url}): {exc}"

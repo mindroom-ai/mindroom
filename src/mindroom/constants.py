@@ -244,6 +244,11 @@ def runtime_config_path(config_path: Path | None = None) -> Path:
     return get_runtime_paths(config_path=config_path).config_path
 
 
+def exported_env_value(name: str, *, default: str | None = None) -> str | None:
+    """Read one currently exported env value, excluding runtime-synced injections."""
+    return _copy_process_env().get(name, default)
+
+
 def runtime_env_value(
     name: str,
     *,
@@ -252,13 +257,11 @@ def runtime_env_value(
 ) -> str | None:
     """Resolve one runtime env value from the runtime context contract."""
     paths = runtime_paths or get_runtime_paths()
-    if name in _RUNTIME_PATH_ENV_KEYS:
-        return paths.env_value(name, default=default)
-    if runtime_paths is None and name in (process_env := _copy_process_env()):
-        return process_env[name]
-    if name in paths.env_file_values:
-        return paths.env_file_values[name]
-    return default
+    if runtime_paths is None and name not in _RUNTIME_PATH_ENV_KEYS:
+        process_env = _copy_process_env()
+        if name in process_env:
+            return process_env[name]
+    return paths.env_value(name, default=default)
 
 
 def runtime_env_flag(
@@ -383,12 +386,28 @@ def _set_active_runtime_paths(paths: RuntimePaths) -> RuntimePaths:
 
 
 def activate_runtime_paths(
+    runtime_paths: RuntimePaths | None = None,
     *,
     config_path: Path | None = None,
     storage_path: Path | None = None,
 ) -> RuntimePaths:
     """Resolve, sync, and commit one runtime path context for the process."""
-    paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+    if runtime_paths is not None and (config_path is not None or storage_path is not None):
+        msg = "Pass either runtime_paths or raw config/storage args to activate_runtime_paths(), not both"
+        raise ValueError(msg)
+
+    if runtime_paths is not None:
+        sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
+        return _set_active_runtime_paths(runtime_paths)
+
+    active_runtime_paths = _active_runtime_paths_or_none()
+    resolved_config_path = config_path
+    if resolved_config_path is None and active_runtime_paths is not None:
+        resolved_config_path = active_runtime_paths.config_path
+    paths = resolve_runtime_paths(
+        config_path=resolved_config_path,
+        storage_path=storage_path,
+    )
     sync_runtime_env_to_process(paths, sync_path_env=True)
     return _set_active_runtime_paths(paths)
 

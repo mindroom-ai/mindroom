@@ -19,12 +19,13 @@ from pydantic import ValidationError
 
 from mindroom import constants
 from mindroom.constants import (
+    RuntimePaths,
     env_key_for_provider,
 )
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import _load_config_quiet, console
+from .config import _activate_cli_runtime, _load_config_quiet, console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -45,7 +46,8 @@ def doctor() -> None:
     failed = 0
     warnings = 0
 
-    config_path = constants.runtime_config_path()
+    runtime_paths = _activate_cli_runtime()
+    config_path = runtime_paths.config_path
 
     # 1. Config file exists
     p, f, w = _run_doctor_step("Checking config file...", lambda: _check_config_exists(config_path))
@@ -57,13 +59,16 @@ def doctor() -> None:
     if config_path.exists():
         config, p, f, w = _run_doctor_step(
             "Validating configuration...",
-            lambda: _check_config_valid(config_path),
+            lambda: _check_config_valid(runtime_paths),
         )
         passed += p
         failed += f
         warnings += w
         if config is not None:
-            p, f, w = _run_doctor_step("Checking providers...", lambda: _check_providers(config))
+            p, f, w = _run_doctor_step(
+                "Checking providers...",
+                lambda: _check_providers(config, runtime_paths=runtime_paths),
+            )
             passed += p
             failed += f
             warnings += w
@@ -71,20 +76,23 @@ def doctor() -> None:
             # 4. Memory LLM & embedder
             p, f, w = _run_doctor_step(
                 "Checking memory config...",
-                lambda: _check_memory_config(config),
+                lambda: _check_memory_config(config, runtime_paths=runtime_paths),
             )
             passed += p
             failed += f
             warnings += w
 
     # 5. Matrix homeserver reachable
-    p, f, w = _run_doctor_step("Checking Matrix homeserver...", _check_matrix_homeserver)
+    p, f, w = _run_doctor_step(
+        "Checking Matrix homeserver...",
+        lambda: _check_matrix_homeserver(runtime_paths=runtime_paths),
+    )
     passed += p
     failed += f
     warnings += w
 
     # 6. Storage directory writable
-    p, f, w = _run_doctor_step("Checking storage...", _check_storage_writable)
+    p, f, w = _run_doctor_step("Checking storage...", lambda: _check_storage_writable(runtime_paths))
     passed += p
     failed += f
     warnings += w
@@ -111,10 +119,10 @@ def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
     return 0, 1, 0
 
 
-def _check_config_valid(config_path: Path) -> tuple[Config | None, int, int, int]:
+def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int, int, int]:
     """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
     try:
-        config = _load_config_quiet(config_path)
+        config = _load_config_quiet(runtime_paths=runtime_paths)
     except ValidationError as exc:
         n = len(exc.errors())
         console.print(f"[red]✗[/red] Config invalid ({n} validation error{'s' if n != 1 else ''})")
@@ -284,11 +292,21 @@ def _validate_provider_key(
     return _http_check(url, headers)
 
 
-def _validate_vertexai_claude_connection(model_config: ModelConfig) -> tuple[bool | None, str]:
+def _validate_vertexai_claude_connection(
+    model_config: ModelConfig,
+    *,
+    runtime_paths: RuntimePaths,
+) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_id = extra_kwargs.get("project_id") or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID")
-    region = extra_kwargs.get("region") or os.getenv("CLOUD_ML_REGION")
+    project_id = extra_kwargs.get("project_id") or constants.runtime_env_value(
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        runtime_paths=runtime_paths,
+    )
+    region = extra_kwargs.get("region") or constants.runtime_env_value(
+        "CLOUD_ML_REGION",
+        runtime_paths=runtime_paths,
+    )
     missing = []
     if not project_id:
         missing.append("ANTHROPIC_VERTEX_PROJECT_ID")
@@ -324,15 +342,18 @@ def _validate_vertexai_claude_connection(model_config: ModelConfig) -> tuple[boo
     return True, ""
 
 
-def _get_ollama_host(config: Config) -> str:
+def _get_ollama_host(config: Config, *, runtime_paths: RuntimePaths) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
         if model.provider == "ollama" and model.host:
             return model.host
-    return os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    return (
+        constants.runtime_env_value("OLLAMA_HOST", runtime_paths=runtime_paths, default="http://localhost:11434")
+        or "http://localhost:11434"
+    )
 
 
-def _check_providers(config: Config) -> tuple[int, int, int]:
+def _check_providers(config: Config, *, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Print provider summary and validate API keys. Returns (passed, failed, warnings)."""
     provider_models: dict[str, list[str]] = {}
     for name, model in config.models.items():
@@ -354,7 +375,7 @@ def _check_providers(config: Config) -> tuple[int, int, int]:
     validated_keys: set[str] = set()
 
     for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, validated_keys)
+        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths=runtime_paths)
         passed += p
         failed += f
         warnings += w
@@ -384,6 +405,8 @@ def _check_single_provider(
     provider: str,
     config: Config,
     validated_keys: set[str],
+    *,
+    runtime_paths: RuntimePaths,
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
     if provider == "vertexai_claude":
@@ -393,7 +416,7 @@ def _check_single_provider(
         for model_config in config.models.values():
             if model_config.provider != provider:
                 continue
-            valid, detail = _validate_vertexai_claude_connection(model_config)
+            valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths=runtime_paths)
             p, f, w = _print_validation(
                 valid,
                 detail,
@@ -407,7 +430,7 @@ def _check_single_provider(
         return passed, failed, warnings
 
     if provider == "ollama":
-        host = _get_ollama_host(config)
+        host = _get_ollama_host(config, runtime_paths=runtime_paths)
         url = f"{host.rstrip('/')}/api/tags"
         valid, detail = _http_check(url)
         return _print_validation(
@@ -427,7 +450,7 @@ def _check_single_provider(
         return 0, 0, 0
     validated_keys.add(env_key)
 
-    api_key = os.getenv(env_key)
+    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths)
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
@@ -443,7 +466,7 @@ def _check_single_provider(
     )
 
 
-def _check_memory_config(config: Config) -> tuple[int, int, int]:
+def _check_memory_config(config: Config, *, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM and embedder configuration. Returns (passed, failed, warnings)."""
     if not config.uses_mem0_memory():
         console.print("[green]✓[/green] Memory backend: file (markdown)")
@@ -452,15 +475,15 @@ def _check_memory_config(config: Config) -> tuple[int, int, int]:
     if config.uses_file_memory():
         console.print("[green]✓[/green] Memory backend: mixed (per-agent mem0/file)")
 
-    p1, f1, w1 = _check_memory_llm(config)
-    p2, f2, w2 = _check_memory_embedder(config)
+    p1, f1, w1 = _check_memory_llm(config, runtime_paths=runtime_paths)
+    p2, f2, w2 = _check_memory_embedder(config, runtime_paths=runtime_paths)
     return p1 + p2, f1 + f2, w1 + w2
 
 
-def _check_memory_llm(config: Config) -> tuple[int, int, int]:
+def _check_memory_llm(config: Config, *, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM configuration. Returns (passed, failed, warnings)."""
     if config.memory.llm is None:
-        ollama_host = _get_ollama_host(config)
+        ollama_host = _get_ollama_host(config, runtime_paths=runtime_paths)
         console.print(
             "[yellow]![/yellow] Memory LLM not configured"
             f" (defaults to ollama at {ollama_host};"
@@ -478,7 +501,7 @@ def _check_memory_llm(config: Config) -> tuple[int, int, int]:
     llm_provider = config.memory.llm.provider
     llm_host = config.memory.llm.config.get("host")
     if llm_provider == "ollama":
-        host = llm_host or _get_ollama_host(config)
+        host = llm_host or _get_ollama_host(config, runtime_paths=runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -490,7 +513,7 @@ def _check_memory_llm(config: Config) -> tuple[int, int, int]:
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = os.getenv(env_key) if env_key else None
+    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
@@ -507,11 +530,11 @@ def _check_memory_llm(config: Config) -> tuple[int, int, int]:
     )
 
 
-def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
+def _check_memory_embedder(config: Config, *, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory embedder configuration. Returns (passed, failed, warnings)."""
     emb = config.memory.embedder
     if emb.provider == "ollama":
-        host = emb.config.host or _get_ollama_host(config)
+        host = emb.config.host or _get_ollama_host(config, runtime_paths=runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -532,7 +555,7 @@ def _check_memory_embedder(config: Config) -> tuple[int, int, int]:
         )
 
     env_key = env_key_for_provider(emb.provider)
-    api_key = os.getenv(env_key) if env_key else None
+    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
@@ -573,12 +596,12 @@ def _validate_sentence_transformers_embedder(model: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _check_matrix_homeserver() -> tuple[int, int, int]:
+def _check_matrix_homeserver(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check Matrix homeserver reachability. Returns (passed, failed, warnings)."""
-    homeserver = constants.runtime_matrix_homeserver()
+    homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     url = matrix_versions_url(homeserver)
     try:
-        response = httpx.get(url, timeout=5, verify=constants.runtime_matrix_ssl_verify())
+        response = httpx.get(url, timeout=5, verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths))
     except httpx.TransportError as exc:
         console.print(f"[red]✗[/red] Matrix homeserver unreachable: {homeserver} ({exc})")
         return 0, 1, 0
@@ -590,9 +613,9 @@ def _check_matrix_homeserver() -> tuple[int, int, int]:
     return 0, 1, 0
 
 
-def _check_storage_writable() -> tuple[int, int, int]:
+def _check_storage_writable(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check storage directory is writable. Returns (passed, failed, warnings)."""
-    storage = constants.get_runtime_paths().storage_root
+    storage = runtime_paths.storage_root
     try:
         storage.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=storage)

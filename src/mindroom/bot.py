@@ -251,7 +251,10 @@ def create_bot_for_entity(
         # Convert team member agent names into canonical agent Matrix IDs.
         # Team streaming resolves config agents from these IDs, so they must keep
         # the `mindroom_` prefix used by MatrixID.from_agent().
-        team_matrix_ids = [MatrixID.from_agent(agent_name, config.domain) for agent_name in team_config.agents]
+        team_matrix_ids = [
+            MatrixID.from_agent(agent_name, config.domain, runtime_paths=config.runtime_paths)
+            for agent_name in team_config.agents
+        ]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
@@ -386,10 +389,10 @@ class AgentBot:
     @property
     def runtime_paths(self) -> RuntimePaths:
         """Return the active runtime paths for this bot instance."""
-        return get_runtime_paths(
-            config_path=self.config_path,
-            storage_path=self.storage_path,
-        )
+        runtime_paths = self.config.runtime_paths
+        if runtime_paths is not None:
+            return runtime_paths
+        return get_runtime_paths(config_path=self.config_path, storage_path=self.storage_path)
 
     def _resolve_reply_thread_id(
         self,
@@ -542,9 +545,10 @@ class AgentBot:
             return
         # Create or retrieve the Matrix user account
         self.agent_user = await create_agent_user(
-            constants.runtime_matrix_homeserver(),
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             self.agent_name,
             self.agent_user.display_name,  # Use existing display name if available
+            runtime_paths=self.runtime_paths,
         )
         self.logger.info(f"Ensured Matrix user account: {self.agent_user.user_id}")
 
@@ -587,7 +591,11 @@ class AgentBot:
     async def start(self) -> None:
         """Start the agent bot with user account setup (but don't join rooms yet)."""
         await self.ensure_user_account()
-        self.client = await login_agent_user(constants.runtime_matrix_homeserver(), self.agent_user)
+        self.client = await login_agent_user(
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            self.agent_user,
+            runtime_paths=self.runtime_paths,
+        )
         await self._set_avatar_if_available()
         await self._set_presence_with_model_info()
 
