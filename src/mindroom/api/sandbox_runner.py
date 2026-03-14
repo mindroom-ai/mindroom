@@ -65,6 +65,7 @@ _RUNNER_EXECUTION_MODE_ENV = "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"
 _RUNNER_SUBPROCESS_TIMEOUT_ENV = "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
+_SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 
 # Sentinel written to stderr to delimit the JSON response from tool output.
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
@@ -333,6 +334,10 @@ def _runner_dedicated_worker_root() -> Path | None:
 
 
 def _runner_storage_root() -> Path:
+    shared_root = os.getenv(_SHARED_STORAGE_ROOT_ENV, "").strip()
+    if shared_root:
+        return Path(shared_root).expanduser().resolve()
+
     storage_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
     if storage_root:
         return shared_storage_root(Path(storage_root).expanduser().resolve())
@@ -369,7 +374,8 @@ def _current_runtime_site_packages() -> list[str]:
 def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(paths.root)
-    env["MINDROOM_STORAGE_PATH"] = str(_runner_storage_root())
+    current_storage_root = env.get("MINDROOM_STORAGE_PATH", "").strip()
+    env["MINDROOM_STORAGE_PATH"] = current_storage_root or str(_runner_storage_root())
     env[LOCAL_WORKER_ROOT_ENV] = str(paths.root.parent)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")

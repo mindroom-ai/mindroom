@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -3039,6 +3040,24 @@ class TestMultiAgentOrchestrator:
             assert "router" in orchestrator.agent_bots
 
     @pytest.mark.asyncio
+    async def test_orchestrator_initialize_uses_custom_config_path(self, tmp_path: Path) -> None:
+        """Initialize should load the exact config file owned by the orchestrator."""
+        config_path = tmp_path / "custom-config.yaml"
+        mock_config = MagicMock()
+        mock_config.agents = {}
+        mock_config.teams = {}
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+        ):
+            orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+            await orchestrator.initialize()
+
+        mock_load_config.assert_called_once_with(config_path.resolve())
+
+    @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
     @patch("mindroom.config.main.Config.from_yaml")
@@ -3486,6 +3505,37 @@ class TestMultiAgentOrchestrator:
         assert updated is False
         mock_schedule_knowledge.assert_awaited_once_with(config, start_watcher=True)
         mock_configure_knowledge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_config_uses_custom_config_path(self, tmp_path: Path) -> None:
+        """Hot reload should keep reading the orchestrator's custom config path."""
+        config_path = tmp_path / "custom-config.yaml"
+        current_config = MagicMock()
+        current_config.authorization.global_users = []
+        new_config = MagicMock()
+        new_config.authorization.global_users = []
+        new_config.defaults.enable_streaming = True
+
+        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path, config_path=config_path)
+        orchestrator.config = current_config
+        plan = SimpleNamespace(
+            mindroom_user_changed=False,
+            new_config=new_config,
+            entities_to_restart=set(),
+            new_entities=set(),
+            only_support_service_changes=True,
+        )
+
+        with (
+            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        ):
+            updated = await orchestrator.update_config()
+
+        assert updated is False
+        mock_load_config.assert_called_once_with(config_path.resolve())
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

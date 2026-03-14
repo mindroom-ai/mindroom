@@ -144,6 +144,7 @@ def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
     worker_port: int = 8766,
+    storage_subpath_prefix: str = "workers",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -157,7 +158,7 @@ def _backend(
         service_account_name="mindroom-worker",
         storage_pvc_name="mindroom-storage",
         storage_mount_path="/app/worker",
-        storage_subpath_prefix="workers",
+        storage_subpath_prefix=storage_subpath_prefix,
         config_map_name="mindroom-config",
         config_key="config.yaml",
         config_path="/app/config.yaml",
@@ -217,6 +218,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
+    assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
     assert "MINDROOM_SHARED_CREDENTIALS_PATH" in env_names
@@ -226,6 +228,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
+    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
     assert env_values["HOME"] == expected_dedicated_root
     assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
     assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
@@ -334,7 +337,25 @@ def test_kubernetes_backend_mounts_only_scoped_agent_root_for_shared_workers() -
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_worker_root}/.shared_credentials"
+
+
+def test_kubernetes_backend_keeps_shared_storage_root_for_custom_worker_prefix() -> None:
+    """Custom worker prefixes should not change the shared storage root env."""
+    backend, apps_api, _core_api = _backend(storage_subpath_prefix="sandbox-workers")
+    worker_key = "v1:tenant-123:shared:code"
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    env_values = {
+        env["name"]: env.get("value") for env in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    expected_worker_root = f"/app/worker/sandbox-workers/{worker_dir_name(worker_key)}"
+
+    assert env_values["MINDROOM_STORAGE_PATH"] == expected_worker_root
+    assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
 
 
 def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:

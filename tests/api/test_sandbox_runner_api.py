@@ -356,6 +356,40 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_agent_roo
     assert "allowed agent roots" in response.json()["detail"]
 
 
+def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_paths(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers should resolve relative agent roots against the shared storage env."""
+    _set_sandbox_token(monkeypatch)
+    worker_key = "v1:tenant-123:shared:general"
+    shared_root = tmp_path / "shared"
+    worker_root = shared_root / "sandbox-workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "save_file",
+            "args": ["hello", "note.txt"],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    saved_file = shared_root / "agents" / "general" / "workspace" / "mind_data" / "note.txt"
+    assert saved_file.read_text(encoding="utf-8") == "hello"
+
+
 def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
