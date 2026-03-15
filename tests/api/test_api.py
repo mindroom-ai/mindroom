@@ -164,6 +164,28 @@ def test_ensure_frontend_dist_dir_respects_disable_flag(
     )
 
 
+def test_ensure_frontend_dist_dir_uses_runtime_relative_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Relative MINDROOM_FRONTEND_DIST should resolve from the runtime config directory."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    frontend_dist_dir = config_dir / "frontend-dist"
+    frontend_dist_dir.mkdir()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    (config_dir / ".env").write_text("MINDROOM_FRONTEND_DIST=frontend-dist\n", encoding="utf-8")
+
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "missing-package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", tmp_path / "missing-repo-dist")
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", True)
+
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+
+    assert frontend_assets.ensure_frontend_dist_dir(runtime_paths) == frontend_dist_dir.resolve()
+
+
 def test_ensure_writable_config_path_seeds_from_template(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

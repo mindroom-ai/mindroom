@@ -11,6 +11,7 @@ from mindroom.credentials_sync import (
     _ENV_TO_SERVICE_MAP,
     get_api_key_for_provider,
     get_ollama_host,
+    get_secret_from_env,
     sync_env_to_credentials,
 )
 
@@ -111,6 +112,21 @@ class TestCredentialsSync:
         )
 
         assert cm.get_api_key("openai") == "ui-set-key"
+
+    def test_get_secret_from_env_resolves_relative_file_paths_from_config_dir(self, tmp_path: Path) -> None:
+        """Relative *_FILE secret paths in the runtime `.env` should anchor to the config directory."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        secret_file = config_dir / "secrets" / "openai.key"
+        secret_file.parent.mkdir(parents=True, exist_ok=True)
+        secret_file.write_text("sk-relative", encoding="utf-8")
+        (config_dir / ".env").write_text("OPENAI_API_KEY_FILE=secrets/openai.key\n", encoding="utf-8")
+
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, process_env={})
+
+        assert get_secret_from_env("OPENAI_API_KEY", runtime_paths) == "sk-relative"
 
     def test_sync_env_does_not_overwrite_legacy_credentials(
         self,

@@ -121,6 +121,14 @@ def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
     return {key: value for key, value in dotenv_values(env_path).items() if isinstance(value, str)}
 
 
+def _resolve_runtime_relative_path(raw_value: str, *, base_dir: Path) -> Path:
+    """Resolve one runtime-owned path value relative to its config directory."""
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve()
+
+
 def _configured_config_path(process_env: Mapping[str, str]) -> Path | None:
     configured_path = process_env.get("MINDROOM_CONFIG_PATH", "").strip()
     if not configured_path:
@@ -147,16 +155,16 @@ def config_search_locations(process_env: Mapping[str, str]) -> list[Path]:
     return locations
 
 
-def _storage_root_from_env_values(env_file_values: dict[str, str]) -> Path | None:
+def _storage_root_from_env_values(env_file_values: dict[str, str], *, config_dir: Path) -> Path | None:
     value = env_file_values.get("MINDROOM_STORAGE_PATH")
     if value is None or not value.strip():
         return None
-    return Path(value).expanduser().resolve()
+    return _resolve_runtime_relative_path(value, base_dir=config_dir)
 
 
 def _storage_root_from_env_path(env_path: Path) -> Path | None:
     """Read MINDROOM_STORAGE_PATH from one env file when present."""
-    return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path))
+    return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path), config_dir=env_path.parent)
 
 
 def resolve_runtime_paths(
@@ -185,7 +193,7 @@ def resolve_runtime_paths(
         resolved_storage_root = Path(storage_path).expanduser().resolve()
     elif configured_storage_path is not None:
         resolved_storage_root = configured_storage_path
-    elif env_storage_root := _storage_root_from_env_values(env_file_values):
+    elif env_storage_root := _storage_root_from_env_values(env_file_values, config_dir=config_dir):
         resolved_storage_root = env_storage_root
     else:
         resolved_storage_root = (config_dir / "mindroom_data").resolve()
@@ -374,10 +382,7 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     raw_value = runtime_paths.env_value(name)
     if raw_value is None or not raw_value.strip():
         return None
-    path = Path(raw_value).expanduser()
-    if not path.is_absolute():
-        path = runtime_paths.config_dir / path
-    return path.resolve()
+    return _resolve_runtime_relative_path(raw_value, base_dir=runtime_paths.config_dir)
 
 
 def runtime_env_flag(
@@ -682,8 +687,7 @@ def ensure_writable_config_path(
     if config_path.exists():
         return True
 
-    template_env = runtime_paths.env_value("MINDROOM_CONFIG_TEMPLATE")
-    template_path = Path(template_env).expanduser().resolve() if template_env else config_path
+    template_path = runtime_env_path(runtime_paths, "MINDROOM_CONFIG_TEMPLATE") or config_path
     if template_path != config_path and template_path.exists():
         shutil.copyfile(template_path, config_path)
         config_path.chmod(0o600)

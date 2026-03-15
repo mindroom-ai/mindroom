@@ -48,6 +48,7 @@ class KubernetesWorkerBackend:
             runtime_paths=runtime_paths,
             config=config,
             auth_token=auth_token,
+            storage_root=self.storage_root,
         )
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()

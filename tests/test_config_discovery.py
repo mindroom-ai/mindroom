@@ -345,6 +345,24 @@ class TestResolveConfigRelativePath:
         )
         assert resolved == custom_storage.resolve() / "kb"
 
+    def test_resolve_runtime_paths_anchors_relative_storage_root_to_config_dir(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Config-adjacent MINDROOM_STORAGE_PATH should resolve relative to the config directory."""
+        config_dir = tmp_path / "cfg"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        (config_dir / ".env").write_text("MINDROOM_STORAGE_PATH=relative_storage\n", encoding="utf-8")
+
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, process_env={})
+
+        assert runtime_paths.storage_root == (config_dir / "relative_storage").resolve()
+
     def test_explicit_config_path_uses_its_own_sibling_env_over_active_runtime_storage(
         self,
         tmp_path: Path,
@@ -631,10 +649,11 @@ class TestResolveConfigRelativePath:
         config_dir = tmp_path / "cfg"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "config.yaml"
-        template_path = tmp_path / "template.yaml"
+        template_path = config_dir / "templates" / "starter.yaml"
+        template_path.parent.mkdir(parents=True, exist_ok=True)
         template_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
         (config_dir / ".env").write_text(
-            f"MINDROOM_CONFIG_TEMPLATE={template_path}\n",
+            "MINDROOM_CONFIG_TEMPLATE=templates/starter.yaml\n",
             encoding="utf-8",
         )
 

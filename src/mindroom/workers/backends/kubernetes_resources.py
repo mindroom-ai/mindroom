@@ -226,11 +226,13 @@ class KubernetesResourceManager:
         runtime_paths: RuntimePaths,
         config: _KubernetesWorkerBackendConfig,
         auth_token: str | None,
+        storage_root: Path,
     ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
         self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
+        self.storage_root = storage_root.expanduser().resolve()
         self.apps_api: _AppsApiProtocol | None = None
         self.core_api: _CoreApiProtocol | None = None
         self.api_exception_cls: type[_ApiStatusError] | None = None
@@ -514,10 +516,12 @@ class KubernetesResourceManager:
 
     def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
+        local_dedicated_root = (self.storage_root / state_subpath).resolve()
         venv_path = f"{dedicated_root}/venv"
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=Path(dedicated_root),
+            local_dedicated_root=local_dedicated_root,
         )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
@@ -566,27 +570,38 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
-    def _worker_google_application_credentials_path(self, dedicated_root: Path) -> str | None:
+    def _worker_google_application_credentials_path(
+        self,
+        dedicated_root: Path,
+        *,
+        local_dedicated_root: Path,
+    ) -> str | None:
         """Return a worker-visible ADC file path, copying the source into shared storage when needed."""
         raw_value = self.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
         if raw_value is None or not raw_value.strip():
             return None
-        if not Path(self.config.storage_mount_path).exists():
+        if not self.storage_root.exists():
             return None
 
         source_path = constants.runtime_env_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         if source_path is None or not source_path.is_file():
             return None
 
-        runtime_dir = dedicated_root / ".runtime"
+        runtime_dir = local_dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         target_path = runtime_dir / source_path.name
         if source_path.resolve() != target_path.resolve():
             shutil.copyfile(source_path, target_path)
             target_path.chmod(0o600)
-        return str(target_path)
+        return str(dedicated_root / ".runtime" / source_path.name)
 
-    def _worker_runtime_paths(self, *, worker_key: str, dedicated_root: Path) -> RuntimePaths:
+    def _worker_runtime_paths(
+        self,
+        *,
+        worker_key: str,
+        dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> RuntimePaths:
         config_path = (
             Path(self.config.config_path)
             if self.config.config_map_name is not None
@@ -596,7 +611,10 @@ class KubernetesResourceManager:
         process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         env_file_values = dict(self.runtime_paths.env_file_values)
         env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        if google_application_credentials := self._worker_google_application_credentials_path(dedicated_root):
+        if google_application_credentials := self._worker_google_application_credentials_path(
+            dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+        ):
             process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
             {

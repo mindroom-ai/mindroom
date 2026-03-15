@@ -405,6 +405,40 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
     assert result == "visible-in-shell"
 
 
+def test_local_shell_does_not_inherit_filtered_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Direct shell execution should not leak filtered process env outside the committed runtime."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "runner-secret")
+    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(
+        [
+            "bash",
+            "-lc",
+            "printf '%s' \"$MINDROOM_SANDBOX_PROXY_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
+        ],
+    )
+
+    assert result == "||visible-in-shell"
+
+
 def test_proxy_forwards_execution_env_only_for_execution_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

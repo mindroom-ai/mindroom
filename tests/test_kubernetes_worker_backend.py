@@ -347,8 +347,10 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
-    expected_worker_root = storage_mount_path / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    expected_worker_root = Path(env_values["MINDROOM_STORAGE_PATH"])
     expected_credentials_path = expected_worker_root / ".runtime" / credentials_path.name
+    local_credentials_path = runtime_paths.storage_root / state_subpath / ".runtime" / credentials_path.name
 
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
@@ -359,7 +361,7 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
-    assert expected_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
+    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
@@ -388,6 +390,45 @@ def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path:
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
 
     assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+
+
+def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_paths_differ(tmp_path: Path) -> None:
+    """Dedicated workers should copy ADC into the local shared storage root even when pod mount paths differ."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    credentials_path = tmp_path / "adc.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    local_storage_root = tmp_path / "local-shared-storage"
+    local_storage_root.mkdir()
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=local_storage_root,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path="/app/worker",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    state_subpath = Path("workers") / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    local_adc_copy = local_storage_root / state_subpath / ".runtime" / credentials_path.name
+
+    assert (
+        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        == f"/app/worker/{state_subpath}/.runtime/{credentials_path.name}"
+    )
+    assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

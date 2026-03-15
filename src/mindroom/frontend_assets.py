@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.constants import runtime_env_path
+
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
@@ -18,9 +20,7 @@ _FRONTEND_BUILD_ATTEMPTED = False
 
 def _resolve_frontend_dist_dir(runtime_paths: RuntimePaths) -> Path | None:
     """Return the bundled or locally built dashboard directory if it exists."""
-    override = runtime_paths.env_value("MINDROOM_FRONTEND_DIST")
-    if override:
-        override_path = Path(override).expanduser().resolve()
+    if override_path := runtime_env_path(runtime_paths, "MINDROOM_FRONTEND_DIST"):
         return override_path if override_path.is_dir() else None
 
     for candidate in (_PACKAGE_FRONTEND_DIR, _REPO_FRONTEND_DIST_DIR):

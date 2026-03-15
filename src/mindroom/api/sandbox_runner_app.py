@@ -1,5 +1,8 @@
 """Minimal FastAPI app for sandbox runner sidecar."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from mindroom.api.sandbox_runner import (
@@ -12,12 +15,9 @@ from mindroom.api.sandbox_runner import (
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
 from mindroom.config.main import load_config
 
-app = FastAPI(title="MindRoom Sandbox Runner")
-app.include_router(sandbox_runner_router)
 
-
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         runtime_paths = _app_runtime_paths(app)
     except TypeError:
@@ -26,6 +26,11 @@ async def _startup() -> None:
     else:
         config = load_config(runtime_paths) if runtime_paths.config_path.exists() else None
     ensure_registry_loaded_with_config(runtime_paths, config)
+    yield
+
+
+app = FastAPI(title="MindRoom Sandbox Runner", lifespan=_lifespan)
+app.include_router(sandbox_runner_router)
 
 
 @app.get("/healthz")

@@ -11,9 +11,7 @@ private Git knowledge sync.
 It is not a generic bridge for tool-specific env var configuration.
 """
 
-from pathlib import Path
-
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.logging_config import get_logger
 
@@ -33,10 +31,10 @@ def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     if val:
         return val
     file_var = f"{name}_FILE"
-    file_path = runtime_paths.env_value(file_var)
-    if file_path and Path(file_path).exists():
+    file_path = runtime_env_path(runtime_paths, file_var)
+    if file_path is not None and file_path.exists():
         try:
-            return Path(file_path).read_text(encoding="utf-8").strip()
+            return file_path.read_text(encoding="utf-8").strip()
         except Exception:
             # Avoid noisy logs here; callers can handle None gracefully
             return None

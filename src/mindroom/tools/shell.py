@@ -21,6 +21,33 @@ if TYPE_CHECKING:
     from agno.tools.shell import ShellTools
 
 
+_LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "NO_PROXY",
+        "PATH",
+        "PYTHONPATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "USER",
+        "VIRTUAL_ENV",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    },
+)
+
+
 @register_tool_with_metadata(
     name="shell",
     display_name="Shell Commands",
@@ -85,7 +112,7 @@ def shell_tools() -> type[ShellTools]:
             import subprocess
 
             try:
-                env = dict(os.environ)
+                env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
                 env.update(self._runtime_env)
                 result = subprocess.run(
                     args,
