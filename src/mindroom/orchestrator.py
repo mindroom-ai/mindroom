@@ -106,17 +106,6 @@ class MultiAgentOrchestrator:
         self.storage_path = self.runtime_paths.storage_root
         self.config_path = self.runtime_paths.config_path
 
-    def _require_runtime_paths(self) -> RuntimePaths:
-        return self.runtime_paths
-
-    def _require_storage_path(self) -> Path:
-        assert self.storage_path is not None
-        return self.storage_path
-
-    def _require_config_path(self) -> Path:
-        assert self.config_path is not None
-        return self.config_path
-
     async def _stop_memory_auto_flush_worker(self) -> None:
         """Stop the background memory auto-flush worker if running."""
         worker = self._memory_auto_flush_worker
@@ -145,8 +134,8 @@ class MultiAgentOrchestrator:
             return
 
         worker = MemoryAutoFlushWorker(
-            storage_path=self._require_storage_path(),
-            runtime_paths=self._require_runtime_paths(),
+            storage_path=self.storage_path,
+            runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
         )
         self._memory_auto_flush_worker = worker
@@ -164,11 +153,11 @@ class MultiAgentOrchestrator:
             return
         # The user account is managed through the same Matrix account lifecycle as bots.
         user_account = await create_agent_user(
-            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
             INTERNAL_USER_AGENT_NAME,
             config.mindroom_user.display_name,
             username=config.mindroom_user.username,
-            runtime_paths=self._require_runtime_paths(),
+            runtime_paths=self.runtime_paths,
         )
         logger.info(f"User account ready: {user_account.user_id}")
 
@@ -198,7 +187,7 @@ class MultiAgentOrchestrator:
         """Initialize or reconfigure knowledge managers for the current config."""
         self.knowledge_managers = await initialize_knowledge_managers(
             config=config,
-            runtime_paths=self._require_runtime_paths(),
+            runtime_paths=self.runtime_paths,
             start_watchers=start_watcher,
             reindex_on_create=False,
         )
@@ -357,7 +346,7 @@ class MultiAgentOrchestrator:
         start_watcher: bool,
     ) -> None:
         """Refresh runtime support services that depend on the active config."""
-        ensure_default_agent_workspaces(config, self._require_storage_path())
+        ensure_default_agent_workspaces(config, self.storage_path)
         await self._refresh_knowledge_for_runtime(config, start_watcher=start_watcher)
         await self._sync_memory_auto_flush_worker()
 
@@ -375,9 +364,9 @@ class MultiAgentOrchestrator:
                 entity_name,
                 temp_user,
                 config,
-                self._require_runtime_paths(),
-                self._require_storage_path(),
-                config_path=self._require_config_path(),
+                self.runtime_paths,
+                self.storage_path,
+                config_path=self.config_path,
             ),
         )
         bot.orchestrator = self
@@ -433,8 +422,8 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = load_config(self._require_runtime_paths())
-        load_plugins(config, self._require_runtime_paths())
+        config = load_config(self.runtime_paths)
+        load_plugins(config, self.runtime_paths)
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -486,7 +475,7 @@ class MultiAgentOrchestrator:
 
     async def _start_runtime(self) -> None:
         """Run the startup sequence before handing off to the sync loops."""
-        await wait_for_matrix_homeserver(runtime_paths=self._require_runtime_paths())
+        await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
         if not self.agent_bots:
             await self.initialize()
 
@@ -597,8 +586,8 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        new_config = load_config(self._require_runtime_paths())
-        load_plugins(new_config, self._require_runtime_paths())
+        new_config = load_config(self.runtime_paths)
+        load_plugins(new_config, self.runtime_paths)
 
         if not self.config:
             return await self._load_initial_config(new_config)
@@ -667,16 +656,16 @@ class MultiAgentOrchestrator:
         config = self._require_config()
         for bot in bots:
             room_aliases = get_rooms_for_entity(bot.agent_name, config)
-            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self._require_runtime_paths())
+            bot.rooms = resolve_room_aliases(room_aliases, runtime_paths=self.runtime_paths)
 
         async def _ensure_internal_user_memberships() -> None:
-            all_rooms = load_rooms(runtime_paths=self._require_runtime_paths())
+            all_rooms = load_rooms(runtime_paths=self.runtime_paths)
             all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
             if all_room_ids and config.mindroom_user is not None:
                 await ensure_user_in_rooms(
-                    constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
+                    constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
                     all_room_ids,
-                    self._require_runtime_paths(),
+                    self.runtime_paths,
                 )
 
         # First invitation and join pass for rooms the router already manages.
@@ -711,7 +700,7 @@ class MultiAgentOrchestrator:
         assert router_bot.client is not None
 
         config = self._require_config()
-        room_ids = await ensure_all_rooms_exist(router_bot.client, config, self._require_runtime_paths())
+        room_ids = await ensure_all_rooms_exist(router_bot.client, config, self.runtime_paths)
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
         return room_ids
 
@@ -730,13 +719,13 @@ class MultiAgentOrchestrator:
         root_space_id = await ensure_root_space(
             router_bot.client,
             config,
-            self._require_runtime_paths(),
+            self.runtime_paths,
             normalized_room_ids,
         )
         if root_space_id is None:
             return
 
-        invite_user_ids = get_root_space_user_ids_to_invite(config, self._require_runtime_paths())
+        invite_user_ids = get_root_space_user_ids_to_invite(config, self.runtime_paths)
         if not invite_user_ids:
             return
 
@@ -785,14 +774,14 @@ class MultiAgentOrchestrator:
             return authorized_user_ids
         assert router_bot.client is not None
 
-        state = MatrixState.load(runtime_paths=self._require_runtime_paths())
+        state = MatrixState.load(runtime_paths=self.runtime_paths)
         user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
         if config.mindroom_user is None or not user_account:
             return authorized_user_ids
 
         server_name = extract_server_name_from_homeserver(
-            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
-            runtime_paths=self._require_runtime_paths(),
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            runtime_paths=self.runtime_paths,
         )
         user_id = MatrixID.from_username(user_account.username, server_name).full_id
         authorized_user_ids.discard(user_id)
@@ -816,7 +805,7 @@ class MultiAgentOrchestrator:
     ) -> None:
         """Invite authorized human users who can access a given room."""
         for authorized_user_id in authorized_user_ids:
-            if not is_authorized_sender(authorized_user_id, config, room_id, self._require_runtime_paths()):
+            if not is_authorized_sender(authorized_user_id, config, room_id, self.runtime_paths):
                 continue
             await self._invite_user_if_missing(
                 room_id,
@@ -865,8 +854,8 @@ class MultiAgentOrchestrator:
             return
 
         server_name = extract_server_name_from_homeserver(
-            constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
-            runtime_paths=self._require_runtime_paths(),
+            constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+            runtime_paths=self.runtime_paths,
         )
         authorized_user_ids = get_authorized_user_ids_to_invite(config)
         authorized_user_ids = await self._invite_internal_user_to_rooms(
@@ -876,7 +865,7 @@ class MultiAgentOrchestrator:
         )
 
         for room_id in joined_rooms:
-            configured_bots = config.get_configured_bots_for_room(room_id, self._require_runtime_paths())
+            configured_bots = config.get_configured_bots_for_room(room_id, self.runtime_paths)
             if not configured_bots:
                 continue
 
@@ -1014,7 +1003,7 @@ async def main(
         auxiliary_specs = [
             (
                 "config watcher",
-                lambda: _watch_config_task(orchestrator._require_config_path(), orchestrator),
+                lambda: _watch_config_task(orchestrator.config_path, orchestrator),
                 "config_watcher_supervisor",
             ),
             ("skills watcher", lambda: _watch_skills_task(orchestrator), "skills_watcher_supervisor"),

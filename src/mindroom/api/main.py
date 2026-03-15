@@ -69,6 +69,7 @@ class _ApiAuthSettings:
 
 @dataclass(frozen=True)
 class _ApiAuthState:
+    runtime_paths: constants.RuntimePaths
     settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
 
@@ -146,7 +147,16 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
-    """Attach one explicit runtime context to an API app instance."""
+    """Initialize one API app instance with explicit runtime-bound state."""
+    state = cast("_ApiState", api_app.state)
+    try:
+        _ = state.config_data
+    except AttributeError:
+        api_app.state.config_data = {}
+    try:
+        _ = state.config_lock
+    except AttributeError:
+        api_app.state.config_lock = threading.Lock()
     api_app.state.runtime_paths = runtime_paths
     api_app.state.auth_state = None
 
@@ -184,14 +194,16 @@ def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSetti
 
 def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     """Return the committed auth state for one API app instance."""
+    runtime_paths = _app_runtime_paths(api_app)
     state = cast("_ApiState", api_app.state).auth_state
-    if state is not None:
+    if state is not None and state.runtime_paths == runtime_paths:
         return state
-    settings = _build_auth_settings(_app_runtime_paths(api_app))
+    settings = _build_auth_settings(runtime_paths)
     state = _ApiAuthState(
+        runtime_paths=runtime_paths,
         settings=settings,
         supabase_auth=_init_supabase_auth(
-            _app_runtime_paths(api_app),
+            runtime_paths,
             settings.supabase_url,
             settings.supabase_anon_key,
         ),

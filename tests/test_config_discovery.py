@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.constants as constants_mod
 from mindroom.config.main import Config, load_config
+from mindroom.matrix.identity import managed_space_alias_localpart
 from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
 
@@ -498,6 +500,60 @@ class TestResolveConfigRelativePath:
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert config.get_domain(resolved_runtime_paths) == "example.org"
+
+    def test_config_from_yaml_rejects_reserved_mindroom_user_localpart(self, tmp_path: Path) -> None:
+        """Pure YAML loads must still apply runtime-sensitive reserved-user validation."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            (
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "agents: {}\n"
+                "router:\n"
+                "  model: default\n"
+                "mindroom_user:\n"
+                "  username: mindroom_router\n"
+                "  display_name: MindRoomUser\n"
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValidationError, match="conflicts with router"):
+            Config.from_yaml(config_path)
+
+    def test_config_from_yaml_rejects_root_space_alias_collision(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pure YAML loads must still reject room keys that collide with the managed root space."""
+        monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+        colliding_room_key = managed_space_alias_localpart(runtime_paths)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            (
+                "models:\n"
+                "  default:\n"
+                "    provider: openai\n"
+                "    id: gpt-5.4\n"
+                "agents:\n"
+                "  general:\n"
+                "    display_name: General\n"
+                "    rooms:\n"
+                f"    - {colliding_room_key}\n"
+                "router:\n"
+                "  model: default\n"
+                "matrix_space:\n"
+                "  enabled: true\n"
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValidationError, match="reserved root Space alias"):
+            Config.from_yaml(config_path)
 
     def test_config_from_yaml_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
         """Config loads should not accept duplicated runtime context."""

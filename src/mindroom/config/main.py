@@ -20,6 +20,7 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
 )
@@ -421,7 +422,8 @@ class Config(BaseModel):
         with path.open() as f:
             data = yaml.safe_load(f) or {}
 
-        config = cls.model_validate(_normalized_config_data(data))
+        runtime_paths = resolve_runtime_paths(config_path=path)
+        config = cls.validate_with_runtime(data, runtime_paths)
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config

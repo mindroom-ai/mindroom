@@ -399,6 +399,7 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
+  "pytest-sugar>=1",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",

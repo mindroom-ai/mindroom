@@ -223,6 +223,36 @@ def test_exported_api_app_has_initialized_runtime_paths() -> None:
     assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
 
 
+def test_initialize_api_app_initializes_fresh_app_state(tmp_path: Path) -> None:
+    """A freshly constructed FastAPI app should get the full MindRoom API state."""
+    fresh_app = FastAPI()
+    runtime_paths = _runtime_paths(tmp_path)
+
+    main.initialize_api_app(fresh_app, runtime_paths)
+
+    assert main._app_runtime_paths(fresh_app) == runtime_paths
+    assert main._app_config_data(fresh_app) == {}
+    assert hasattr(main._app_config_lock(fresh_app), "acquire")
+    assert main._app_auth_state(fresh_app).runtime_paths == runtime_paths
+
+
+def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
+    """Replacing app runtime paths should invalidate cached auth settings."""
+    fresh_app = FastAPI()
+    initial_runtime = _runtime_paths(tmp_path, process_env={})
+    refreshed_runtime = _runtime_paths(
+        tmp_path,
+        process_env={"MINDROOM_API_KEY": "updated-key"},
+    )
+
+    main.initialize_api_app(fresh_app, initial_runtime)
+    assert main._app_auth_state(fresh_app).settings.mindroom_api_key is None
+
+    fresh_app.state.runtime_paths = refreshed_runtime
+
+    assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -892,6 +922,7 @@ def test_spotify_connect_uses_pending_oauth_state(
         ),
     )
     main.app.state.auth_state = main._ApiAuthState(
+        runtime_paths=main.app.state.runtime_paths,
         settings=main._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
@@ -1527,6 +1558,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
     main.app.state.auth_state = main._ApiAuthState(
+        runtime_paths=runtime_paths,
         settings=main._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
@@ -1665,6 +1697,7 @@ def _set_platform_auth(
         auth = _FakeAuth()
 
     main.app.state.auth_state = main._ApiAuthState(
+        runtime_paths=main.app.state.runtime_paths,
         settings=main._ApiAuthSettings(
             platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",

@@ -406,14 +406,14 @@ def resolve_config_relative_path(
     return (runtime_paths.config_dir / unresolved).resolve()
 
 
-def _docker_container_enabled() -> bool:
+def _docker_container_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether MindRoom is running from the packaged container image."""
-    return os.getenv("DOCKER_CONTAINER", "").strip().lower() in {"1", "true", "yes", "on"}
+    return runtime_paths.env_flag("DOCKER_CONTAINER")
 
 
 def _use_storage_path_for_workspace_assets(runtime_paths: RuntimePaths) -> bool:
     """Return whether writable workspace assets should live under persistent storage."""
-    if not _docker_container_enabled():
+    if not _docker_container_enabled(runtime_paths):
         return False
     configured_config_path = runtime_paths.process_env.get("MINDROOM_CONFIG_PATH")
     configured_storage_path = runtime_paths.process_env.get("MINDROOM_STORAGE_PATH")
@@ -502,14 +502,6 @@ def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) ->
         process_env=dict(runtime_paths.process_env),
     )
     return updated_runtime_paths.storage_root
-
-
-def env_flag(name: str, *, default: bool = False) -> bool:
-    """Read a boolean environment flag."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # Other constants
