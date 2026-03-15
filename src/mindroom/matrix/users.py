@@ -568,42 +568,6 @@ async def _register_user_without_token(
         return await _register_with_client(client)
 
 
-async def _register_user_for_runtime(
-    *,
-    homeserver: str,
-    username: str,
-    password: str,
-    display_name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Register one Matrix user using the optional explicit runtime context."""
-    await _register_user(
-        homeserver=homeserver,
-        username=username,
-        password=password,
-        display_name=display_name,
-        runtime_paths=runtime_paths,
-    )
-
-
-async def _login_existing_user_for_runtime(
-    *,
-    homeserver: str,
-    user_id: str,
-    password: str,
-    display_name: str,
-    runtime_paths: RuntimePaths,
-) -> nio.LoginResponse | nio.LoginError:
-    """Login one Matrix user using the optional explicit runtime context."""
-    return await _login_existing_user(
-        homeserver=homeserver,
-        user_id=user_id,
-        password=password,
-        display_name=display_name,
-        runtime_paths=runtime_paths,
-    )
-
-
 async def create_agent_user(
     homeserver: str,
     agent_name: str,
@@ -658,7 +622,7 @@ async def create_agent_user(
     user_id = MatrixID.from_username(matrix_username, server_name).full_id
 
     if registration_needed:
-        await _register_user_for_runtime(
+        await _register_user(
             homeserver=homeserver,
             username=matrix_username,
             password=password,
@@ -666,7 +630,7 @@ async def create_agent_user(
             runtime_paths=runtime_paths,
         )
     else:
-        login_response = await _login_existing_user_for_runtime(
+        login_response = await _login_existing_user(
             homeserver=homeserver,
             user_id=user_id,
             password=password,
@@ -679,7 +643,7 @@ async def create_agent_user(
                 agent_name=agent_name,
                 user_id=user_id,
             )
-            await _register_user_for_runtime(
+            await _register_user(
                 homeserver=homeserver,
                 username=matrix_username,
                 password=password,
