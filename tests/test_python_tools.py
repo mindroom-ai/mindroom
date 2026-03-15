@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.tools import python as python_tools_module
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -22,18 +27,29 @@ class _DummyPythonTools:
         self.init_kwargs = kwargs
 
 
-def test_python_tools_preserve_both_install_entrypoints() -> None:
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+
+
+def test_python_tools_preserve_both_install_entrypoints(tmp_path: Path) -> None:
     """MindRoom should keep both installer names available for compatibility."""
-    tool = python_tools_module.python_tools()()
+    tool = python_tools_module.python_tools()(runtime_paths=_runtime_paths(tmp_path))
 
     assert "pip_install_package" in tool.functions
     assert "uv_pip_install_package" in tool.functions
 
 
 @pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
-def test_python_tools_respect_include_tools_for_installers(installer_name: str) -> None:
+def test_python_tools_respect_include_tools_for_installers(installer_name: str, tmp_path: Path) -> None:
     """Toolkit include filters should still expose whichever installer was requested."""
-    tool = python_tools_module.python_tools()(include_tools=[installer_name])
+    tool = python_tools_module.python_tools()(
+        include_tools=[installer_name],
+        runtime_paths=_runtime_paths(tmp_path),
+    )
 
     assert sorted(tool.functions) == [installer_name]
 
@@ -42,6 +58,7 @@ def test_python_tools_respect_include_tools_for_installers(installer_name: str) 
 def test_python_tool_installers_use_shared_install_command_and_warn(
     monkeypatch: pytest.MonkeyPatch,
     installer_name: str,
+    tmp_path: Path,
 ) -> None:
     """Both installer names should reuse the shared command builder and warnings."""
     commands: list[list[str]] = []
@@ -66,7 +83,7 @@ def test_python_tool_installers_use_shared_install_command_and_warn(
     )
 
     tool_cls = python_tools_module.python_tools()
-    result = getattr(tool_cls(), installer_name)("pyfiglet")
+    result = getattr(tool_cls(runtime_paths=_runtime_paths(tmp_path)), installer_name)("pyfiglet")
 
     assert result == "successfully installed package pyfiglet"
     assert commands == [
@@ -80,6 +97,7 @@ def test_python_tool_installers_use_shared_install_command_and_warn(
 def test_python_tool_installers_log_errors(
     monkeypatch: pytest.MonkeyPatch,
     installer_name: str,
+    tmp_path: Path,
 ) -> None:
     """Install failures should be logged and returned for both installer entrypoints."""
     calls: list[str] = []
@@ -102,7 +120,7 @@ def test_python_tool_installers_log_errors(
     )
 
     tool_cls = python_tools_module.python_tools()
-    result = getattr(tool_cls(), installer_name)("pyfiglet")
+    result = getattr(tool_cls(runtime_paths=_runtime_paths(tmp_path)), installer_name)("pyfiglet")
 
     assert result == "Error installing package pyfiglet: boom"
     assert calls == ["warn", "debug:Installing package pyfiglet"]
