@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal
@@ -1669,8 +1668,8 @@ class AgentBot:
             thread_id=thread_id,
             resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
             session_id=session_id,
-            tenant_id=os.getenv("CUSTOMER_ID"),
-            account_id=os.getenv("ACCOUNT_ID"),
+            tenant_id=constants.runtime_env_value("CUSTOMER_ID", self.runtime_paths),
+            account_id=constants.runtime_env_value("ACCOUNT_ID", self.runtime_paths),
         )
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from httpx import Response
 
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -25,6 +26,12 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
     }
     manager.save_credentials("homeassistant", test_creds)
     return manager
+
+
+@pytest.fixture
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Create an explicit runtime context for tool construction tests."""
+    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
 
 @pytest.fixture
@@ -60,10 +67,15 @@ class TestHomeAssistantTools:
         for expected in expected_methods:
             assert expected in method_names
 
-    def test_tool_metadata_passes_worker_scope_to_wrapper(self, mock_credentials_manager: CredentialsManager) -> None:
+    def test_tool_metadata_passes_worker_scope_to_wrapper(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
         """Tool construction must propagate worker routing metadata into the wrapper."""
         tool = get_tool_by_name(
             "homeassistant",
+            runtime_paths,
             credentials_manager=mock_credentials_manager,
             worker_scope="shared",
             routing_agent_name="general",
@@ -73,11 +85,16 @@ class TestHomeAssistantTools:
         assert tool._worker_scope == "shared"
         assert tool._routing_agent_name == "general"
 
-    def test_tool_metadata_rejects_isolating_worker_scope(self, mock_credentials_manager: CredentialsManager) -> None:
+    def test_tool_metadata_rejects_isolating_worker_scope(
+        self,
+        mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
+    ) -> None:
         """Home Assistant tools are intentionally unsupported for isolating worker scopes."""
         with pytest.raises(ValueError, match="worker_scope=shared"):
             get_tool_by_name(
                 "homeassistant",
+                runtime_paths,
                 credentials_manager=mock_credentials_manager,
                 worker_scope="user",
                 routing_agent_name="general",

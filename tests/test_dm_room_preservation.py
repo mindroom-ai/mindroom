@@ -14,11 +14,17 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
-    return bind_runtime_paths(Config(**config_data), tmp_path)
+    return bind_runtime_paths(
+        Config(**config_data),
+        orchestrator_runtime_paths(
+            tmp_path,
+            config_path=tmp_path / "config.yaml",
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -223,7 +229,8 @@ class TestDMPreservationDuringCleanup:
         # Mock joined rooms - mix of configured and DM rooms
         joined_rooms = ["!configured:server", "!dm:server", "!another_dm:server"]
 
-        def mock_get_configured_bots(room_id: str) -> set[str]:
+        def mock_get_configured_bots(room_id: str, runtime_paths: object | None = None) -> set[str]:
+            del runtime_paths
             # Only !configured:server has configured bots
             if room_id == "!configured:server":
                 return {"mindroom_agent"}

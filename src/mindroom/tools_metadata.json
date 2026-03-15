@@ -1259,19 +1259,7 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Path to the configuration file",
-          "label": "Configuration Path",
-          "name": "config_path",
-          "options": null,
-          "placeholder": null,
-          "required": true,
-          "type": "text",
-          "validation": null
-        }
-      ],
+      "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [
         "agno",
@@ -1286,7 +1274,7 @@
       "icon_color": "text-purple-500",
       "name": "config_manager",
       "setup_type": "none",
-      "status": "requires_config"
+      "status": "available"
     },
     {
       "auth_provider": null,

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -15,12 +16,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for voice handler tests."""
-    return bind_runtime_paths(config)
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 async def _handle_voice_message(
@@ -63,7 +64,7 @@ async def _prepare_voice_message(
     thread_id: str | None,
 ) -> voice_handler._PreparedVoiceMessage | None:
     """Prepare one voice message with the explicit runtime bound to the test config."""
-    return await voice_handler._prepare_voice_message(
+    return await voice_handler.prepare_voice_message(
         client,
         storage_path,
         room,
@@ -73,10 +74,6 @@ async def _prepare_voice_message(
         sender_domain=sender_domain,
         thread_id=thread_id,
     )
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestVoiceHandler:
@@ -106,7 +103,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_voice_handler_ignores_when_disabled(self) -> None:
         """Test that voice handler does nothing when disabled."""
-        config = Config()
+        config = _runtime_bound_config(Config())
 
         # Mock objects
         client = AsyncMock()

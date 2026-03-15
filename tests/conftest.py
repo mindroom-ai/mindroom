@@ -1,7 +1,6 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import os
-import tempfile
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,6 +22,7 @@ __all__ = [
     "create_mock_room",
     "orchestrator_runtime_paths",
     "runtime_paths_for",
+    "test_runtime_paths",
 ]
 
 _TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
@@ -80,7 +80,7 @@ TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
 
 
-def _make_test_runtime_paths(tmp_root: Path) -> RuntimePaths:
+def test_runtime_paths(tmp_root: Path) -> RuntimePaths:
     """Create an isolated runtime context for one test config."""
     tmp_root.mkdir(parents=True, exist_ok=True)
     config_path = tmp_root / "config.yaml"
@@ -93,6 +93,9 @@ def _make_test_runtime_paths(tmp_root: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+test_runtime_paths.__test__ = False
 
 
 def orchestrator_runtime_paths(
@@ -111,9 +114,11 @@ def orchestrator_runtime_paths(
     )
 
 
-def bind_runtime_paths(config: Config, runtime_root: Path | None = None) -> Config:
+def bind_runtime_paths(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Config:
     """Return a runtime-bound copy of a test config."""
-    runtime_paths = _make_test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
     bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     bound.__dict__["domain"] = bound.get_domain(runtime_paths)

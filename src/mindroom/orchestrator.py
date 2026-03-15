@@ -950,10 +950,10 @@ async def _run_api_server(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Run the bundled dashboard/API server as an asyncio task."""
-    from mindroom.api.main import app as api_app  # noqa: PLC0415
+    from mindroom.api import main as api_main  # noqa: PLC0415
 
-    api_app.state.runtime_paths = runtime_paths
-    config = uvicorn.Config(api_app, host=host, port=port, log_level=log_level.lower())
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    config = uvicorn.Config(api_main.app, host=host, port=port, log_level=log_level.lower())
     server = uvicorn.Server(config)
     await server.serve()
 

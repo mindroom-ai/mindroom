@@ -97,21 +97,21 @@ def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
     return {key: value for key, value in dotenv_values(env_path).items() if isinstance(value, str)}
 
 
-def _configured_config_path(process_env: dict[str, str]) -> Path | None:
+def _configured_config_path(process_env: Mapping[str, str]) -> Path | None:
     configured_path = process_env.get("MINDROOM_CONFIG_PATH", "").strip()
     if not configured_path:
         return None
     return Path(configured_path).expanduser()
 
 
-def config_search_locations() -> list[Path]:
+def config_search_locations(process_env: Mapping[str, str]) -> list[Path]:
     """Return the ordered list of locations where MindRoom looks for config.
 
     This is the single source of truth for config file discovery.
     """
     seen: set[Path] = set()
     locations: list[Path] = []
-    if configured_path := _configured_config_path(_copy_process_env()):
+    if configured_path := _configured_config_path(process_env):
         resolved = configured_path.resolve()
         seen.add(resolved)
         locations.append(resolved)
@@ -336,11 +336,6 @@ def runtime_ai_cache_enabled(runtime_paths: RuntimePaths) -> bool:
     return runtime_env_flag("MINDROOM_ENABLE_AI_CACHE", default=True, runtime_paths=runtime_paths)
 
 
-def runtime_storage_root(runtime_paths: RuntimePaths) -> Path:
-    """Return the storage root for one explicit runtime context."""
-    return runtime_paths.storage_root
-
-
 def matrix_state_file(runtime_paths: RuntimePaths) -> Path:
     """Return the matrix-state file for one runtime context."""
     return runtime_paths.storage_root / "matrix_state.yaml"
@@ -455,13 +450,13 @@ def resolve_avatar_path(
     return workspace_path
 
 
-def find_config(*, process_env: dict[str, str] | None = None) -> Path:
+def find_config(*, process_env: Mapping[str, str]) -> Path:
     """Find the first existing config file, or fall back to ~/.mindroom/config.yaml.
 
     Returns the original (possibly relative) path, not a resolved one,
     so CLI-facing defaults still display cleanly.
     """
-    if configured_path := _configured_config_path(_copy_process_env(process_env)):
+    if configured_path := _configured_config_path(process_env):
         return configured_path
     for path in _CONFIG_SEARCH_PATHS:
         if path.exists():

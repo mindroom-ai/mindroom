@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,11 +16,11 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _bind_runtime_paths(config: Config) -> Config:
-    return bind_runtime_paths(config)
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def _make_context(config: Config) -> ToolRuntimeContext:

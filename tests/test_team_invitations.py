@@ -18,11 +18,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(config, tmp_path)
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 @pytest.fixture

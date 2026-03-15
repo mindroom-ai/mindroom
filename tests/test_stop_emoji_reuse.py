@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.stop import StopManager
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 @pytest.mark.asyncio
@@ -209,7 +209,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
                 "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
             },
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
 
     bot = AgentBot(

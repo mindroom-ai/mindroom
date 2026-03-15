@@ -176,7 +176,7 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config()
+        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,7 +187,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config()
+        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
         assert result == home_config
 
     def test_prefers_cwd_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,7 +199,7 @@ class TestFindConfig:
         home_config.write_text("agents: {}")
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.find_config()
+        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
         assert result == cwd_config
 
     def test_env_var_overrides_filesystem_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +213,7 @@ class TestFindConfig:
             search_paths=[cwd_config],
         )
 
-        result = constants_mod.find_config()
+        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
         assert result == env_config
 
     def test_env_var_expands_tilde(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,7 +222,7 @@ class TestFindConfig:
 
         _patch_config_globals(monkeypatch, env="~/my_config.yaml")
 
-        result = constants_mod.find_config()
+        result = constants_mod.find_config(process_env=constants_mod.exported_process_env())
         assert result == Path("~/my_config.yaml").expanduser()
         assert "~" not in str(result)
 
@@ -236,7 +236,7 @@ class TestConfigSearchLocations:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
 
-        result = constants_mod.config_search_locations()
+        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
         assert len(result) == 2
         assert result[0] == cwd_config.resolve()
         assert result[1] == home_config.resolve()
@@ -251,7 +251,7 @@ class TestConfigSearchLocations:
             search_paths=[cwd_config],
         )
 
-        result = constants_mod.config_search_locations()
+        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
         assert result[0] == env_config.resolve()
 
     def test_deduplicates_when_env_matches_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,7 +263,7 @@ class TestConfigSearchLocations:
             search_paths=[cwd_config],
         )
 
-        result = constants_mod.config_search_locations()
+        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
         resolved_paths = [str(p) for p in result]
         assert len(resolved_paths) == len(set(resolved_paths))
 
@@ -423,11 +423,10 @@ class TestResolveConfigRelativePath:
         monkeypatch.setenv("OPENAI_API_KEY", "from-shell")
 
         config = Config.from_yaml(config_path)
+        resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert (
-            constants_mod.runtime_env_value("OPENAI_API_KEY", runtime_paths=config.require_runtime_paths())
-            == "from-shell"
-        )
+        assert not hasattr(config, "runtime_paths")
+        assert constants_mod.runtime_env_value("OPENAI_API_KEY", runtime_paths=resolved_runtime_paths) == "from-shell"
 
     def test_config_from_yaml_explicit_path_keeps_exported_storage_override(
         self,
@@ -444,9 +443,10 @@ class TestResolveConfigRelativePath:
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
 
         config = Config.from_yaml(config_path)
+        resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert config.runtime_paths is not None
-        assert config.runtime_paths.storage_root == storage_path.resolve()
+        assert not hasattr(config, "runtime_paths")
+        assert resolved_runtime_paths.storage_root == storage_path.resolve()
 
     def test_explicit_runtime_paths_use_process_env_for_non_path_values(
         self,
@@ -473,7 +473,7 @@ class TestResolveConfigRelativePath:
         assert constants_mod.runtime_mindroom_namespace(runtime_paths=runtime_paths) == "alpha1234"
         assert constants_mod.runtime_matrix_homeserver(runtime_paths=runtime_paths) == "https://hs.example"
         assert constants_mod.runtime_matrix_server_name(runtime_paths=runtime_paths) == "server.example"
-        assert config.domain == "server.example"
+        assert config.get_domain(runtime_paths) == "server.example"
 
     def test_config_domain_uses_sibling_env_matrix_homeserver(
         self,
@@ -495,8 +495,9 @@ class TestResolveConfigRelativePath:
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
 
         config = Config.from_yaml(config_path)
+        resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert config.domain == "example.org"
+        assert config.get_domain(resolved_runtime_paths) == "example.org"
 
     def test_config_from_yaml_rejects_runtime_paths_and_config_path_together(self, tmp_path: Path) -> None:
         """Config loads should not accept duplicated runtime context."""
@@ -509,8 +510,8 @@ class TestResolveConfigRelativePath:
         with pytest.raises(TypeError):
             Config.from_yaml(config_path, **invalid_kwargs)
 
-    def test_config_from_yaml_explicit_path_inherits_activated_runtime_storage(self, tmp_path: Path) -> None:
-        """Explicit path reloads should preserve the activated runtime storage context."""
+    def test_config_from_yaml_explicit_path_ignores_activated_runtime_storage(self, tmp_path: Path) -> None:
+        """Explicit path reloads should stay pure and ignore compatibility-injected runtime storage."""
         config_path = tmp_path / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.write_text(
@@ -521,12 +522,13 @@ class TestResolveConfigRelativePath:
         constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
 
         config = Config.from_yaml(config_path)
+        resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
-        assert config.runtime_paths is not None
-        assert config.runtime_paths.storage_root == storage_path.resolve()
+        assert not hasattr(config, "runtime_paths")
+        assert resolved_runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
-    def test_no_arg_config_load_and_find_config_follow_activated_runtime(self, tmp_path: Path) -> None:
-        """Activated runtime should remain the default compatibility context."""
+    def test_find_config_and_primary_runtime_ignore_set_runtime_paths(self, tmp_path: Path) -> None:
+        """Pure config discovery should ignore compatibility-synced runtime env."""
         config_path = tmp_path / "cfg" / "config.yaml"
         storage_path = tmp_path / "custom-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -536,17 +538,17 @@ class TestResolveConfigRelativePath:
         )
 
         runtime_paths = constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
-        loaded_default = Config.from_yaml()
 
-        assert constants_mod.find_config() == config_path
-        assert loaded_default.require_runtime_paths().config_path == config_path.resolve()
-        assert loaded_default.require_runtime_paths().storage_root == runtime_paths.storage_root
+        assert constants_mod.find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
+        assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
+        assert runtime_paths.config_path == config_path.resolve()
+        assert runtime_paths.storage_root == storage_path.resolve()
 
-    def test_activate_runtime_paths_promotes_runtime_path_env_contract(
+    def test_set_runtime_paths_promotes_runtime_path_env_contract(
         self,
         tmp_path: Path,
     ) -> None:
-        """Activation should return a runtime object that carries the resolved path env values."""
+        """set_runtime_paths should return a primary runtime carrying the path env contract."""
         config_path = tmp_path / "custom" / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -555,8 +557,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        explicit_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
-        activated = constants_mod.activate_runtime_paths(explicit_runtime_paths)
+        activated = constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
 
         assert activated.config_path == config_path.resolve()
         assert activated.storage_root == storage_path.resolve()
@@ -804,6 +805,5 @@ class TestRuntimeGuardrails:
         """Plain Config() should not silently acquire runtime bindings in tests."""
         config = Config()
 
-        assert config.runtime_paths is None
-        with pytest.raises(RuntimeError, match="explicit runtime paths"):
-            config.require_runtime_paths()
+        assert not hasattr(config, "runtime_paths")
+        assert not hasattr(config, "require_runtime_paths")

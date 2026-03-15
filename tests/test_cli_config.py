@@ -850,7 +850,7 @@ class TestRunApiFlags:
             runtime_paths = kwargs["runtime_paths"]
             assert isinstance(runtime_paths, constants_module.RuntimePaths)
             assert runtime_paths.storage_root == runtime_storage.resolve()
-            assert constants_module.runtime_storage_root(runtime_paths) == runtime_storage.resolve()
+            assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
             assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())

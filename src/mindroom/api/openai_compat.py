@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -36,7 +35,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config.main import Config, load_config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag, runtime_env_value
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -298,14 +297,15 @@ def _error_response(
 
 def _authenticate_request(
     authorization: str | None,
+    runtime_paths: RuntimePaths,
 ) -> JSONResponse | None:
     """Authenticate one `/v1` request."""
-    keys_env = os.getenv("OPENAI_COMPAT_API_KEYS", "")
-    allow_unauthenticated = os.getenv("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    keys_env = runtime_env_value("OPENAI_COMPAT_API_KEYS", runtime_paths, default="") or ""
+    allow_unauthenticated = runtime_env_flag(
+        "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED",
+        runtime_paths,
+        default=False,
+    )
     if not keys_env.strip():
         if allow_unauthenticated:
             return None
@@ -503,6 +503,7 @@ def _build_tool_execution_identity(
     *,
     agent_name: str,
     session_id: str,
+    runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity:
     """Build the execution identity used for worker-routed tool calls."""
     return ToolExecutionIdentity(
@@ -513,8 +514,8 @@ def _build_tool_execution_identity(
         thread_id=None,
         resolved_thread_id=None,
         session_id=session_id,
-        tenant_id=os.getenv("CUSTOMER_ID"),
-        account_id=os.getenv("ACCOUNT_ID"),
+        tenant_id=runtime_env_value("CUSTOMER_ID", runtime_paths),
+        account_id=runtime_env_value("ACCOUNT_ID", runtime_paths),
     )
 
 
@@ -614,7 +615,8 @@ async def list_models(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    auth_error = _authenticate_request(authorization)
+    _, runtime_paths = _load_config(request)
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
@@ -676,7 +678,8 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    auth_error = _authenticate_request(authorization)
+    runtime_paths = request.app.state.runtime_paths
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
@@ -721,6 +724,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            runtime_paths=runtime_paths,
         )
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
@@ -757,6 +761,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            runtime_paths=runtime_paths,
         )
         if req.stream:
             response = await _stream_completion(

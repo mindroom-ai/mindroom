@@ -18,7 +18,7 @@ from mindroom.teams import (
     _TeamModeDecision,
     decide_team_formation,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 async def _select_team_mode_for_test(message: str, agent_names: list[str], config: Config) -> TeamMode:
@@ -28,10 +28,13 @@ async def _select_team_mode_for_test(message: str, agent_names: list[str], confi
 async def decide_team_formation_for_test(**kwargs: object) -> TeamFormationDecision:
     """Run team-formation logic with the test config's bound runtime context."""
     config = kwargs.get("config")
-    if not isinstance(config, Config):
-        msg = "config is required"
-        raise TypeError(msg)
-    kwargs["runtime_paths"] = runtime_paths_for(config)
+    runtime_paths = kwargs.get("runtime_paths")
+    if runtime_paths is None:
+        if not isinstance(config, Config):
+            msg = "config or runtime_paths is required"
+            raise TypeError(msg)
+        runtime_paths = runtime_paths_for(config)
+    kwargs["runtime_paths"] = runtime_paths
     return await decide_team_formation(**kwargs)
 
 
@@ -81,7 +84,7 @@ def mock_config(tmp_path):
                 ),
             },
         ),
-        tmp_path,
+        test_runtime_paths(tmp_path),
     )
     return config
 
@@ -223,6 +226,7 @@ class TestShouldFormTeam:
                 "Send email then call",
                 ["email", "phone"],
                 mock_config,
+                runtime_paths_for(mock_config),
             )
 
     @pytest.mark.asyncio
@@ -274,6 +278,7 @@ class TestShouldFormTeam:
             room=MagicMock(spec=nio.MatrixRoom),
             message="Send email then call",
             config=None,  # No config provided
+            runtime_paths=runtime_paths_for(mock_config),
             use_ai_decision=True,
         )
 
@@ -293,6 +298,7 @@ class TestShouldFormTeam:
             room=MagicMock(spec=nio.MatrixRoom),
             message="Send an email",
             config=None,
+            runtime_paths=runtime_paths_for(mock_config),
             use_ai_decision=True,
         )
 
@@ -418,6 +424,7 @@ class TestIntegrationScenarios:
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
+            runtime_paths=runtime_paths_for(mock_config),
         )
 
         # Should still work with hardcoded logic

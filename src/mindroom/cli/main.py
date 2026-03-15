@@ -19,6 +19,7 @@ from mindroom import __version__, constants
 from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
+    exported_process_env,
 )
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -379,7 +380,7 @@ def _print_missing_config_error() -> None:
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
     console.print("Config search locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(), 1):
+    for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
         status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({status})")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")

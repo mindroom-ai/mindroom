@@ -18,22 +18,22 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.routing import _AgentSuggestion
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
-    return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
 
 
-def suggest_agent_for_message(
+async def suggest_agent_for_message(
     message: str,
     agents: list[MatrixID],
     config: Config,
     thread_history: list[dict[str, str]] | None = None,
 ) -> str | None:
     """Run routing with the test config's bound runtime context."""
-    return mindroom.routing.suggest_agent_for_message(
+    return await mindroom.routing.suggest_agent_for_message(
         message,
         agents,
         config,
@@ -76,6 +76,30 @@ def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
     assert isinstance(config, Config)
     kwargs["runtime_paths"] = runtime_paths_for(config)
     return AgentBot(*args, **kwargs)
+
+
+def _agent_description_config() -> Config:
+    """Build a deterministic config for agent description tests."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Solve mathematical problems",
+                    tools=["calculator"],
+                    instructions=["Use the calculator tools"],
+                    rooms=[],
+                ),
+                "general": AgentConfig(
+                    display_name="General",
+                    role="general-purpose assistant",
+                    instructions=["Always provide a clear and helpful answer."],
+                    rooms=[],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
 
 
 class TestAIRouting:
@@ -330,7 +354,7 @@ class TestThreadUtils:
         assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
 
         # Regular users should still be rejected
-        assert extract_agent_name(self.config.get_mindroom_user_id(), self.config) is None
+        assert extract_agent_name(self.config.get_mindroom_user_id(runtime_paths_for(self.config)), self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
 
     def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
@@ -565,7 +589,7 @@ class TestAgentDescription:
 
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         description = describe_agent("calculator", config)
 
         assert "calculator" in description
@@ -575,7 +599,7 @@ class TestAgentDescription:
 
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = []
         description = describe_agent("general", config)
 
@@ -586,7 +610,7 @@ class TestAgentDescription:
 
     def test_describe_agent_includes_default_tools(self) -> None:
         """Agent descriptions include defaults.tools when agent has no local tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
 
@@ -596,7 +620,7 @@ class TestAgentDescription:
 
     def test_describe_agent_can_opt_out_of_default_tools(self) -> None:
         """Agent descriptions omit defaults.tools when include_default_tools is false."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
@@ -607,7 +631,7 @@ class TestAgentDescription:
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         description = describe_agent("nonexistent", config)
 
         assert description == "nonexistent: Unknown agent or team"

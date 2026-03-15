@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.constants import RuntimePaths, runtime_env_value
 from mindroom.credentials import (
     CredentialsManager,
     get_credentials_manager,
@@ -27,9 +27,6 @@ from mindroom.tool_system.worker_routing import (
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )
-
-if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -160,8 +157,12 @@ def _build_dashboard_execution_identity(request: Request, agent_name: str) -> To
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
-    tenant_id = os.getenv("CUSTOMER_ID")
-    account_id = os.getenv("ACCOUNT_ID")
+    runtime_paths = request.app.state.runtime_paths
+    if not isinstance(runtime_paths, RuntimePaths):
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg)
+    tenant_id = runtime_env_value("CUSTOMER_ID", runtime_paths)
+    account_id = runtime_env_value("ACCOUNT_ID", runtime_paths)
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,

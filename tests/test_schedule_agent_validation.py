@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -12,12 +14,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, schedule_task
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for scheduling tests."""
-    return bind_runtime_paths(config)
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.MatrixRoom:
@@ -80,6 +82,7 @@ async def test_schedule_validates_agents_in_room() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -139,6 +142,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -209,6 +213,7 @@ async def test_schedule_allows_agents_in_room() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -275,6 +280,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes research and calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -329,6 +335,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes remind me about deployment",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -376,6 +383,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask imaginary agent",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 

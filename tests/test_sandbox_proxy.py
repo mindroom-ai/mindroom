@@ -11,6 +11,7 @@ import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers import runtime as workers_runtime_module
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
+_TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 class _FakeResponse:
@@ -81,7 +83,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         _recording_client_class(captured=captured),
     )
 
-    tool = get_tool_by_name("calculator")
+    tool = get_tool_by_name("calculator", _TEST_RUNTIME_PATHS)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -110,7 +112,7 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", True)
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
-    tool = get_tool_by_name("calculator")
+    tool = get_tool_by_name("calculator", _TEST_RUNTIME_PATHS)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -140,7 +142,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         ),
     )
 
-    tool = get_tool_by_name("calculator", credentials_manager=fake_credentials)
+    tool = get_tool_by_name("calculator", _TEST_RUNTIME_PATHS, credentials_manager=fake_credentials)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -160,13 +162,13 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
 def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
     """Tool init overrides should allow only the explicit safe whitelist."""
     with pytest.raises(ToolInitOverrideError, match="api_key"):
-        get_tool_by_name("openai", tool_init_overrides={"api_key": "sk-test"})
+        get_tool_by_name("openai", _TEST_RUNTIME_PATHS, tool_init_overrides={"api_key": "sk-test"})
 
 
 def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
     """base_dir overrides should be validated before toolkit construction."""
     with pytest.raises(ToolInitOverrideError, match="base_dir"):
-        get_tool_by_name("coding", tool_init_overrides={"base_dir": {"bad": "value"}})
+        get_tool_by_name("coding", _TEST_RUNTIME_PATHS, tool_init_overrides={"base_dir": {"bad": "value"}})
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +194,7 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy_module, "_SANDBOX_RUNNER_MODE", False)
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name("calculator")
+    tool = get_tool_by_name("calculator", _TEST_RUNTIME_PATHS)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
@@ -257,6 +259,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
 
     tool = get_tool_by_name(
         "calculator",
+        _TEST_RUNTIME_PATHS,
         credentials_manager=fake_credentials,
         worker_tools_override=["calculator"],
         worker_scope="user",
@@ -309,6 +312,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
 
     tool = get_tool_by_name(
         "calculator",
+        _TEST_RUNTIME_PATHS,
         worker_tools_override=["calculator"],
         worker_scope="user_agent",
         routing_agent_name="code",
@@ -531,7 +535,13 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
     monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_IMAGE", raising=False)
     monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", raising=False)
 
-    tool = get_tool_by_name("shell", worker_tools_override=["shell"], worker_scope=None, routing_agent_name="code")
+    tool = get_tool_by_name(
+        "shell",
+        _TEST_RUNTIME_PATHS,
+        worker_tools_override=["shell"],
+        worker_scope=None,
+        routing_agent_name="code",
+    )
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -637,6 +647,7 @@ class TestWorkerToolsOverride:
 
         tool = get_tool_by_name(
             "homeassistant",
+            _TEST_RUNTIME_PATHS,
             credentials_manager=fake_credentials,
             worker_tools_override=["homeassistant"],
             worker_scope="shared",
@@ -663,7 +674,7 @@ class TestWorkerToolsOverride:
         )
 
         # Override says sandbox calculator
-        tool = get_tool_by_name("calculator", worker_tools_override=["calculator"])
+        tool = get_tool_by_name("calculator", _TEST_RUNTIME_PATHS, worker_tools_override=["calculator"])
         entrypoint = tool.functions["add"].entrypoint
         assert entrypoint is not None
         result = entrypoint(1, 2)
@@ -686,6 +697,7 @@ class TestWorkerToolsOverride:
 
         tool = get_tool_by_name(
             "coding",
+            _TEST_RUNTIME_PATHS,
             tool_init_overrides={"base_dir": "/workspace/demo"},
             worker_tools_override=["coding"],
         )
@@ -717,6 +729,7 @@ class TestWorkerToolsOverride:
         )
         tool = get_tool_by_name(
             "coding",
+            _TEST_RUNTIME_PATHS,
             tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
             runtime_overrides={"shared_storage_root": Path("/srv/mindroom")},
             worker_tools_override=["coding"],
@@ -762,6 +775,7 @@ class TestWorkerToolsOverride:
 
         tool = get_tool_by_name(
             "coding",
+            _TEST_RUNTIME_PATHS,
             tool_init_overrides={"base_dir": "/mindroom_data/agents/general/workspace/mind_data"},
             worker_tools_override=["coding"],
         )
@@ -797,6 +811,7 @@ class TestWorkerToolsOverride:
 
         tool = get_tool_by_name(
             "coding",
+            _TEST_RUNTIME_PATHS,
             tool_init_overrides={"base_dir": str(unrelated_base_dir)},
             worker_tools_override=["coding"],
             worker_scope="shared",

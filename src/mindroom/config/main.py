@@ -20,8 +20,6 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    resolve_primary_runtime_paths,
-    resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
 )
@@ -101,17 +99,6 @@ def _resolve_agent_thread_mode(
             return overrides[override_key]
 
     return default_mode
-
-
-def _resolve_runtime_paths_for_config_load(
-    config_path: Path | None,
-) -> RuntimePaths:
-    """Resolve the runtime context used to load one config file."""
-    if config_path is None:
-        return resolve_primary_runtime_paths()
-
-    resolved_config_path = Path(config_path).expanduser().resolve()
-    return resolve_runtime_paths(config_path=resolved_config_path)
 
 
 def _normalize_optional_config_sections(data: dict[str, object]) -> None:
@@ -423,12 +410,10 @@ class Config(BaseModel):
     @classmethod
     def from_yaml(
         cls,
-        config_path: Path | None = None,
+        config_path: Path,
     ) -> Config:
-        """Create a Config instance from YAML data with default runtime validation."""
-        resolved_runtime_paths = _resolve_runtime_paths_for_config_load(config_path)
-        path = resolved_runtime_paths.config_path
-
+        """Create a pure Config instance from one explicit YAML file path."""
+        path = Path(config_path).expanduser().resolve()
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
             raise FileNotFoundError(msg)
@@ -436,7 +421,7 @@ class Config(BaseModel):
         with path.open() as f:
             data = yaml.safe_load(f) or {}
 
-        config = cls.validate_with_runtime(data, resolved_runtime_paths)
+        config = cls.model_validate(_normalized_config_data(data))
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config

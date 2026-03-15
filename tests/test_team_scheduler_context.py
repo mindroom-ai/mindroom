@@ -15,7 +15,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -37,7 +37,7 @@ def _make_bot(tmp_path: Path) -> AgentBot:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         ),
-        tmp_path,
+        test_runtime_paths(tmp_path),
     )
     agent_user = AgentMatrixUser(
         agent_name="general",

@@ -118,6 +118,7 @@ def _add_worker_context_init_kwargs(
     tool_class: type[Toolkit],
     *,
     init_kwargs: dict[str, object],
+    runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     runtime_overrides: dict[str, object] | None,
     worker_scope: WorkerScope | None,
@@ -125,6 +126,8 @@ def _add_worker_context_init_kwargs(
 ) -> None:
     """Inject worker-routing constructor args when a toolkit supports them."""
     init_signature = inspect.signature(tool_class.__init__)
+    if "runtime_paths" in init_signature.parameters:
+        init_kwargs["runtime_paths"] = runtime_paths
     if credentials_manager is not None and "credentials_manager" in init_signature.parameters:
         init_kwargs["credentials_manager"] = credentials_manager
     if runtime_overrides:
@@ -217,6 +220,7 @@ def _build_tool_instance(
     _add_worker_context_init_kwargs(
         tool_class,
         init_kwargs=init_kwargs,
+        runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
         runtime_overrides=runtime_overrides,
         worker_scope=worker_scope,

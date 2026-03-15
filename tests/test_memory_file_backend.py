@@ -9,7 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 import mindroom.memory.functions as memory_functions
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -174,6 +176,32 @@ async def store_conversation_memory(
     )
 
 
+def _test_config(storage_path: Path) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "calculator": AgentConfig(display_name="Calculator"),
+                "helper": AgentConfig(display_name="Helper"),
+                "test_agent": AgentConfig(display_name="Test Agent"),
+                "a_b": AgentConfig(display_name="A B"),
+                "c": AgentConfig(display_name="C"),
+                "a": AgentConfig(display_name="A"),
+                "b_c": AgentConfig(display_name="B C"),
+            },
+        ),
+        runtime_paths,
+    )
+
+
 @pytest.fixture
 def storage_path(tmp_path: Path) -> Path:
     return tmp_path
@@ -181,7 +209,7 @@ def storage_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def config(storage_path: Path) -> Config:
-    return bind_runtime_paths(Config.from_yaml(), storage_path)
+    return _test_config(storage_path)
 
 
 @pytest.mark.asyncio

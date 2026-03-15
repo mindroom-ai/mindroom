@@ -6,7 +6,8 @@ are properly tracked to prevent re-processing after restart.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,10 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture
@@ -38,6 +36,7 @@ def mock_router_agent() -> AgentMatrixUser:
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config with some agents."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     return bind_runtime_paths(
         Config(
             agents={
@@ -48,6 +47,7 @@ def mock_config() -> Config:
             room_models={},
             models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
         ),
+        runtime_paths,
     )
 
 
@@ -73,6 +73,7 @@ class TestResponseTrackingRegression:
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(mock_config),
             enable_streaming=False,
             rooms=[test_room_id],
         )
@@ -143,6 +144,7 @@ class TestResponseTrackingRegression:
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(mock_config),
             enable_streaming=False,
             rooms=[test_room_id],
         )
@@ -222,6 +224,7 @@ class TestResponseTrackingRegression:
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(mock_config),
             enable_streaming=False,
             rooms=[test_room_id],
         )

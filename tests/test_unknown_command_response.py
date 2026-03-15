@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 @pytest.mark.asyncio
@@ -31,7 +31,7 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
             },
             router=RouterConfig(model="default"),
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
 
     # Create router agent user
@@ -129,7 +129,7 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
             },
             router=RouterConfig(model="default"),
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
 
     # Create router agent user
@@ -249,7 +249,7 @@ async def test_unknown_command_with_reply(tmp_path: Path) -> None:
             },
             router=RouterConfig(model="default"),
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
 
     # Create router agent user

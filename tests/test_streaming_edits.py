@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,13 +27,14 @@ def setup_test_bot(
     config: Config | None = None,
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
+    runtime_paths = test_runtime_paths(storage_path)
     if config is None:
-        config = bind_runtime_paths(Config(router=RouterConfig(model="default")), storage_path)
+        config = bind_runtime_paths(Config(router=RouterConfig(model="default")), runtime_paths)
     else:
         try:
             runtime_paths_for(config)
         except KeyError:
-            config = bind_runtime_paths(config, storage_path)
+            config = bind_runtime_paths(config, runtime_paths)
 
     bot = AgentBot(
         agent,

@@ -1,2 +1,110 @@
+agents:
+  coach:
+    context_files: []
+    delegate_to: []
+    display_name: Coach
+    include_default_tools: true
+    instructions: []
+    knowledge_bases: []
+    model: default
+    role: Personal coaching
+    room_thread_modes: {}
+    rooms:
+    - lobby
+    - personal
+    skills: []
+    thread_mode: thread
+    tools: []
+  general:
+    context_files: []
+    delegate_to: []
+    display_name: GeneralAgent
+    include_default_tools: true
+    instructions: []
+    knowledge_bases: []
+    model: default
+    role: General assistant
+    room_thread_modes: {}
+    rooms:
+    - lobby
+    skills: []
+    thread_mode: thread
+    tools: []
+authorization:
+  agent_reply_permissions: {}
+  aliases: {}
+  default_room_access: false
+  global_users: []
+  room_permissions: {}
+bot_accounts: []
+cultures: {}
+defaults:
+  allow_self_config: false
+  compress_tool_results: true
+  enable_session_summaries: false
+  enable_streaming: true
+  learning: true
+  learning_mode: always
+  markdown: true
+  max_preload_chars: 50000
+  show_stop_button: true
+  show_tool_calls: true
+  tools:
+  - scheduler
+knowledge_bases: {}
+matrix_room_access:
+  invite_only_rooms: []
+  mode: single_user_private
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  reconcile_existing_rooms: false
+matrix_space:
+  enabled: true
+  name: MindRoom
+memory:
+  auto_flush:
+    batch:
+      max_sessions_per_agent_per_cycle: 3
+      max_sessions_per_cycle: 10
+    enabled: false
+    extractor:
+      include_memory_context:
+        memory_snippets: 5
+        snippet_max_chars: 400
+      max_chars_per_flush: 12000
+      max_extraction_seconds: 30
+      max_messages_per_flush: 20
+      no_reply_token: NO_REPLY
+    flush_interval_seconds: 1800
+    idle_seconds: 120
+    max_cross_session_reprioritize: 5
+    max_dirty_age_seconds: 600
+    max_retry_cooldown_seconds: 300
+    retry_cooldown_seconds: 30
+    stale_ttl_seconds: 86400
+  backend: mem0
+  embedder:
+    config:
+      model: text-embedding-3-small
+    provider: openai
+  file:
+    max_entrypoint_lines: 200
+  team_reads_member_memory: false
+models:
+  default:
+    id: test-model
+    provider: test
+plugins: []
+room_models: {}
 router:
   model: default
+teams: {}
+timezone: UTC
+voice:
+  enabled: false
+  intelligence:
+    model: default
+  stt:
+    model: whisper-1
+    provider: openai
+  visible_router_echo: false

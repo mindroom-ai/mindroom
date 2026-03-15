@@ -363,8 +363,8 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     """Skill command dispatch should reuse the same workspace override rules as create_agent()."""
     captured_calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
-        captured_calls.append((tool_name, dict(kwargs)))
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
@@ -394,8 +394,8 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
     """Skill command dispatch should respect the bot runtime storage path."""
     captured_calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
-        captured_calls.append((tool_name, dict(kwargs)))
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)

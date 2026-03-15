@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,11 +27,10 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -59,6 +60,7 @@ class TestStreamingBehavior:
 
     def setup_method(self) -> None:
         """Set up test config."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         self.config = bind_runtime_paths(
             Config(
                 agents={
@@ -70,6 +72,7 @@ class TestStreamingBehavior:
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 router=RouterConfig(model="default"),
             ),
+            runtime_paths,
         )
 
     @pytest.mark.asyncio

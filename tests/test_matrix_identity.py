@@ -17,14 +17,14 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(config, tmp_path)
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 class TestMatrixID:

@@ -20,7 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -34,17 +34,18 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 
 def _make_config(storage_path: Path) -> Config:
-    config = Config(
-        agents={
-            "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
-            "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
-        },
-        teams={},
-        models={"default": ModelConfig(provider="test", id="test-model")},
-        authorization=AuthorizationConfig(default_room_access=True),
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        _runtime_paths(storage_path),
     )
-    config._runtime_paths = _runtime_paths(storage_path)
-    return config
 
 
 @pytest.fixture
@@ -93,7 +94,7 @@ async def test_agent_processes_direct_mention(
 
         config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         await bot.start()
 
         # Create a message mentioning the calculator agent
@@ -148,7 +149,7 @@ async def test_agent_processes_direct_mention(
                 assert ai_kwargs["prompt"] == f"@mindroom_calculator:{config.domain} What's 15% of 200?"
                 assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
                 assert ai_kwargs["thread_history"] == []
-                assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+                assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
                 assert ai_kwargs["config"] == config
                 assert ai_kwargs["room_id"] == test_room_id
                 assert ai_kwargs["knowledge"] is None
@@ -180,7 +181,7 @@ async def test_agent_ignores_other_agents(
 
         config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         await bot.start()
 
         # Create a message from another agent
@@ -242,7 +243,14 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
+        bot = AgentBot(
+            mock_calculator_agent,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=[test_room_id],
+            enable_streaming=False,
+        )
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -429,7 +437,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"] == mock_fetch.return_value
-            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
             assert ai_kwargs["room_id"] == test_room_id
             assert ai_kwargs["knowledge"] is None
@@ -527,7 +535,7 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[initial_room])
         await bot.start()
 
         # Create invite event for a different room

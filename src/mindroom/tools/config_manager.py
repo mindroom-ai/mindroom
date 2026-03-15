@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.metadata import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -21,19 +20,11 @@ if TYPE_CHECKING:
     display_name="Config Manager",
     description="Build and manage MindRoom agents with expert knowledge of the system",
     category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.REQUIRES_CONFIG,
+    status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="Settings",
     icon_color="text-purple-500",
-    config_fields=[
-        ConfigField(
-            name="config_path",
-            label="Configuration Path",
-            type="text",
-            required=True,
-            description="Path to the configuration file",
-        ),
-    ],
+    config_fields=[],
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
 )

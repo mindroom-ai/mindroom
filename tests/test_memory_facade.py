@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import mindroom.memory.functions as memory_functions
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._prompting import _format_memories_as_context
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -154,6 +156,31 @@ async def store_conversation_memory(
     )
 
 
+def _test_config(storage_path: Path) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "agent": AgentConfig(display_name="Agent"),
+                "calculator": AgentConfig(display_name="Calculator"),
+                "data_analyst": AgentConfig(display_name="Data Analyst"),
+                "finance": AgentConfig(display_name="Finance"),
+                "general": AgentConfig(display_name="General"),
+                "helper": AgentConfig(display_name="Helper"),
+                "test_agent": AgentConfig(display_name="Test Agent"),
+            },
+        ),
+        runtime_paths,
+    )
+
+
 class TestMemoryFacade:
     @pytest.fixture
     def mock_memory(self) -> AsyncMock:
@@ -168,7 +195,7 @@ class TestMemoryFacade:
 
     @pytest.fixture
     def config(self, storage_path: Path) -> Config:
-        return bind_runtime_paths(Config.from_yaml(), storage_path)
+        return _test_config(storage_path)
 
     @pytest.mark.asyncio
     async def test_memory_instance_creation(self, mock_memory: AsyncMock, storage_path: Path, config: Config) -> None:

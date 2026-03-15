@@ -26,6 +26,7 @@ from mindroom.constants import (
     RuntimePaths,
     config_search_locations,
     env_key_for_provider,
+    exported_process_env,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     sync_runtime_env_to_process,
@@ -206,7 +207,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return resolve_primary_runtime_paths().config_path.resolve()
+    return resolve_primary_runtime_paths(process_env=exported_process_env()).config_path.resolve()
 
 
 def _activate_cli_runtime(
@@ -219,12 +220,14 @@ def _activate_cli_runtime(
         runtime_paths = resolve_primary_runtime_paths(
             config_path=path.expanduser().resolve(),
             storage_path=storage_path,
+            process_env=exported_process_env(),
         )
         sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
         return runtime_paths
 
     runtime_paths = resolve_primary_runtime_paths(
         storage_path=storage_path,
+        process_env=exported_process_env(),
     )
     sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
     return runtime_paths
@@ -375,7 +378,7 @@ def config_show(
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         console.print("\nSearch locations (first match wins):")
-        for i, loc in enumerate(config_search_locations(), 1):
+        for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
             status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
             console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
@@ -484,7 +487,7 @@ def config_path_cmd(
     console.print(f"Resolved config path: {resolved} ({status})")
 
     console.print("\nSearch locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(), 1):
+    for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
         loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({loc_status})")
 

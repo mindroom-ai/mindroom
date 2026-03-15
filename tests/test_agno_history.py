@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,9 +58,9 @@ def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> Runt
     )
 
 
-def _runtime_bound_config(config: Config) -> Config:
+def _runtime_bound_config(config: Config, tmp_path: object | None = None) -> Config:
     """Return a runtime-bound config for history tests."""
-    return bind_runtime_paths(config)
+    return bind_runtime_paths(config, _runtime_paths(tmp_path or tempfile.mkdtemp()))
 
 
 def _load_default_config() -> Config:

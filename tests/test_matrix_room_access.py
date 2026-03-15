@@ -35,7 +35,10 @@ def _config_with_runtime_paths(
     **config_data: object,
 ) -> Config:
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
-    return bind_runtime_paths(Config.model_validate(config_data, context={"runtime_paths": runtime_paths}), tmp_path)
+    return bind_runtime_paths(
+        Config.model_validate(config_data, context={"runtime_paths": runtime_paths}),
+        runtime_paths,
+    )
 
 
 def test_matrix_room_access_defaults() -> None:
@@ -224,6 +227,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#lobby:example.com",
         context="new_room_creation",
     )
@@ -409,12 +413,20 @@ async def test_existing_room_reconciliation_runs_after_later_join(
     )
 
     assert second_room_id == "!lobby:example.com"
-    ensure_room_has_topic.assert_awaited_once_with(mock_client, "!lobby:example.com", "lobby", "Lobby", config)
+    ensure_room_has_topic.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "lobby",
+        "Lobby",
+        config,
+        runtime_paths_for(config),
+    )
     configure_access.assert_awaited_once_with(
         client=mock_client,
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#lobby:example.com",
         context="existing_room_reconciliation",
     )
@@ -460,7 +472,7 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     mock_client = AsyncMock()
 
     monkeypatch.setattr(Config, "get_all_configured_rooms", lambda _self: ["lobby", "ops"])
-    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config: [])
+    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config, _runtime_paths: [])
 
     async def _ensure_room_exists(*, room_key: str, **_kwargs: object) -> str:
         if room_key == "lobby":

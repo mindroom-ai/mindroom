@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import html
 import importlib
-import os
 import secrets
 import threading
 from contextlib import asynccontextmanager, suppress
@@ -12,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -74,9 +73,9 @@ class _ApiAuthState:
     supabase_auth: _SupabaseClientProtocol | None
 
 
-def _worker_cleanup_interval_seconds() -> float:
+def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
     """Return the configured background idle-worker cleanup interval."""
-    raw = os.getenv(_WORKER_CLEANUP_INTERVAL_ENV, "0").strip()
+    raw = (runtime_paths.env_value(_WORKER_CLEANUP_INTERVAL_ENV, default="0") or "0").strip()
     try:
         interval = float(raw)
     except ValueError:
@@ -109,7 +108,7 @@ def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
 
 async def _worker_cleanup_loop(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
     """Periodically clean idle workers in the primary runtime."""
-    interval_seconds = _worker_cleanup_interval_seconds()
+    interval_seconds = _worker_cleanup_interval_seconds(runtime_paths)
     if interval_seconds <= 0:
         return
 
@@ -131,11 +130,22 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
 
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
     """Return the committed runtime paths for one API app instance."""
-    runtime_paths = api_app.state.__dict__.get("runtime_paths")
+    state = cast("_ApiState", api_app.state)
+    try:
+        runtime_paths = state.runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
     if not isinstance(runtime_paths, constants.RuntimePaths):
         msg = "API runtime paths are not initialized"
         raise TypeError(msg)
     return runtime_paths
+
+
+def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
+    """Attach one explicit runtime context to an API app instance."""
+    api_app.state.runtime_paths = runtime_paths
+    api_app.state.auth_state = None
 
 
 def api_config_data(request: Request) -> dict[str, Any]:
@@ -158,14 +168,14 @@ def _app_config_lock(api_app: FastAPI) -> threading.Lock:
     return cast("_ApiState", api_app.state).config_lock
 
 
-def _build_auth_settings_from_env() -> _ApiAuthSettings:
-    """Read dashboard auth settings from the real process environment."""
+def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
+    """Read dashboard auth settings from one explicit runtime context."""
     return _ApiAuthSettings(
-        platform_login_url=os.getenv("MINDROOM_PLATFORM_LOGIN_URL"),
-        supabase_url=os.getenv("SUPABASE_URL"),
-        supabase_anon_key=os.getenv("SUPABASE_ANON_KEY"),
-        account_id=os.getenv("ACCOUNT_ID"),
-        mindroom_api_key=os.getenv("MINDROOM_API_KEY"),
+        platform_login_url=runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL"),
+        supabase_url=runtime_paths.env_value("SUPABASE_URL"),
+        supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
     )
 
 
@@ -174,7 +184,7 @@ def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     state = cast("_ApiState", api_app.state).auth_state
     if state is not None:
         return state
-    settings = _build_auth_settings_from_env()
+    settings = _build_auth_settings(_app_runtime_paths(api_app))
     state = _ApiAuthState(
         settings=settings,
         supabase_auth=_init_supabase_auth(settings.supabase_url, settings.supabase_anon_key),
@@ -200,8 +210,6 @@ async def _watch_config(
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
-    if not hasattr(_app.state, "runtime_paths"):
-        _app.state.runtime_paths = constants.resolve_primary_runtime_paths(process_env=constants.exported_process_env())
     runtime_paths = _app_runtime_paths(_app)
     constants.sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
     constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
@@ -263,7 +271,7 @@ def load_runtime_config(
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
     """Resolve a request path to a static asset or SPA fallback."""
-    normalized_path = request_path.strip("/")
+    normalized_path = unquote(request_path).strip("/")
     index_path = frontend_dir / "index.html"
     if not normalized_path:
         return index_path if index_path.is_file() else None

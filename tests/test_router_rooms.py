@@ -19,7 +19,13 @@ from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runti
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(config, tmp_path)
+    return bind_runtime_paths(
+        config,
+        orchestrator_runtime_paths(
+            tmp_path,
+            config_path=tmp_path / "config.yaml",
+        ),
+    )
 
 
 @pytest.fixture
@@ -151,7 +157,12 @@ async def test_router_joins_rooms_on_start(
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

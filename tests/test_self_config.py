@@ -348,83 +348,87 @@ class TestAgentCreationInjection:
     @patch("mindroom.agents.SqliteDb")
     def test_allow_self_config_true_injects_tool(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent with allow_self_config=True should have self_config tool."""
-        config = Config.from_yaml()
-        # Pick an existing agent and enable self_config
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = True
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=True)},
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_allow_self_config_false_no_tool(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent with allow_self_config=False should not have self_config tool."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = False
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=False)},
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_defaults_fallback_true(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """When agent omits allow_self_config, defaults.allow_self_config=True should inject."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = None  # not set
-        config.defaults.allow_self_config = True
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write")},
+            defaults=DefaultsConfig(allow_self_config=True),
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_defaults_fallback_false(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """When agent omits allow_self_config, defaults.allow_self_config=False should not inject."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = None
-        config.defaults.allow_self_config = False
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write")},
+            defaults=DefaultsConfig(allow_self_config=False),
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_agent_override_beats_default(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Agent-level allow_self_config should override default."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.defaults.allow_self_config = True
-        config.agents[agent_name].allow_self_config = False
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=False)},
+            defaults=DefaultsConfig(allow_self_config=True),
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" not in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_manual_self_config_tool_loads(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Explicitly configured self_config tool should be loadable."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = False
-        config.agents[agent_name].tools = ["self_config"]
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={
+                "writer": AgentConfig(
+                    display_name="Writer",
+                    role="Write",
+                    allow_self_config=False,
+                    tools=["self_config"],
+                ),
+            },
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert "self_config" in tool_names
 
     @patch("mindroom.agents.SqliteDb")
     def test_self_config_not_duplicated_when_manual_and_auto(self, _mock_storage: MagicMock) -> None:  # noqa: PT019
         """Manual self_config plus allow_self_config should still produce one tool instance."""
-        config = Config.from_yaml()
-        agent_name = next(iter(config.agents))
-        config.agents[agent_name].allow_self_config = True
-        config.agents[agent_name].tools = ["self_config"]
-
-        agent = _create_agent_for_test(agent_name, config=config)
+        config, _ = _make_config(
+            agents={
+                "writer": AgentConfig(
+                    display_name="Writer",
+                    role="Write",
+                    allow_self_config=True,
+                    tools=["self_config"],
+                ),
+            },
+        )
+        agent = _create_agent_for_test("writer", config=config)
         tool_names = [t.name for t in agent.tools]
         assert tool_names.count("self_config") == 1
 

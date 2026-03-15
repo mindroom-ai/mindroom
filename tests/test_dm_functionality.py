@@ -17,18 +17,24 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
-    return bind_runtime_paths(config, path)
+def _bind_runtime_paths(config: Config, path: Path) -> Config:
+    return bind_runtime_paths(config, test_runtime_paths(path))
 
 
-def _config(**kwargs: object) -> Config:
-    return _bind_runtime_paths(Config(**kwargs))
+def _config(path: Path, **kwargs: object) -> Config:
+    return _bind_runtime_paths(Config(**kwargs), path)
 
 
 @pytest.mark.asyncio
@@ -82,12 +88,13 @@ class TestDMRoomCreation:
 class TestDMResponseLogic:
     """Test agent response logic in DM rooms."""
 
-    def test_should_respond_in_dm_mode_no_mention(self) -> None:
+    def test_should_respond_in_dm_mode_no_mention(self, tmp_path: Path) -> None:
         """Test that agents respond in DM mode without mentions."""
         config = _bind_runtime_paths(
             Config(
                 agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
             ),
+            tmp_path,
         )
 
         # Mock room with single agent - use the correct domain from config
@@ -112,12 +119,13 @@ class TestDMResponseLogic:
 
         assert should_respond is True
 
-    def test_should_respond_in_dm_mode_when_mentioned(self) -> None:
+    def test_should_respond_in_dm_mode_when_mentioned(self, tmp_path: Path) -> None:
         """Test that agents respond in DM mode when mentioned."""
         config = _bind_runtime_paths(
             Config(
                 agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
             ),
+            tmp_path,
         )
 
         # Mock room with single agent - use the correct domain from config
@@ -141,7 +149,7 @@ class TestDMResponseLogic:
 
         assert should_respond is True
 
-    def test_should_not_respond_in_dm_mode_when_other_mentioned(self) -> None:
+    def test_should_not_respond_in_dm_mode_when_other_mentioned(self, tmp_path: Path) -> None:
         """Test that agents don't respond when other agents are mentioned."""
         config = _bind_runtime_paths(
             Config(
@@ -150,6 +158,7 @@ class TestDMResponseLogic:
                     "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
                 },
             ),
+            tmp_path,
         )
 
         # Mock room with multiple agents - use the correct domains from config
@@ -174,7 +183,7 @@ class TestDMResponseLogic:
 
         assert should_respond is False
 
-    def test_multi_agent_dm_does_not_respond_individually(self) -> None:
+    def test_multi_agent_dm_does_not_respond_individually(self, tmp_path: Path) -> None:
         """Test that multiple agents in DM room without mentions don't respond individually."""
         config = _bind_runtime_paths(
             Config(
@@ -183,6 +192,7 @@ class TestDMResponseLogic:
                     "other_agent": AgentConfig(display_name="Other Agent", role="Other"),
                 },
             ),
+            tmp_path,
         )
 
         # Mock room with multiple agents - use the correct domains from config
@@ -228,7 +238,7 @@ class TestDMMessageContext:
 
     async def test_extract_dm_context(self, tmp_path: Path) -> None:
         """Test extracting message context in DM mode."""
-        config = _bind_runtime_paths(Config())
+        config = _bind_runtime_paths(Config(), tmp_path)
 
         # Create a bot with mocked components
         # Use the correct MatrixID from config
@@ -284,7 +294,7 @@ class TestDMIntegration:
 
     async def test_agent_accepts_dm_invites(self, tmp_path: Path) -> None:
         """Test that agents accept DM invitations when configured."""
-        config = _config()
+        config = _config(tmp_path)
 
         # Use the correct MatrixID from config
         test_agent_matrix_id = (
@@ -325,7 +335,7 @@ class TestDMIntegration:
         # This is a more complex integration test
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
-        config = _config()
+        config = _config(tmp_path)
         config.agents = {"researcher": MagicMock()}
 
         # Create and configure a bot
@@ -423,6 +433,7 @@ class TestDMIntegration:
     async def test_agent_processes_dm_messages_when_not_configured_for_room(self, tmp_path: Path) -> None:
         """Test that agents process messages in DM rooms even when not configured for them."""
         config = _config(
+            tmp_path,
             agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test")},
         )
 

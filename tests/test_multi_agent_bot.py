@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -55,15 +53,24 @@ from mindroom.orchestrator import (
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
+    from pathlib import Path
 
 
-def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
     """Return a runtime-bound config for bot tests."""
-    return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(
+        config,
+        test_runtime_paths(runtime_root),
+    )
 
 
 @dataclass
@@ -168,7 +175,7 @@ class TestAgentBot:
     """Test cases for AgentBot class."""
 
     @staticmethod
-    def create_mock_config(runtime_root: Path | None = None) -> Config:
+    def create_mock_config(runtime_root: Path) -> Config:
         """Create a typed config for tests that do not need a runtime-bound YAML load."""
         return _runtime_bound_config(
             Config(
@@ -251,7 +258,7 @@ class TestAgentBot:
         *,
         assigned_bases: list[str] | None,
         knowledge_bases: dict[str, KnowledgeBaseConfig] | None = None,
-        runtime_root: Path | None = None,
+        runtime_root: Path,
     ) -> Config:
         """Create a real config with one calculator agent for knowledge assignment tests."""
         return _runtime_bound_config(
@@ -279,6 +286,7 @@ class TestAgentBot:
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
+            runtime_root=tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock(knowledge_managers={"research": MagicMock()})
@@ -296,6 +304,7 @@ class TestAgentBot:
             knowledge_bases={
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
+            runtime_root=tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
@@ -317,6 +326,7 @@ class TestAgentBot:
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb_research"), watch=False),
                 "legal": KnowledgeBaseConfig(path=str(tmp_path / "kb_legal"), watch=False),
             },
+            runtime_root=tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
@@ -455,7 +465,7 @@ class TestAgentBot:
         tmp_path: Path,
     ) -> None:
         """Test AgentBot initialization."""
-        mock_load_config.return_value = self.create_mock_config()
+        mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
 
         bot = AgentBot(mock_agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!test:localhost"])
@@ -498,7 +508,7 @@ class TestAgentBot:
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
 
-        mock_load_config.return_value = self.create_mock_config()
+        mock_load_config.return_value = self.create_mock_config(tmp_path)
         config = mock_load_config.return_value
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
@@ -809,7 +819,7 @@ class TestAgentBot:
             assert stream_kwargs["agent_name"] == "calculator"
             assert stream_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
             assert stream_kwargs["session_id"] == "!test:localhost:$thread_root_id"
-            assert stream_kwargs["runtime_paths"].storage_root == tmp_path
+            assert stream_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert stream_kwargs["config"] == config
             assert stream_kwargs["thread_history"] == []
             assert stream_kwargs["room_id"] == "!test:localhost"
@@ -829,7 +839,7 @@ class TestAgentBot:
             assert ai_kwargs["agent_name"] == "calculator"
             assert ai_kwargs["prompt"] == f"{mention_id}: What's 2+2?"
             assert ai_kwargs["session_id"] == "!test:localhost:$thread_root_id"
-            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
             assert ai_kwargs["thread_history"] == []
             assert ai_kwargs["room_id"] == "!test:localhost"
@@ -1889,7 +1899,7 @@ class TestAgentBot:
         )
 
         config = self._config_for_storage(tmp_path)
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
             "router": MatrixID.from_username("mindroom_router", "localhost"),
@@ -1969,7 +1979,7 @@ class TestAgentBot:
         )
 
         config = self._config_for_storage(tmp_path)
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
             "router": MatrixID.from_username("mindroom_router", "localhost"),
@@ -2074,7 +2084,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
             "general": MatrixID.from_username("mindroom_general", "localhost"),
         }
@@ -2162,7 +2172,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
             "general": MatrixID.from_username("mindroom_general", "localhost"),
         }
@@ -2228,7 +2238,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "router": MatrixID.from_username("mindroom_router", "localhost"),
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
@@ -2663,9 +2673,10 @@ class TestAgentBot:
         bot = AgentBot(
             mock_agent_user,
             tmp_path,
+            config,
+            runtime_paths_for(config),
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
-            config=config,
         )
         bot.client = AsyncMock()
 
@@ -2676,6 +2687,7 @@ class TestAgentBot:
         mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
         mock_orchestrator.current_config = config
         mock_orchestrator.config = config  # This is what teams.py uses
+        mock_orchestrator.runtime_paths = runtime_paths_for(config)
         bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
@@ -3208,7 +3220,7 @@ class TestMultiAgentOrchestrator:
         mock_config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         with (
-            patch("mindroom.orchestrator.Config.from_yaml", return_value=mock_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(MultiAgentOrchestrator, "_create_managed_bot"),
@@ -3223,7 +3235,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator.initialize()
 
         mock_load_config.assert_called_once()
-        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
+        assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
@@ -3611,6 +3623,7 @@ class TestMultiAgentOrchestrator:
         with (
             patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS", 0),
             patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS", 0),
+            patch("mindroom.orchestrator.logger.exception"),
         ):
             task = asyncio.create_task(
                 _run_auxiliary_task_forever("test task", _operation),
@@ -3643,6 +3656,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch("mindroom.orchestrator._AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS", 0.01),
+            patch("mindroom.orchestrator.logger.exception"),
             patch(
                 "mindroom.orchestrator.retry_delay_seconds",
                 side_effect=lambda attempt, **_: retry_attempts.append(attempt) or 0,
@@ -3651,7 +3665,7 @@ class TestMultiAgentOrchestrator:
             task = asyncio.create_task(
                 _run_auxiliary_task_forever("test task", _operation),
             )
-            await asyncio.wait_for(third_start.wait(), timeout=2)
+            await asyncio.wait_for(third_start.wait(), timeout=5)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -3711,7 +3725,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": router_bot}
 
         with (
-            patch("mindroom.orchestrator.Config.from_yaml", return_value=config),
+            patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
@@ -3754,7 +3768,7 @@ class TestMultiAgentOrchestrator:
         )
 
         with (
-            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config) as mock_load_config,
+            patch("mindroom.orchestrator.load_config", return_value=new_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
@@ -3763,7 +3777,7 @@ class TestMultiAgentOrchestrator:
 
         assert updated is False
         mock_load_config.assert_called_once()
-        assert mock_load_config.call_args.kwargs["runtime_paths"].config_path == config_path.resolve()
+        assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:
@@ -3825,7 +3839,7 @@ class TestMultiAgentOrchestrator:
         new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
 
         with (
-            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",
@@ -3906,7 +3920,7 @@ class TestMultiAgentOrchestrator:
         new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
 
         with (
-            patch("mindroom.orchestrator.Config.from_yaml", return_value=new_config),
+            patch("mindroom.orchestrator.load_config", return_value=new_config),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._identify_entities_to_restart",

@@ -21,14 +21,14 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    return bind_runtime_paths(config, tmp_path)
+    return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
 def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -185,7 +185,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
-        config=MagicMock(),
+        config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
         rooms=["!test:example.com"],
     )
     bot.response_tracker = MagicMock()

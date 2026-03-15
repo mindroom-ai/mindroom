@@ -12,13 +12,15 @@ These tests ensure no regressions in the core response logic.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for
+from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
 
 
 class TestAgentResponseLogic:
@@ -26,6 +28,7 @@ class TestAgentResponseLogic:
 
     def setup_method(self) -> None:
         """Set up test config."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         self.config = bind_runtime_paths(
             Config(
                 agents={
@@ -38,6 +41,7 @@ class TestAgentResponseLogic:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
+            runtime_paths,
         )
         self.config.authorization.default_room_access = True
         self.runtime_paths = runtime_paths_for(self.config)
@@ -693,7 +697,7 @@ class TestAgentResponseLogic:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
         )
-        config = bind_runtime_paths(config)
+        config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
         runtime_paths = runtime_paths_for(config)
         config.authorization.default_room_access = True
         room = create_mock_room("!room:localhost", ["calculator"], config)

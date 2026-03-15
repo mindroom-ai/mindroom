@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 @pytest.mark.asyncio
@@ -30,7 +30,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
     domain = config.domain
 
@@ -44,6 +44,7 @@ async def test_agent_ignores_user_message_mentioning_other_agents(tmp_path) -> N
         ),
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
 
@@ -105,7 +106,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
             room_models={},
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         ),
-        tmp_path,
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
     domain = config.domain
 
@@ -119,6 +120,7 @@ async def test_agent_responds_when_mentioned_along_with_others(tmp_path) -> None
         ),
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
 

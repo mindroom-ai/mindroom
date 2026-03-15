@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from mindroom.config.agent import AgentConfig
@@ -14,12 +17,13 @@ from mindroom.thread_utils import (
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture
 def mock_config() -> Config:
     """Create a mock config for testing."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     return bind_runtime_paths(
         Config(
             defaults=DefaultsConfig(),
@@ -58,6 +62,7 @@ def mock_config() -> Config:
                 ),
             },
         ),
+        runtime_paths,
     )
 
 

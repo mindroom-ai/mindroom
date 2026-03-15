@@ -65,8 +65,8 @@ class TestDynamicConfigUpdate:
             models={"default": {"provider": "test", "id": "test-model"}},
         )
 
-        # Mock the from_yaml method to return our updated config
-        with patch.object(Config, "from_yaml", return_value=updated_config):  # noqa: SIM117
+        # Mock the explicit runtime-bound config loader used by update_config().
+        with patch("mindroom.orchestrator.load_config", return_value=updated_config):  # noqa: SIM117
             # Mock the bot creation and setup methods to avoid actual Matrix operations
             with (
                 patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
@@ -206,7 +206,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         ):
             updated = await orchestrator.update_config()
@@ -262,7 +262,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -314,7 +314,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -366,7 +366,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
@@ -420,7 +420,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(
                 orchestrator,

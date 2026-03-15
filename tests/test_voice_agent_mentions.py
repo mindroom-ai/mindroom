@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,10 +16,11 @@ from mindroom.voice_handler import (
     _process_transcription,
     _sanitize_unavailable_mentions,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _voice_config(agent_display_names: dict[str, str]) -> Config:
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     config = bind_runtime_paths(
         Config(
             agents={
@@ -26,6 +29,7 @@ def _voice_config(agent_display_names: dict[str, str]) -> Config:
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         ),
+        runtime_paths,
     )
     config.voice.intelligence.model = "test-model"
     return config
@@ -259,12 +263,7 @@ def test_is_speculative_command_rewrite(
 @pytest.mark.asyncio
 async def test_voice_transcription_rejects_invented_skill_command() -> None:
     """A general sessions question must not be rewritten into !skill."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -286,12 +285,7 @@ async def test_voice_transcription_rejects_invented_skill_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_keeps_explicit_skill_command() -> None:
     """Explicit skill intent should continue to produce !skill commands."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -312,12 +306,7 @@ async def test_voice_transcription_keeps_explicit_skill_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_rejects_invented_help_command() -> None:
     """A general question must not be rewritten into !help."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -339,12 +328,7 @@ async def test_voice_transcription_rejects_invented_help_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_keeps_explicit_help_command() -> None:
     """Explicit help intent should continue to produce !help commands."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,

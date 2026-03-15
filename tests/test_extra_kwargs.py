@@ -11,10 +11,10 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 
-def _config_with_runtime_paths(config_data: dict[str, object]) -> Config:
+def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
     runtime_root = Path(tempfile.mkdtemp())
     runtime_paths = resolve_runtime_paths(
         config_path=runtime_root / "config.yaml",
@@ -22,8 +22,7 @@ def _config_with_runtime_paths(config_data: dict[str, object]) -> Config:
         process_env={},
     )
     config = Config(**config_data)
-    config._runtime_paths = runtime_paths
-    return config
+    return config, runtime_paths
 
 
 def test_model_config_with_extra_kwargs() -> None:
@@ -144,10 +143,10 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = _config_with_runtime_paths(config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Get the model instance
-    model = get_model_instance(config, "test_model")
+    model = get_model_instance(config, runtime_paths, "test_model")
 
     # Check that the model has the correct parameters
     assert model.id == "openai/gpt-4"
@@ -201,16 +200,16 @@ def test_different_providers_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = _config_with_runtime_paths(config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Test OpenAI model
-    openai_model = get_model_instance(config, "openai_model")
+    openai_model = get_model_instance(config, runtime_paths, "openai_model")
     assert openai_model.temperature == 0.5
     assert openai_model.top_p == 0.9
     assert openai_model.frequency_penalty == 0.3
 
     # Test Anthropic model
-    anthropic_model = get_model_instance(config, "anthropic_model")
+    anthropic_model = get_model_instance(config, runtime_paths, "anthropic_model")
     assert anthropic_model.temperature == 0.2
     assert anthropic_model.max_tokens == 2048
 
@@ -244,10 +243,10 @@ def test_model_without_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = _config_with_runtime_paths(config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Should work without any issues
-    model = get_model_instance(config, "simple_model")
+    model = get_model_instance(config, runtime_paths, "simple_model")
     assert model.id == "gpt-3.5-turbo"
     assert model.provider == "OpenAI"
 
@@ -282,8 +281,8 @@ def test_vertexai_claude_provider() -> None:
         "agents": {},
     }
 
-    config = _config_with_runtime_paths(config_data)
-    model = get_model_instance(config, "vertex_claude_model")
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)
     assert model.id == "claude-sonnet-4@20250514"

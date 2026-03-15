@@ -161,10 +161,21 @@ def test_ensure_writable_config_path_seeds_from_template(
     assert writable_config.read_text(encoding="utf-8") == template_config.read_text(encoding="utf-8")
 
 
-def test_api_lifespan_syncs_env_credentials_on_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_lifespan_syncs_env_credentials_on_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """API startup should run env credential sync via the FastAPI lifespan hook."""
     sync_calls: list[str] = []
     watch_calls: list[str] = []
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
 
     async def _fake_watch_config(
         stop_event: asyncio.Event,
@@ -209,7 +220,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
         config_path=config_path,
         storage_path=tmp_path / "storage",
     )
-    main.app.state.runtime_paths = runtime_paths
+    main.initialize_api_app(main.app, runtime_paths)
     main.app.state.config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
 
     async def _idle_watch_config(
@@ -250,8 +261,8 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
         await callback()
         stop_event.set()
 
-    runtime_paths = constants.set_runtime_paths(config_path=config_path)
-    main.app.state.runtime_paths = runtime_paths
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
     monkeypatch.setattr(main, "watch_file", _fake_watch_file)
     monkeypatch.setattr(
         main,
@@ -610,7 +621,7 @@ def test_google_connect_uses_pending_oauth_state(
 
     monkeypatch.setattr(
         "mindroom.api.google_integration._get_oauth_credentials",
-        lambda: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+        lambda _runtime_paths: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
     )
     monkeypatch.setattr(
         "mindroom.api.google_integration._ensure_google_packages",
@@ -626,6 +637,122 @@ def test_google_connect_uses_pending_oauth_state(
     assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
     assert issued_state["state"]
     assert issued_state["state"] != "general"
+
+
+def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google configure should write to the request runtime `.env` and refresh app runtime paths."""
+    config = _config_with_worker_scope("shared")
+    captured_client_config: dict[str, Any] = {}
+
+    class _FakeFlow:
+        def authorization_url(
+            self,
+            *,
+            access_type: str,
+            include_granted_scopes: str,
+            prompt: str,
+            state: str,
+        ) -> tuple[str, str]:
+            assert access_type == "offline"
+            assert include_granted_scopes == "true"
+            assert prompt == "consent"
+            assert state
+            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
+
+    class _FakeFlowFactory:
+        @staticmethod
+        def from_client_config(
+            client_config: object,
+            *,
+            scopes: list[str],
+            redirect_uri: str,
+        ) -> _FakeFlow:
+            assert scopes
+            assert redirect_uri == "http://localhost:8765/api/google/callback"
+            captured_client_config.update(client_config["web"])
+            return _FakeFlow()
+
+    configured_client_secret = "configured-client-secret"  # noqa: S105
+    configure_response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": configured_client_secret,
+            "project_id": "configured-project",
+        },
+    )
+    assert configure_response.status_code == 200
+
+    env_path = temp_config_file.parent / ".env"
+    env_contents = env_path.read_text(encoding="utf-8")
+    assert "GOOGLE_CLIENT_ID=configured-client-id" in env_contents
+    assert f"GOOGLE_CLIENT_SECRET={configured_client_secret}" in env_contents
+    assert "GOOGLE_PROJECT_ID=configured-project" in env_contents
+
+    monkeypatch.setattr(
+        "mindroom.api.google_integration._ensure_google_packages",
+        lambda: (object, object, _FakeFlowFactory),
+    )
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, temp_config_file)):
+        connect_response = api_key_client.post(
+            "/api/google/connect?agent_name=general",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert connect_response.status_code == 200
+    assert connect_response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
+    assert captured_client_config["client_id"] == "configured-client-id"
+    assert captured_client_config["client_secret"] == configured_client_secret
+    assert captured_client_config["redirect_uris"] == ["http://localhost:8765/api/google/callback"]
+
+
+def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Google reset should clear the runtime `.env` and drop the refreshed runtime credentials."""
+    config = _config_with_worker_scope("shared")
+    env_path = temp_config_file.parent / ".env"
+
+    configure_response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+        },
+    )
+    assert configure_response.status_code == 200
+    env_path.write_text(env_path.read_text(encoding="utf-8") + "UNRELATED=value\n", encoding="utf-8")
+
+    with patch("mindroom.api.google_integration.get_credentials_manager") as mock_get_credentials_manager:
+        reset_response = api_key_client.post(
+            "/api/google/reset",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert reset_response.status_code == 200
+    mock_get_credentials_manager.return_value.delete_credentials.assert_called_once_with("google")
+    env_contents = env_path.read_text(encoding="utf-8")
+    assert "GOOGLE_CLIENT_ID=" not in env_contents
+    assert "GOOGLE_CLIENT_SECRET=" not in env_contents
+    assert "GOOGLE_PROJECT_ID=" not in env_contents
+    assert "GOOGLE_REDIRECT_URI=" not in env_contents
+    assert "UNRELATED=value" in env_contents
+
+    with patch("mindroom.api.main.load_runtime_config", return_value=(config, temp_config_file)):
+        connect_response = api_key_client.post(
+            "/api/google/connect?agent_name=general",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert connect_response.status_code == 503
+    assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
 
 
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
@@ -729,8 +856,28 @@ def test_spotify_connect_uses_pending_oauth_state(
             issued_state["state"] = state or ""
             return "https://accounts.spotify.test/authorize"
 
-    monkeypatch.setenv("SPOTIFY_CLIENT_ID", "client-id")
-    monkeypatch.setenv("SPOTIFY_CLIENT_SECRET", "client-secret")
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=main.app.state.runtime_paths.config_path,
+            storage_path=main.app.state.runtime_paths.storage_root,
+            process_env={
+                **dict(main.app.state.runtime_paths.process_env),
+                "SPOTIFY_CLIENT_ID": "client-id",
+                "SPOTIFY_CLIENT_SECRET": "client-secret",
+            },
+        ),
+    )
+    main.app.state.auth_state = main._ApiAuthState(
+        settings=main._ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+        ),
+        supabase_auth=None,
+    )
 
     def _spotify_oauth_factory(**_kwargs: object) -> _FakeSpotifyOAuth:
         return _FakeSpotifyOAuth()
@@ -861,7 +1008,7 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
         config_path=config_path,
         process_env={"MINDROOM_NAMESPACE": "prod1"},
     )
-    main.app.state.runtime_paths = runtime_paths
+    main.initialize_api_app(main.app, runtime_paths)
 
     async def _idle_watch_config(
         stop_event: asyncio.Event,
@@ -1354,8 +1501,8 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 @pytest.fixture
 def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
-    runtime_paths = constants.set_runtime_paths(config_path=temp_config_file)
-    main.app.state.runtime_paths = runtime_paths
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
+    main.initialize_api_app(main.app, runtime_paths)
     main.app.state.auth_state = main._ApiAuthState(
         settings=main._ApiAuthSettings(
             platform_login_url=None,

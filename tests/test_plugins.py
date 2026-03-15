@@ -13,14 +13,22 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import _TOOL_REGISTRY, TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     import pytest
 
 
 def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
-    config._runtime_paths = resolve_runtime_paths(config_path=config_path)
-    return config
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
@@ -73,10 +81,10 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
     try:
-        plugins = load_plugins(config)
+        plugins = load_plugins(config, runtime_paths_for(config))
         assert [plugin.name for plugin in plugins] == ["demo-plugin"]
         assert "demo_plugin" in _TOOL_REGISTRY
-        tool = get_tool_by_name("demo_plugin")
+        tool = get_tool_by_name("demo_plugin", runtime_paths_for(config))
         assert tool.name == "demo"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
@@ -145,11 +153,11 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     original_tool_cache = plugin_module._TOOL_MODULE_CACHE.copy()
 
     try:
-        plugins = load_plugins(config)
+        plugins = load_plugins(config, runtime_paths_for(config))
         assert [plugin.name for plugin in plugins] == ["demo-pkg"]
         assert plugins[0].root == plugin_root.resolve()
         assert "demo_pkg_tool" in _TOOL_REGISTRY
-        tool = get_tool_by_name("demo_pkg_tool")
+        tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config))
         assert tool.name == "demo_pkg"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
@@ -197,6 +205,6 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    plugins = load_plugins(config)
+    plugins = load_plugins(config, runtime_paths_for(config))
 
     assert [plugin.name for plugin in plugins] == ["demo-plugin"]

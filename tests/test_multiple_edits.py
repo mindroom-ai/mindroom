@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,7 +38,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             router=RouterConfig(model="default"),
         ),
-        tmp_path,
+        test_runtime_paths(tmp_path),
     )
 
     bot = AgentBot(
@@ -47,6 +47,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         rooms=["!test:localhost"],
         enable_streaming=False,
         config=config,
+        runtime_paths=runtime_paths_for(config),
     )
 
     # Mock the orchestrator and client

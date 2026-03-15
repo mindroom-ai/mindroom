@@ -26,17 +26,17 @@ These files are high-risk because they define runtime behavior for many tests.
 
 | File | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| `src/mindroom/constants.py` | claimed | codex / 2026-03-14 | Active runtime/env cleanup and explicit runtime consistency. |
+| `src/mindroom/constants.py` | done | codex / 2026-03-14 | Config discovery and runtime env helpers now take explicit env/runtime input; the runtime guardrail and discovery suites pass on the current tree. |
 | `src/mindroom/config/main.py` | done | codex / 2026-03-14 | `Config.from_yaml(...)` is now an explicit pure file loader; runtime-aware loads go through `load_config(runtime_paths)`. |
-| `src/mindroom/api/main.py` | claimed | codex / 2026-03-14 | API app runtime scoping and request/runtime consistency. |
-| `src/mindroom/api/openai_compat.py` | claimed | codex / 2026-03-14 | OpenAI-compatible runtime propagation and auth/runtime tests. |
-| `src/mindroom/api/credentials.py` | claimed | codex / 2026-03-14 | Explicit runtime-based dashboard execution identity. |
+| `src/mindroom/api/main.py` | done | codex / 2026-03-14 | API app state now owns the explicit runtime context; `tests/api/test_api.py` passes on the current tree. |
+| `src/mindroom/api/openai_compat.py` | done | codex / 2026-03-14 | `/v1` auth and runtime lookups now use explicit RuntimePaths; `tests/test_openai_compat.py` passes on the current tree. |
+| `src/mindroom/api/credentials.py` | done | codex / 2026-03-14 | Dashboard execution identity now reads tenant/account values from the request runtime; `tests/api/test_credentials_api.py` passes on the current tree. |
 | `src/mindroom/api/google_integration.py` | done | codex / 2026-03-14 | Google OAuth config/reset now read and write the request runtime's `.env`, then refresh the app runtime paths so follow-up requests see the change immediately. |
-| `src/mindroom/api/integrations.py` | claimed | codex / 2026-03-14 | Remove ambient integration env reads. |
-| `src/mindroom/bot.py` | claimed | codex / 2026-03-14 | Tool execution identity cleanup. |
-| `src/mindroom/cli/config.py` | claimed | codex / 2026-03-14 | Make config-discovery display paths use an explicit exported env snapshot instead of ambient reads. |
-| `src/mindroom/cli/main.py` | claimed | codex / 2026-03-14 | Make top-level missing-config guidance use explicit config-discovery env input. |
-| `src/mindroom/commands/handler.py` | claimed | codex / 2026-03-14 | Explicit runtime in skill execution identity. |
+| `src/mindroom/api/integrations.py` | done | codex / 2026-03-14 | OAuth integration endpoints now read redirect/client settings from the request runtime; the API suites pass on the current tree. |
+| `src/mindroom/bot.py` | done | codex / 2026-03-14 | Bot tool execution identity now reads tenant/account values from explicit RuntimePaths; the multi-agent bot suite passes on the current tree. |
+| `src/mindroom/cli/config.py` | done | codex / 2026-03-14 | CLI config discovery output now uses an explicit exported env snapshot; the CLI/config-discovery suites pass on the current tree. |
+| `src/mindroom/cli/main.py` | done | codex / 2026-03-14 | Top-level missing-config guidance now uses explicit config-discovery env input; the CLI/config-discovery suites pass on the current tree. |
+| `src/mindroom/commands/handler.py` | done | codex / 2026-03-14 | Skill command execution identity now reads tenant/account values from explicit RuntimePaths; the skills/command suites pass on the current tree. |
 | `tests/conftest.py` | done | codex / 2026-03-14 | Shared runtime-binding fixtures and reset behavior are in place; the coordinated explicit-runtime test sweep is complete. |
 
 ## Reserved Files
@@ -57,7 +57,7 @@ These are the known test files that still need coordinated runtime-refactor work
 | `tests/test_memory_mem0_backend.py` | done | codex / 2026-03-14 | Bound a self-contained general/calculator config to explicit runtime paths that match the test storage root. |
 | `tests/test_memory_tools.py` | done | codex / 2026-03-14 | Bound a self-contained explicit runtime config and finished runtime-bearing mock expectations. |
 | `tests/test_multi_agent_e2e.py` | done | codex / 2026-03-14 | Re-ran on the current tree; the file already passes cleanly with explicit RuntimePaths. |
-| `tests/test_multi_agent_bot.py` | done | codex / 2026-03-14 | Re-ran on the current tree; the full multi-agent bot suite now passes cleanly with explicit RuntimePaths. |
+| `tests/test_multi_agent_bot.py` | done | codex / 2026-03-14 | Re-ran on the current tree, then stabilized the auxiliary-task backoff test by stubbing exception logging and widening its async wait margin; the file now passes cleanly under xdist and in the full backend suite. |
 | `tests/test_matrix_agent_manager.py` | done | codex / 2026-03-14 | Replaced repo-config dependency with explicit runtime-bound agent/team config and fixed partial-failure expectations. |
 | `tests/test_bot_scheduling.py` | done | codex / 2026-03-14 | Switched the local runtime-binding helper to construct explicit RuntimePaths instead of passing bare paths into `bind_runtime_paths(...)`. |
 | `tests/test_cli_config.py` | done | claude-opus / 2026-03-14 | Fixed runtime_storage_root → runtime_paths.storage_root. |
@@ -81,7 +81,7 @@ These are the known test files that still need coordinated runtime-refactor work
 | `tests/test_routing_regression.py` | done | codex / 2026-03-14 | Switched the local runtime-binding helper to construct explicit RuntimePaths instead of passing bare paths into `bind_runtime_paths(...)`. |
 | `tests/test_sandbox_proxy.py` | not_needed |  | Already passes. |
 | `tests/test_schedule_agent_validation.py` | done | codex / 2026-03-14 | Added explicit test RuntimePaths instead of implicit binding. |
-| `tests/test_config_discovery.py` | claimed | codex / 2026-03-14 | Tightening config discovery so `find_config` and `config_search_locations` take an explicit env snapshot. |
+| `tests/test_config_discovery.py` | done | codex / 2026-03-14 | Updated the discovery expectations for explicit process-env snapshots and re-verified the file on the current tree (`36 passed`). |
 | `tests/test_agent_datetime_context.py` | done | codex / 2026-03-14 | Replaced repo-config loading with a self-contained runtime-bound config and patched model creation in the datetime prompt tests. |
 | `tests/test_agent_order_preservation.py` | done | codex / 2026-03-14 | Re-ran on the current tree; the file already passes cleanly with explicit RuntimePaths. |
 | `tests/test_agent_response_logic.py` | done | codex / 2026-03-14 | Re-ran on the current tree; the file already passes cleanly with explicit RuntimePaths. |

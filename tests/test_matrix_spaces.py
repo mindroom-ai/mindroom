@@ -16,18 +16,14 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.identity import managed_space_alias_localpart, mindroom_namespace
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import orchestrator_runtime_paths
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _config_with_runtime_paths(tmp_path, **config_data: object) -> Config:  # noqa: ANN001
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
+    return bind_runtime_paths(
+        Config(**config_data),
+        orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
     )
-    config = Config(**config_data)
-    config._runtime_paths = runtime_paths
-    return config
 
 
 def test_matrix_space_defaults() -> None:
@@ -190,12 +186,13 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         space_id = await matrix_rooms.ensure_root_space(
             client,
             config,
+            runtime_paths_for(config),
             {"lobby": "!lobby:localhost", "dev": "!dev:localhost"},
         )
 
     assert space_id == "!space:localhost"
     assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state, runtime_paths=config.runtime_paths)
+    mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
     mock_create.assert_awaited_once()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "MindRoom")
     assert mock_add.await_args_list == [
@@ -208,7 +205,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         avatar_category="spaces",
         avatar_name="root_space",
         context="root_space",
-        runtime_paths=config.runtime_paths,
+        runtime_paths=runtime_paths_for(config),
     )
 
 
@@ -240,11 +237,16 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
-        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+        )
 
     assert space_id == "!space:localhost"
     assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state, runtime_paths=config.runtime_paths)
+    mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
     mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace")
@@ -255,7 +257,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         avatar_category="spaces",
         avatar_name="root_space",
         context="root_space",
-        runtime_paths=config.runtime_paths,
+        runtime_paths=runtime_paths_for(config),
     )
 
 
@@ -287,7 +289,12 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
-        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+        )
 
     assert space_id is None
     assert state.space_room_id is None
@@ -319,7 +326,12 @@ async def test_ensure_root_space_returns_none_when_name_write_fails(tmp_path) ->
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
-        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+        )
 
     assert space_id is None
     mock_add.assert_not_awaited()
@@ -346,7 +358,12 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=False)) as mock_add,
         patch("mindroom.matrix.rooms._set_room_avatar_if_available", new=AsyncMock()) as mock_avatar,
     ):
-        space_id = await matrix_rooms.ensure_root_space(client, config, {"lobby": "!lobby:localhost"})
+        space_id = await matrix_rooms.ensure_root_space(
+            client,
+            config,
+            runtime_paths_for(config),
+            {"lobby": "!lobby:localhost"},
+        )
 
     assert space_id is None
     mock_add.assert_awaited_once_with(client, "!space:localhost", "!lobby:localhost", "localhost")
@@ -381,11 +398,12 @@ async def test_orchestrator_ensure_root_space_invites_internal_and_authorized_us
     mock_space.assert_awaited_once_with(
         router_bot.client,
         orchestrator.config,
+        orchestrator.runtime_paths,
         {"lobby": "!lobby:localhost"},
     )
     # Should have invited both the internal user and the authorized owner
     invited_user_ids = {c.args[2] for c in mock_invite.await_args_list}
-    assert orchestrator.config.get_mindroom_user_id() in invited_user_ids
+    assert orchestrator.config.get_mindroom_user_id(orchestrator.runtime_paths) in invited_user_ids
     assert "@owner:example.com" in invited_user_ids
     assert "@collaborator:example.com" not in invited_user_ids
 
@@ -485,7 +503,7 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
     orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
     with (
-        patch.object(Config, "from_yaml", return_value=updated_config),
+        patch("mindroom.orchestrator.load_config", return_value=updated_config),
         patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         patch.object(

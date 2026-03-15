@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path  # noqa: TC003
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,12 +17,19 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for reload tests."""
-    return bind_runtime_paths(config, runtime_root)
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
@@ -209,7 +217,12 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -286,7 +299,12 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -365,7 +383,12 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -433,7 +456,12 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -636,7 +664,12 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

@@ -27,7 +27,7 @@ from mindroom.matrix.users import (
     create_agent_user,
     login_agent_user,
 )
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,6 +39,28 @@ def _runtime_paths(tmp_path: Path, **env: str) -> constants_mod.RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     return constants_mod.resolve_runtime_paths(config_path=config_path, process_env={**os.environ, **env})
+
+
+def _bound_agent_manager_config(tmp_path: Path) -> Config:
+    runtime_paths = _runtime_paths(tmp_path)
+    return bind_runtime_paths(
+        Config.model_validate(
+            {
+                "agents": {
+                    "calculator": {"display_name": "CalculatorAgent"},
+                    "general": {"display_name": "GeneralAgent"},
+                },
+                "teams": {
+                    "helpers": {
+                        "display_name": "HelpersTeam",
+                        "role": "Coordinate support work",
+                        "agents": ["calculator", "general"],
+                    },
+                },
+            },
+        ),
+        runtime_paths,
+    )
 
 
 def _recording_httpx_async_client(
@@ -915,10 +937,10 @@ class TestEnsureAllAgentUsers:
     async def test_ensure_all_agent_users(
         self,
         mock_create_user: AsyncMock,
+        tmp_path: Path,
     ) -> None:
         """Test ensuring all configured agents have users."""
-        # Load real configuration
-        config = Config.from_yaml()
+        config = _bound_agent_manager_config(tmp_path)
 
         # Mock user creation - router is created first, then configured agents
         mock_users = []
@@ -937,7 +959,7 @@ class TestEnsureAllAgentUsers:
 
         mock_create_user.side_effect = mock_users
 
-        agent_users = await _ensure_all_agent_users("http://localhost:8008", config)
+        agent_users = await _ensure_all_agent_users("http://localhost:8008", config, runtime_paths_for(config))
 
         # Should have router + all configured agents + all configured teams
         expected_count = 1 + len(config.agents) + len(config.teams)
@@ -950,29 +972,18 @@ class TestEnsureAllAgentUsers:
     async def test_ensure_all_agent_users_with_error(
         self,
         mock_create_user: AsyncMock,
+        tmp_path: Path,
     ) -> None:
         """Test handling errors when creating agent users."""
-        # Load real configuration
-        config = Config.from_yaml()
+        config = _bound_agent_manager_config(tmp_path)
+        mock_create_user.side_effect = [
+            AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"),
+            AgentMatrixUser("calculator", "@mindroom_calculator:localhost", "CalculatorAgent", "pass_calculator"),
+            Exception("Failed to create user"),
+            AgentMatrixUser("helpers", "@mindroom_helpers:localhost", "HelpersTeam", "pass_helpers"),
+        ]
 
-        # Mock user creation with a failure - create list of results with one error
-        mock_results = []
-        mock_results.append(AgentMatrixUser("router", "@mindroom_router:localhost", "RouterAgent", "router_pass"))
+        agent_users = await _ensure_all_agent_users("http://localhost:8008", config, runtime_paths_for(config))
 
-        # Add successful agents first
-        for i, agent_name in enumerate(config.agents):
-            if i == 0:  # First agent succeeds
-                user_id = f"@mindroom_{agent_name}:localhost"
-                display_name = config.agents[agent_name].display_name or f"{agent_name.title()}Agent"
-                mock_results.append(AgentMatrixUser(agent_name, user_id, display_name, f"pass_{agent_name}"))
-            elif i == 1:  # Second agent raises an exception
-                # Create a mock that will raise an exception when awaited
-                mock_error = AsyncMock(side_effect=Exception("Failed to create user"))
-                mock_create_user.side_effect = [*mock_results, mock_error]
-                break
-
-        agent_users = await _ensure_all_agent_users("http://localhost:8008", config)
-
-        # Should still return the successful ones (router + first agent)
-        assert len(agent_users) >= 2  # At least router + one agent
-        assert "router" in agent_users
+        # Router succeeds, one agent fails, and team creation still continues.
+        assert set(agent_users) == {"router", "calculator", "helpers"}

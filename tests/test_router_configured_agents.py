@@ -9,15 +9,23 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import get_configured_agents_for_room
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 class TestRouterAgentSelection:
     """Test router agent selection logic."""
 
+    @staticmethod
+    def _bind_runtime(config: Config) -> Config:
+        runtime_root = Path(tempfile.mkdtemp())
+        return bind_runtime_paths(
+            config,
+            orchestrator_runtime_paths(runtime_root, config_path=runtime_root / "config.yaml"),
+        )
+
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = bind_runtime_paths(
+        self.config = self._bind_runtime(
             Config(
                 agents={
                     "calculator": AgentConfig(
@@ -37,7 +45,6 @@ class TestRouterAgentSelection:
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
-            Path(tempfile.mkdtemp()),
         )
 
     def test_get_configured_agents_returns_only_configured(self) -> None:
@@ -110,7 +117,7 @@ class TestRouterAgentSelection:
 
     def test_router_excludes_itself(self) -> None:
         """Test that router agent is excluded from available agents."""
-        config_with_router = bind_runtime_paths(
+        config_with_router = self._bind_runtime(
             Config(
                 agents={
                     "calculator": AgentConfig(
@@ -122,7 +129,6 @@ class TestRouterAgentSelection:
                 room_models={},
                 models={"default": ModelConfig(provider="test", id="test-model")},
             ),
-            Path(tempfile.mkdtemp()),
         )
 
         room = MagicMock()

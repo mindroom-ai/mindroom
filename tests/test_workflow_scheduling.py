@@ -24,16 +24,16 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def _mid(name: str) -> MatrixID:
     return MatrixID(username=name, domain="localhost")
 
 
-def _runtime_bound_config(config: Config) -> Config:
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound workflow config."""
-    return bind_runtime_paths(config, Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
 
 
 @pytest.fixture

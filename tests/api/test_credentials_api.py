@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mindroom import constants
-from mindroom.api.main import app
+from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 
@@ -36,12 +36,14 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     """Create a test client for the API."""
-    app.state.runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
+    initialize_api_app(
+        app,
+        constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
     )
-    app.state.auth_state = None
     return TestClient(app)
 
 

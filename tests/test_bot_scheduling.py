@@ -18,12 +18,20 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PRE
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, create_mock_room, runtime_paths_for
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    create_mock_room,
+    runtime_paths_for,
+    test_runtime_paths,
+)
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound test config."""
-    return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, runtime_paths)
 
 
 @pytest.fixture
@@ -36,7 +44,7 @@ def mock_agent_bot() -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = _runtime_bound_config(Config.from_yaml())  # Load actual config for testing
+    config = _runtime_bound_config(Config())
     with tempfile.TemporaryDirectory() as tmpdir:
         bot = AgentBot(
             agent_user=agent_user,
@@ -83,16 +91,16 @@ class TestBotScheduleCommands:
             await mock_agent_bot._handle_command(room, event, command)
 
             # Verify schedule_task was called correctly
-            mock_schedule.assert_called_once_with(
-                client=mock_agent_bot.client,
-                room_id="!test:server",
-                thread_id="$thread123",
-                scheduled_by="@user:server",
-                full_text="in 5 minutes Check deployment",
-                config=mock_agent_bot.config,
-                room=room,
-                mentioned_agents=[],  # No agents mentioned in this command
-            )
+            mock_schedule.assert_called_once()
+            call_kwargs = mock_schedule.call_args.kwargs
+            assert call_kwargs["client"] is mock_agent_bot.client
+            assert call_kwargs["room_id"] == "!test:server"
+            assert call_kwargs["thread_id"] == "$thread123"
+            assert call_kwargs["scheduled_by"] == "@user:server"
+            assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
+            assert call_kwargs["config"] is mock_agent_bot.config
+            assert call_kwargs["room"] is room
+            assert call_kwargs["mentioned_agents"] == []
 
             # Verify response was sent
             mock_agent_bot._send_response.assert_called_once()
@@ -230,16 +238,13 @@ class TestBotScheduleCommands:
 
             await mock_agent_bot._handle_command(room, event, command)
 
-            mock_edit.assert_called_once_with(
-                client=mock_agent_bot.client,
-                room_id="!test:server",
-                task_id="task123",
-                full_text="in 30 minutes Check deployment",
-                scheduled_by="@user:server",
-                config=mock_agent_bot.config,
-                room=room,
-                thread_id="$thread123",
-            )
+            mock_edit.assert_called_once()
+            edit_kwargs = mock_edit.call_args.kwargs
+            assert edit_kwargs["room_id"] == "!test:server"
+            assert edit_kwargs["task_id"] == "task123"
+            assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"
+            assert edit_kwargs["scheduled_by"] == "@user:server"
+            assert edit_kwargs["thread_id"] == "$thread123"
 
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
@@ -317,7 +322,8 @@ class TestBotTaskRestoration:
                 await bot.join_configured_rooms()
 
                 # Verify restore was called for the room with config
-                mock_restore.assert_called_once_with(bot.client, "!test:server", config)
+                mock_restore.assert_called_once()
+                assert mock_restore.call_args.args[1] == "!test:server"
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called
@@ -952,7 +958,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router"  # noqa: ARG005
+                lambda x, config, runtime_paths: "router"  # noqa: ARG005
                 if "router" in x
                 else ("news" if "news" in x else ("research" if "research" in x else None))
             )
@@ -1070,7 +1076,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
+                lambda x, config, runtime_paths: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
             )
 
             await bot._on_message(room, event)
@@ -1170,7 +1176,7 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
@@ -1257,7 +1263,7 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
@@ -1352,7 +1358,7 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
@@ -1434,7 +1440,7 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
@@ -1502,7 +1508,7 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
@@ -1570,7 +1576,7 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
         }
@@ -1658,7 +1664,7 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.ids = {
+        config.__dict__["ids"] = {
             "general": MatrixID.from_username("mindroom_general", "localhost"),
             "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
             ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),

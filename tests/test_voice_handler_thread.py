@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -9,7 +11,7 @@ import pytest
 
 from mindroom import voice_handler
 from mindroom.config.main import Config
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.mark.asyncio
@@ -38,7 +40,10 @@ async def test_voice_handler_returns_transcription() -> None:
     voice_event.source = {"content": {}}
 
     # Mock config
-    config = bind_runtime_paths(Config.from_yaml())
+    config = bind_runtime_paths(
+        Config(),
+        test_runtime_paths(Path(tempfile.mkdtemp())),
+    )
     config.voice.enabled = True
 
     # Mock audio download

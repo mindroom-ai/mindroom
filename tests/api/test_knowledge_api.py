@@ -47,8 +47,7 @@ def test_client(tmp_path: Path) -> TestClient:
         storage_path=tmp_path / "mindroom_data",
         process_env={},
     )
-    main.app.state.runtime_paths = runtime_paths
-    main.app.state.auth_state = None
+    main.initialize_api_app(main.app, runtime_paths)
     return TestClient(main.app)
 
 

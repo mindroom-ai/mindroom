@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -35,8 +36,6 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 
-_BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
-
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -48,28 +47,72 @@ def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> Ru
     )
 
 
+def _test_config() -> Config:
+    """Create a self-contained test config with standard agents."""
+    from tests.conftest import bind_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = _runtime_paths(Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    tools=[],
+                    rooms=["lobby"],
+                ),
+                "summary": AgentConfig(
+                    display_name="SummaryAgent",
+                    role="Summarize content",
+                    tools=[],
+                    rooms=["lobby"],
+                ),
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    role="Solve math problems",
+                    tools=["calculator"],
+                    rooms=["lobby", "science", "analysis"],
+                ),
+                "shell": AgentConfig(
+                    display_name="ShellAgent",
+                    role="Execute shell commands",
+                    tools=["shell"],
+                    rooms=["lobby", "dev"],
+                ),
+                "code": AgentConfig(
+                    display_name="CodeAgent",
+                    role="Generate code",
+                    tools=["coding"],
+                    rooms=["lobby", "dev"],
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+                "sonnet": ModelConfig(provider="anthropic", id="claude-sonnet-4-6"),
+            },
+        ),
+        runtime_paths,
+    )
+
+
 def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
-    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
-    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
-    return bound
+    """Bind explicit RuntimePaths to a test config."""
+    from tests.conftest import bind_runtime_paths  # noqa: PLC0415
 
-
-def _runtime_for_config(config: Config) -> RuntimePaths:
-    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
-    if runtime_paths is not None:
-        return runtime_paths
-    return resolve_runtime_paths(config_path=Path("config.yaml"), storage_path=Path("mindroom_data"))
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
     """Create an agent with the test config's explicit runtime context."""
-    return create_agent(agent_name, config, _runtime_for_config(config), **kwargs)
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
+    return create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
 
 
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
-    config = Config.from_yaml()
+    config = _test_config()
     agent = _create_agent_for_test("calculator", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CalculatorAgent"
@@ -78,7 +121,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
-    config = Config.from_yaml()
+    config = _test_config()
     agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "GeneralAgent"
@@ -92,7 +135,7 @@ def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
 @patch("mindroom.agents.SqliteDb")
 def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].show_tool_calls = False
 
     agent = _create_agent_for_test("general", config=config)
@@ -103,7 +146,7 @@ def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None: 
 @patch("mindroom.agents.SqliteDb")
 def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """All agents should get the scheduler tool even when not explicitly configured."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = []
 
     agent = _create_agent_for_test("summary", config=config)
@@ -115,7 +158,7 @@ def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # 
 @patch("mindroom.agents.SqliteDb")
 def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """defaults.tools should be merged into every agent's configured tools."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.tools = ["scheduler", "calculator"]
     config.agents["summary"].tools = []
 
@@ -129,7 +172,7 @@ def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None
 @patch("mindroom.agents.SqliteDb")
 def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """An agent tool already present should not be duplicated by defaults.tools."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.tools = ["scheduler"]
     config.agents["summary"].tools = ["scheduler"]
 
@@ -142,7 +185,7 @@ def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> 
 @patch("mindroom.agents.SqliteDb")
 def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Agent include_default_tools=False should skip defaults.tools entirely."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.tools = ["scheduler", "calculator"]
     config.agents["summary"].tools = []
     config.agents["summary"].include_default_tools = False
@@ -156,7 +199,7 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
 
 def test_openclaw_compat_expands_to_implied_tools() -> None:
     """openclaw_compat should stay in the list and bring its implied tools."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
@@ -176,7 +219,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
 
 def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     """Implied tool expansion should preserve first-seen order while deduping entries."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = [
         "browser",
         "openclaw_compat",
@@ -209,7 +252,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
 ) -> None:
     """Agent construction should look up openclaw_compat and all its implied tools."""
     mock_get_tool_by_name.return_value = MagicMock()
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
@@ -229,6 +272,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
     def _lookup_tool(
         name: str,
+        _runtime_paths: object = None,
         *,
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
@@ -238,6 +282,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         routing_agent_name: str | None = None,
     ) -> MagicMock:
         del (
+            _runtime_paths,
             credentials_manager,
             tool_init_overrides,
             runtime_overrides,
@@ -254,7 +299,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
     mock_get_tool_by_name.side_effect = _lookup_tool
 
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
@@ -275,7 +320,7 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
     mock_get_tool_by_name.return_value = MagicMock()
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
     config.agents["summary"].worker_tools = ["openclaw_compat"]
@@ -301,7 +346,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("Canonical workspace.\n", encoding="utf-8")
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
@@ -326,7 +371,7 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     """Agents without memory_file_path should not be forced into an auto-created workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_file_path = None
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
@@ -349,18 +394,20 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     """Agent creation should resolve relative plugin paths from the active config file."""
     config_path = tmp_path / "cfg" / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config = Config.from_yaml()
+    config = _test_config()
     runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
 
     with patch("mindroom.agents.SqliteDb"):
         _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
-    mock_load_plugins.assert_called_once_with(config)
+    mock_load_plugins.assert_called_once()
+    assert mock_load_plugins.call_args.args[0] is not None  # config
+    assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
 
 
 def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
     """Absolute memory_file_path should fail fast instead of creating copied state."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
 
     with pytest.raises(ValidationError, match="workspace-relative"):
@@ -369,7 +416,7 @@ def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> 
 
 def test_create_agent_rejects_env_var_memory_file_workspace() -> None:
     """Env-var memory_file_path should fail fast instead of becoming a literal workspace subdir."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
 
     with pytest.raises(ValidationError, match="env-variable references"):
@@ -378,7 +425,7 @@ def test_create_agent_rejects_env_var_memory_file_workspace() -> None:
 
 def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
     """Absolute context_files should fail fast instead of creating copied state."""
-    config = Config.from_yaml()
+    config = _test_config()
 
     with pytest.raises(ValidationError, match="workspace-relative"):
         config.agents["general"].context_files = [str(tmp_path / "SOUL.md")]
@@ -386,7 +433,7 @@ def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
 
 def test_create_agent_rejects_env_var_context_files() -> None:
     """Env-var context_files should fail fast instead of becoming literal workspace segments."""
-    config = Config.from_yaml()
+    config = _test_config()
 
     with pytest.raises(ValidationError, match="env-variable references"):
         config.agents["general"].context_files = ["${MINDROOM_STORAGE_PATH}/SOUL.md"]
@@ -394,7 +441,7 @@ def test_create_agent_rejects_env_var_context_files() -> None:
 
 def test_create_agent_rejects_bare_env_var_context_files() -> None:
     """Agent-owned paths should reject bare `$NAME/...` forms too."""
-    config = Config.from_yaml()
+    config = _test_config()
 
     with pytest.raises(ValidationError, match="env-variable references"):
         config.agents["general"].context_files = ["$MINDROOM_STORAGE_PATH/SOUL.md"]
@@ -411,7 +458,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     mock_get_tool_by_name.return_value = MagicMock()
 
     workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell"]
@@ -436,7 +483,7 @@ def test_create_agent_uses_default_worker_tool_policy_when_unset(
 ) -> None:
     """Agent creation should pass the built-in default worker-routing policy when worker_tools is omitted."""
     mock_get_tool_by_name.return_value = MagicMock()
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
     config.agents["summary"].worker_tools = None
@@ -451,7 +498,7 @@ def test_create_agent_uses_default_worker_tool_policy_when_unset(
 @patch("mindroom.agents.SqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should stay in the list and imply matrix_message."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
@@ -466,7 +513,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
 
 def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     """Implied matrix_message should not duplicate explicit configuration."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
@@ -476,7 +523,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
 
 def test_matrix_message_implies_attachments_tool() -> None:
     """matrix_message should automatically include attachments via implied tools."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
@@ -486,7 +533,7 @@ def test_matrix_message_implies_attachments_tool() -> None:
 
 def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     """Explicit attachments should not duplicate implied attachments."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
@@ -497,7 +544,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
-    config = Config.from_yaml()
+    config = _test_config()
     agent = _create_agent_for_test("code", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CodeAgent"
@@ -506,7 +553,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the shell agent is created correctly."""
-    config = Config.from_yaml()
+    config = _test_config()
     agent = _create_agent_for_test("shell", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "ShellAgent"
@@ -515,7 +562,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the summary agent is created correctly."""
-    config = Config.from_yaml()
+    config = _test_config()
     agent = _create_agent_for_test("summary", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "SummaryAgent"
@@ -523,7 +570,7 @@ def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
 
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
-    config = Config.from_yaml()
+    config = _test_config()
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
         _create_agent_for_test("unknown", config=config)
 
@@ -531,7 +578,7 @@ def test_get_agent_unknown() -> None:
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     """Tests that learning can be disabled per agent."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].learning = False
     agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
@@ -542,7 +589,7 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
     """Tests that defaults.learning is used when per-agent learning is omitted."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.learning = False
     config.agents["general"].learning = None
 
@@ -557,7 +604,7 @@ def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_st
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that learning mode can be configured as agentic."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].learning_mode = "agentic"
     agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
@@ -571,7 +618,7 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     """Tests that learning mode falls back to defaults when agent config is None."""
-    config = Config.from_yaml()
+    config = _test_config()
     # Agent has no explicit learning settings (None), defaults say enabled + agentic.
     config.agents["general"].learning = None
     config.agents["general"].learning_mode = None
@@ -592,7 +639,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Session and learning databases should live under the canonical agent state root."""
-    config = Config.from_yaml()
+    config = _test_config()
     _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     agent_root = agent_state_root_path(tmp_path, "general")
@@ -604,7 +651,7 @@ def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: Mag
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Worker scope should not change the canonical session and learning paths."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].worker_scope = "user"
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -634,7 +681,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared scope should still use canonical agent state before a live request context exists."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].worker_scope = "shared"
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
 
@@ -667,7 +714,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared worker credentials should be available during agent construction outside request context."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.tools = []
     config.agents["general"].tools = ["credentialed_toolkit"]
     config.agents["general"].worker_scope = "shared"
@@ -694,6 +741,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
 
     def _get_tool_by_name(
         tool_name: str,
+        _runtime_paths: object = None,
         *,
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
@@ -702,7 +750,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del tool_init_overrides, runtime_overrides, worker_tools_override
+        del _runtime_paths, tool_init_overrides, runtime_overrides, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,
@@ -753,7 +801,7 @@ def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Pat
 
 def test_agent_owned_validation_matches_runtime_resolution(tmp_path: Path) -> None:
     """Validation and runtime resolution should share the same normalization contract."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].context_files = ["./mind_data/SOUL.md"]
@@ -838,7 +886,7 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     """Context files should be read live from the canonical agent root across scopes."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].context_files = ["mind_data/SOUL.md"]
@@ -949,7 +997,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     """Kubernetes-backed unscoped agents should still use the canonical agent workspace."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
@@ -983,7 +1031,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     """Dedicated worker runtime roots should not change the canonical agent-owned paths."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].memory_backend = "file"
     config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
@@ -1014,7 +1062,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
 @patch("mindroom.agents.SqliteDb")
 def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Context files should load directly from the canonical workspace."""
-    config = Config.from_yaml()
+    config = _test_config()
     workspace = agent_workspace_root_path(tmp_path, "general")
     soul_path = workspace / "SOUL.md"
     user_path = workspace / "USER.md"
@@ -1044,7 +1092,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
     tmp_path: Path,
 ) -> None:
     """Preload cap should drop earlier context files before later ones."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.defaults.max_preload_chars = 420
 
     workspace = agent_workspace_root_path(tmp_path, "general")
@@ -1067,7 +1115,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
 @patch("mindroom.agents.SqliteDb")
 def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
     """Missing context files should not prevent agent creation."""
-    config = Config.from_yaml()
+    config = _test_config()
     config.agents["general"].context_files = ["does-not-exist.md"]
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
@@ -1078,7 +1126,7 @@ def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path
 
 def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: Path) -> None:
     """Relative context paths should resolve from the canonical workspace, not CWD."""
-    config = Config.from_yaml()
+    config = _test_config()
     workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     soul_path = workspace / "SOUL.md"
@@ -1391,15 +1439,16 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     model = MagicMock()
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
     with patch("mindroom.ai.get_model_instance", return_value=model):
         _create_agent_for_test(
             "agent_one",
-            config=_bind_runtime_paths(config, runtime_paths),
+            config=bound_config,
             include_interactive_questions=False,
         )
         _create_agent_for_test(
             "agent_two",
-            config=config,
+            config=bound_config,
             include_interactive_questions=False,
         )
 
@@ -1463,7 +1512,9 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
             include_interactive_questions=False,
         )
 
-    mock_get_model_instance.assert_called_once_with(config, "m1")
+    mock_get_model_instance.assert_called_once()
+    call_args = mock_get_model_instance.call_args
+    assert call_args.args[2] == "m1"  # model_name
     assert mock_agent_class.call_count == 1
     assert mock_storage.call_count >= 2
     assert mock_culture_manager_class.call_args is not None

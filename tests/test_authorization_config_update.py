@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from mindroom.authorization import is_authorized_sender
 from mindroom.config.main import Config
-from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 def test_authorization_check_uses_updated_config() -> None:
@@ -13,6 +16,7 @@ def test_authorization_check_uses_updated_config() -> None:
     This demonstrates that when the config.authorization is updated,
     the authorization checks will use the new configuration.
     """
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     # Create config with alice authorized
     config = bind_runtime_paths(
         Config(
@@ -30,8 +34,8 @@ def test_authorization_check_uses_updated_config() -> None:
                 "default_room_access": False,
             },
         ),
+        runtime_paths,
     )
-
     runtime_paths = runtime_paths_for(config)
 
     # Alice should be authorized

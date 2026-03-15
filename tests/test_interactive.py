@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -11,7 +13,7 @@ from mindroom import interactive
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture
@@ -27,6 +29,7 @@ class TestInteractiveFunctions:
 
     def setup_method(self) -> None:
         """Set up test config."""
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
         self.config = bind_runtime_paths(
             Config(
                 agents={
@@ -36,6 +39,7 @@ class TestInteractiveFunctions:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
+            runtime_paths,
         )
 
     def test_should_create_interactive_question(self) -> None:
@@ -202,7 +206,13 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "🚀"
 
-        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
 
         # Should return the selected value and thread_id
         assert result == ("fast", "$thread123")
@@ -227,7 +237,13 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$unknown123"
         event.key = "👍"
 
-        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
 
         # Should return None for unknown reaction
         assert result is None
@@ -254,7 +270,13 @@ Based on your choice, I'll proceed accordingly."""
         event.reacts_to = "$question123"
         event.key = "✅"
 
-        result = await interactive.handle_reaction(mock_client, event, "test_agent", self.config)
+        result = await interactive.handle_reaction(
+            mock_client,
+            event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
 
         # Should return None (ignoring own reaction)
         assert result is None
@@ -461,7 +483,13 @@ Just let me know your preference!"""
         reaction_event.reacts_to = event_id
         reaction_event.key = "🔍"
 
-        result = await interactive.handle_reaction(mock_client, reaction_event, "test_agent", self.config)
+        result = await interactive.handle_reaction(
+            mock_client,
+            reaction_event,
+            "test_agent",
+            self.config,
+            runtime_paths_for(self.config),
+        )
 
         # Verify reaction was processed
         assert result == ("detailed", "$thread123")  # Thread ID from the question
