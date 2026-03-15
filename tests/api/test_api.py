@@ -922,6 +922,51 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
     assert main.config == original_config
 
 
+def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -> None:
+    """API config loads should normalize legacy null optional sections."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-5.4\n"
+        "agents: {}\n"
+        "teams: null\n"
+        "plugins: null\n"
+        "router:\n"
+        "  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+
+    main._load_config_from_file(runtime_paths)
+
+    assert main.config["teams"] == {}
+    assert main.config["plugins"] == []
+
+
+def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> None:
+    """API config writes should accept legacy null optional sections already loaded in memory."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
+    main.config = {
+        "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+        "router": {"model": "default"},
+        "agents": {},
+        "teams": None,
+        "plugins": None,
+    }
+
+    main._run_config_write(
+        lambda: None,
+        runtime_paths=runtime_paths,
+        error_prefix="Failed to save configuration",
+    )
+
+    assert main.config["teams"] == {}
+    assert main.config["plugins"] == []
+
+
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
     """Test error handling for non-existent agent."""
     test_client.post("/api/config/load")

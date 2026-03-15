@@ -377,6 +377,32 @@ class TestResolveConfigRelativePath:
 
         assert resolved == (other_dir / "storage-other" / "kb").resolve()
 
+    def test_explicit_config_path_keeps_real_shell_storage_override_after_activation(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Alternate config loads must preserve a real exported storage override."""
+        active_dir = tmp_path / "active"
+        other_dir = tmp_path / "other"
+        active_dir.mkdir(parents=True, exist_ok=True)
+        other_dir.mkdir(parents=True, exist_ok=True)
+        active_config = active_dir / "config.yaml"
+        other_config = other_dir / "config.yaml"
+        for path in (active_config, other_config):
+            path.write_text(
+                "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+                encoding="utf-8",
+            )
+
+        shared_storage = tmp_path / "shared-storage"
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
+        constants_mod.set_runtime_paths(config_path=active_config)
+
+        resolved_runtime = constants_mod.resolve_runtime_paths(config_path=other_config)
+
+        assert resolved_runtime.storage_root == shared_storage.resolve()
+
     def test_config_from_yaml_does_not_override_existing_shell_env(
         self,
         tmp_path: Path,

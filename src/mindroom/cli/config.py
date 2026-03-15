@@ -27,7 +27,6 @@ from mindroom.constants import (
     activate_runtime_paths,
     config_search_locations,
     env_key_for_provider,
-    exported_process_env,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
 )
@@ -207,7 +206,7 @@ def _resolve_config_path(path: Path | None) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return resolve_primary_runtime_paths(process_env=exported_process_env()).config_path.resolve()
+    return resolve_primary_runtime_paths().config_path.resolve()
 
 
 def _activate_cli_runtime(
@@ -216,21 +215,17 @@ def _activate_cli_runtime(
     storage_path: Path | None = None,
 ) -> RuntimePaths:
     """Create the CLI runtime context once and return it for explicit threading."""
-    process_env = exported_process_env()
     if path is not None:
-        filtered_process_env = {key: value for key, value in process_env.items() if key != "MINDROOM_CONFIG_PATH"}
         return activate_runtime_paths(
             resolve_primary_runtime_paths(
                 config_path=path.expanduser().resolve(),
                 storage_path=storage_path,
-                process_env=filtered_process_env,
             ),
         )
 
     return activate_runtime_paths(
         resolve_primary_runtime_paths(
             storage_path=storage_path,
-            process_env=process_env,
         ),
     )
 

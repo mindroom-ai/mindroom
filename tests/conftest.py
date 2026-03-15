@@ -159,9 +159,13 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
 
     original_env = os.environ.copy()
     original_synced_env = dict(constants._RUNTIME_SYNCED_ENV_VALUES)
+    original_synced_originals = dict(constants._RUNTIME_SYNCED_ENV_ORIGINALS)
+    original_active_runtime = constants._ACTIVE_RUNTIME_PATHS
     yield
     os.environ.clear()
     os.environ.update(original_env)
+    constants._ACTIVE_RUNTIME_PATHS = original_active_runtime
+    constants._RUNTIME_SYNCED_ENV_ORIGINALS = dict(original_synced_originals)
     constants._replace_runtime_synced_env(original_synced_env)
 
 

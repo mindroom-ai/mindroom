@@ -228,6 +228,15 @@ def _save_config_to_file(
     constants.safe_replace(tmp_path, config_path)
 
 
+def _validated_config_payload(
+    raw_config: dict[str, Any],
+    runtime_paths: constants.RuntimePaths,
+) -> dict[str, Any]:
+    """Normalize and validate one config payload against the active runtime."""
+    validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
+    return validated_config.model_dump(exclude_none=True)
+
+
 # Global variable to store current config
 config: dict[str, Any] = {}
 config_lock = threading.Lock()
@@ -247,8 +256,7 @@ def _run_config_write[T](
             original_config = deepcopy(config)
             result = mutate()
             candidate_config = config if save_payload is None else save_payload
-            validated_config = Config.validate_with_runtime(candidate_config, runtime_paths)
-            validated_payload = validated_config.model_dump(exclude_none=True)
+            validated_payload = _validated_config_payload(candidate_config, runtime_paths)
             config = validated_payload
             _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
         except HTTPException:
@@ -582,10 +590,10 @@ async def verify_user(
 def _load_config_from_file(runtime_paths: constants.RuntimePaths) -> None:
     """Load config from YAML file."""
     global config
-    config_path = runtime_paths.config_path
     try:
-        with config_path.open() as f, config_lock:
-            config = yaml.safe_load(f)
+        validated_payload = Config.from_yaml(runtime_paths=runtime_paths).model_dump(exclude_none=True)
+        with config_lock:
+            config = validated_payload
         print("Config loaded successfully")
     except Exception as e:
         print(f"Error loading config: {e}")

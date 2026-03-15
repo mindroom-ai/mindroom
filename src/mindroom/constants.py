@@ -25,6 +25,8 @@ _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 _RUNTIME_SYNCED_ENV_VALUES: dict[str, str] = {}
+_RUNTIME_SYNCED_ENV_ORIGINALS: dict[str, str | None] = {}
+_ACTIVE_RUNTIME_PATHS: "RuntimePaths | None" = None
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,11 @@ def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, st
     exported_env: dict[str, str] = {}
     for key, value in os.environ.items():
         synced_value = _RUNTIME_SYNCED_ENV_VALUES.get(key)
-        if synced_value is not None and synced_value == value and key not in _RUNTIME_PATH_ENV_KEYS:
+        if synced_value is not None and synced_value == value:
+            original_value = _RUNTIME_SYNCED_ENV_ORIGINALS.get(key)
+            if original_value is None:
+                continue
+            exported_env[key] = original_value
             continue
         exported_env[key] = value
     return exported_env
@@ -104,10 +110,13 @@ def config_search_locations() -> list[Path]:
 
     This is the single source of truth for config file discovery.
     """
-    process_env = _copy_process_env()
     seen: set[Path] = set()
     locations: list[Path] = []
-    if configured_path := _configured_config_path(process_env):
+    if _ACTIVE_RUNTIME_PATHS is not None:
+        resolved = _ACTIVE_RUNTIME_PATHS.config_path.resolve()
+        seen.add(resolved)
+        locations.append(resolved)
+    elif configured_path := _configured_config_path(_copy_process_env()):
         resolved = configured_path.resolve()
         seen.add(resolved)
         locations.append(resolved)
@@ -131,13 +140,6 @@ def _storage_root_from_env_path(env_path: Path) -> Path | None:
     return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path))
 
 
-def _active_runtime_path_env() -> tuple[Path | None, str | None]:
-    """Return the currently synced compatibility config/storage path env values."""
-    config_value = _RUNTIME_SYNCED_ENV_VALUES.get("MINDROOM_CONFIG_PATH")
-    config_path = Path(config_value).expanduser().resolve() if config_value else None
-    return config_path, _RUNTIME_SYNCED_ENV_VALUES.get("MINDROOM_STORAGE_PATH")
-
-
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -148,21 +150,19 @@ def resolve_runtime_paths(
 
     This is a pure resolver. It does not mutate `os.environ` or any module globals.
     """
-    resolved_process_env = _copy_process_env(process_env)
-    active_config_path, active_storage_value = _active_runtime_path_env()
+    resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
     if (
         process_env is None
-        and config_path is not None
+        and _ACTIVE_RUNTIME_PATHS is not None
         and storage_path is None
-        and active_storage_value is not None
-        and resolved_process_env.get("MINDROOM_STORAGE_PATH") == active_storage_value
-        and Path(config_path).expanduser().resolve() != active_config_path
+        and (resolved_config_arg is None or resolved_config_arg == _ACTIVE_RUNTIME_PATHS.config_path)
     ):
-        # Activated runtime remains the compatibility default only for the
-        # currently active config. Alternate config loads must resolve against
-        # their own sibling `.env` or explicit shell-exported overrides.
-        resolved_process_env.pop("MINDROOM_STORAGE_PATH", None)
-    resolved_config_path = Path(config_path or find_config(process_env=resolved_process_env)).expanduser().resolve()
+        return _ACTIVE_RUNTIME_PATHS
+
+    resolved_process_env = _copy_process_env(process_env)
+    resolved_config_path = (
+        Path(resolved_config_arg or find_config(process_env=resolved_process_env)).expanduser().resolve()
+    )
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
     env_file_values = _runtime_env_file_values_for_path(env_path)
@@ -223,19 +223,26 @@ def resolve_primary_runtime_paths(
 
 
 def _replace_runtime_synced_env(next_values: dict[str, str]) -> None:
-    global _RUNTIME_SYNCED_ENV_VALUES
+    global _RUNTIME_SYNCED_ENV_ORIGINALS, _RUNTIME_SYNCED_ENV_VALUES
 
     previous_values = _RUNTIME_SYNCED_ENV_VALUES
+    previous_originals = _RUNTIME_SYNCED_ENV_ORIGINALS
+    exported_env = _copy_process_env()
     for key, old_value in previous_values.items():
         if key in next_values:
             continue
         if os.environ.get(key) == old_value:
-            os.environ.pop(key, None)
+            original_value = previous_originals.get(key)
+            if original_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original_value
 
     for key, value in next_values.items():
         os.environ[key] = value
 
     _RUNTIME_SYNCED_ENV_VALUES = dict(next_values)
+    _RUNTIME_SYNCED_ENV_ORIGINALS = {key: exported_env.get(key) for key in next_values}
 
 
 def sync_runtime_env_to_process(
@@ -296,7 +303,7 @@ def runtime_config_path(
 
 
 def exported_process_env() -> dict[str, str]:
-    """Return the current env snapshot, excluding only non-path runtime-synced injections."""
+    """Return the current exported env snapshot without compatibility-injected values."""
     return _copy_process_env()
 
 
@@ -391,7 +398,10 @@ def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
 
 def activate_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Sync one explicit runtime context into process env for compatibility."""
+    global _ACTIVE_RUNTIME_PATHS
+
     primary_runtime_paths = _with_primary_runtime_env(runtime_paths)
+    _ACTIVE_RUNTIME_PATHS = primary_runtime_paths
     sync_runtime_env_to_process(primary_runtime_paths, sync_path_env=True)
     return primary_runtime_paths
 
@@ -491,6 +501,8 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
     Returns the original (possibly relative) path, not a resolved one,
     so CLI-facing defaults still display cleanly.
     """
+    if process_env is None and _ACTIVE_RUNTIME_PATHS is not None:
+        return _ACTIVE_RUNTIME_PATHS.config_path
     if configured_path := _configured_config_path(_copy_process_env(process_env)):
         return configured_path
     for path in _CONFIG_SEARCH_PATHS:

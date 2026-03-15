@@ -6,7 +6,7 @@ import re
 from collections import deque
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, model_validator
@@ -21,7 +21,6 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    exported_process_env,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
     runtime_matrix_homeserver,
@@ -114,9 +113,8 @@ def _resolve_runtime_paths_for_config_load(
     if runtime_paths is not None:
         return runtime_paths
 
-    process_env = exported_process_env()
     if config_path is None:
-        return resolve_primary_runtime_paths(process_env=process_env)
+        return resolve_primary_runtime_paths()
 
     resolved_config_path = Path(config_path).expanduser().resolve()
     return resolve_runtime_paths(config_path=resolved_config_path)
@@ -129,6 +127,16 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
             data[name] = {}
     if data.get("plugins") is None:
         data["plugins"] = []
+
+
+def _normalized_config_data(data: object) -> object:
+    """Return config input with legacy optional sections normalized."""
+    if not isinstance(data, dict):
+        return data
+
+    normalized_data = cast("dict[str, object]", data.copy())
+    _normalize_optional_config_sections(normalized_data)
+    return normalized_data
 
 
 def _router_agents_for_room(
@@ -421,7 +429,7 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
         config._runtime_paths = runtime_paths
         return config
 
@@ -449,8 +457,6 @@ class Config(BaseModel):
 
         with path.open() as f:
             data = yaml.safe_load(f) or {}
-
-        _normalize_optional_config_sections(data)
 
         config = cls.validate_with_runtime(data, resolved_runtime_paths)
         logger.info(f"Loaded agent configuration from {path}")
