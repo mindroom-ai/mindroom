@@ -104,6 +104,8 @@ def test_team_bot_uses_defaults_streaming_setting(
 ) -> None:
     """Team bots should inherit defaults.enable_streaming from config."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
+    runtime_paths = runtime_paths_for(config_with_rooms)
+    domain = config_with_rooms.get_domain(runtime_paths)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
     def mock_resolve_room_aliases(
@@ -127,15 +129,15 @@ def test_team_bot_uses_defaults_streaming_setting(
         "team1",
         team_user,
         config_with_rooms,
-        runtime_paths_for(config_with_rooms),
+        runtime_paths,
         tmp_path,
     )
 
     assert team_bot is not None
     assert team_bot.enable_streaming is False
     assert team_bot.team_agents == [
-        MatrixID.from_agent("agent1", config_with_rooms.domain, runtime_paths_for(config_with_rooms)),
-        MatrixID.from_agent("agent2", config_with_rooms.domain, runtime_paths_for(config_with_rooms)),
+        MatrixID.from_agent("agent1", domain, runtime_paths),
+        MatrixID.from_agent("agent2", domain, runtime_paths),
     ]
 
 
