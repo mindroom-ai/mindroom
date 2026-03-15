@@ -639,7 +639,7 @@ class TestRoutingRegression:
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config
-        domain = mock_config.domain
+        domain = mock_config.get_domain(runtime_paths_for(mock_config))
 
         # Update mock agents to use the correct domain
         mock_research_agent.user_id = f"@mindroom_research:{domain}"

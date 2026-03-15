@@ -64,7 +64,9 @@ class TestTeamRoomMembership:
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, runtime_paths_for(config))]
+        team_matrix_ids = [
+            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
@@ -117,7 +119,9 @@ class TestTeamRoomMembership:
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, runtime_paths_for(config))]
+        team_matrix_ids = [
+            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,

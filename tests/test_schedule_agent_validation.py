@@ -61,7 +61,10 @@ async def test_schedule_validates_agents_in_room() -> None:
     client = AsyncMock()
 
     # Create a mock room with the agents - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock the workflow parsing to return a workflow with calculator mentioned
     mock_workflow = ScheduledWorkflow(
@@ -90,7 +93,7 @@ async def test_schedule_validates_agents_in_room() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this room" in response
 
@@ -121,7 +124,10 @@ async def test_schedule_validates_agents_in_thread() -> None:
     client = AsyncMock()
 
     # Create a mock room with assistant - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock the workflow parsing
     mock_workflow = ScheduledWorkflow(
@@ -150,7 +156,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this thread" in response
 
@@ -185,8 +191,8 @@ async def test_schedule_allows_agents_in_room() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.domain}",
-            f"@mindroom_calculator:{config.domain}",
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}",
         ],
     )
 
@@ -257,8 +263,8 @@ async def test_schedule_with_multiple_agents_validation() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.domain}",
-            f"@mindroom_researcher:{config.domain}",
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_researcher:{config.get_domain(runtime_paths_for(config))}",
         ],
     )
 
@@ -288,10 +294,10 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         # Researcher should not be mentioned as invalid
-        researcher_matrix_id = config.ids["researcher"].full_id
+        researcher_matrix_id = config.get_ids(runtime_paths_for(config))["researcher"].full_id
         assert researcher_matrix_id not in response.split("not available")[1] if "not available" in response else True
 
 
@@ -315,7 +321,10 @@ async def test_schedule_with_no_agent_mentions() -> None:
     client.room_put_state = AsyncMock()
 
     # Create a mock room - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock workflow without any agent mentions
     mock_workflow = ScheduledWorkflow(
@@ -363,7 +372,10 @@ async def test_schedule_with_nonexistent_agent() -> None:
     client = AsyncMock()
 
     # Create a mock room - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock workflow mentioning non-existent agent
     mock_workflow = ScheduledWorkflow(
@@ -376,7 +388,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
     with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, response = await schedule_task(
+        task_id, _response = await schedule_task(
             client=client,
             room_id="test_room",
             thread_id=None,

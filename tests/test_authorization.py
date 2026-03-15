@@ -27,7 +27,6 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
     )
     bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
-    bound.__dict__["ids"] = bound.get_ids(runtime_paths)
     return bound
 
 
@@ -155,7 +154,7 @@ def test_no_restrictions_only_allows_internal_user(
 
     # Agents should still be allowed
     assert is_authorized_sender(
-        mock_config_no_restrictions.ids["assistant"].full_id,
+        mock_config_no_restrictions.get_ids(_runtime_paths_for(mock_config_no_restrictions))["assistant"].full_id,
         mock_config_no_restrictions,
         "!test:server",
     )
@@ -184,12 +183,12 @@ def test_agents_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured agents are always allowed regardless of authorized_users."""
     # Configured agents should be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids["assistant"].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["assistant"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids["analyst"].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["analyst"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -202,7 +201,7 @@ def test_teams_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that configured teams are always allowed regardless of authorized_users."""
     # Configured team should be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids["test_team"].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["test_team"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -215,7 +214,9 @@ def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
     """Test that the router agent is always allowed."""
     # Router should always be allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids[ROUTER_AGENT_NAME].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))[
+            ROUTER_AGENT_NAME
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -279,21 +280,23 @@ def test_mixed_authorization_scenarios(mock_config_with_restrictions: Config) ->
 
     # Agents - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids["assistant"].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["assistant"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
 
     # Teams - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids["test_team"].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))["test_team"].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
 
     # Router - allowed
     assert is_authorized_sender(
-        mock_config_with_restrictions.ids[ROUTER_AGENT_NAME].full_id,
+        mock_config_with_restrictions.get_ids(_runtime_paths_for(mock_config_with_restrictions))[
+            ROUTER_AGENT_NAME
+        ].full_id,
         mock_config_with_restrictions,
         "!test:server",
     )
@@ -759,7 +762,7 @@ def test_effective_sender_uses_voice_original_sender_for_router_messages() -> No
     }
 
     assert get_effective_sender_id_for_reply_permissions(
-        config.ids[ROUTER_AGENT_NAME].full_id,
+        config.get_ids(_runtime_paths_for(config))[ROUTER_AGENT_NAME].full_id,
         event_source,
         config,
     ) == ("@alice:example.com")
@@ -814,7 +817,7 @@ def test_effective_sender_uses_original_sender_for_internal_agent_messages() -> 
     }
 
     assert get_effective_sender_id_for_reply_permissions(
-        config.ids["assistant"].full_id,
+        config.get_ids(_runtime_paths_for(config))["assistant"].full_id,
         event_source,
         config,
     ) == ("@alice:example.com")

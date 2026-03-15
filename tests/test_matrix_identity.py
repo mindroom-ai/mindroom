@@ -72,7 +72,7 @@ class TestMatrixID:
     def test_agent_name_extraction(self, tmp_path: Path) -> None:
         """Test extracting agent name."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
-        domain = self.config.domain
+        domain = self.config.get_domain(runtime_paths_for(self.config))
 
         # Valid agent
         mid = MatrixID.parse(f"@mindroom_calculator:{domain}")
@@ -89,7 +89,7 @@ class TestMatrixID:
     def test_parse_router(self, tmp_path: Path) -> None:
         """Test parsing a router agent ID."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
-        domain = self.config.domain
+        domain = self.config.get_domain(runtime_paths_for(self.config))
         mid = MatrixID.parse(f"@mindroom_router:{domain}")
         assert mid.username == "mindroom_router"
         assert mid.domain == domain
@@ -162,7 +162,7 @@ class TestHelperFunctions:
     def test_is_agent_id(self, tmp_path: Path) -> None:
         """Test quick agent ID check."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
-        domain = self.config.domain
+        domain = self.config.get_domain(runtime_paths_for(self.config))
         runtime_paths = runtime_paths_for(self.config)
         assert is_agent_id(f"@mindroom_calculator:{domain}", self.config, runtime_paths) is True
         assert is_agent_id(f"@mindroom_general:{domain}", self.config, runtime_paths) is True
@@ -173,7 +173,7 @@ class TestHelperFunctions:
     def test_extract_agent_name(self, tmp_path: Path) -> None:
         """Test agent name extraction."""
         self.config = _bind_runtime_paths(self.config, tmp_path)
-        domain = self.config.domain
+        domain = self.config.get_domain(runtime_paths_for(self.config))
         runtime_paths = runtime_paths_for(self.config)
         assert extract_agent_name(f"@mindroom_calculator:{domain}", self.config, runtime_paths) == "calculator"
         assert extract_agent_name(f"@mindroom_general:{domain}", self.config, runtime_paths) == "general"

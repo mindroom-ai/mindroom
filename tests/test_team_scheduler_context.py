@@ -67,8 +67,16 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain, runtime_paths_for(bot.config)),
-        MatrixID.from_agent("research", bot.config.domain, runtime_paths_for(bot.config)),
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -103,8 +111,16 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain, runtime_paths_for(bot.config)),
-        MatrixID.from_agent("research", bot.config.domain, runtime_paths_for(bot.config)),
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:

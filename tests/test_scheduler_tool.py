@@ -47,7 +47,11 @@ def test_extract_mentioned_agents_from_text() -> None:
         config,
         runtime_paths_for(config),
     )
-    expected_agent = MatrixID.from_agent("general", config.domain, runtime_paths_for(config))
+    expected_agent = MatrixID.from_agent(
+        "general",
+        config.get_domain(runtime_paths_for(config)),
+        runtime_paths_for(config),
+    )
     assert result == [expected_agent]
 
 

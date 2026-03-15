@@ -743,7 +743,9 @@ class TestAgentResponseLogic:
             thread_history=thread_history,
             config=self.config,
             runtime_paths=self.runtime_paths,
-            mentioned_agents=[self.config.ids["research"]],  # ResearchAgent is mentioned
+            mentioned_agents=[
+                self.config.get_ids(runtime_paths_for(self.config))["research"],
+            ],  # ResearchAgent is mentioned
             sender_id=self.sender,
         )
         assert should_respond is False  # Should NOT respond when another agent is mentioned

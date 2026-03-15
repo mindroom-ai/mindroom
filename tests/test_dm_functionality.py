@@ -101,7 +101,7 @@ class TestDMResponseLogic:
         room = MagicMock()
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
-        agent_matrix_id = config.ids["test_agent"].full_id
+        agent_matrix_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         room.users = {agent_matrix_id: None}
 
         # In DM mode, agent should respond when no one else has
@@ -132,7 +132,7 @@ class TestDMResponseLogic:
         room = MagicMock()
         room.room_id = "!dm:localhost"
         # Use the actual MatrixID from config to ensure domain matches
-        agent_matrix_id = config.ids["test_agent"].full_id
+        agent_matrix_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         room.users = {agent_matrix_id: None}
 
         # When mentioned, always respond
@@ -164,8 +164,8 @@ class TestDMResponseLogic:
         # Mock room with multiple agents - use the correct domains from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        test_agent_id = config.ids["test_agent"].full_id
-        other_agent_id = config.ids["other_agent"].full_id
+        test_agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
+        other_agent_id = config.get_ids(runtime_paths_for(config))["other_agent"].full_id
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # Another agent is mentioned, not this one
@@ -177,7 +177,9 @@ class TestDMResponseLogic:
             thread_history=[],
             config=config,
             runtime_paths=runtime_paths_for(config),
-            mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
+            mentioned_agents=[
+                config.get_ids(runtime_paths_for(config))["other_agent"],
+            ],  # Other agent mentioned with correct domain
             sender_id="@user:localhost",
         )
 
@@ -198,8 +200,8 @@ class TestDMResponseLogic:
         # Mock room with multiple agents - use the correct domains from config
         room = MagicMock()
         room.room_id = "!dm:localhost"
-        test_agent_id = config.ids["test_agent"].full_id
-        other_agent_id = config.ids["other_agent"].full_id
+        test_agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
+        other_agent_id = config.get_ids(runtime_paths_for(config))["other_agent"].full_id
         room.users = {test_agent_id: None, other_agent_id: None}
 
         # No mentions - agents should not respond individually (team formation happens at a higher level)
@@ -243,7 +245,9 @@ class TestDMMessageContext:
         # Create a bot with mocked components
         # Use the correct MatrixID from config
         test_agent_matrix_id = (
-            config.ids["test_agent"] if "test_agent" in config.ids else MatrixID.parse("@mindroom_test_agent:localhost")
+            config.get_ids(runtime_paths_for(config))["test_agent"]
+            if "test_agent" in config.get_ids(runtime_paths_for(config))
+            else MatrixID.parse("@mindroom_test_agent:localhost")
         )
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
@@ -298,7 +302,9 @@ class TestDMIntegration:
 
         # Use the correct MatrixID from config
         test_agent_matrix_id = (
-            config.ids["test_agent"] if "test_agent" in config.ids else MatrixID.parse("@mindroom_test_agent:localhost")
+            config.get_ids(runtime_paths_for(config))["test_agent"]
+            if "test_agent" in config.get_ids(runtime_paths_for(config))
+            else MatrixID.parse("@mindroom_test_agent:localhost")
         )
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
@@ -341,7 +347,9 @@ class TestDMIntegration:
         # Create and configure a bot
         # Use the correct MatrixID from config
         researcher_matrix_id = (
-            config.ids["researcher"] if "researcher" in config.ids else MatrixID.parse("@mindroom_researcher:localhost")
+            config.get_ids(runtime_paths_for(config))["researcher"]
+            if "researcher" in config.get_ids(runtime_paths_for(config))
+            else MatrixID.parse("@mindroom_researcher:localhost")
         )
         agent_user = AgentMatrixUser(
             agent_name="researcher",
@@ -361,7 +369,9 @@ class TestDMIntegration:
 
         bot.client = AsyncMock()
         bot.client.user_id = (
-            config.ids["researcher"].full_id if "researcher" in config.ids else "@mindroom_researcher:localhost"
+            config.get_ids(runtime_paths_for(config))["researcher"].full_id
+            if "researcher" in config.get_ids(runtime_paths_for(config))
+            else "@mindroom_researcher:localhost"
         )
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
@@ -406,7 +416,9 @@ class TestDMIntegration:
             room.name = "DM with researcher"
             # Use the correct MatrixID from config
             researcher_id = (
-                config.ids["researcher"].full_id if "researcher" in config.ids else "@mindroom_researcher:localhost"
+                config.get_ids(runtime_paths_for(config))["researcher"].full_id
+                if "researcher" in config.get_ids(runtime_paths_for(config))
+                else "@mindroom_researcher:localhost"
             )
             room.users = {researcher_id: None}  # Single agent in room
 
@@ -438,7 +450,7 @@ class TestDMIntegration:
         )
 
         # Use the correct MatrixID from config
-        test_agent_matrix_id = config.ids["test_agent"]
+        test_agent_matrix_id = config.get_ids(runtime_paths_for(config))["test_agent"]
         agent_user = AgentMatrixUser(
             agent_name="test_agent",
             user_id=test_agent_matrix_id.full_id,
@@ -456,7 +468,7 @@ class TestDMIntegration:
         )
 
         bot.client = AsyncMock()
-        bot.client.user_id = config.ids["test_agent"].full_id
+        bot.client.user_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
         bot.response_tracker.has_responded = MagicMock(return_value=False)
@@ -498,7 +510,7 @@ class TestDMIntegration:
             room.room_id = "!dm:localhost"  # This room is NOT in bot.rooms
             room.name = "DM Room"
             # Use the correct MatrixID from config
-            test_agent_id = config.ids["test_agent"].full_id
+            test_agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
             room.users = {test_agent_id: None}  # Single agent in room
 
             event = MagicMock(spec=nio.RoomMessageText)

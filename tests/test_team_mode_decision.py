@@ -209,8 +209,11 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COORDINATE
 
             result = await decide_team_formation_for_test(
-                agent=mock_config.ids["email"],
-                tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+                agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                tagged_agents=[
+                    mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                    mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+                ],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[],
                 room=MagicMock(spec=nio.MatrixRoom),
@@ -233,8 +236,11 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_without_ai_decision(self, mock_config):
         """Test team formation with hardcoded mode selection."""
         result = await decide_team_formation_for_test(
-            agent=mock_config.ids["email"],
-            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+            agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+            tagged_agents=[
+                mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+            ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -252,8 +258,11 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_message_fallback(self, mock_config):
         """Test fallback to hardcoded logic when message is None."""
         result = await decide_team_formation_for_test(
-            agent=mock_config.ids["email"],
-            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+            agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+            tagged_agents=[
+                mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+            ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -271,8 +280,11 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_config_fallback(self, mock_config):
         """Test fallback to hardcoded logic when config is None."""
         result = await decide_team_formation_for_test(
-            agent=mock_config.ids["email"],
-            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+            agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+            tagged_agents=[
+                mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+            ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -291,8 +303,8 @@ class TestShouldFormTeam:
     async def test_decide_team_formation_no_team_needed(self, mock_config):
         """Test when no team formation is needed."""
         result = await decide_team_formation_for_test(
-            agent=mock_config.ids["email"],
-            tagged_agents=[mock_config.ids["email"]],  # Only one agent
+            agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+            tagged_agents=[mock_config.get_ids(runtime_paths_for(mock_config))["email"]],  # Only one agent
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),
@@ -313,9 +325,12 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation_for_test(
-                agent=mock_config.ids["analyst"],
+                agent=mock_config.get_ids(runtime_paths_for(mock_config))["analyst"],
                 tagged_agents=[],
-                agents_in_thread=[mock_config.ids["research"], mock_config.ids["analyst"]],
+                agents_in_thread=[
+                    mock_config.get_ids(runtime_paths_for(mock_config))["research"],
+                    mock_config.get_ids(runtime_paths_for(mock_config))["analyst"],
+                ],
                 all_mentioned_in_thread=[],
                 room=MagicMock(spec=nio.MatrixRoom),
                 message="Continue the analysis",
@@ -334,13 +349,13 @@ class TestShouldFormTeam:
             mock_determine.return_value = TeamMode.COLLABORATE
 
             result = await decide_team_formation_for_test(
-                agent=mock_config.ids["email"],
+                agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
                 tagged_agents=[],
                 agents_in_thread=[],
                 all_mentioned_in_thread=[
-                    mock_config.ids["email"],
-                    mock_config.ids["phone"],
-                    mock_config.ids["research"],
+                    mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                    mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+                    mock_config.get_ids(runtime_paths_for(mock_config))["research"],
                 ],
                 room=MagicMock(spec=nio.MatrixRoom),
                 message="Let's continue",
@@ -371,8 +386,11 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await decide_team_formation_for_test(
-                    agent=mock_config.ids["email"],
-                    tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+                    agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                    tagged_agents=[
+                        mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                        mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+                    ],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
                     room=MagicMock(spec=nio.MatrixRoom),
@@ -400,8 +418,11 @@ class TestIntegrationScenarios:
 
             with patch("mindroom.teams.Agent", return_value=mock_agent):
                 result = await decide_team_formation_for_test(
-                    agent=mock_config.ids["analyst"],
-                    tagged_agents=[mock_config.ids["research"], mock_config.ids["analyst"]],
+                    agent=mock_config.get_ids(runtime_paths_for(mock_config))["analyst"],
+                    tagged_agents=[
+                        mock_config.get_ids(runtime_paths_for(mock_config))["research"],
+                        mock_config.get_ids(runtime_paths_for(mock_config))["analyst"],
+                    ],
                     agents_in_thread=[],
                     all_mentioned_in_thread=[],
                     room=MagicMock(spec=nio.MatrixRoom),
@@ -419,8 +440,11 @@ class TestIntegrationScenarios:
         """Test that the function still works with old call signature."""
         # Old code might call without message and config
         result = await decide_team_formation_for_test(
-            agent=mock_config.ids["email"],
-            tagged_agents=[mock_config.ids["email"], mock_config.ids["phone"]],
+            agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+            tagged_agents=[
+                mock_config.get_ids(runtime_paths_for(mock_config))["email"],
+                mock_config.get_ids(runtime_paths_for(mock_config))["phone"],
+            ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             room=MagicMock(spec=nio.MatrixRoom),

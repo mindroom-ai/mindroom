@@ -161,8 +161,8 @@ class TestVoiceHandler:
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.users = {
-            f"@mindroom_openclaw:{config.domain}": MagicMock(),
-            f"@mindroom_router:{config.domain}": MagicMock(),
+            f"@mindroom_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
+            f"@mindroom_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
             "@alice:example.com": MagicMock(),
         }
         event = MagicMock(spec=nio.RoomMessageAudio)

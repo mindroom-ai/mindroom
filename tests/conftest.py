@@ -127,8 +127,6 @@ def bind_runtime_paths(
     """Return a runtime-bound copy of a test config."""
     bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
-    bound.__dict__["domain"] = bound.get_domain(runtime_paths)
-    bound.__dict__["ids"] = bound.get_ids(runtime_paths)
     return bound
 
 

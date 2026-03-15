@@ -98,7 +98,7 @@ async def test_agent_processes_direct_mention(
         await bot.start()
 
         # Create a message mentioning the calculator agent
-        message_body = f"@mindroom_calculator:{config.domain} What's 15% of 200?"
+        message_body = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
@@ -107,7 +107,9 @@ async def test_agent_processes_direct_mention(
                 "content": {
                     "msgtype": "m.text",
                     "body": message_body,
-                    "m.mentions": {"user_ids": [f"@mindroom_calculator:{config.domain}"]},
+                    "m.mentions": {
+                        "user_ids": [f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"],
+                    },
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                 },
                 "event_id": "$test_event:localhost",
@@ -146,7 +148,10 @@ async def test_agent_processes_direct_mention(
                 mock_ai.assert_called_once()
                 ai_kwargs = mock_ai.call_args.kwargs
                 assert ai_kwargs["agent_name"] == "calculator"
-                assert ai_kwargs["prompt"] == f"@mindroom_calculator:{config.domain} What's 15% of 200?"
+                assert (
+                    ai_kwargs["prompt"]
+                    == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+                )
                 assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
                 assert ai_kwargs["thread_history"] == []
                 assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
@@ -222,7 +227,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
-    domain = mock_config.domain
+    domain = mock_config.get_domain(runtime_paths_for(mock_config))
     test_room_id = "!test:localhost"  # Room ID can stay as localhost
     test_user_id = f"@alice:{domain}"
     thread_root_id = f"$thread_root:{domain}"

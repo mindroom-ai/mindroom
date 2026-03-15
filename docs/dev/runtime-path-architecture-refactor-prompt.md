@@ -107,7 +107,7 @@ Guardrails to add:
 - Tests for rejection of invalid forms such as `$MINDROOM_STORAGE_PATH/...` when workspace-relative agent-owned paths are required.
 - Tests for worker-scoped execution still using canonical durable agent state.
 - A two-workspace regression test that activates workspace A, then loads workspace B, and proves B resolves against B's own config path, sibling `.env`, and storage root.
-- A test that modules imported before `set_runtime_paths()` still behave correctly after the runtime context changes.
+- A test that modules imported before runtime initialization still behave correctly after the runtime context changes.
 - A test proving an explicitly exported shell env var is not overwritten by config-adjacent `.env` loading.
 - A regression test for config seeding from a sibling `.env` `MINDROOM_CONFIG_TEMPLATE`.
 - A regression test or lint-style test that prevents new direct runtime use of import-time runtime globals outside approved bootstrap modules.

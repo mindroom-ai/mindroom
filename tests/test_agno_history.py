@@ -431,7 +431,7 @@ class TestGetUnseenMessages:
     def test_filters_agent_messages(self) -> None:
         """Messages from this agent are excluded."""
         config = self._make_config()
-        agent_id = config.ids["test_agent"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         thread_history = [
             {"sender": agent_id, "body": "I am the agent", "event_id": "$a1"},
             {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
@@ -469,7 +469,7 @@ class TestGetUnseenMessages:
     def test_multi_user_scenario(self) -> None:
         """Multiple users/agents in thread, only unseen from non-self returned."""
         config = self._make_config()
-        agent_id = config.ids["test_agent"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         thread_history = [
             {"sender": "@alice:example.com", "body": "Hi", "event_id": "$a1"},
             {"sender": agent_id, "body": "Hello Alice", "event_id": "$bot1"},
@@ -1047,7 +1047,7 @@ class TestFullScenario:
                 models={"default": {"provider": "openai", "id": "test"}},
             ),
         )
-        agent_id = config.ids["bot"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["bot"].full_id
 
         # Simulate a thread with multiple users
         thread_history = [

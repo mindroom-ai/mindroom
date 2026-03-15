@@ -92,7 +92,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         raw_stream = await _team_response_stream_raw(
-            agent_ids=[config.ids["general"]],
+            agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             orchestrator=orchestrator,
@@ -130,7 +130,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
         chunks = [
             chunk
             async for chunk in team_response_stream(
-                agent_ids=[config.ids["general"]],
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
                 orchestrator=orchestrator,
@@ -176,7 +176,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
         chunks = [
             chunk
             async for chunk in team_response_stream(
-                agent_ids=[config.ids["general"]],
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
                 orchestrator=orchestrator,

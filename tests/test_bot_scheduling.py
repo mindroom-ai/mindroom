@@ -15,7 +15,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
 from tests.conftest import (
@@ -650,7 +649,11 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
         # mentioned_agents should be a list of MatrixID objects
-        mock_context.mentioned_agents = [config.ids["calculator"]] if "calculator" in config.ids else []
+        mock_context.mentioned_agents = (
+            [config.get_ids(runtime_paths_for(config))["calculator"]]
+            if "calculator" in config.get_ids(runtime_paths_for(config))
+            else []
+        )
         mock_context.has_non_agent_mentions = False
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
@@ -1176,11 +1179,6 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1230,7 +1228,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return only one agent (general)
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
 
             await bot._on_message(room, event)
 
@@ -1263,12 +1261,6 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1319,7 +1311,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return multiple agents
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
 
             await bot._on_message(room, event)
 
@@ -1358,12 +1353,6 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1414,7 +1403,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_message(room, event)
 
         bot._handle_ai_routing.assert_not_called()
@@ -1440,11 +1432,6 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1480,7 +1467,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
 
         # Router should handle the command even with a single agent
@@ -1508,11 +1495,6 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1548,7 +1530,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
 
         # Router MUST handle schedule commands even with a single agent
@@ -1576,11 +1558,6 @@ class TestRouterSkipsSingleAgent:
                 agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1632,7 +1609,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.get_agents_in_thread") as mock_agents_in_thread,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             mock_agents_in_thread.return_value = []
             await bot._on_message(room, voice_event)
 
@@ -1664,12 +1641,6 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
             bot = AgentBot(
                 agent_user=agent_user,
@@ -1705,7 +1676,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_message(room, event)
 
         bot._handle_command.assert_called_once()

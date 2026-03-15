@@ -357,8 +357,8 @@ class TestExecuteScheduledWorkflow:
             assert call_args[0][0] == client  # client
             assert call_args[0][1] == "!room:server"  # room_id
             content = call_args[0][2]
-            assert config.ids["research"].full_id in content["body"]
-            assert config.ids["analyst"].full_id in content["body"]
+            assert config.get_ids(runtime_paths_for(config))["research"].full_id in content["body"]
+            assert config.get_ids(runtime_paths_for(config))["analyst"].full_id in content["body"]
             assert content["m.relates_to"]["event_id"] == "$thread123"
             assert content[ORIGINAL_SENDER_KEY] == "@user:server"
 
@@ -490,7 +490,7 @@ class TestIntegrationWithScheduling:
 
         # Create a mock room with research agent using the correct MatrixID
         room = nio.MatrixRoom("!room:server", "@bot:server")
-        research_matrix_id = config.ids["research"].full_id
+        research_matrix_id = config.get_ids(runtime_paths_for(config))["research"].full_id
         room.users[research_matrix_id] = nio.RoomMember(
             user_id=research_matrix_id,
             display_name="Research",

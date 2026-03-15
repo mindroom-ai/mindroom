@@ -36,7 +36,6 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.matrix.client import PermanentMatrixStartupError
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -749,7 +748,7 @@ class TestAgentBot:
         mock_get_latest_thread.return_value = "latest_thread_event"
 
         config = self._config_for_storage(tmp_path)
-        mention_id = f"@mindroom_calculator:{config.domain}"
+        mention_id = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"
         agent_user = AgentMatrixUser(
             agent_name="calculator",
             password=TEST_PASSWORD,
@@ -1899,12 +1898,6 @@ class TestAgentBot:
         )
 
         config = self._config_for_storage(tmp_path)
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            "router": MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -1951,7 +1944,10 @@ class TestAgentBot:
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_media_message(room, event)
 
         bot._handle_ai_routing.assert_called_once_with(
@@ -1979,12 +1975,6 @@ class TestAgentBot:
         )
 
         config = self._config_for_storage(tmp_path)
-        config.__dict__["ids"] = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            "router": MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.logger = MagicMock()
@@ -2051,7 +2041,10 @@ class TestAgentBot:
                 return_value=attachment_record,
             ) as mock_register_file,
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_media_message(room, event)
 
         bot._handle_ai_routing.assert_called_once()
@@ -2084,11 +2077,6 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.__dict__["ids"] = {
-            "router": MatrixID.from_username("mindroom_router", "localhost"),
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-        }
-
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -2126,7 +2114,10 @@ class TestAgentBot:
         assert attachment_record is not None
 
         with (
-            patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[config.ids["general"]]),
+            patch(
+                "mindroom.bot.filter_agents_by_sender_permissions",
+                return_value=[config.get_ids(runtime_paths_for(config))["general"]],
+            ),
             patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
             patch(
                 "mindroom.bot.register_file_or_video_attachment",
@@ -2172,11 +2163,6 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.__dict__["ids"] = {
-            "router": MatrixID.from_username("mindroom_router", "localhost"),
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-        }
-
         bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -2201,7 +2187,10 @@ class TestAgentBot:
         attachment_record.attachment_id = _attachment_id_for_event("$image_route")
 
         with (
-            patch("mindroom.bot.filter_agents_by_sender_permissions", return_value=[config.ids["general"]]),
+            patch(
+                "mindroom.bot.filter_agents_by_sender_permissions",
+                return_value=[config.get_ids(runtime_paths_for(config))["general"]],
+            ),
             patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
             patch(
                 "mindroom.bot.register_image_attachment",
@@ -2238,12 +2227,6 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        config.__dict__["ids"] = {
-            "router": MatrixID.from_username("mindroom_router", "localhost"),
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-        }
-
         router_bot = AgentBot(
             AgentMatrixUser(
                 agent_name="router",
@@ -2418,7 +2401,10 @@ class TestAgentBot:
             patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
             patch(
                 "mindroom.bot.get_available_agents_for_sender",
-                return_value=[config.ids["calculator"], config.ids["general"]],
+                return_value=[
+                    config.get_ids(runtime_paths_for(config))["calculator"],
+                    config.get_ids(runtime_paths_for(config))["general"],
+                ],
             ),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
@@ -2485,7 +2471,10 @@ class TestAgentBot:
             patch("mindroom.bot.extract_agent_name", return_value=None),
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
             patch("mindroom.bot.has_multiple_non_agent_users_in_thread", return_value=False),
-            patch("mindroom.bot.get_available_agents_for_sender", return_value=[config.ids["calculator"]]),
+            patch(
+                "mindroom.bot.get_available_agents_for_sender",
+                return_value=[config.get_ids(runtime_paths_for(config))["calculator"]],
+            ),
             patch("mindroom.bot.is_authorized_sender", return_value=True),
             patch("mindroom.bot.is_dm_room", new_callable=AsyncMock, return_value=False),
             patch("mindroom.bot.extract_media_caption", return_value="[Attached image]"),
@@ -2611,8 +2600,8 @@ class TestAgentBot:
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!dm:localhost"
         room.users = {
-            config.ids["calculator"].full_id: MagicMock(),
-            config.ids["general"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
         }
 
         with patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide:
@@ -2632,7 +2621,9 @@ class TestAgentBot:
             )
 
         assert mock_decide.await_count == 1
-        assert mock_decide.call_args.kwargs["available_agents_in_room"] == [config.ids["calculator"]]
+        assert mock_decide.call_args.kwargs["available_agents_in_room"] == [
+            config.get_ids(runtime_paths_for(config))["calculator"],
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
@@ -2790,7 +2781,9 @@ class TestAgentBot:
             {"sender": "@user:localhost", "body": "Previous message", "timestamp": 123, "event_id": "prev1"},
             {"sender": mock_agent_user.user_id, "body": "My response", "timestamp": 124, "event_id": "prev2"},
             {
-                "sender": config.ids["general"].full_id if "general" in config.ids else "@mindroom_general:localhost",
+                "sender": config.get_ids(runtime_paths_for(config))["general"].full_id
+                if "general" in config.get_ids(runtime_paths_for(config))
+                else "@mindroom_general:localhost",
                 "body": "Another agent response",
                 "timestamp": 125,
                 "event_id": "prev3",
