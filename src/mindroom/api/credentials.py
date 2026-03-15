@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -26,9 +26,6 @@ from mindroom.tool_system.worker_routing import (
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )
-
-if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -70,12 +67,6 @@ class RequestCredentialsTarget:
     worker_scope: WorkerScope | None
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
-
-
-def _request_runtime_paths(request: Request) -> RuntimePaths:
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    return api_runtime_paths(request)
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -152,10 +143,12 @@ def consume_pending_oauth_request(
 
 
 def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
-    runtime_paths = _request_runtime_paths(request)
+    runtime_paths = api_runtime_paths(request)
     tenant_id = runtime_paths.env_value("CUSTOMER_ID")
     account_id = runtime_paths.env_value("ACCOUNT_ID")
     return ToolExecutionIdentity(
@@ -196,9 +189,12 @@ def resolve_request_credentials_target(
     service_names: tuple[str, ...] = (),
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    _reject_raw_worker_targeting(request)
+    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
 
-    base_manager = credentials_manager or get_runtime_credentials_manager(_request_runtime_paths(request))
+    _reject_raw_worker_targeting(request)
+    runtime_paths = api_runtime_paths(request)
+
+    base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
 
     if not agent_name:
         return RequestCredentialsTarget(
@@ -209,9 +205,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
-
-    config, _ = load_runtime_config(_request_runtime_paths(request))
+    config, _ = load_runtime_config(runtime_paths)
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 

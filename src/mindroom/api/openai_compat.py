@@ -72,24 +72,15 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-def _request_runtime_paths(request: Request) -> RuntimePaths:
-    """Return the explicit runtime context for one OpenAI-compatible request."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    try:
-        return api_runtime_paths(request)
-    except TypeError as exc:
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg) from exc
-
-
 def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
     """Load the current runtime config and return it with its path.
 
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     return load_config(runtime_paths), runtime_paths
 
 
@@ -689,7 +680,9 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error

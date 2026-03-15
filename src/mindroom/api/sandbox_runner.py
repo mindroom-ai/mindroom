@@ -16,7 +16,7 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from loguru import logger
@@ -131,8 +131,10 @@ def initialize_sandbox_runner_app(
     runner_token: str | None = None,
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
-    api_app.state.runtime_paths = runtime_paths
-    api_app.state.runner_token = runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token
+    api_app.state.sandbox_runner_context = _SandboxRunnerContext(
+        runtime_paths=runtime_paths,
+        runner_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
+    )
 
 
 def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config | None) -> None:
@@ -263,25 +265,26 @@ class _WorkerRequestPreparationError(ValueError):
     """Raised when one worker-backed execute request cannot be prepared."""
 
 
-class _SandboxRunnerState(Protocol):
+@dataclass(frozen=True)
+class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
     runner_token: str | None
 
 
-def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
-    try:
-        runtime_paths = cast("_SandboxRunnerState", app.state).runtime_paths
-    except AttributeError as exc:
-        msg = "Sandbox runner runtime paths are not initialized"
-        raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, constants.RuntimePaths):
-        msg = "Sandbox runner runtime paths are not initialized"
+def _app_context(app: FastAPI) -> _SandboxRunnerContext:
+    context = getattr(app.state, "sandbox_runner_context", None)
+    if not isinstance(context, _SandboxRunnerContext):
+        msg = "Sandbox runner context is not initialized"
         raise TypeError(msg)
-    return runtime_paths
+    return context
+
+
+def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
+    return _app_context(app).runtime_paths
 
 
 def _app_runner_token(app: FastAPI) -> str | None:
-    runner_token = cast("_SandboxRunnerState", app.state).runner_token
+    runner_token = _app_context(app).runner_token
     if runner_token is None:
         return None
     if not isinstance(runner_token, str):

@@ -11,7 +11,6 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
     from mindroom.workers.manager import WorkerManager
     from mindroom.workers.models import WorkerHandle
 
@@ -68,14 +67,10 @@ def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
     )
 
 
-def _request_runtime_paths(request: Request) -> RuntimePaths:
+def _worker_manager(request: Request) -> WorkerManager:
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    return api_runtime_paths(request)
-
-
-def _worker_manager(request: Request) -> WorkerManager:
-    runtime_paths = _request_runtime_paths(request)
+    runtime_paths = api_runtime_paths(request)
     proxy_config = sandbox_proxy_config(runtime_paths)
     if not primary_worker_backend_available(
         runtime_paths,

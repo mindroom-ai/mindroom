@@ -23,13 +23,6 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
-def _request_runtime_paths(request: Request) -> RuntimePaths:
-    """Return the explicit runtime context for one API request."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    return api_runtime_paths(request)
-
-
 def get_dashboard_url(request: Request) -> str:
     """Return the dashboard base URL for OAuth redirects."""
     return str(request.base_url).rstrip("/")
@@ -37,7 +30,9 @@ def get_dashboard_url(request: Request) -> str:
 
 def _get_spotify_redirect_uri(request: Request) -> str:
     """Return the Spotify OAuth callback URL."""
-    configured = _request_runtime_paths(request).env_value("SPOTIFY_REDIRECT_URI")
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    configured = api_runtime_paths(request).env_value("SPOTIFY_REDIRECT_URI")
     if configured:
         return configured
     return str(request.url_for("spotify_callback"))
@@ -110,6 +105,8 @@ async def get_spotify_status(
     agent_name: str | None = None,
 ) -> SpotifyStatus:
     """Get Spotify connection status."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     status = SpotifyStatus(connected=False)
     creds = _get_spotify_credentials(request, agent_name)
     if not creds or "access_token" not in creds:
@@ -117,7 +114,7 @@ async def get_spotify_status(
 
     status.connected = True
     try:
-        spotify_cls, _ = _ensure_spotify_packages(_request_runtime_paths(request))
+        spotify_cls, _ = _ensure_spotify_packages(api_runtime_paths(request))
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
         status.details = {
@@ -136,7 +133,9 @@ async def get_spotify_status(
 @router.post("/spotify/connect")
 async def connect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Start Spotify OAuth flow."""
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
     client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
@@ -173,7 +172,9 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "spotify", state)
     agent_name = pending.agent_name
 
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
     client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
