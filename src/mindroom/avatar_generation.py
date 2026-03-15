@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     resolve_avatar_path,
@@ -146,7 +146,7 @@ def get_console() -> Console:
 
 def load_validated_config(runtime_paths: constants.RuntimePaths) -> Config:
     """Load and validate the active MindRoom configuration."""
-    return Config.from_yaml(runtime_paths=runtime_paths)
+    return load_config(runtime_paths)
 
 
 def get_avatar_path(
@@ -188,9 +188,9 @@ def _missing_avatar_targets(
     }
 
 
-def has_missing_managed_avatars(config: Config) -> bool:
+def has_missing_managed_avatars(config: Config, runtime_paths: constants.RuntimePaths) -> bool:
     """Return whether any managed avatar file is missing from the workspace."""
-    return bool(_missing_avatar_targets(config, config.require_runtime_paths()))
+    return bool(_missing_avatar_targets(config, runtime_paths))
 
 
 async def generate_prompt(
@@ -320,9 +320,12 @@ async def _sync_avatar_target(
     return False
 
 
-async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int, list[str]]:
+async def _sync_configured_room_avatars(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[int, int, list[str]]:
     """Apply configured room avatars and return success/skip counts plus failed labels."""
-    runtime_paths = config.require_runtime_paths()
     success_count = 0
     skip_count = 0
     failed_labels: list[str] = []
@@ -354,12 +357,12 @@ async def _sync_root_space_avatar(
     client: nio.AsyncClient,
     config: Config,
     state: MatrixState,
+    runtime_paths: constants.RuntimePaths,
 ) -> bool | None:
     """Apply the managed root-space avatar when both the asset and room exist."""
     if not config.matrix_space.enabled or not state.space_room_id:
         return None
 
-    runtime_paths = config.require_runtime_paths()
     root_space_avatar_path = resolve_avatar_path(
         "spaces",
         ROOT_SPACE_AVATAR_NAME,
@@ -402,8 +405,8 @@ async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths) -> N
     config = load_validated_config(runtime_paths)
     failed_labels: list[str] = []
     try:
-        success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config)
-        root_space_success = await _sync_root_space_avatar(client, config, state)
+        success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config, runtime_paths)
+        root_space_success = await _sync_root_space_avatar(client, config, state, runtime_paths)
         if root_space_success is True:
             success_count += 1
         elif root_space_success is False:
@@ -514,6 +517,7 @@ def _remaining_missing_avatar_targets(
 
 async def _generate_missing_avatars(
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     missing_targets: set[tuple[str, str]],
 ) -> bool:
     """Generate every missing managed avatar and report whether startup may continue."""
@@ -522,7 +526,6 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    runtime_paths = config.require_runtime_paths()
     api_key = get_secret_from_env("GOOGLE_API_KEY", runtime_paths=runtime_paths)
     if not api_key:
         console.print("[red]Error: GOOGLE_API_KEY or GOOGLE_API_KEY_FILE environment variable not set[/red]")
@@ -580,6 +583,6 @@ async def run_avatar_generation(runtime_paths: constants.RuntimePaths) -> None:
     config = load_validated_config(runtime_paths)
     missing_targets = _missing_avatar_targets(config, runtime_paths)
 
-    if not await _generate_missing_avatars(config, missing_targets):
+    if not await _generate_missing_avatars(config, runtime_paths, missing_targets):
         msg = "Avatar generation failed. See errors above."
         raise AvatarGenerationError(msg)

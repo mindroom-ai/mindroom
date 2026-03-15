@@ -47,10 +47,6 @@ def _strip_agent_namespace_suffix(agent_identifier: str, runtime_paths: RuntimeP
     return stripped or None
 
 
-def _runtime_paths_from_config(config: Config) -> RuntimePaths:
-    return config.require_runtime_paths()
-
-
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = mindroom_namespace(runtime_paths)
@@ -114,21 +110,21 @@ class MatrixID:
         """Get the full Matrix ID like @mindroom_calculator:localhost."""
         return f"@{self.username}:{self.domain}"
 
-    def agent_name(self, config: Config) -> str | None:
+    def agent_name(self, config: Config, runtime_paths: RuntimePaths) -> str | None:
         """Extract agent name if this is a configured agent ID.
 
-        Only IDs whose domain matches ``config.domain`` are recognised.
+        Only IDs whose domain matches the explicit runtime domain are recognised.
         A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
         treated as a local agent, even if the localpart matches.
         """
-        if self.domain != config.domain or not self.username.startswith(self.AGENT_PREFIX):
+        if self.domain != config.get_domain(runtime_paths) or not self.username.startswith(self.AGENT_PREFIX):
             return None
 
         # Remove prefix
         agent_identifier = self.username[len(self.AGENT_PREFIX) :]
         name = _strip_agent_namespace_suffix(
             agent_identifier,
-            runtime_paths=_runtime_paths_from_config(config),
+            runtime_paths=runtime_paths,
         )
         if name is None:
             return None
@@ -190,12 +186,12 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
     return MatrixID(username=parts[0], domain=parts[1])
 
 
-def is_agent_id(matrix_id: str, config: Config) -> bool:
+def is_agent_id(matrix_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Quick check if a Matrix ID is an agent."""
-    return extract_agent_name(matrix_id, config) is not None
+    return extract_agent_name(matrix_id, config, runtime_paths) is not None
 
 
-def extract_agent_name(sender_id: str, config: Config) -> str | None:
+def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
     Returns agent name (e.g., 'calculator') or None if not an agent.
@@ -203,7 +199,7 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
     mid = MatrixID.parse(sender_id)
-    return mid.agent_name(config)
+    return mid.agent_name(config, runtime_paths)
 
 
 def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:

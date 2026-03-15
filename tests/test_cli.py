@@ -380,7 +380,8 @@ def test_mindroom_user_none_validates_and_returns_none_id() -> None:
     """Config with mindroom_user omitted should validate and return None user ID."""
     config = Config()
     assert config.mindroom_user is None
-    assert config.get_mindroom_user_id() is None
+    runtime_paths = constants_mod.resolve_runtime_paths(process_env={"MINDROOM_NAMESPACE": ""})
+    assert config.get_mindroom_user_id(runtime_paths) is None
 
 
 def test_agent_and_team_names_must_not_overlap() -> None:

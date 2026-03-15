@@ -26,7 +26,6 @@ _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PA
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 _RUNTIME_SYNCED_ENV_VALUES: dict[str, str] = {}
 _RUNTIME_SYNCED_ENV_ORIGINALS: dict[str, str | None] = {}
-_ACTIVE_RUNTIME_PATHS: "RuntimePaths | None" = None
 
 
 @dataclass(frozen=True)
@@ -112,11 +111,7 @@ def config_search_locations() -> list[Path]:
     """
     seen: set[Path] = set()
     locations: list[Path] = []
-    if _ACTIVE_RUNTIME_PATHS is not None:
-        resolved = _ACTIVE_RUNTIME_PATHS.config_path.resolve()
-        seen.add(resolved)
-        locations.append(resolved)
-    elif configured_path := _configured_config_path(_copy_process_env()):
+    if configured_path := _configured_config_path(_copy_process_env()):
         resolved = configured_path.resolve()
         seen.add(resolved)
         locations.append(resolved)
@@ -151,14 +146,6 @@ def resolve_runtime_paths(
     This is a pure resolver. It does not mutate `os.environ` or any module globals.
     """
     resolved_config_arg = Path(config_path).expanduser().resolve() if config_path is not None else None
-    if (
-        process_env is None
-        and _ACTIVE_RUNTIME_PATHS is not None
-        and storage_path is None
-        and (resolved_config_arg is None or resolved_config_arg == _ACTIVE_RUNTIME_PATHS.config_path)
-    ):
-        return _ACTIVE_RUNTIME_PATHS
-
     resolved_process_env = _copy_process_env(process_env)
     resolved_config_path = (
         Path(resolved_config_arg or find_config(process_env=resolved_process_env)).expanduser().resolve()
@@ -285,23 +272,6 @@ def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
     return _CONFIG_PATH_PLACEHOLDER_PATTERN.sub(_replace, value)
 
 
-def runtime_config_path(
-    config_path: Path | None = None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
-) -> Path:
-    """Return one explicit runtime config path."""
-    if runtime_paths is not None and config_path is not None:
-        msg = "Pass either runtime_paths or config_path to runtime_config_path(), not both"
-        raise ValueError(msg)
-    if runtime_paths is not None:
-        return runtime_paths.config_path
-    if config_path is not None:
-        return Path(config_path).expanduser().resolve()
-    msg = "runtime_config_path() requires explicit runtime_paths or config_path"
-    raise ValueError(msg)
-
-
 def exported_process_env() -> dict[str, str]:
     """Return the current exported env snapshot without compatibility-injected values."""
     return _copy_process_env()
@@ -394,16 +364,6 @@ def credentials_dir(runtime_paths: RuntimePaths) -> Path:
 def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     """Return the encryption-keys directory for one runtime context."""
     return runtime_paths.storage_root / "encryption_keys"
-
-
-def activate_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
-    """Sync one explicit runtime context into process env for compatibility."""
-    global _ACTIVE_RUNTIME_PATHS
-
-    primary_runtime_paths = _with_primary_runtime_env(runtime_paths)
-    _ACTIVE_RUNTIME_PATHS = primary_runtime_paths
-    sync_runtime_env_to_process(primary_runtime_paths, sync_path_env=True)
-    return primary_runtime_paths
 
 
 def resolve_config_relative_path(
@@ -501,8 +461,6 @@ def find_config(*, process_env: dict[str, str] | None = None) -> Path:
     Returns the original (possibly relative) path, not a resolved one,
     so CLI-facing defaults still display cleanly.
     """
-    if process_env is None and _ACTIVE_RUNTIME_PATHS is not None:
-        return _ACTIVE_RUNTIME_PATHS.config_path
     if configured_path := _configured_config_path(_copy_process_env(process_env)):
         return configured_path
     for path in _CONFIG_SEARCH_PATHS:
@@ -523,7 +481,8 @@ def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) ->
         storage_path=storage_path,
         process_env=dict(runtime_paths.process_env),
     )
-    return activate_runtime_paths(updated_runtime_paths).storage_root
+    sync_runtime_env_to_process(updated_runtime_paths, sync_path_env=True)
+    return updated_runtime_paths.storage_root
 
 
 def set_runtime_paths(
@@ -531,13 +490,13 @@ def set_runtime_paths(
     config_path: Path | None = None,
     storage_path: Path | None = None,
 ) -> RuntimePaths:
-    """Compatibility wrapper for the explicit runtime activation path."""
-    return activate_runtime_paths(
-        resolve_primary_runtime_paths(
-            config_path=config_path,
-            storage_path=storage_path,
-        ),
+    """Resolve one primary runtime context and sync it into process env for compatibility."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
     )
+    sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
+    return runtime_paths
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:

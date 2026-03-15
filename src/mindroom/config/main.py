@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -105,14 +104,9 @@ def _resolve_agent_thread_mode(
 
 
 def _resolve_runtime_paths_for_config_load(
-    *,
     config_path: Path | None,
-    runtime_paths: RuntimePaths | None,
 ) -> RuntimePaths:
     """Resolve the runtime context used to load one config file."""
-    if runtime_paths is not None:
-        return runtime_paths
-
     if config_path is None:
         return resolve_primary_runtime_paths()
 
@@ -172,8 +166,6 @@ def _router_agents_for_room(
 
 class Config(BaseModel):
     """Complete configuration from YAML."""
-
-    _runtime_paths: RuntimePaths | None = PrivateAttr(default=None)
 
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
@@ -380,17 +372,14 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
-    @cached_property
-    def domain(self) -> str:
-        """Extract the domain from the MATRIX_HOMESERVER."""
+    def get_domain(self, runtime_paths: RuntimePaths) -> str:
+        """Extract the Matrix domain for one explicit runtime context."""
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        runtime_paths = self.require_runtime_paths()
         homeserver = runtime_matrix_homeserver(runtime_paths)
         return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
-    @cached_property
-    def ids(self) -> dict[str, MatrixID]:
+    def get_ids(self, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
         """Get MatrixID objects for all agents and teams.
 
         Returns:
@@ -400,27 +389,27 @@ class Config(BaseModel):
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
         mapping: dict[str, MatrixID] = {}
-        runtime_paths = self.require_runtime_paths()
+        domain = self.get_domain(runtime_paths)
 
         # Add all agents
         for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain, runtime_paths)
+            mapping[agent_name] = MatrixID.from_agent(agent_name, domain, runtime_paths)
 
         # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain, runtime_paths)
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, domain, runtime_paths)
 
         # Add all teams
         for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, self.domain, runtime_paths)
+            mapping[team_name] = MatrixID.from_agent(team_name, domain, runtime_paths)
         return mapping
 
-    def get_mindroom_user_id(self) -> str | None:
+    def get_mindroom_user_id(self, runtime_paths: RuntimePaths) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
         if self.mindroom_user is None:
             return None
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
-        return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
+        return MatrixID.from_username(self.mindroom_user.username, self.get_domain(runtime_paths)).full_id
 
     @classmethod
     def validate_with_runtime(
@@ -429,26 +418,15 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
-        config._runtime_paths = runtime_paths
-        return config
+        return cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
 
     @classmethod
     def from_yaml(
         cls,
         config_path: Path | None = None,
-        *,
-        runtime_paths: RuntimePaths | None = None,
     ) -> Config:
-        """Create a Config instance from YAML data."""
-        if runtime_paths is not None and config_path is not None:
-            msg = "Pass either runtime_paths or config_path to Config.from_yaml(), not both"
-            raise ValueError(msg)
-
-        resolved_runtime_paths = _resolve_runtime_paths_for_config_load(
-            config_path=config_path,
-            runtime_paths=runtime_paths,
-        )
+        """Create a Config instance from YAML data with default runtime validation."""
+        resolved_runtime_paths = _resolve_runtime_paths_for_config_load(config_path)
         path = resolved_runtime_paths.config_path
 
         if not path.exists():
@@ -462,19 +440,6 @@ class Config(BaseModel):
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config
-
-    @property
-    def runtime_paths(self) -> RuntimePaths | None:
-        """Return the runtime paths used to resolve this config, when available."""
-        return self._runtime_paths
-
-    def require_runtime_paths(self) -> RuntimePaths:
-        """Return the committed runtime paths for runtime-sensitive operations."""
-        runtime_paths = self._runtime_paths
-        if runtime_paths is None:
-            msg = "Config requires explicit runtime paths for runtime-sensitive operations"
-            raise RuntimeError(msg)
-        return runtime_paths
 
     def get_agent_culture(self, agent_name: str) -> tuple[str, CultureConfig] | None:
         """Get the configured culture assignment for an agent, if any."""
@@ -502,7 +467,11 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_worker_tools(self, agent_name: str) -> list[str]:
+    def get_agent_worker_tools(
+        self,
+        agent_name: str,
+        runtime_paths: RuntimePaths,
+    ) -> list[str]:
         """Get effective worker-routed tools for an agent, including default policy resolution."""
         agent_config = self.get_agent(agent_name)
         configured = agent_config.worker_tools
@@ -515,7 +484,7 @@ class Config(BaseModel):
                 ensure_tool_registry_loaded,
             )
 
-            ensure_tool_registry_loaded(self)
+            ensure_tool_registry_loaded(runtime_paths, self)
             return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
 
@@ -610,6 +579,7 @@ class Config(BaseModel):
     def get_entity_thread_mode(
         self,
         entity_name: str,
+        runtime_paths: RuntimePaths,
         room_id: str | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
@@ -619,7 +589,6 @@ class Config(BaseModel):
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        runtime_paths = self.require_runtime_paths()
         if entity_name in self.agents:
             return _resolve_agent_thread_mode(
                 self.agents[entity_name],
@@ -692,11 +661,16 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
 
-    def get_configured_bots_for_room(self, room_id: str) -> set[str]:
+    def get_configured_bots_for_room(
+        self,
+        room_id: str,
+        runtime_paths: RuntimePaths,
+    ) -> set[str]:
         """Get the set of bot usernames that should be in a specific room.
 
         Args:
             room_id: The Matrix room ID
+            runtime_paths: Explicit runtime context for room resolution.
 
         Returns:
             Set of bot usernames (without domain) that should be in this room
@@ -705,7 +679,6 @@ class Config(BaseModel):
         from mindroom.matrix.identity import agent_username_localpart  # noqa: PLC0415
         from mindroom.matrix.rooms import resolve_room_aliases  # noqa: PLC0415
 
-        runtime_paths = self.require_runtime_paths()
         configured_bots = set()
 
         # Check which agents should be in this room
@@ -728,20 +701,16 @@ class Config(BaseModel):
 
     def save_to_yaml(
         self,
-        config_path: Path | None = None,
+        config_path: Path,
     ) -> None:
         """Save the config to a YAML file, excluding None values.
 
         Args:
-            config_path: Path to save the config to. If None, uses the bound runtime config path.
+            config_path: Path to save the config to.
 
         """
-        path = config_path or (self._runtime_paths.config_path if self._runtime_paths is not None else None)
-        if path is None:
-            msg = "save_to_yaml() requires an explicit config_path or a Config loaded with runtime paths"
-            raise RuntimeError(msg)
         config_dict = self.model_dump(exclude_none=True)
-        path_obj = Path(path)
+        path_obj = Path(config_path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as f:
@@ -754,4 +723,20 @@ class Config(BaseModel):
                 width=120,  # Wider lines to reduce wrapping
             )
         safe_replace(tmp_path, path_obj)
-        logger.info(f"Saved configuration to {path}")
+        logger.info(f"Saved configuration to {config_path}")
+
+
+def load_config(runtime_paths: RuntimePaths) -> Config:
+    """Load and validate one config against an explicit runtime context."""
+    path = runtime_paths.config_path
+    if not path.exists():
+        msg = f"Agent configuration file not found: {path}"
+        raise FileNotFoundError(msg)
+
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    config = Config.validate_with_runtime(data, runtime_paths)
+    logger.info(f"Loaded agent configuration from {path}")
+    logger.info(f"Found {len(config.agents)} agent configurations")
+    return config

@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
-from mindroom.config.main import Config
-from mindroom.constants import exported_process_env, resolve_primary_runtime_paths
 from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
@@ -31,6 +29,8 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
 
 # Registry mapping tool names to their factory functions
@@ -137,15 +137,10 @@ def _add_worker_context_init_kwargs(
         init_kwargs["routing_agent_name"] = routing_agent_name
 
 
-def _default_credentials_manager() -> CredentialsManager:
-    """Resolve the persisted credential store for the current runtime context."""
-    runtime_paths = resolve_primary_runtime_paths(process_env=exported_process_env())
-    return get_credentials_manager(storage_root=runtime_paths.storage_root)
-
-
 def _resolve_tool_credentials_manager(
     tool_name: str,
     tool_class: type[Toolkit],
+    runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
 ) -> CredentialsManager | None:
     """Return the credential manager a tool rebuild should use, if any."""
@@ -164,11 +159,12 @@ def _resolve_tool_credentials_manager(
     if not needs_persisted_credentials:
         return None
 
-    return _default_credentials_manager()
+    return get_credentials_manager(storage_root=runtime_paths.storage_root)
 
 
 def _build_tool_instance(
     tool_name: str,
+    runtime_paths: RuntimePaths,
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
@@ -195,6 +191,7 @@ def _build_tool_instance(
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         tool_name,
         tool_class,
+        runtime_paths,
         credentials_manager,
     )
     credentials = (
@@ -248,6 +245,7 @@ def _build_tool_instance(
 
 def get_tool_by_name(
     tool_name: str,
+    runtime_paths: RuntimePaths,
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
@@ -267,6 +265,7 @@ def get_tool_by_name(
     build = functools.partial(
         _build_tool_instance,
         tool_name,
+        runtime_paths,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
         credentials_manager=credentials_manager,
@@ -463,25 +462,16 @@ def register_tool_with_metadata(
 
 
 def ensure_tool_registry_loaded(
+    runtime_paths: RuntimePaths,
     config: Config | None = None,
-    *,
-    config_path: Path | None = None,
 ) -> None:
     """Ensure core and plugin tools are registered in the metadata registry."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 
-    if config is None and config_path is not None:
-        config = Config.from_yaml(config_path)
-
     if config is None:
         return
 
-    if config.runtime_paths is None:
-        if config_path is None:
-            return
-        config = Config.from_yaml(config_path)
-
-    load_plugins(config)
+    load_plugins(config, runtime_paths)
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

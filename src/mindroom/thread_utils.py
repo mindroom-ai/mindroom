@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 # Matches <a href="https://matrix.to/#/@user:domain">...</a> pills used by bridges.
 # Accepts both single and double quotes (mautrix bridges use single quotes).
@@ -41,15 +42,16 @@ def _extract_mentioned_user_ids(content: dict[str, Any]) -> list[str]:
     return []
 
 
-def _is_bot_or_agent(sender: str, config: Config) -> bool:
+def _is_bot_or_agent(sender: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return True when *sender* is a MindRoom agent **or** listed in ``bot_accounts``."""
-    return bool(extract_agent_name(sender, config)) or sender in config.bot_accounts
+    return bool(extract_agent_name(sender, config, runtime_paths)) or sender in config.bot_accounts
 
 
 def check_agent_mentioned(
     event_source: dict,
     agent_id: MatrixID | None,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> tuple[list[MatrixID], bool, bool]:
     """Check if an agent is mentioned in a message.
 
@@ -60,9 +62,9 @@ def check_agent_mentioned(
     """
     content = event_source.get("content", {})
     all_mentioned_ids = _extract_mentioned_user_ids(content)
-    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config)
+    mentioned_agents = _agents_from_user_ids(all_mentioned_ids, config, runtime_paths)
     am_i_mentioned = agent_id in mentioned_agents
-    has_non_agent_mentions = any(not _is_bot_or_agent(uid, config) for uid in all_mentioned_ids)
+    has_non_agent_mentions = any(not _is_bot_or_agent(uid, config, runtime_paths) for uid in all_mentioned_ids)
 
     return mentioned_agents, am_i_mentioned, has_non_agent_mentions
 
@@ -73,7 +75,11 @@ def create_session_id(room_id: str, thread_id: str | None) -> str:
     return f"{room_id}:{thread_id}" if thread_id else room_id
 
 
-def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
+def get_agents_in_thread(
+    thread_history: list[dict[str, Any]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
 
     Note: Router agent is excluded from the participant list as it's not
@@ -86,7 +92,7 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
 
     for msg in thread_history:
         sender: str = msg.get("sender", "")
-        agent_name = extract_agent_name(sender, config)
+        agent_name = extract_agent_name(sender, config, runtime_paths)
 
         # Skip router agent and invalid senders
         if not agent_name or agent_name == ROUTER_AGENT_NAME:
@@ -104,12 +110,16 @@ def get_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -
     return agents
 
 
-def _agents_from_user_ids(user_ids: list[str], config: Config) -> list[MatrixID]:
+def _agents_from_user_ids(
+    user_ids: list[str],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Return agent MatrixIDs from a list of raw Matrix user ID strings."""
     agents: list[MatrixID] = []
     for user_id in user_ids:
         mid = MatrixID.parse(user_id)
-        if mid.agent_name(config):
+        if mid.agent_name(config, runtime_paths):
             agents.append(mid)
     return agents
 
@@ -140,7 +150,11 @@ def has_user_responded_after_message(
     return False
 
 
-def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
+def has_multiple_non_agent_users_in_thread(
+    thread_history: list[dict[str, Any]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Return True when more than one non-agent user has posted in the thread.
 
     Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
@@ -149,14 +163,18 @@ def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, Any]],
     non_agent_senders: set[str] = set()
     for msg in thread_history:
         sender: str = msg.get("sender", "")
-        if sender and not _is_bot_or_agent(sender, config):
+        if sender and not _is_bot_or_agent(sender, config, runtime_paths):
             non_agent_senders.add(sender)
             if len(non_agent_senders) > 1:
                 return True
     return False
 
 
-def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixID]:
+def get_configured_agents_for_room(
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Get list of agent MatrixIDs configured for a specific room.
 
     This returns only agents that have the room in their configuration,
@@ -164,30 +182,38 @@ def get_configured_agents_for_room(room_id: str, config: Config) -> list[MatrixI
 
     Note: Router agent is excluded as it's not a regular conversation participant.
     """
-    runtime_paths = config.require_runtime_paths()
     configured_agents: list[MatrixID] = []
+    config_ids = config.get_ids(runtime_paths)
 
     # Check which agents should be in this room
     for agent_name, agent_config in config.agents.items():
         if agent_name != ROUTER_AGENT_NAME:
             resolved_rooms = resolve_room_aliases(agent_config.rooms, runtime_paths)
             if room_id in resolved_rooms:
-                configured_agents.append(config.ids[agent_name])
+                configured_agents.append(config_ids[agent_name])
 
     return sorted(configured_agents, key=lambda x: x.full_id)
 
 
-def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, Any]], config: Config) -> bool:
+def _has_any_agent_mentions_in_thread(
+    thread_history: list[dict[str, Any]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Check if any agents are mentioned anywhere in the thread."""
     for msg in thread_history:
         content = msg.get("content", {})
         user_ids = _extract_mentioned_user_ids(content)
-        if _agents_from_user_ids(user_ids, config):
+        if _agents_from_user_ids(user_ids, config, runtime_paths):
             return True
     return False
 
 
-def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], config: Config) -> list[MatrixID]:
+def get_all_mentioned_agents_in_thread(
+    thread_history: list[dict[str, Any]],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Get all unique agent MatrixIDs that have been mentioned anywhere in the thread.
 
     Preserves the order of first mention while preventing duplicates.
@@ -198,7 +224,7 @@ def get_all_mentioned_agents_in_thread(thread_history: list[dict[str, Any]], con
     for msg in thread_history:
         content = msg.get("content", {})
         user_ids = _extract_mentioned_user_ids(content)
-        agents = _agents_from_user_ids(user_ids, config)
+        agents = _agents_from_user_ids(user_ids, config, runtime_paths)
 
         for agent in agents:
             if agent.full_id not in seen_ids:
@@ -215,6 +241,7 @@ def should_agent_respond(  # noqa: PLR0911
     room: nio.MatrixRoom,
     thread_history: list[dict],
     config: Config,
+    runtime_paths: RuntimePaths,
     mentioned_agents: list[MatrixID] | None = None,
     has_non_agent_mentions: bool = False,
     *,
@@ -231,12 +258,13 @@ def should_agent_respond(  # noqa: PLR0911
         room: The Matrix room object
         thread_history: History of messages in the thread
         config: Application configuration
+        runtime_paths: Explicit runtime context for permissions and mention resolution
         mentioned_agents: List of all agent MatrixIDs mentioned in the message
         has_non_agent_mentions: True when the message explicitly tags a non-agent user
         sender_id: Sender Matrix ID used for per-agent reply permissions
 
     """
-    if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config):
+    if not authorization.is_sender_allowed_for_agent_reply(sender_id, agent_name, config, runtime_paths):
         return False
 
     # Always respond if mentioned
@@ -247,21 +275,26 @@ def should_agent_respond(  # noqa: PLR0911
     if mentioned_agents or has_non_agent_mentions:
         return False
 
-    available_agents = authorization.get_available_agents_for_sender(room, sender_id, config)
-    agent_matrix_id = config.ids[agent_name]
+    available_agents = authorization.get_available_agents_for_sender(room, sender_id, config, runtime_paths)
+    agent_matrix_id = config.get_ids(runtime_paths)[agent_name]
 
     # Non-thread messages: auto-respond if we're the only visible agent in the room.
     if not is_thread:
         return len(available_agents) == 1 and available_agents[0] == agent_matrix_id
 
     # In threads with multiple human participants, always require explicit mention.
-    if has_multiple_non_agent_users_in_thread(thread_history, config):
+    if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
         return False
 
     # For threads, continue only if we're the single participating agent
     # that may reply to this sender.
-    agents_in_thread = get_agents_in_thread(thread_history, config)
-    agents_in_thread = authorization.filter_agents_by_sender_permissions(agents_in_thread, sender_id, config)
+    agents_in_thread = get_agents_in_thread(thread_history, config, runtime_paths)
+    agents_in_thread = authorization.filter_agents_by_sender_permissions(
+        agents_in_thread,
+        sender_id,
+        config,
+        runtime_paths,
+    )
     if agents_in_thread:
         return len(agents_in_thread) == 1 and agents_in_thread[0] == agent_matrix_id
 

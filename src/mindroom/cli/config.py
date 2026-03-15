@@ -19,16 +19,16 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
     RuntimePaths,
-    activate_runtime_paths,
     config_search_locations,
     env_key_for_provider,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
+    sync_runtime_env_to_process,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -216,18 +216,18 @@ def _activate_cli_runtime(
 ) -> RuntimePaths:
     """Create the CLI runtime context once and return it for explicit threading."""
     if path is not None:
-        return activate_runtime_paths(
-            resolve_primary_runtime_paths(
-                config_path=path.expanduser().resolve(),
-                storage_path=storage_path,
-            ),
-        )
-
-    return activate_runtime_paths(
-        resolve_primary_runtime_paths(
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=path.expanduser().resolve(),
             storage_path=storage_path,
-        ),
+        )
+        sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
+        return runtime_paths
+
+    runtime_paths = resolve_primary_runtime_paths(
+        storage_path=storage_path,
     )
+    sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
+    return runtime_paths
 
 
 def _get_editor() -> str:
@@ -495,9 +495,7 @@ def config_path_cmd(
 
 
 def _load_config_quiet(
-    path: Path | None = None,
-    *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
 ) -> Config:
     """Load config while temporarily suppressing structlog output.
 
@@ -516,9 +514,7 @@ def _load_config_quiet(
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
-        if runtime_paths is not None:
-            return Config.from_yaml(runtime_paths=runtime_paths)
-        return Config.from_yaml(path)
+        return load_config(runtime_paths)
     finally:
         if not was_configured:
             structlog.reset_defaults()

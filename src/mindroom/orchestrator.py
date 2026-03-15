@@ -43,7 +43,7 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config
+from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
 from .file_watcher import watch_file
 from .logging_config import get_logger, setup_logging
@@ -146,6 +146,7 @@ class MultiAgentOrchestrator:
 
         worker = MemoryAutoFlushWorker(
             storage_path=self._require_storage_path(),
+            runtime_paths=self._require_runtime_paths(),
             config_provider=lambda: self.config,
         )
         self._memory_auto_flush_worker = worker
@@ -374,6 +375,7 @@ class MultiAgentOrchestrator:
                 entity_name,
                 temp_user,
                 config,
+                self._require_runtime_paths(),
                 self._require_storage_path(),
                 config_path=self._require_config_path(),
             ),
@@ -431,8 +433,8 @@ class MultiAgentOrchestrator:
         set_runtime_starting("Loading config and preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
-        load_plugins(config)
+        config = load_config(self._require_runtime_paths())
+        load_plugins(config, self._require_runtime_paths())
         await self._prepare_user_account(config, update_runtime_state=True)
         self.config = config
         for entity_name in self._configured_entity_names(config):
@@ -595,8 +597,8 @@ class MultiAgentOrchestrator:
 
     async def update_config(self) -> bool:
         """Reload configuration, restart affected entities, and reconcile room state."""
-        new_config = Config.from_yaml(runtime_paths=self._require_runtime_paths())
-        load_plugins(new_config)
+        new_config = load_config(self._require_runtime_paths())
+        load_plugins(new_config, self._require_runtime_paths())
 
         if not self.config:
             return await self._load_initial_config(new_config)
@@ -709,7 +711,7 @@ class MultiAgentOrchestrator:
         assert router_bot.client is not None
 
         config = self._require_config()
-        room_ids = await ensure_all_rooms_exist(router_bot.client, config)
+        room_ids = await ensure_all_rooms_exist(router_bot.client, config, self._require_runtime_paths())
         logger.info(f"Ensured existence of {len(room_ids)} rooms")
         return room_ids
 
@@ -725,11 +727,16 @@ class MultiAgentOrchestrator:
             return
 
         normalized_room_ids = room_ids if isinstance(room_ids, dict) else {}
-        root_space_id = await ensure_root_space(router_bot.client, config, normalized_room_ids)
+        root_space_id = await ensure_root_space(
+            router_bot.client,
+            config,
+            self._require_runtime_paths(),
+            normalized_room_ids,
+        )
         if root_space_id is None:
             return
 
-        invite_user_ids = get_root_space_user_ids_to_invite(config)
+        invite_user_ids = get_root_space_user_ids_to_invite(config, self._require_runtime_paths())
         if not invite_user_ids:
             return
 
@@ -809,7 +816,7 @@ class MultiAgentOrchestrator:
     ) -> None:
         """Invite authorized human users who can access a given room."""
         for authorized_user_id in authorized_user_ids:
-            if not is_authorized_sender(authorized_user_id, config, room_id):
+            if not is_authorized_sender(authorized_user_id, config, room_id, self._require_runtime_paths()):
                 continue
             await self._invite_user_if_missing(
                 room_id,
@@ -869,7 +876,7 @@ class MultiAgentOrchestrator:
         )
 
         for room_id in joined_rooms:
-            configured_bots = config.get_configured_bots_for_room(room_id)
+            configured_bots = config.get_configured_bots_for_room(room_id, self._require_runtime_paths())
             if not configured_bots:
                 continue
 
@@ -987,7 +994,7 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
-    runtime_paths = constants.activate_runtime_paths(runtime_paths)
+    constants.sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.

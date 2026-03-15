@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _install_optional_extras,
@@ -29,6 +30,7 @@ from mindroom.tool_system.metadata import (
 )
 
 HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
+TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
 
 
 def test_all_tools_can_be_imported() -> None:
@@ -45,7 +47,7 @@ def test_all_tools_can_be_imported() -> None:
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
         try:
-            tool_instance = get_tool_by_name(tool_name)
+            tool_instance = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
             assert tool_instance is not None
             assert hasattr(tool_instance, "name")
         except Exception as e:
@@ -156,7 +158,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda name: name == tool_name)
     try:
-        tool = get_tool_by_name(tool_name)
+        tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
         assert isinstance(tool, DummyToolkit)
         assert calls["count"] == 2
     finally:
@@ -198,7 +200,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda _name: False)
     try:
         with pytest.raises(ImportError, match="dependency missing forever"):
-            get_tool_by_name(tool_name)
+            get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

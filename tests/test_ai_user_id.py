@@ -26,6 +26,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -45,7 +46,8 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond passes user_id through to ai_response."""
-        config = Config.from_yaml()
+        config = bind_runtime_paths(Config.from_yaml(), tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -65,6 +67,7 @@ class TestUserIdPassthrough:
                 requester_id="@alice:localhost",
                 client=bot.client,
                 config=config,
+                runtime_paths=runtime_paths,
                 storage_path=tmp_path,
             ),
         )
@@ -99,7 +102,8 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond_streaming passes user_id through to stream_agent_response."""
-        config = Config.from_yaml()
+        config = bind_runtime_paths(Config.from_yaml(), tmp_path)
+        runtime_paths = _runtime_paths(tmp_path)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -121,6 +125,7 @@ class TestUserIdPassthrough:
                 requester_id="@bob:localhost",
                 client=bot.client,
                 config=config,
+                runtime_paths=runtime_paths,
                 storage_path=tmp_path,
             ),
         )

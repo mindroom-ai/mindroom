@@ -132,12 +132,10 @@ async def get_all_agents_rooms(request: Request) -> AllAgentsRoomsResponse:
     Returns information about configured rooms, joined rooms,
     and unconfigured rooms (joined but not in config) for each Matrix entity.
     """
-    from mindroom.api.main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import api_config_data, api_config_lock, api_runtime_paths  # noqa: PLC0415
 
-    with config_lock:
-        entities = _get_configured_matrix_entities(config)
-
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+    with api_config_lock(request):
+        entities = _get_configured_matrix_entities(api_config_data(request))
 
     runtime_paths = api_runtime_paths(request)
 
@@ -163,12 +161,10 @@ async def get_agent_rooms(agent_id: str, request: Request) -> AgentRoomsResponse
         HTTPException: If the entity is not found or an error occurs
 
     """
-    from mindroom.api.main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import api_config_data, api_config_lock, api_runtime_paths  # noqa: PLC0415
 
-    with config_lock:
-        agent_data = _get_configured_matrix_entity(config, agent_id)
-
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+    with api_config_lock(request):
+        agent_data = _get_configured_matrix_entity(api_config_data(request), agent_id)
 
     return await _get_agent_matrix_rooms(agent_id, agent_data, api_runtime_paths(request))
 
@@ -188,12 +184,10 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
         HTTPException: If the entity is not found or the leave operation fails
 
     """
-    from mindroom.api.main import config, config_lock  # noqa: PLC0415
+    from mindroom.api.main import api_config_data, api_config_lock, api_runtime_paths  # noqa: PLC0415
 
-    with config_lock:
-        agent_data = _get_configured_matrix_entity(config, request.agent_id)
-
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+    with api_config_lock(api_request):
+        agent_data = _get_configured_matrix_entity(api_config_data(api_request), request.agent_id)
 
     runtime_paths = api_runtime_paths(api_request)
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)

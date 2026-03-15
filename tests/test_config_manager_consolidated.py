@@ -9,6 +9,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
 
 
@@ -17,6 +18,10 @@ def _minimal_config_path(tmp_path: Path) -> Path:
     config_path = tmp_path / "config.yaml"
     Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}).save_to_yaml(config_path)
     return config_path
+
+
+def _runtime_paths() -> RuntimePaths:
+    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 class TestConsolidatedConfigManager:
@@ -606,7 +611,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code", worker_tools=["python"]),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["python"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["python"]
 
     def test_worker_tools_fall_back_to_defaults(self) -> None:
         """When agent has no worker_tools, defaults should apply."""
@@ -616,7 +621,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["shell", "file"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "file"]
 
     def test_worker_tools_use_default_policy_when_unset(self) -> None:
         """When worker_tools are omitted everywhere, the built-in worker routing policy applies."""
@@ -629,7 +634,7 @@ class TestGetAgentWorkerTools:
                 ),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["shell", "coding"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "coding"]
 
     def test_worker_tools_default_policy_returns_empty_list_for_primary_only_tools(self) -> None:
         """Tools without a worker default should stay local when worker_tools are omitted."""
@@ -642,7 +647,7 @@ class TestGetAgentWorkerTools:
                 ),
             },
         )
-        assert config.get_agent_worker_tools("code") == []
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
 
     def test_worker_tools_empty_list_disables_routing(self) -> None:
         """Empty worker_tools should explicitly disable worker routing for that agent."""
@@ -652,7 +657,7 @@ class TestGetAgentWorkerTools:
                 "research": AgentConfig(display_name="Research", worker_tools=[]),
             },
         )
-        assert config.get_agent_worker_tools("research") == []
+        assert config.get_agent_worker_tools("research", _runtime_paths()) == []
 
     def test_defaults_empty_list_disables_worker_routing(self) -> None:
         """Empty default worker_tools should disable worker routing for inheriting agents."""
@@ -662,7 +667,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == []
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
 
     def test_worker_tools_expand_implied_tools(self) -> None:
         """Worker tool resolution should preserve the normal preset expansion behavior."""
@@ -672,7 +677,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == [
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == [
             "openclaw_compat",
             "python",
             "shell",

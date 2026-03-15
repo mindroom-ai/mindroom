@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
-from tests.conftest import TEST_ACCESS_TOKEN
+from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, runtime_paths_for
 
 
 class _FakeHttpResponse:
@@ -34,14 +34,8 @@ def _config_with_runtime_paths(
     tmp_path: Path,
     **config_data: object,
 ) -> Config:
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config.model_validate(config_data, context={"runtime_paths": runtime_paths})
-    config._runtime_paths = runtime_paths
-    return config
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
+    return bind_runtime_paths(Config.model_validate(config_data, context={"runtime_paths": runtime_paths}), tmp_path)
 
 
 def test_matrix_room_access_defaults() -> None:
@@ -74,7 +68,7 @@ def test_matrix_room_access_invite_only_matching() -> None:
         },
     )
     access = config.matrix_room_access
-    runtime_paths = config.require_runtime_paths()
+    runtime_paths = runtime_paths_for(config)
 
     assert access.is_invite_only_room("lobby", runtime_paths)
     assert access.is_invite_only_room("ops", runtime_paths, room_alias="#ops:example.com")
@@ -104,6 +98,7 @@ async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.Mon
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         context="test",
     )
 
@@ -135,6 +130,7 @@ async def test_configure_managed_room_access_invite_only_override(monkeypatch: p
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         context="test",
     )
 
@@ -179,6 +175,7 @@ async def test_existing_room_reconciliation_respects_flag(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -216,6 +213,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -347,6 +345,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -389,6 +388,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -403,6 +403,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -442,6 +443,7 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
         room_key="secret",
         room_id="!secret:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#secret:example.com",
         context="test",
     )
@@ -471,8 +473,7 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     logger_exception = MagicMock()
     monkeypatch.setattr(matrix_rooms.logger, "exception", logger_exception)
 
-    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config)
-
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
     assert room_ids == {"ops": "!ops:example.com"}
     assert ensure_room_exists_mock.await_count == 2
     logger_exception.assert_called_once()

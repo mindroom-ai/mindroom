@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import mindroom.constants as constants_mod
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.matrix.state import MatrixState
 from mindroom.response_tracker import ResponseTracker
 
@@ -468,7 +468,7 @@ class TestResolveConfigRelativePath:
             },
         )
 
-        config = Config.from_yaml(runtime_paths=runtime_paths)
+        config = load_config(runtime_paths)
 
         assert constants_mod.runtime_mindroom_namespace(runtime_paths=runtime_paths) == "alpha1234"
         assert constants_mod.runtime_matrix_homeserver(runtime_paths=runtime_paths) == "https://hs.example"
@@ -505,10 +505,9 @@ class TestResolveConfigRelativePath:
             "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
             encoding="utf-8",
         )
-        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
-
-        with pytest.raises(ValueError, match="either runtime_paths or config_path"):
-            Config.from_yaml(config_path, runtime_paths=runtime_paths)
+        invalid_kwargs = {"runtime_paths": constants_mod.resolve_runtime_paths(config_path=config_path)}
+        with pytest.raises(TypeError):
+            Config.from_yaml(config_path, **invalid_kwargs)
 
     def test_config_from_yaml_explicit_path_inherits_activated_runtime_storage(self, tmp_path: Path) -> None:
         """Explicit path reloads should preserve the activated runtime storage context."""

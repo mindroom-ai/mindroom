@@ -16,7 +16,13 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -161,7 +167,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         client.sync_forever = AsyncMock()
 
     # Create orchestrator with specific room configuration
-    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
 
     # Patch the config loading to assign rooms
     with patch("mindroom.config.main.Config.from_yaml") as mock_config:
@@ -194,7 +201,14 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                     agent_user.user_id = "@mindroom_router:localhost"
 
                 # Create the actual bot with config
-                return AgentBot(agent_user, storage_path, config, rooms=[test_room_id])
+                runtime_config = bind_runtime_paths(config, storage_path)
+                return AgentBot(
+                    agent_user,
+                    storage_path,
+                    runtime_config,
+                    runtime_paths_for(runtime_config),
+                    rooms=[test_room_id],
+                )
 
             mock_create_bot.side_effect = create_bot_side_effect
             await orchestrator.initialize()
@@ -401,7 +415,14 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             tmp_path,
         )
 
-        bot = AgentBot(calc_user, tmp_path, config, rooms=["!test:localhost"], enable_streaming=False)
+        bot = AgentBot(
+            calc_user,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=["!test:localhost"],
+            enable_streaming=False,
+        )
         await bot.start()
 
         test_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="", encrypted=False)

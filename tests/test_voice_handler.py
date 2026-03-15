@@ -15,12 +15,64 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for voice handler tests."""
     return bind_runtime_paths(config)
+
+
+async def _handle_voice_message(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    audio: Audio | None = None,
+) -> str | None:
+    """Run voice handling with the explicit runtime bound to the test config."""
+    return await voice_handler._handle_voice_message(
+        client,
+        room,
+        event,
+        config,
+        runtime_paths_for(config),
+        audio=audio,
+    )
+
+
+async def _process_transcription(transcription: str, config: Config, **kwargs: object) -> str:
+    """Run transcription processing with the explicit runtime bound to the test config."""
+    return await voice_handler._process_transcription(
+        transcription,
+        config,
+        runtime_paths_for(config),
+        **kwargs,
+    )
+
+
+async def _prepare_voice_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    sender_domain: str,
+    thread_id: str | None,
+) -> voice_handler._PreparedVoiceMessage | None:
+    """Prepare one voice message with the explicit runtime bound to the test config."""
+    return await voice_handler._prepare_voice_message(
+        client,
+        storage_path,
+        room,
+        event,
+        config,
+        runtime_paths=runtime_paths_for(config),
+        sender_domain=sender_domain,
+        thread_id=thread_id,
+    )
 
 
 if TYPE_CHECKING:
@@ -62,7 +114,7 @@ class TestVoiceHandler:
         event = MagicMock()
 
         # Should return immediately without processing
-        await voice_handler._handle_voice_message(client, room, event, config)
+        await _handle_voice_message(client, room, event, config)
 
         # Verify no processing occurred
         client.download.assert_not_called()
@@ -93,7 +145,7 @@ class TestVoiceHandler:
         with patch("mindroom.voice_handler._process_transcription") as mock_process:
             mock_process.return_value = "@research help me with this"
 
-            result = await voice_handler._process_transcription("research help me with this", config)
+            result = await _process_transcription("research help me with this", config)
             assert "@research" in result
 
     @pytest.mark.asyncio
@@ -128,7 +180,7 @@ class TestVoiceHandler:
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
-            result = await voice_handler._handle_voice_message(client, room, event, config)
+            result = await _handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
         assert mock_process.await_count == 1
@@ -200,7 +252,7 @@ class TestVoiceHandler:
         cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
 
         with patch("mindroom.voice_handler._download_audio", new=AsyncMock(return_value=None)):
-            prepared = await voice_handler.prepare_voice_message(
+            prepared = await _prepare_voice_message(
                 client,
                 tmp_path,
                 room,
@@ -253,7 +305,7 @@ class TestVoiceHandler:
 
         with patch("mindroom.voice_handler._compute_normalized_voice_message", side_effect=fake_compute):
             first_waiter = asyncio.create_task(
-                voice_handler.prepare_voice_message(
+                _prepare_voice_message(
                     client,
                     tmp_path,
                     room,
@@ -266,7 +318,7 @@ class TestVoiceHandler:
             await started.wait()
 
             second_waiter = asyncio.create_task(
-                voice_handler.prepare_voice_message(
+                _prepare_voice_message(
                     client,
                     tmp_path,
                     room,

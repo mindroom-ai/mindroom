@@ -99,15 +99,15 @@ def _format_agent_description(agent_name: str, config: Config) -> str:
     return ""
 
 
-def _generate_welcome_message(room_id: str, config: Config) -> str:
+def _generate_welcome_message(room_id: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Generate the welcome message text for a room."""
     # Get list of configured agents for this room
-    configured_agents = get_configured_agents_for_room(room_id, config)
+    configured_agents = get_configured_agents_for_room(room_id, config, runtime_paths)
 
     # Build agent list for the welcome message
     agent_list = []
     for agent_id in configured_agents:
-        agent_name = agent_id.agent_name(config)
+        agent_name = agent_id.agent_name(config, runtime_paths)
         if not agent_name or agent_name == ROUTER_AGENT_NAME:
             continue
 
@@ -165,11 +165,12 @@ def _resolve_skill_command_agent(  # noqa: C901
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID],
     requester_user_id: str,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str | None, str | None]:
     requested = skill_name.strip().lower()
     mentioned_names: list[str] = []
     for mid in mentioned_agents:
-        name = mid.agent_name(config)
+        name = mid.agent_name(config, runtime_paths)
         if not name or name == ROUTER_AGENT_NAME:
             continue
         mentioned_names.append(name)
@@ -177,10 +178,10 @@ def _resolve_skill_command_agent(  # noqa: C901
     if len(unique_mentions) > 1:
         return None, f"❌ Multiple agents mentioned: {', '.join(unique_mentions)}. Mention only one."
 
-    agents_in_room = get_available_agents_for_sender(room, requester_user_id, config)
+    agents_in_room = get_available_agents_for_sender(room, requester_user_id, config, runtime_paths)
     candidate_names: list[str] = []
     for mid in agents_in_room:
-        name = mid.agent_name(config)
+        name = mid.agent_name(config, runtime_paths)
         if not name:
             continue
         if name not in config.agents:
@@ -214,7 +215,7 @@ def _collect_agent_toolkits(
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, Toolkit]]:
     resolved_storage_path = runtime_paths.storage_root
-    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
@@ -453,13 +454,13 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     elif command.type == CommandType.HI:
         # Generate the welcome message for this room
-        response_text = _generate_welcome_message(room.room_id, context.config)
+        response_text = _generate_welcome_message(room.room_id, context.config, context.runtime_paths)
 
     elif command.type == CommandType.SCHEDULE:
         full_text = command.args["full_text"]
 
         # Get mentioned agents from the command text
-        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config)
+        mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config, context.runtime_paths)
 
         _, response_text = await schedule_task(
             client=context.client,
@@ -468,6 +469,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             scheduled_by=requester_user_id,
             full_text=full_text,
             config=context.config,
+            runtime_paths=context.runtime_paths,
             room=room,
             mentioned_agents=mentioned_agents,
         )
@@ -508,6 +510,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             full_text=full_text,
             scheduled_by=requester_user_id,
             config=context.config,
+            runtime_paths=context.runtime_paths,
             room=room,
             thread_id=effective_thread_id,
         )
@@ -567,19 +570,25 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         if not skill_name:
             response_text = "Usage: !skill <name> [args]"
         else:
-            mentioned_agents, _, _ = check_agent_mentioned(event.source, None, context.config)
+            mentioned_agents, _, _ = check_agent_mentioned(
+                event.source,
+                None,
+                context.config,
+                context.runtime_paths,
+            )
             target_agent, error = _resolve_skill_command_agent(
                 skill_name,
                 config=context.config,
                 room=room,
                 mentioned_agents=mentioned_agents,
                 requester_user_id=requester_user_id,
+                runtime_paths=context.runtime_paths,
             )
             if error:
                 response_text = error
             else:
                 assert target_agent is not None
-                spec = resolve_skill_command_spec(skill_name, context.config, target_agent)
+                spec = resolve_skill_command_spec(skill_name, context.config, context.runtime_paths, target_agent)
                 if spec is None:
                     response_text = f"❌ Skill '{skill_name}' not found or not enabled for agent '{target_agent}'."
                 elif not spec.user_invocable:

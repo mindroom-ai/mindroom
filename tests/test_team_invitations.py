@@ -12,23 +12,17 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom import constants
 from mindroom.bot import TeamBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-    )
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(config, tmp_path)
 
 
 @pytest.fixture
@@ -70,11 +64,12 @@ class TestTeamRoomMembership:
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, config.require_runtime_paths())]
+        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, runtime_paths_for(config))]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
             team_agents=team_matrix_ids,
             team_mode="round_robin",
@@ -122,11 +117,12 @@ class TestTeamRoomMembership:
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, config.require_runtime_paths())]
+        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain, runtime_paths_for(config))]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
             team_agents=team_matrix_ids,
             team_mode="round_robin",

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -58,11 +59,12 @@ async def add_agent_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     metadata: dict | None = None,
 ) -> None:
     """Add a memory for an agent."""
     if use_file_memory_backend(config, agent_name=agent_name):
-        add_file_agent_memory(content, agent_name, storage_path, config)
+        add_file_agent_memory(content, agent_name, storage_path, config, runtime_paths)
         return
     await add_mem0_agent_memory(
         content,
@@ -79,6 +81,7 @@ def append_agent_daily_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
@@ -88,6 +91,7 @@ def append_agent_daily_memory(
         agent_name,
         storage_path,
         config,
+        runtime_paths,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
@@ -97,11 +101,12 @@ async def search_agent_memories(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     limit: int = 3,
 ) -> list[MemoryResult]:
     """Search agent memories including team memories."""
     if use_file_memory_backend(config, agent_name=agent_name):
-        return search_file_agent_memories(query, agent_name, storage_path, config, limit=limit)
+        return search_file_agent_memories(query, agent_name, storage_path, config, runtime_paths, limit=limit)
     return await search_mem0_agent_memories(
         query,
         agent_name,
@@ -116,6 +121,7 @@ async def list_all_agent_memories(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     limit: int = 100,
     *,
     preserve_resolved_storage_path: bool = False,
@@ -126,6 +132,7 @@ async def list_all_agent_memories(
             agent_name,
             storage_path,
             config,
+            runtime_paths,
             limit=limit,
             preserve_resolved_storage_path=preserve_resolved_storage_path,
         )
@@ -143,10 +150,11 @@ async def get_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
     """Get a single memory by ID."""
     if caller_uses_file_memory_backend(config, caller_context):
-        return get_file_agent_memory(memory_id, caller_context, storage_path, config)
+        return get_file_agent_memory(memory_id, caller_context, storage_path, config, runtime_paths)
     return await get_mem0_agent_memory(
         memory_id,
         caller_context,
@@ -162,10 +170,11 @@ async def update_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Update a single memory by ID."""
     if caller_uses_file_memory_backend(config, caller_context):
-        update_file_agent_memory(memory_id, content, caller_context, storage_path, config)
+        update_file_agent_memory(memory_id, content, caller_context, storage_path, config, runtime_paths)
         return
     await update_mem0_agent_memory(
         memory_id,
@@ -182,10 +191,11 @@ async def delete_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Delete a single memory by ID."""
     if caller_uses_file_memory_backend(config, caller_context):
-        delete_file_agent_memory(memory_id, caller_context, storage_path, config)
+        delete_file_agent_memory(memory_id, caller_context, storage_path, config, runtime_paths)
         return
     await delete_mem0_agent_memory(
         memory_id,
@@ -201,15 +211,16 @@ async def build_memory_enhanced_prompt(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Build a prompt enhanced with relevant memories."""
     logger.debug("Building enhanced prompt", agent=agent_name)
-    agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config)
+    agent_memories = await search_agent_memories(prompt, agent_name, storage_path, config, runtime_paths)
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
     if use_file_memory_backend(config, agent_name=agent_name):
-        resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
+        resolution = resolve_file_memory_resolution(storage_path, config, runtime_paths, agent_name=agent_name)
         agent_entrypoint = load_scope_entrypoint_context(agent_scope_user_id(agent_name), resolution, config)
         context_chunks: list[str] = []
         if agent_entrypoint:
@@ -231,6 +242,7 @@ async def store_conversation_memory(
     storage_path: Path,
     session_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict] | None = None,
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -246,7 +258,7 @@ async def store_conversation_memory(
             else team_uses_file_memory_backend(config, agent_name)
         )
         if use_file_backend:
-            store_file_conversation_memory(prompt, agent_name, storage_path, config)
+            store_file_conversation_memory(prompt, agent_name, storage_path, config, runtime_paths)
             return
 
         messages = build_memory_messages(prompt, thread_history, user_id)

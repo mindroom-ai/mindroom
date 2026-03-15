@@ -55,7 +55,7 @@ from mindroom.orchestrator import (
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
 from mindroom.teams import TeamFormationDecision, TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -63,20 +63,7 @@ if TYPE_CHECKING:
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for bot tests."""
-    runtime_root = runtime_root or Path(tempfile.mkdtemp())
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    config_path = runtime_root / "config.yaml"
-    if not config_path.exists():
-        config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=runtime_root,
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    return Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
 
 
 @dataclass
@@ -293,7 +280,7 @@ class TestAgentBot:
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.orchestrator = MagicMock(knowledge_managers={"research": MagicMock()})
 
         assert bot._knowledge_for_agent("calculator") is None
@@ -310,7 +297,7 @@ class TestAgentBot:
                 "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
             },
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
         manager = MagicMock()
         manager.get_knowledge.return_value = expected_knowledge
@@ -331,7 +318,7 @@ class TestAgentBot:
                 "legal": KnowledgeBaseConfig(path=str(tmp_path / "kb_legal"), watch=False),
             },
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         research_vector_db = MagicMock()
         research_vector_db.search.return_value = [
@@ -471,7 +458,7 @@ class TestAgentBot:
         mock_load_config.return_value = self.create_mock_config()
         config = mock_load_config.return_value
 
-        bot = AgentBot(mock_agent_user, tmp_path, config, rooms=["!test:localhost"])
+        bot = AgentBot(mock_agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!test:localhost"])
         assert bot.agent_user == mock_agent_user
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
@@ -485,6 +472,7 @@ class TestAgentBot:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         assert bot_no_stream.enable_streaming is False
 
@@ -513,7 +501,7 @@ class TestAgentBot:
         mock_load_config.return_value = self.create_mock_config()
         config = mock_load_config.return_value
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         await bot.start()
 
         assert bot.running
@@ -533,7 +521,7 @@ class TestAgentBot:
     ) -> None:
         """Permanent startup failures should stop retrying immediately."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         with (
             patch.object(
@@ -652,7 +640,7 @@ class TestAgentBot:
         """Test stopping an agent bot."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.running = True
 
@@ -666,7 +654,7 @@ class TestAgentBot:
         """Test handling room invitations."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -684,7 +672,7 @@ class TestAgentBot:
         """Test that agent ignores its own messages."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -705,7 +693,7 @@ class TestAgentBot:
         """Test that agent ignores messages from other agents."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -765,6 +753,7 @@ class TestAgentBot:
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         bot.client = AsyncMock()
 
@@ -879,7 +868,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
@@ -930,7 +919,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
@@ -983,7 +972,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
@@ -1024,7 +1013,7 @@ class TestAgentBot:
             yield
 
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
@@ -1068,7 +1057,7 @@ class TestAgentBot:
             yield "chunk"
 
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
@@ -1117,7 +1106,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
         assert bot._agent_has_matrix_messaging_tool("calculator") is True
 
@@ -1145,7 +1134,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
@@ -1214,7 +1203,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response")
@@ -1243,7 +1232,7 @@ class TestAgentBot:
         """Test agent bot not responding when not mentioned."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         mock_room = MagicMock()
@@ -1274,7 +1263,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room_id = "!test:localhost"
         local_room = MagicMock(spec=nio.MatrixRoom)
         local_room.room_id = room_id
@@ -1311,7 +1300,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room_id = "!test:localhost"
         bot.client = MagicMock(rooms={})
         bot.orchestrator = MagicMock()
@@ -1343,7 +1332,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = None
 
         context = bot._build_tool_runtime_context(
@@ -1372,7 +1361,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
 
         context = bot._build_tool_runtime_context(
@@ -1414,7 +1403,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
@@ -1460,7 +1449,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot.response_tracker.has_responded.return_value = False
@@ -1504,7 +1493,7 @@ class TestAgentBot:
     ) -> None:
         """Image messages should call _generate_response with images payload."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1590,7 +1579,7 @@ class TestAgentBot:
     ) -> None:
         """Media turns should include attachment IDs already referenced in thread history."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1688,7 +1677,7 @@ class TestAgentBot:
     ) -> None:
         """Image download failure should still mark event as responded."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1744,7 +1733,7 @@ class TestAgentBot:
     ) -> None:
         """File messages should call _generate_response with a local media path in prompt."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1836,7 +1825,7 @@ class TestAgentBot:
     ) -> None:
         """File media persistence failure should still mark event as responded."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -1906,7 +1895,7 @@ class TestAgentBot:
             "router": MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -1986,7 +1975,7 @@ class TestAgentBot:
             "router": MatrixID.from_username("mindroom_router", "localhost"),
         }
 
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -2090,7 +2079,7 @@ class TestAgentBot:
             "general": MatrixID.from_username("mindroom_general", "localhost"),
         }
 
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot._send_response = AsyncMock(return_value="$route")
@@ -2178,7 +2167,7 @@ class TestAgentBot:
             "general": MatrixID.from_username("mindroom_general", "localhost"),
         }
 
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot._send_response = AsyncMock(return_value="$route")
@@ -2255,6 +2244,7 @@ class TestAgentBot:
             ),
             tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         general_bot = AgentBot(
             AgentMatrixUser(
@@ -2266,6 +2256,7 @@ class TestAgentBot:
             ),
             tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         router_bot.client = AsyncMock()
@@ -2377,7 +2368,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -2452,7 +2443,7 @@ class TestAgentBot:
             ),
             tmp_path,
         )
-        bot = AgentBot(agent_user, tmp_path, config=config)
+        bot = AgentBot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
         bot._handle_ai_routing = AsyncMock()
         bot.response_tracker = MagicMock()
@@ -2503,7 +2494,7 @@ class TestAgentBot:
     ) -> None:
         """After router routes an image, the selected agent should resolve it via attachments."""
         config = self._config_for_storage(tmp_path)
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         tracker = MagicMock()
@@ -2597,7 +2588,7 @@ class TestAgentBot:
             tmp_path,
         )
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         context = _MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -2871,7 +2862,7 @@ class TestAgentBot:
         """Test that agent bot skips messages it has already responded to."""
         config = self._config_for_storage(tmp_path)
 
-        bot = AgentBot(mock_agent_user, tmp_path, config=config)
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
         # Mark an event as already responded

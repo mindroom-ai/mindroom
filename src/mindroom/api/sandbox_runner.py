@@ -21,9 +21,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
-import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
 from mindroom import constants
 from mindroom.credentials import CredentialsManager, get_credentials_manager
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolInitOverrideError,
@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _MAX_LEASE_TTL_SECONDS = 3600
 _DEFAULT_LEASE_TTL_SECONDS = 60
@@ -73,30 +74,29 @@ _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
 
 
-def _load_config_from_env() -> tuple[Config | None, Path | None]:
-    """Read runner config path from environment variables."""
-    from mindroom.config.main import Config as _Config  # noqa: PLC0415
+def _load_config_from_env() -> tuple[RuntimePaths, Config | None]:
+    """Read the sandbox runner runtime context from its process environment."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
 
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     if runtime_paths.config_path.exists():
-        return _Config.from_yaml(runtime_paths=runtime_paths), runtime_paths.config_path
-    return None, None
+        return runtime_paths, load_config(runtime_paths)
+    return runtime_paths, None
 
 
-def ensure_registry_loaded_with_config() -> None:
+def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config | None) -> None:
     """Load config from env and ensure the tool registry is populated.
 
     Used by both the FastAPI startup and the subprocess worker so that
     plugin tools are registered even in fresh processes.
     """
-    config, config_path = _load_config_from_env()
-    ensure_tool_registry_loaded(config, config_path=config_path)
+    ensure_tool_registry_loaded(runtime_paths, config)
 
 
-def _runner_credentials_manager() -> CredentialsManager:
+def _runner_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Return the sandbox runner's persisted credential manager."""
-    return get_credentials_manager(storage_root=_runner_storage_root())
+    return get_credentials_manager(storage_root=runtime_paths.storage_root)
 
 
 @dataclass
@@ -207,7 +207,7 @@ class _WorkerRequestPreparationError(ValueError):
 
 
 async def _validate_runner_token(x_mindroom_sandbox_token: Annotated[str | None, Header()] = None) -> None:
-    if _sandbox_proxy._PROXY_TOKEN is None:
+    if sandbox_proxy._PROXY_TOKEN is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
     if not sandbox_proxy_token_matches(x_mindroom_sandbox_token):
         raise HTTPException(status_code=401, detail="Unauthorized sandbox runner request")
@@ -228,6 +228,8 @@ async def _maybe_await(value: object) -> object:
 
 def _resolve_entrypoint(
     *,
+    runtime_paths: RuntimePaths,
+    config: Config | None,
     tool_name: str,
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
@@ -236,13 +238,14 @@ def _resolve_entrypoint(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    ensure_registry_loaded_with_config()
+    ensure_registry_loaded_with_config(runtime_paths, config)
     try:
         toolkit = get_tool_by_name(
             tool_name,
+            runtime_paths=runtime_paths,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
-            credentials_manager=_runner_credentials_manager(),
+            credentials_manager=_runner_credentials_manager(runtime_paths),
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
             worker_scope=worker_scope,
@@ -486,7 +489,7 @@ def _prepare_worker(worker_key: str) -> WorkerHandle:
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint="/api/sandbox-runner/execute",
-            auth_token=_sandbox_proxy._PROXY_TOKEN,
+            auth_token=sandbox_proxy._PROXY_TOKEN,
             status="ready",
             backend_name="dedicated_sandbox_runner",
             last_used_at=now,
@@ -607,9 +610,12 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
+    runtime_paths, config = _load_config_from_env()
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=config,
             tool_name=request.tool_name,
             function_name=request.function_name,
             credential_overrides=request.credential_overrides or None,

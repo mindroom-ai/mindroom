@@ -14,7 +14,7 @@ from mindroom.voice_handler import (
     _process_transcription,
     _sanitize_unavailable_mentions,
 )
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def _voice_config(agent_display_names: dict[str, str]) -> Config:
@@ -29,6 +29,11 @@ def _voice_config(agent_display_names: dict[str, str]) -> Config:
     )
     config.voice.intelligence.model = "test-model"
     return config
+
+
+async def _process_transcription_for_test(transcription: str, config: Config, **kwargs: object) -> str:
+    """Run voice transcription processing with the test config's runtime context."""
+    return await _process_transcription(transcription, config, runtime_paths_for(config), **kwargs)
 
 
 @pytest.mark.asyncio
@@ -57,7 +62,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()  # Mock model instance
 
-        result = await _process_transcription("HomeAssistant turn on the lights", config)
+        result = await _process_transcription_for_test("HomeAssistant turn on the lights", config)
         assert result == "@home turn on the lights"
 
     # Test 2: Agent with command
@@ -71,7 +76,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription(
+        result = await _process_transcription_for_test(
             "hey home assistant schedule to turn off the lights in 10 minutes",
             config,
         )
@@ -88,7 +93,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("research agent find papers on AI", config)
+        result = await _process_transcription_for_test("research agent find papers on AI", config)
         assert result == "@research find papers on AI"
 
 
@@ -121,7 +126,7 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        await _process_transcription("test", config)
+        await _process_transcription_for_test("test", config)
 
         # Verify the prompt shows the correct format
         assert "@home or @mindroom_home (spoken as: HomeAssistant)" in captured_prompt
@@ -158,7 +163,7 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        await _process_transcription(
+        await _process_transcription_for_test(
             "test",
             config,
             available_agent_names=["openclaw"],
@@ -191,7 +196,7 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription(
+        result = await _process_transcription_for_test(
             "review this",
             config,
             available_agent_names=["openclaw"],
@@ -273,7 +278,7 @@ async def test_voice_transcription_rejects_invented_skill_command() -> None:
         mock_get_model.return_value = MagicMock()
 
         transcription = "How do agent sessions work?"
-        result = await _process_transcription(transcription, config)
+        result = await _process_transcription_for_test(transcription, config)
 
     assert result == transcription
 
@@ -299,7 +304,7 @@ async def test_voice_transcription_keeps_explicit_skill_command() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("run skill session list", config)
+        result = await _process_transcription_for_test("run skill session list", config)
 
     assert result == "!skill session list"
 
@@ -326,7 +331,7 @@ async def test_voice_transcription_rejects_invented_help_command() -> None:
         mock_get_model.return_value = MagicMock()
 
         transcription = "What is photosynthesis?"
-        result = await _process_transcription(transcription, config)
+        result = await _process_transcription_for_test(transcription, config)
 
     assert result == transcription
 
@@ -352,6 +357,6 @@ async def test_voice_transcription_keeps_explicit_help_command() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("help command", config)
+        result = await _process_transcription_for_test("help command", config)
 
     assert result == "!help"

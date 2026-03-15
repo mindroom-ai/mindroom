@@ -12,21 +12,13 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.room_cleanup import _cleanup_orphaned_bots_in_room, cleanup_all_orphaned_bots
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 
 def _config_with_runtime_paths(tmp_path: Path, **config_data: object) -> Config:
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={},
-    )
-    config = Config(**config_data)
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(Config(**config_data), tmp_path)
 
 
 @pytest.mark.asyncio
@@ -59,6 +51,7 @@ class TestDMPreservationDuringCleanup:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!regular:server", "!another:server"],
         )
         bot.client = AsyncMock()
@@ -112,6 +105,7 @@ class TestDMPreservationDuringCleanup:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!configured:server"],  # Only one configured room
         )
         bot.client = AsyncMock()
@@ -159,6 +153,7 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!dm:server",
                 config,
+                runtime_paths_for(config),
             )
 
             # Should not kick anyone from DM room
@@ -201,6 +196,7 @@ class TestDMPreservationDuringCleanup:
                 client,
                 "!regular:server",
                 config,
+                runtime_paths_for(config),
             )
 
             # Should kick the orphaned bot
@@ -254,7 +250,7 @@ class TestDMPreservationDuringCleanup:
             patch("mindroom.matrix.room_cleanup.is_dm_room", side_effect=mock_is_dm_room),
         ):
             client.room_kick = AsyncMock(return_value=nio.RoomKickResponse())
-            result = await cleanup_all_orphaned_bots(client, config)
+            result = await cleanup_all_orphaned_bots(client, config, runtime_paths_for(config))
 
             # Should process configured room but skip DM rooms
             assert "!configured:server" in result

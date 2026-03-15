@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
+from mindroom.config.main import load_config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.custom_tools.config_manager import _is_known_tool_entry, validate_knowledge_bases
 from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -23,9 +25,10 @@ _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 class SelfConfigTools(Toolkit):
     """Tools that let an agent read and modify its own configuration only."""
 
-    def __init__(self, agent_name: str, config_path: Path) -> None:
+    def __init__(self, agent_name: str, runtime_paths: RuntimePaths) -> None:
         self.agent_name = agent_name
-        self.config_path = Path(config_path).expanduser().resolve()
+        self.runtime_paths = runtime_paths
+        self.config_path = runtime_paths.config_path
         super().__init__(
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
@@ -39,7 +42,7 @@ class SelfConfigTools(Toolkit):
 
         """
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
         except Exception as e:
             return f"Error loading configuration: {e}"
 
@@ -102,7 +105,7 @@ class SelfConfigTools(Toolkit):
 
         """
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
         except Exception as e:
             return f"Error loading configuration: {e}"
 

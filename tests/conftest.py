@@ -22,7 +22,10 @@ __all__ = [
     "bypass_authorization",
     "create_mock_room",
     "orchestrator_runtime_paths",
+    "runtime_paths_for",
 ]
+
+_TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
 
 
 class FakeCredentialsManager:
@@ -111,7 +114,20 @@ def orchestrator_runtime_paths(
 def bind_runtime_paths(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound copy of a test config."""
     runtime_paths = _make_test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    return Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
+    bound.__dict__["domain"] = bound.get_domain(runtime_paths)
+    bound.__dict__["ids"] = bound.get_ids(runtime_paths)
+    return bound
+
+
+def runtime_paths_for(config: Config) -> RuntimePaths:
+    """Return the explicit runtime context previously bound to a test config."""
+    runtime_paths = _TEST_RUNTIME_PATHS_BY_CONFIG_ID.get(id(config))
+    if runtime_paths is None:
+        msg = "Test config is missing bound RuntimePaths"
+        raise KeyError(msg)
+    return runtime_paths
 
 
 def create_mock_room(
@@ -123,7 +139,7 @@ def create_mock_room(
     room = MagicMock()
     room.room_id = room_id
     if agents:
-        domain = config.domain if config else "localhost"
+        domain = config.get_domain(runtime_paths_for(config)) if config is not None else "localhost"
         room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
     else:
         room.users = {}
@@ -160,13 +176,14 @@ def _reset_runtime_paths() -> Generator[None, None, None]:
     original_env = os.environ.copy()
     original_synced_env = dict(constants._RUNTIME_SYNCED_ENV_VALUES)
     original_synced_originals = dict(constants._RUNTIME_SYNCED_ENV_ORIGINALS)
-    original_active_runtime = constants._ACTIVE_RUNTIME_PATHS
+    original_bound_configs = dict(_TEST_RUNTIME_PATHS_BY_CONFIG_ID)
     yield
     os.environ.clear()
     os.environ.update(original_env)
-    constants._ACTIVE_RUNTIME_PATHS = original_active_runtime
     constants._RUNTIME_SYNCED_ENV_ORIGINALS = dict(original_synced_originals)
     constants._replace_runtime_synced_env(original_synced_env)
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
 
 
 @pytest.fixture(autouse=True)

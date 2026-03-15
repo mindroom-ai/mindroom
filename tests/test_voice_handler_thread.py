@@ -9,6 +9,7 @@ import pytest
 
 from mindroom import voice_handler
 from mindroom.config.main import Config
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 @pytest.mark.asyncio
@@ -37,7 +38,7 @@ async def test_voice_handler_returns_transcription() -> None:
     voice_event.source = {"content": {}}
 
     # Mock config
-    config = Config.from_yaml()
+    config = bind_runtime_paths(Config.from_yaml())
     config.voice.enabled = True
 
     # Mock audio download
@@ -50,7 +51,7 @@ async def test_voice_handler_returns_transcription() -> None:
         patch("mindroom.voice_handler._transcribe_audio", return_value="what is the weather today"),
         patch("mindroom.voice_handler._process_transcription", return_value="what is the weather today"),
     ):
-        result = await voice_handler._handle_voice_message(client, room, voice_event, config)
+        result = await voice_handler._handle_voice_message(client, room, voice_event, config, runtime_paths_for(config))
 
         # Verify the handler returns the transcribed message with voice prefix
         assert result == "🎤 what is the weather today"

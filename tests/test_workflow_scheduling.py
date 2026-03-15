@@ -24,7 +24,7 @@ from mindroom.scheduling import (
     _WorkflowParseError,
     schedule_task,
 )
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def _mid(name: str) -> MatrixID:
@@ -37,20 +37,21 @@ def _runtime_bound_config(config: Config) -> Config:
 
 
 @pytest.fixture
-def mock_config() -> MagicMock:
-    """Create a mock config with test agents."""
-    config = MagicMock()
-    config.agents = {
-        "research": MagicMock(),
-        "email_assistant": MagicMock(),
-        "finance": MagicMock(),
-        "shell": MagicMock(),
-        "analyst": MagicMock(),
-    }
-    config.models = {
-        "default": MagicMock(),
-    }
-    return config
+def mock_config() -> Config:
+    """Create a runtime-bound config with test agents."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "research": AgentConfig(display_name="Research"),
+                "email_assistant": AgentConfig(display_name="Email Assistant"),
+                "finance": AgentConfig(display_name="Finance"),
+                "shell": AgentConfig(display_name="Shell"),
+                "analyst": AgentConfig(display_name="Analyst"),
+            },
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+    )
 
 
 class TestCronSchedule:
@@ -135,6 +136,7 @@ class TestParseWorkflowSchedule:
         result = await _parse_workflow_schedule(
             "Every Monday at 9am, research AI news and email me a summary",
             config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
             available_agents=[_mid("research"), _mid("email_assistant")],
         )
 
@@ -167,6 +169,7 @@ class TestParseWorkflowSchedule:
         result = await _parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
             available_agents=[_mid("general")],
         )
 
@@ -192,6 +195,7 @@ class TestParseWorkflowSchedule:
         result = await _parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
             available_agents=[_mid("finance")],
         )
 
@@ -216,6 +220,7 @@ class TestParseWorkflowSchedule:
         result = await _parse_workflow_schedule(
             "Schedule something",
             config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
             available_agents=[_mid("general")],
         )
 
@@ -246,6 +251,7 @@ class TestParseWorkflowSchedule:
         await _parse_workflow_schedule(
             "remind me later",
             config=mock_config,
+            runtime_paths=runtime_paths_for(mock_config),
             available_agents=[
                 _mid("general"),
                 _mid("research"),
@@ -291,12 +297,22 @@ class TestParseWorkflowSchedule:
         mock_agent.arun.side_effect = [resp_once, resp_cron]
         mock_agent_class.return_value = mock_agent
 
-        result_once = await _parse_workflow_schedule("remind me later", mock_config, [_mid("general")])
+        result_once = await _parse_workflow_schedule(
+            "remind me later",
+            mock_config,
+            runtime_paths_for(mock_config),
+            [_mid("general")],
+        )
         assert isinstance(result_once, ScheduledWorkflow)
         assert result_once.schedule_type == "once"
         assert result_once.execute_at is not None
 
-        result_cron = await _parse_workflow_schedule("every day", mock_config, [_mid("general")])
+        result_cron = await _parse_workflow_schedule(
+            "every day",
+            mock_config,
+            runtime_paths_for(mock_config),
+            [_mid("general")],
+        )
         assert isinstance(result_cron, ScheduledWorkflow)
         assert result_cron.schedule_type == "cron"
         assert result_cron.cron_schedule is not None
@@ -328,12 +344,12 @@ class TestExecuteScheduledWorkflow:
             created_by="@user:server",
         )
 
-        await _execute_scheduled_workflow(client, workflow, config)
+        await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
 
         # Verify message was sent
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await _execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
             mock_send.assert_called_once()
 
             # Check the message content
@@ -349,7 +365,7 @@ class TestExecuteScheduledWorkflow:
     async def test_execute_workflow_simple_reminder(self) -> None:
         """Test executing a simple reminder without agents."""
         client = AsyncMock()
-        config = MagicMock()  # Add a mock config
+        config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -359,7 +375,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await _execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
             mock_send.assert_called_once()
 
             # Check the message content
@@ -372,7 +388,7 @@ class TestExecuteScheduledWorkflow:
     async def test_execute_workflow_error_handling(self) -> None:
         """Test error handling in execute_scheduled_workflow."""
         client = AsyncMock()
-        config = MagicMock()  # Add a mock config
+        config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -387,7 +403,7 @@ class TestExecuteScheduledWorkflow:
 
         with patch("mindroom.scheduling.send_message", new=mock_send):
             # Should not raise, but log error
-            await _execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
 
             # Should have tried to send original and error message
             assert mock_send.call_count == 2
@@ -400,7 +416,7 @@ class TestExecuteScheduledWorkflow:
     async def test_execute_workflow_no_room_id(self) -> None:
         """Test that workflow without room_id doesn't execute."""
         client = AsyncMock()
-        config = MagicMock()  # Add a mock config
+        config = _runtime_bound_config(Config())
         workflow = ScheduledWorkflow(
             schedule_type="once",
             execute_at=datetime.now(UTC),
@@ -410,7 +426,7 @@ class TestExecuteScheduledWorkflow:
         )
 
         with patch("mindroom.scheduling.send_message", new=AsyncMock()) as mock_send:
-            await _execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths_for(config))
             mock_send.assert_not_called()
 
 
@@ -489,6 +505,7 @@ class TestIntegrationWithScheduling:
                 scheduled_by="@user:server",
                 full_text="Daily at 9am, research AI news",
                 config=config,
+                runtime_paths=runtime_paths_for(config),
                 room=room,
             )
 

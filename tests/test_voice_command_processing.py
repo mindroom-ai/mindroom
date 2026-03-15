@@ -21,7 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.voice_handler import prepare_voice_message
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +29,40 @@ if TYPE_CHECKING:
 
 def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, tmp_path)
+
+
+def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    return AgentBot(
+        agent_user=agent_user,
+        storage_path=storage_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=rooms,
+    )
+
+
+async def _prepare_voice_message_with_runtime(
+    client: object,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    sender_domain: str,
+    thread_id: str | None,
+) -> object:
+    """Normalize voice input with the test config's explicit runtime context."""
+    return await prepare_voice_message(
+        client,
+        storage_path,
+        room,
+        event,
+        config,
+        runtime_paths=runtime_paths_for(config),
+        sender_domain=sender_domain,
+        thread_id=thread_id,
+    )
 
 
 def _make_voice_event(
@@ -78,7 +112,7 @@ def _make_visible_router_echo_scenario(
         tmp_path,
     )
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -110,7 +144,7 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
     agent_user.agent_name = ROUTER_AGENT_NAME
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(Config(authorization={"default_room_access": True}), tmp_path),
@@ -148,7 +182,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
     agent_user.agent_name = ROUTER_AGENT_NAME
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=MagicMock(),
@@ -196,7 +230,7 @@ async def test_prepare_voice_message_includes_original_sender_and_attachment_met
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = "🎤 turn on the lights"
-        prepared = await prepare_voice_message(
+        prepared = await _prepare_voice_message_with_runtime(
             client,
             tmp_path,
             room,
@@ -235,7 +269,7 @@ async def test_prepare_voice_message_marks_raw_audio_fallback_and_thread(tmp_pat
 
     with patch("mindroom.voice_handler._download_audio", new_callable=AsyncMock) as mock_download_audio:
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        prepared = await prepare_voice_message(
+        prepared = await _prepare_voice_message_with_runtime(
             client,
             tmp_path,
             room,
@@ -274,7 +308,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
         tmp_path,
     )
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -319,7 +353,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     agent_user.agent_name = "home"
     agent_user.matrix_id = MatrixID.parse("@mindroom_home:localhost")
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
@@ -371,7 +405,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
     agent_user.agent_name = "home"
     agent_user.matrix_id = MatrixID.parse("@mindroom_home:localhost")
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=_attach_runtime_paths(
@@ -427,7 +461,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
         agent_user.agent_name = agent_name
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
-        bot = AgentBot(
+        bot = _agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -627,7 +661,7 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         tmp_path,
     )
 
-    bot = AgentBot(
+    bot = _agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
@@ -693,7 +727,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
         agent_user.agent_name = agent_name
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
-        bot = AgentBot(
+        bot = _agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
@@ -764,7 +798,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         agent_user.user_id = f"@mindroom_{agent_name}:localhost"
         agent_user.agent_name = agent_name
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
-        bot = AgentBot(
+        bot = _agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,

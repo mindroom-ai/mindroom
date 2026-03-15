@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import mindroom.routing
+import mindroom.thread_utils
 from mindroom.agents import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -15,19 +17,65 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing import _AgentSuggestion, suggest_agent_for_message
-from mindroom.thread_utils import (
-    _has_any_agent_mentions_in_thread,
-    check_agent_mentioned,
-    extract_agent_name,
-    has_multiple_non_agent_users_in_thread,
-)
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
+from mindroom.routing import _AgentSuggestion
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
     return bind_runtime_paths(config, runtime_root or Path(tempfile.mkdtemp()))
+
+
+def suggest_agent_for_message(
+    message: str,
+    agents: list[MatrixID],
+    config: Config,
+    thread_history: list[dict[str, str]] | None = None,
+) -> str | None:
+    """Run routing with the test config's bound runtime context."""
+    return mindroom.routing.suggest_agent_for_message(
+        message,
+        agents,
+        config,
+        runtime_paths_for(config),
+        thread_history,
+    )
+
+
+def check_agent_mentioned(
+    event_source: dict,
+    agent_id: MatrixID | None,
+    config: Config,
+) -> tuple[list[MatrixID], bool, bool]:
+    """Check mentions with the test config's bound runtime context."""
+    return mindroom.thread_utils.check_agent_mentioned(event_source, agent_id, config, runtime_paths_for(config))
+
+
+def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+    """Check thread mentions with the test config's bound runtime context."""
+    return mindroom.thread_utils._has_any_agent_mentions_in_thread(thread_history, config, runtime_paths_for(config))
+
+
+def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+    """Check multi-human thread participation with the test config's bound runtime context."""
+    return mindroom.thread_utils.has_multiple_non_agent_users_in_thread(
+        thread_history,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+def extract_agent_name(sender_id: str, config: Config) -> str | None:
+    """Extract configured agent names with the test config's bound runtime context."""
+    return mindroom.thread_utils.extract_agent_name(sender_id, config, runtime_paths_for(config))
+
+
+def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    config = kwargs["config"]
+    assert isinstance(config, Config)
+    kwargs["runtime_paths"] = runtime_paths_for(config)
+    return AgentBot(*args, **kwargs)
 
 
 class TestAIRouting:
@@ -187,7 +235,7 @@ class TestAIRouting:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = AgentBot(agent, tmp_path, config=config)
+        bot = _agent_bot(agent, tmp_path, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()

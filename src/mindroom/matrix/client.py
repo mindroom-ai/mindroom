@@ -36,6 +36,17 @@ class PermanentMatrixStartupError(ValueError):
     """Raised for Matrix startup failures that should not be retried."""
 
 
+def _require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
+    """Reject stale positional call shapes with a clear error."""
+    if isinstance(runtime_paths, RuntimePaths):
+        return runtime_paths
+    msg = (
+        "matrix_client() requires RuntimePaths as its second argument. "
+        "Call matrix_client(homeserver, runtime_paths, user_id=...)"
+    )
+    raise TypeError(msg)
+
+
 def matrix_startup_error(
     message: str,
     *,
@@ -84,6 +95,7 @@ def _create_matrix_client(
         nio.AsyncClient: Configured Matrix client instance
 
     """
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
     ssl_context = _maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
 
     # Default store path for encryption support
@@ -130,10 +142,11 @@ async def matrix_client(
         nio.AsyncClient: The Matrix client instance
 
     Example:
-        async with matrix_client("http://localhost:8008") as client:
+        async with matrix_client("http://localhost:8008", runtime_paths, user_id="@user:localhost") as client:
             response = await client.login(password="secret")
 
     """
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
 
     try:
@@ -163,6 +176,7 @@ async def login(
         ValueError: If login fails
 
     """
+    runtime_paths = _require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, user_id)
 
     response = await client.login(password)

@@ -59,9 +59,15 @@ _SCOPES = [
 _ENV_PATH = Path(__file__).parent.parent.parent.parent.parent / ".env"
 
 # Get configuration from environment
-_MINDROOM_PORT = os.getenv("MINDROOM_PORT", "8765")
-_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_MINDROOM_PORT}/api/google/callback")
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
+
+
+def _mindroom_port() -> str:
+    return os.getenv("MINDROOM_PORT", "8765")
+
+
+def _redirect_uri() -> str:
+    return os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{_mindroom_port()}/api/google/callback")
 
 
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
@@ -106,7 +112,7 @@ def _get_oauth_credentials() -> dict[str, Any] | None:
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "redirect_uris": [_REDIRECT_URI],
+            "redirect_uris": [_redirect_uri()],
         },
     }
 
@@ -178,13 +184,13 @@ def _save_env_credentials(client_id: str, client_secret: str, project_id: str | 
 
     # Update or add credentials
     # Use current environment variable for redirect URI to support multiple deployments
-    current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
+    current_redirect_uri = _redirect_uri()
     env_vars = {
         "GOOGLE_CLIENT_ID": client_id,
         "GOOGLE_CLIENT_SECRET": client_secret,
         "GOOGLE_PROJECT_ID": project_id or "mindroom-integration",
         "GOOGLE_REDIRECT_URI": current_redirect_uri,
-        "MINDROOM_PORT": _MINDROOM_PORT,
+        "MINDROOM_PORT": _mindroom_port(),
     }
 
     for key, value in env_vars.items():
@@ -277,7 +283,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
 
         # Create OAuth flow with all scopes
         # Use current environment variable for redirect URI to support multiple deployments
-        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
+        current_redirect_uri = _redirect_uri()
         flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
 
         # Generate authorization URL
@@ -324,7 +330,7 @@ async def callback(request: Request) -> RedirectResponse:
 
         # Create OAuth flow and exchange code for tokens
         # Use current environment variable for redirect URI to support multiple deployments
-        current_redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", _REDIRECT_URI)
+        current_redirect_uri = _redirect_uri()
         flow = flow_cls.from_client_config(oauth_config, scopes=_SCOPES, redirect_uri=current_redirect_uri)
         flow.fetch_token(code=code)
 

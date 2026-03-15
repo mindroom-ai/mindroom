@@ -22,6 +22,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,7 @@ class _MindroomSkillsLoader(SkillLoader):
 
     roots: Sequence[Path]
     config: Config
+    runtime_paths: RuntimePaths
     allowlist: Sequence[str] | None = None
     env_vars: Mapping[str, str] | None = None
     credential_keys: set[str] | None = None
@@ -60,6 +62,7 @@ class _MindroomSkillsLoader(SkillLoader):
             if self.credential_keys is not None
             else _collect_credential_keys(
                 self.config,
+                self.runtime_paths,
             )
         )
         config_data = self.config.model_dump()
@@ -90,6 +93,7 @@ class _MindroomSkillsLoader(SkillLoader):
 def build_agent_skills(
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     skill_roots: Sequence[Path] | None = None,
     env_vars: Mapping[str, str] | None = None,
@@ -104,9 +108,12 @@ def build_agent_skills(
     loader = _MindroomSkillsLoader(
         roots=roots,
         config=config,
+        runtime_paths=runtime_paths,
         allowlist=agent_config.skills,
         env_vars=env_vars,
-        credential_keys=credential_keys if credential_keys is not None else _collect_credential_keys(config),
+        credential_keys=credential_keys
+        if credential_keys is not None
+        else _collect_credential_keys(config, runtime_paths),
     )
     return Skills(loaders=[loader])
 
@@ -145,6 +152,7 @@ class _SkillListing:
 def resolve_skill_command_spec(  # noqa: C901
     skill_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     *,
     skill_roots: Sequence[Path] | None = None,
@@ -162,7 +170,9 @@ def resolve_skill_command_spec(  # noqa: C901
         return None
 
     env_vars = os.environ if env_vars is None else env_vars
-    credential_keys = credential_keys if credential_keys is not None else _collect_credential_keys(config)
+    credential_keys = (
+        credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
+    )
     config_data = config.model_dump()
 
     resolved: _SkillCommandSpec | None = None
@@ -608,8 +618,7 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
     return bool(current)
 
 
-def _collect_credential_keys(config: Config) -> set[str]:
-    runtime_paths = config.require_runtime_paths()
+def _collect_credential_keys(_config: Config, runtime_paths: RuntimePaths) -> set[str]:
     credentials_manager = get_credentials_manager(
         storage_root=runtime_paths.storage_root,
     )

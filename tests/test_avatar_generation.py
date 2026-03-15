@@ -116,12 +116,13 @@ def test_has_missing_managed_avatars_detects_complete_avatar_set(
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config)
+    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_direct_room_ids(
@@ -141,12 +142,13 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config)
+    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
@@ -166,12 +168,13 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
+    runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
     for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config)
+    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
 
 
 def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
@@ -192,6 +195,7 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, tmp_path)
+    runtime_paths = _runtime_paths(tmp_path)
     bundled_root = tmp_path / "bundled"
 
     def _resolve_avatar_path(
@@ -209,7 +213,7 @@ def test_has_missing_managed_avatars_treats_bundled_avatars_as_present(
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
 
-    assert not generate_avatars.has_missing_managed_avatars(config)
+    assert not generate_avatars.has_missing_managed_avatars(config, runtime_paths)
 
 
 @pytest.mark.asyncio

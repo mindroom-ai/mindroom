@@ -45,9 +45,10 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     runtime_paths = constants.set_runtime_paths(config_path=temp_config_file)
     main.app.state.runtime_paths = runtime_paths
+    main.app.state.auth_state = None
 
     # Force reload of config
-    main._load_config_from_file(main.app.state.runtime_paths)
+    main._load_config_from_file(main.app.state.runtime_paths, main.app)
 
     # Create test client
     return TestClient(main.app)

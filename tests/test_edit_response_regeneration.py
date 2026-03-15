@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path  # noqa: TC003
-from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -14,9 +13,10 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def _test_config(
@@ -42,17 +42,7 @@ def _test_config(
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     """Attach example.com runtime paths to a test config."""
-    config_path = tmp_path / "config.yaml"
-    runtime_paths = RuntimePaths(
-        config_path=config_path,
-        config_dir=config_path.parent,
-        env_path=config_path.parent / ".env",
-        storage_root=tmp_path,
-        process_env=MappingProxyType({}),
-        env_file_values=MappingProxyType({"MATRIX_HOMESERVER": "https://example.com"}),
-    )
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(config, tmp_path)
 
 
 @pytest.mark.asyncio
@@ -73,6 +63,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -216,6 +207,7 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -303,6 +295,7 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -463,6 +456,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -564,6 +558,7 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -671,6 +666,7 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -740,6 +736,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -840,6 +837,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -951,6 +949,7 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -1025,6 +1024,7 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 

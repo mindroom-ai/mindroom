@@ -734,7 +734,11 @@ async def login_agent_user(
 
 
 # TODO: Check, this seems unused!
-async def _ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, AgentMatrixUser]:
+async def _ensure_all_agent_users(
+    homeserver: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> dict[str, AgentMatrixUser]:
     """Ensure all configured agents and teams have Matrix user accounts.
 
     This includes user-configured agents, teams, and the built-in router agent.
@@ -742,14 +746,13 @@ async def _ensure_all_agent_users(homeserver: str, config: Config) -> dict[str, 
     Args:
         homeserver: The Matrix homeserver URL
         config: Application configuration
+        runtime_paths: Explicit runtime context for Matrix IDs and credential storage
 
     Returns:
         Dictionary mapping agent/team names to AgentMatrixUser objects
 
     """
     agent_users = {}
-    runtime_paths = config.require_runtime_paths()
-
     # First, create the built-in router agent
     try:
         router_user = await create_agent_user(

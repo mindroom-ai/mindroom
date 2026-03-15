@@ -81,13 +81,13 @@ async def _configure_managed_room_access(
     room_key: str,
     room_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     room_alias: str | None = None,
     context: str,
 ) -> bool:
     """Apply configured room joinability/discoverability policy for one managed room."""
     access_config = config.matrix_room_access
-    runtime_paths = config.require_runtime_paths()
     target_join_rule = access_config.get_target_join_rule(
         room_key,
         runtime_paths,
@@ -234,6 +234,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     room_name: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
@@ -243,6 +244,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         client: Matrix client to use for room creation
         room_key: The room key/alias (without domain)
         config: Configuration with agent settings for topic generation
+        runtime_paths: Explicit runtime context for room aliases, topics, and avatars
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
 
@@ -250,7 +252,6 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         Room ID if room exists or was created, None on failure
 
     """
-    runtime_paths = config.require_runtime_paths()
     existing_rooms = load_rooms(runtime_paths=runtime_paths)
 
     # First, try to resolve the room alias on the server
@@ -283,7 +284,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             # For existing rooms, ensure they have a topic set
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
-            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
+            await ensure_room_has_topic(client, room_id, room_key, room_name, config, runtime_paths)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
                 await _configure_managed_room_access(
@@ -291,6 +292,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                     room_key=room_key,
                     room_id=room_id,
                     config=config,
+                    runtime_paths=runtime_paths,
                     room_alias=full_alias,
                     context="existing_room_reconciliation",
                 )
@@ -325,7 +327,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         room_name = _room_key_to_name(room_key)
 
     # Generate a contextual topic for the room using AI
-    topic = await generate_room_topic_ai(room_key, room_name, config)
+    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
     logger.info(f"Creating room {room_key} with topic: {topic}")
 
     created_room_id = await create_room(
@@ -347,6 +349,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 room_key=room_key,
                 room_id=created_room_id,
                 config=config,
+                runtime_paths=runtime_paths,
                 room_alias=full_alias,
                 context="new_room_creation",
             )
@@ -377,12 +380,14 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 async def ensure_all_rooms_exist(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> dict[str, str]:
     """Ensure all configured rooms exist and invite user account.
 
     Args:
         client: Matrix client to use for room creation
         config: Configuration with room settings
+        runtime_paths: Explicit runtime context for room resolution and state updates
 
     Returns:
         Dict mapping room keys to room IDs
@@ -402,7 +407,7 @@ async def ensure_all_rooms_exist(
             continue
 
         # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config)
+        power_users = get_agent_ids_for_room(room_key, config, runtime_paths)
 
         # Ensure room exists
         try:
@@ -410,6 +415,7 @@ async def ensure_all_rooms_exist(
                 client=client,
                 room_key=room_key,
                 config=config,
+                runtime_paths=runtime_paths,
                 power_users=power_users,
             )
         except RuntimeError:
@@ -428,12 +434,12 @@ async def ensure_all_rooms_exist(
 async def _ensure_root_space_exists(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
     if not config.matrix_space.enabled:
         return None
 
-    runtime_paths = config.require_runtime_paths()
     state = MatrixState.load(runtime_paths=runtime_paths)
     joined_room_ids = await get_joined_rooms(client) or []
     if state.space_room_id and state.space_room_id in joined_room_ids:
@@ -475,13 +481,14 @@ async def _ensure_root_space_exists(
 async def ensure_root_space(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
     room_ids: dict[str, str],
 ) -> str | None:
     """Ensure the optional root Matrix Space exists and links the supplied managed rooms."""
     if not config.matrix_space.enabled:
         return None
 
-    root_space_id = await _ensure_root_space_exists(client, config)
+    root_space_id = await _ensure_root_space_exists(client, config, runtime_paths)
     if root_space_id is None:
         return None
 
@@ -489,7 +496,6 @@ async def ensure_root_space(
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
         return None
 
-    runtime_paths = config.require_runtime_paths()
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     for room_id in dict.fromkeys(room_ids.values()):
         if not await add_room_to_space(client, root_space_id, room_id, server_name):

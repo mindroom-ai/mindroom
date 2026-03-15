@@ -7,7 +7,6 @@ This lets users change keys via the UI without losing them on restart,
 while still picking up .env changes for keys that were never manually set.
 """
 
-import os
 from pathlib import Path
 
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_value
@@ -47,8 +46,6 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
 
-    os.environ["GITHUB_TOKEN"] = github_token
-
     creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     existing = creds_manager.load_credentials("github_private")
     if existing is not None:
@@ -82,8 +79,8 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     - If the existing credential has ``_source=ui`` (or no ``_source``,
       for legacy files), skip it to protect the user's manual override.
 
-    Environment variables are always exported to ``os.environ`` so that
-    libraries like mem0 can pick them up regardless.
+    Runtime-bound credentials stay in the credential store instead of being
+    mirrored back into ambient process env.
     """
     creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     synced_count = 0
@@ -96,10 +93,6 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
             continue
 
         logger.debug(f"Found value for {env_var}: length={len(env_value)}")
-
-        # Always export to os.environ so libraries (mem0, etc.) can use it
-        if service != "ollama":
-            os.environ[env_var] = env_value
 
         # Check existing credentials and their source
         existing = creds_manager.load_credentials(service)

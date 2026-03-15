@@ -14,14 +14,19 @@ from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 if TYPE_CHECKING:
     from pathlib import Path
 
+_BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
-def _make_config(*, runtime_paths: constants_mod.RuntimePaths | None = None) -> Config:
-    runtime_paths = runtime_paths or constants_mod.resolve_runtime_paths(
+
+def _default_runtime_paths() -> constants_mod.RuntimePaths:
+    return constants_mod.resolve_runtime_paths(
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+def _make_config(*, runtime_paths: constants_mod.RuntimePaths) -> Config:
     config = Config(
         agents={
             "calculator": AgentConfig(display_name="Calculator"),
@@ -31,8 +36,29 @@ def _make_config(*, runtime_paths: constants_mod.RuntimePaths | None = None) -> 
         },
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
-    config._runtime_paths = runtime_paths
-    return config
+    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+    return bound
+
+
+def _runtime_paths_for(config: Config) -> constants_mod.RuntimePaths:
+    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
+    if runtime_paths is None:
+        msg = "Test config is missing bound RuntimePaths"
+        raise KeyError(msg)
+    return runtime_paths
+
+
+def _parse_mentions_in_text(
+    text: str,
+    sender_domain: str,
+    config: Config,
+) -> tuple[str, list[str], str]:
+    return parse_mentions_in_text(text, sender_domain, config, _runtime_paths_for(config))
+
+
+def _format_message_with_mentions(config: Config, text: str, **kwargs: object) -> dict[str, object]:
+    return format_message_with_mentions(config, _runtime_paths_for(config), text, **kwargs)
 
 
 class TestMentionParsing:
@@ -40,20 +66,20 @@ class TestMentionParsing:
 
     def test_parse_single_mention(self) -> None:
         """Test parsing a single agent mention."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "Hey @calculator can you help with this?"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Hey @mindroom_calculator:localhost can you help with this?"
         assert mentions == ["@mindroom_calculator:localhost"]
 
     def test_parse_multiple_mentions(self) -> None:
         """Test parsing multiple agent mentions."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "@calculator and @general please work together on this"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert (
             processed == "@mindroom_calculator:localhost and @mindroom_general:localhost please work together on this"
@@ -63,20 +89,20 @@ class TestMentionParsing:
 
     def test_parse_with_full_mention(self) -> None:
         """Test parsing when full @mindroom_agent format is used."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "Ask @mindroom_calculator for help"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Ask @mindroom_calculator:localhost for help"
         assert mentions == ["@mindroom_calculator:localhost"]
 
     def test_parse_with_domain(self) -> None:
         """Test parsing when mention already has domain."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "Ask @mindroom_calculator:matrix.org for help"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         # Should replace with sender's domain
         assert processed == "Ask @mindroom_calculator:localhost for help"
@@ -93,56 +119,56 @@ class TestMentionParsing:
         config = _make_config(runtime_paths=runtime_paths)
 
         text = "Ask @mindroom_calculator_a1b2c3d4:matrix.org for help"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "Ask @mindroom_calculator_a1b2c3d4:localhost for help"
         assert mentions == ["@mindroom_calculator_a1b2c3d4:localhost"]
 
     def test_custom_domain(self) -> None:
         """Test with custom sender domain."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "Hey @calculator"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "matrix.org", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "matrix.org", config)
 
         assert processed == "Hey @mindroom_calculator:matrix.org"
         assert mentions == ["@mindroom_calculator:matrix.org"]
 
     def test_ignore_unknown_mentions(self) -> None:
         """Test that unknown agents are not converted."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "@calculator is real but @unknown is not"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_calculator:localhost is real but @unknown is not"
         assert mentions == ["@mindroom_calculator:localhost"]
 
     def test_ignore_user_mentions(self) -> None:
         """Test that user mentions are ignored."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "@mindroom_user_123 and @calculator"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_user_123 and @mindroom_calculator:localhost"
         assert mentions == ["@mindroom_calculator:localhost"]
 
     def test_no_duplicate_mentions(self) -> None:
         """Test that duplicate mentions are handled."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "@calculator help! @calculator are you there?"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == "@mindroom_calculator:localhost help! @mindroom_calculator:localhost are you there?"
         assert mentions == ["@mindroom_calculator:localhost"]  # Only one entry
 
     def test_format_message_with_mentions(self) -> None:
         """Test the full content creation with mentions."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
-        content = format_message_with_mentions(
+        content = _format_message_with_mentions(
             config,
             "@calculator and @code please help",
             sender_domain="matrix.org",
@@ -161,10 +187,10 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_includes_tool_trace(self) -> None:
         """Structured tool traces should be attached to message content when provided."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file", args_preview="file=a.py")]
 
-        content = format_message_with_mentions(
+        content = _format_message_with_mentions(
             config,
             "Done.",
             sender_domain="matrix.org",
@@ -177,10 +203,10 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_merges_extra_content(self) -> None:
         """Custom metadata should be merged with structured tool trace content."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
         trace = [ToolTraceEntry(type="tool_call_started", tool_name="save_file")]
 
-        content = format_message_with_mentions(
+        content = _format_message_with_mentions(
             config,
             "Done.",
             sender_domain="matrix.org",
@@ -194,9 +220,9 @@ class TestMentionParsing:
 
     def test_format_message_with_mentions_preserves_inherited_mentions(self) -> None:
         """Inherited mentions should survive even when the new text adds no mentions."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
-        content = format_message_with_mentions(
+        content = _format_message_with_mentions(
             config,
             "Transcription omitted the agent mention.",
             sender_domain="matrix.org",
@@ -207,21 +233,21 @@ class TestMentionParsing:
 
     def test_no_mentions_in_text(self) -> None:
         """Test text with no mentions."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         text = "This has no mentions"
-        processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         assert processed == text
         assert mentions == []
 
     def test_mention_in_middle_of_word(self) -> None:
         """Test that mentions in middle of words are not parsed."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         # The regex should require word boundaries
         text = "Use decode@code function"
-        processed, _mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+        processed, _mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
         # Current implementation might catch this - documenting actual behavior
         # This is a limitation we should be aware of
@@ -229,7 +255,7 @@ class TestMentionParsing:
 
     def test_case_insensitive_mentions(self) -> None:
         """Test that mentions are case-insensitive."""
-        config = _make_config()
+        config = _make_config(runtime_paths=_default_runtime_paths())
 
         # Test various capitalizations
         test_cases = [
@@ -241,7 +267,7 @@ class TestMentionParsing:
         ]
 
         for text, expected_agents in test_cases:
-            _processed, mentions, _markdown = parse_mentions_in_text(text, "localhost", config)
+            _processed, mentions, _markdown = _parse_mentions_in_text(text, "localhost", config)
 
             # Extract agent names from the mentioned user IDs
             mentioned_agents = []

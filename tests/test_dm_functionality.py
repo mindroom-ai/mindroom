@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom import constants
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -18,17 +17,14 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_PASSWORD, orchestrator_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=(path or Path("config.yaml")),
-        storage_path=Path("mindroom_data"),
-        process_env={"MINDROOM_NAMESPACE": ""},
-    )
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(config, path)
 
 
 def _config(**kwargs: object) -> Config:
@@ -109,6 +105,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],  # No previous messages
             config=config,
+            runtime_paths=runtime_paths_for(config),
             mentioned_agents=None,  # No agents mentioned
             sender_id="@user:localhost",
         )
@@ -138,6 +135,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],
             config=config,
+            runtime_paths=runtime_paths_for(config),
             sender_id="@user:localhost",
         )
 
@@ -169,6 +167,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],
             config=config,
+            runtime_paths=runtime_paths_for(config),
             mentioned_agents=[config.ids["other_agent"]],  # Other agent mentioned with correct domain
             sender_id="@user:localhost",
         )
@@ -201,6 +200,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],
             config=config,
+            runtime_paths=runtime_paths_for(config),
             mentioned_agents=None,  # No agents mentioned
             sender_id="@user:localhost",
         )
@@ -212,6 +212,7 @@ class TestDMResponseLogic:
             room=room,
             thread_history=[],
             config=config,
+            runtime_paths=runtime_paths_for(config),
             mentioned_agents=None,  # No agents mentioned
             sender_id="@user:localhost",
         )
@@ -244,6 +245,7 @@ class TestDMMessageContext:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],  # Not configured for any rooms
         )
 
@@ -299,6 +301,7 @@ class TestDMIntegration:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],
         )
 
@@ -342,6 +345,7 @@ class TestDMIntegration:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty rooms list - not configured for any room
         )
 
@@ -436,6 +440,7 @@ class TestDMIntegration:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],  # Empty - not configured for any room
         )
 

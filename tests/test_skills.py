@@ -122,6 +122,7 @@ def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -142,6 +143,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     eligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={"TEST_ENV": "1"},
         credential_keys=set(),
@@ -151,6 +153,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     ineligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -160,6 +163,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     eligible_with_credentials = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys={"TEST_ENV"},
@@ -181,6 +185,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
     missing = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -191,6 +196,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
     available = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -212,6 +218,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     eligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -222,6 +229,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     ineligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -241,6 +249,7 @@ def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -257,6 +266,7 @@ def test_skill_eligibility_always_overrides(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -273,6 +283,7 @@ def test_get_agent_skills_ordering(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -289,6 +300,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -303,6 +315,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     refreshed = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -329,6 +342,7 @@ def test_skill_command_spec_parses_frontmatter(tmp_path: Path) -> None:
     spec = resolve_skill_command_spec(
         "dispatch",
         config,
+        _runtime_paths(tmp_path),
         "code",
         skill_roots=[tmp_path],
         env_vars={},

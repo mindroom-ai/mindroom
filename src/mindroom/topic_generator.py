@@ -13,6 +13,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -23,13 +24,19 @@ class _RoomTopic(BaseModel):
     topic: str = Field(description="The room topic - concise, informative, with emoji")
 
 
-async def generate_room_topic_ai(room_key: str, room_name: str, config: Config) -> str | None:
+async def generate_room_topic_ai(
+    room_key: str,
+    room_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
     """Generate a contextual topic for a room using AI based on its purpose and configured agents.
 
     Args:
         room_key: The room key/alias (e.g., 'dev', 'analysis', 'lobby')
         room_name: Display name for the room
         config: Configuration with agent settings
+        runtime_paths: Explicit runtime context for model selection and session scoping
 
     Returns:
         A contextual topic string for the room
@@ -78,7 +85,7 @@ Examples:
 
 Generate the topic:"""
 
-    model = get_model_instance(config, "default")
+    model = get_model_instance(config, runtime_paths, "default")
 
     agent = Agent(
         name="TopicGenerator",
@@ -88,7 +95,6 @@ Generate the topic:"""
     )
 
     session_id = f"topic_{room_key}"
-    runtime_paths = config.require_runtime_paths()
     try:
         response = await _cached_agent_run(
             agent=agent,
@@ -113,6 +119,7 @@ async def ensure_room_has_topic(
     room_key: str,
     room_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Ensure a room has a topic set, generating one if needed.
 
@@ -122,6 +129,7 @@ async def ensure_room_has_topic(
         room_key: The room key/alias
         room_name: Display name for the room
         config: Configuration with agent settings
+        runtime_paths: Explicit runtime context for topic generation
 
     Returns:
         True if topic was set or already exists, False on error
@@ -135,7 +143,7 @@ async def ensure_room_has_topic(
 
     # Generate and set topic
     logger.info(f"Generating AI topic for existing room {room_key}")
-    topic = await generate_room_topic_ai(room_key, room_name, config)
+    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
     if topic is None:
         logger.warning(f"Failed to generate topic for room {room_key}")
         return False

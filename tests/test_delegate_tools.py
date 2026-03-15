@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,22 +15,20 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.constants import RuntimePaths
 
 
 def _make_config(agents: dict[str, AgentConfig]) -> Config:
     """Create a minimal Config with the given agents."""
-    config = Config(
+    return Config(
         agents=agents,
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
-    config._runtime_paths = resolve_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=Path("mindroom_data"),
-    )
-    return config
 
 
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
@@ -44,8 +41,7 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
-    config._runtime_paths = _runtime_paths(storage_path)
-    return config
+    return bind_runtime_paths(config, storage_path)
 
 
 class TestDelegateTools:
@@ -265,7 +261,7 @@ class TestDelegateKnowledge:
             models={"default": ModelConfig(provider="openai", id="gpt-4")},
             knowledge_bases={"docs": {"path": "./docs"}},
         )
-        config._runtime_paths = _runtime_paths(tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
@@ -424,6 +420,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -441,6 +438,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "worker",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -463,6 +461,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -485,6 +484,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -513,6 +513,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -543,6 +544,7 @@ class TestDelegateAutoInjection:
         agent = create_agent(
             "leader",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )

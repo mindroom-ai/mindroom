@@ -23,7 +23,18 @@ from mindroom.constants import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+
+
+def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    return AgentBot(
+        agent_user=agent_user,
+        storage_path=storage_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=rooms,
+    )
 
 
 def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
@@ -54,7 +65,7 @@ def mock_home_bot() -> AgentBot:
             ),
             Path(tmpdir),
         )
-        bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+        bot = _agent_bot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()

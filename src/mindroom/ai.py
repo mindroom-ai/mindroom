@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import os
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -35,10 +34,10 @@ from agno.utils.message import filter_tool_calls
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
-    PROVIDER_ENV_KEYS,
     ROUTER_AGENT_NAME,
     RuntimePaths,
     runtime_ai_cache_enabled,
+    runtime_env_value,
 )
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -493,36 +492,7 @@ def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
     return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
-def _set_api_key_env_var(provider: str, runtime_paths: RuntimePaths) -> None:
-    """Set environment variable for a provider from CredentialsManager.
-
-    Since we sync from .env to CredentialsManager on startup,
-    this will always use the latest keys from .env.
-
-    Args:
-        provider: Provider name (e.g., 'openai', 'anthropic')
-        runtime_paths: Explicit runtime context for credentials and env resolution.
-
-    """
-    env_vars = {
-        **PROVIDER_ENV_KEYS,
-        "gemini": PROVIDER_ENV_KEYS["google"],
-    }
-
-    canonical_provider = _canonical_provider(provider)
-    if canonical_provider not in env_vars:
-        return
-
-    # Get API key from CredentialsManager (which has been synced from .env)
-    api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
-
-    # Set environment variable if key exists
-    if api_key:
-        os.environ[env_vars[canonical_provider]] = api_key
-        logger.debug(f"Set {env_vars[canonical_provider]} from CredentialsManager")
-
-
-def _create_model_for_provider(
+def _create_model_for_provider(  # noqa: C901, PLR0912
     provider: str,
     model_id: str,
     model_config: ModelConfig,
@@ -547,6 +517,25 @@ def _create_model_for_provider(
 
     """
     canonical_provider = _canonical_provider(provider)
+
+    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
+        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
+        if api_key:
+            extra_kwargs["api_key"] = api_key
+
+    if canonical_provider == "vertexai_claude":
+        if "project_id" not in extra_kwargs:
+            project_id = runtime_env_value("ANTHROPIC_VERTEX_PROJECT_ID", runtime_paths=runtime_paths)
+            if project_id:
+                extra_kwargs["project_id"] = project_id
+        if "region" not in extra_kwargs:
+            region = runtime_env_value("CLOUD_ML_REGION", runtime_paths=runtime_paths)
+            if region:
+                extra_kwargs["region"] = region
+        if "base_url" not in extra_kwargs:
+            base_url = runtime_env_value("ANTHROPIC_VERTEX_BASE_URL", runtime_paths=runtime_paths)
+            if base_url:
+                extra_kwargs["base_url"] = base_url
 
     # Handle Ollama separately due to special host configuration
     if canonical_provider == "ollama":
@@ -589,12 +578,14 @@ def _create_model_for_provider(
 
 def get_model_instance(
     config: Config,
+    runtime_paths: RuntimePaths,
     model_name: str = "default",
 ) -> Model:
     """Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
+        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
         model_name: Name of the model configuration to use (default: "default")
 
     Returns:
@@ -618,8 +609,6 @@ def get_model_instance(
     # Get extra kwargs if specified
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
-    runtime_paths = config.require_runtime_paths()
-
     # Check for model-specific API key first, then fall back to provider-level
     creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
@@ -627,9 +616,6 @@ def get_model_instance(
 
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
-    else:
-        # Set environment variable from CredentialsManager for Agno to use
-        _set_api_key_env_var(provider, runtime_paths=runtime_paths)
 
     return _create_model_for_provider(
         provider,
@@ -665,6 +651,7 @@ def _get_unseen_messages(
     thread_history: list[dict[str, Any]],
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     seen_event_ids: set[str],
     current_event_id: str | None,
 ) -> list[dict[str, Any]]:
@@ -675,7 +662,7 @@ def _get_unseen_messages(
     - Messages whose event_id is in seen_event_ids
     - The current triggering message (current_event_id)
     """
-    matrix_id = config.ids.get(agent_name)
+    matrix_id = config.get_ids(runtime_paths).get(agent_name)
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
     for msg in thread_history:
@@ -903,7 +890,7 @@ async def _prepare_agent_and_prompt(
 
     """
     storage_path = runtime_paths.storage_root
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config)
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, runtime_paths)
 
     unseen_event_ids: list[str] = []
 
@@ -920,7 +907,14 @@ async def _prepare_agent_and_prompt(
         assert session is not None
         assert thread_history is not None
         seen_ids = get_seen_event_ids(session)
-        unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
+        unseen = _get_unseen_messages(
+            thread_history,
+            agent_name,
+            config,
+            runtime_paths,
+            seen_ids,
+            reply_to_event_id,
+        )
         unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
         full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
     elif has_prior_runs and not reply_to_event_id:
@@ -935,6 +929,7 @@ async def _prepare_agent_and_prompt(
     agent = create_agent(
         agent_name,
         config,
+        runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )

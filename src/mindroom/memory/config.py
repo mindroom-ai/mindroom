@@ -1,7 +1,6 @@
 """Memory configuration and setup."""
 
 import hashlib
-import os
 from pathlib import Path
 from typing import Any
 
@@ -63,10 +62,9 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
 
     # Add provider-specific configuration
     if embedder_provider == "openai":
-        # Set environment variable from CredentialsManager for Mem0 to use
         api_key = creds_manager.get_api_key("openai")
         if api_key:
-            os.environ["OPENAI_API_KEY"] = api_key
+            embedder_config["config"]["api_key"] = api_key
         # Support custom OpenAI-compatible base URL (e.g., llama.cpp)
         if app_config.memory.embedder.config.host:
             embedder_config["config"]["openai_base_url"] = app_config.memory.embedder.config.host
@@ -102,15 +100,14 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
             elif key != "host":  # Skip host for other fields
                 llm_config["config"][key] = value
 
-        # Set environment variables from CredentialsManager for Mem0 to use
         if app_config.memory.llm.provider == "openai":
             api_key = creds_manager.get_api_key("openai")
             if api_key:
-                os.environ["OPENAI_API_KEY"] = api_key
+                llm_config["config"]["api_key"] = api_key
         elif app_config.memory.llm.provider == "anthropic":
             api_key = creds_manager.get_api_key("anthropic")
             if api_key:
-                os.environ["ANTHROPIC_API_KEY"] = api_key
+                llm_config["config"]["api_key"] = api_key
 
         logger.info(
             f"Using {app_config.memory.llm.provider} model '{app_config.memory.llm.config.get('model')}' for memory",

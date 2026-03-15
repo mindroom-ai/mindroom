@@ -130,8 +130,8 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    config, config_path = load_runtime_config(runtime_paths)
-    ensure_tool_registry_loaded(config, config_path=config_path)
+    config, _ = load_runtime_config(runtime_paths)
+    ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
     worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None
     if not worker_scope_allows_shared_only_integrations(worker_scope):

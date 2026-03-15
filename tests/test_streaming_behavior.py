@@ -25,7 +25,7 @@ from mindroom.streaming import (
     is_in_progress_message,
     send_streaming_response,
 )
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -109,6 +109,7 @@ class TestStreamingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=True,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         helper_bot.client = AsyncMock()
 
@@ -126,6 +127,7 @@ class TestStreamingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         calc_bot.client = AsyncMock()
 
@@ -248,6 +250,7 @@ class TestStreamingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         calc_bot.client = AsyncMock()
 
@@ -332,6 +335,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Simulate streaming chunks
@@ -380,6 +384,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             min_update_interval=0.5,
             interval_ramp_seconds=15.0,
@@ -404,6 +409,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_char_threshold=180,
             min_update_char_threshold=30,
             interval_ramp_seconds=15.0,
@@ -428,6 +434,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
         )
 
         streaming._update("abc")
@@ -444,6 +451,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
         )
         assert streaming.stream_started_at is None
         # Before stream starts, ramp is inactive so steady-state interval is returned
@@ -472,6 +480,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             min_update_interval=0.5,
             interval_ramp_seconds=15.0,
@@ -498,6 +507,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=10.0,
             update_char_threshold=5,
             min_update_char_threshold=5,
@@ -525,6 +535,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
         )
@@ -552,6 +563,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
         )
@@ -588,6 +600,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
         )
@@ -619,6 +632,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             update_interval=5.0,
             progress_update_interval=0.2,
         )
@@ -659,6 +673,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
         )
         # Existing event from edit/ack flows, but no placeholder progress was sent.
         streaming.event_id = "$existing_msg"
@@ -693,6 +708,7 @@ class TestStreamingBehavior:
             thread_id=None,
             sender_domain="localhost",
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Stream some content
@@ -745,6 +761,7 @@ class TestStreamingBehavior:
                 thread_id=None,
                 sender_domain="localhost",
                 config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
                 response_stream=cancelling_stream(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
@@ -786,6 +803,7 @@ class TestStreamingBehavior:
                 thread_id=None,
                 sender_domain="localhost",
                 config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
                 room_mode=True,
@@ -831,6 +849,7 @@ class TestStreamingBehavior:
                 thread_id=None,
                 sender_domain="localhost",
                 config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
                 response_stream=failing_stream(),
                 existing_event_id="$thinking_123",
                 room_mode=True,

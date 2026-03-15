@@ -10,9 +10,10 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.stop import StopManager
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 @pytest.mark.asyncio
@@ -34,6 +35,11 @@ async def test_stop_emoji_only_stops_during_generation(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 
@@ -118,6 +124,11 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 
@@ -205,6 +216,7 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)

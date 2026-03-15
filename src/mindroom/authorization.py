@@ -62,6 +62,7 @@ def is_authorized_sender(
     sender_id: str,
     config: Config,
     room_id: str,
+    runtime_paths: RuntimePaths,
     *,
     room_alias: str | None = None,
 ) -> bool:
@@ -71,6 +72,7 @@ def is_authorized_sender(
         sender_id: Matrix ID of the message sender
         config: Application configuration
         room_id: Room ID for permission checks
+        runtime_paths: Explicit runtime context for Matrix identity resolution
         room_alias: Optional canonical room alias for permission checks
 
     Returns:
@@ -78,12 +80,12 @@ def is_authorized_sender(
 
     """
     # Always allow configured internal user on the current domain.
-    mindroom_user_id = config.get_mindroom_user_id()
+    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
     if mindroom_user_id is not None and sender_id == mindroom_user_id:
         return True
 
     # Check if sender is an agent or team
-    agent_name = extract_agent_name(sender_id, config)
+    agent_name = extract_agent_name(sender_id, config, runtime_paths)
     if agent_name:
         # Agent is either in config.agents, config.teams, or is the router
         return agent_name in config.agents or agent_name in config.teams or agent_name == ROUTER_AGENT_NAME
@@ -96,8 +98,6 @@ def is_authorized_sender(
         return True
 
     room_permissions = config.authorization.room_permissions
-    runtime_paths = config.require_runtime_paths()
-
     # Check room-specific permissions by direct room identifiers first.
     for permission_key in _room_permission_lookup_keys(room_id, room_alias=room_alias, runtime_paths=runtime_paths):
         if permission_key in room_permissions:
@@ -120,7 +120,12 @@ def is_authorized_sender(
     return config.authorization.default_room_access
 
 
-def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: Config) -> bool:
+def is_sender_allowed_for_agent_reply(
+    sender_id: str,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Check whether *agent_name* is allowed to reply to *sender_id*.
 
     Internal MindRoom identities (agents/teams/router and internal user) bypass
@@ -137,8 +142,12 @@ def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: C
 
     # Internal MindRoom participants are not restricted by per-user reply lists.
     # Bridge bot accounts are intentionally not exempt.
-    mindroom_user_id = config.get_mindroom_user_id()
-    if (mindroom_user_id is not None and sender_id == mindroom_user_id) or extract_agent_name(sender_id, config):
+    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
+    if (mindroom_user_id is not None and sender_id == mindroom_user_id) or extract_agent_name(
+        sender_id,
+        config,
+        runtime_paths,
+    ):
         return True
 
     resolved_sender = config.authorization.resolve_alias(sender_id)
@@ -149,6 +158,7 @@ def get_effective_sender_id_for_reply_permissions(
     sender_id: str,
     event_source: Mapping[str, Any] | None,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Return the sender ID used for per-agent reply permission checks.
 
@@ -156,8 +166,8 @@ def get_effective_sender_id_for_reply_permissions(
     transcriptions, scheduled task fires, etc.) and include the original sender
     in event content. For trusted internal senders, use that embedded sender.
     """
-    known_internal_ids = {matrix_id.full_id for matrix_id in config.ids.values()}
-    mindroom_user_id = config.get_mindroom_user_id()
+    known_internal_ids = {matrix_id.full_id for matrix_id in config.get_ids(runtime_paths).values()}
+    mindroom_user_id = config.get_mindroom_user_id(runtime_paths)
     is_internal_mindroom_sender = (
         mindroom_user_id is not None and sender_id == mindroom_user_id
     ) or sender_id in known_internal_ids
@@ -180,17 +190,22 @@ def filter_agents_by_sender_permissions(
     agents: Sequence[MatrixID],
     sender_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return only agents that may reply to *sender_id* per config rules."""
     result: list[MatrixID] = []
     for agent in agents:
-        name = agent.agent_name(config)
-        if name and is_sender_allowed_for_agent_reply(sender_id, name, config):
+        name = agent.agent_name(config, runtime_paths)
+        if name and is_sender_allowed_for_agent_reply(sender_id, name, config, runtime_paths):
             result.append(agent)
     return result
 
 
-def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[MatrixID]:
+def get_available_agents_in_room(
+    room: nio.MatrixRoom,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Get list of available agent MatrixIDs in a room.
 
     Note: Router agent is excluded as it's not a regular conversation participant.
@@ -199,7 +214,7 @@ def get_available_agents_in_room(room: nio.MatrixRoom, config: Config) -> list[M
 
     for member_id in room.users:
         mid = MatrixID.parse(member_id)
-        agent_name = mid.agent_name(config)
+        agent_name = mid.agent_name(config, runtime_paths)
         # Exclude router agent
         if agent_name and agent_name != ROUTER_AGENT_NAME:
             agents.append(mid)
@@ -211,10 +226,12 @@ def get_available_agents_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Return room agents that may reply to *sender_id*."""
     return filter_agents_by_sender_permissions(
-        get_available_agents_in_room(room, config),
+        get_available_agents_in_room(room, config, runtime_paths),
         sender_id,
         config,
+        runtime_paths,
     )

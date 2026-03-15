@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import ValidationError
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -177,7 +177,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     path = runtime_paths.config_path
 
     # Load current config
-    config = Config.from_yaml(runtime_paths=runtime_paths)
+    config = load_config(runtime_paths)
     config_dict = config.model_dump(exclude_none=True)
 
     if operation == "show":
@@ -305,7 +305,7 @@ async def apply_config_change(
 
     try:
         # Load the current configuration
-        config = Config.from_yaml(runtime_paths=runtime_paths)
+        config = load_config(runtime_paths)
         config_dict = config.model_dump()
 
         # Apply the specific change

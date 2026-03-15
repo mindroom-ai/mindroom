@@ -304,6 +304,7 @@ async def update_schedule(
                 task_id=task_id,
                 workflow=updated_workflow,
                 config=runtime_config,
+                runtime_paths=runtime_paths,
                 existing_task=existing_task,
                 restart_task=False,
             )

@@ -10,7 +10,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
@@ -29,7 +29,7 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
 
 
 def _load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
-    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths
+    return load_config(runtime_paths), runtime_paths
 
 
 def _knowledge_root(

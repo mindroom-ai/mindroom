@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from mindroom import constants, frontend_assets
@@ -166,7 +166,11 @@ def test_api_lifespan_syncs_env_credentials_on_startup(monkeypatch: pytest.Monke
     sync_calls: list[str] = []
     watch_calls: list[str] = []
 
-    async def _fake_watch_config(stop_event: asyncio.Event, runtime_paths: constants.RuntimePaths) -> None:
+    async def _fake_watch_config(
+        stop_event: asyncio.Event,
+        _app: FastAPI,
+        runtime_paths: constants.RuntimePaths,
+    ) -> None:
         assert runtime_paths == main.app.state.runtime_paths
         watch_calls.append("watch")
         await stop_event.wait()
@@ -206,9 +210,13 @@ def test_api_lifespan_loads_config_from_injected_runtime(
         storage_path=tmp_path / "storage",
     )
     main.app.state.runtime_paths = runtime_paths
-    main.config = {"agents": {"wrong": {"display_name": "Wrong"}}}
+    main.app.state.config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
 
-    async def _idle_watch_config(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_watch_config(
+        stop_event: asyncio.Event,
+        _app: FastAPI,
+        _runtime_paths: constants.RuntimePaths,
+    ) -> None:
         await stop_event.wait()
 
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
@@ -245,9 +253,13 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
     runtime_paths = constants.set_runtime_paths(config_path=config_path)
     main.app.state.runtime_paths = runtime_paths
     monkeypatch.setattr(main, "watch_file", _fake_watch_file)
-    monkeypatch.setattr(main, "_load_config_from_file", lambda _runtime_paths: watched_paths.append(Path("loaded")))
+    monkeypatch.setattr(
+        main,
+        "_load_config_from_file",
+        lambda _runtime_paths, _app: watched_paths.append(Path("loaded")),
+    )
 
-    await main._watch_config(stop_event, main.app.state.runtime_paths)
+    await main._watch_config(stop_event, main.app, main.app.state.runtime_paths)
 
     assert watched_paths == [config_path, Path("loaded")]
 
@@ -851,7 +863,11 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     )
     main.app.state.runtime_paths = runtime_paths
 
-    async def _idle_watch_config(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
+    async def _idle_watch_config(
+        stop_event: asyncio.Event,
+        _app: FastAPI,
+        _runtime_paths: constants.RuntimePaths,
+    ) -> None:
         await stop_event.wait()
 
     async def _idle_worker_cleanup(stop_event: asyncio.Event, _runtime_paths: constants.RuntimePaths) -> None:
@@ -888,7 +904,7 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
         "router": {"model": "default"},
         "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
     }
-    main.config = yaml.safe_load(yaml.safe_dump(original_config))
+    main.app.state.config_data = yaml.safe_load(yaml.safe_dump(original_config))
 
     class _AssertingLock:
         def __enter__(self) -> object:
@@ -896,15 +912,16 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
 
         def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
             if exc_type is not None:
-                assert main.config == original_config
+                assert main.app.state.config_data == original_config
             return False
 
-    original_lock = main.config_lock
-    main.config_lock = _AssertingLock()
+    original_lock = main.app.state.config_lock
+    main.app.state.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
             main._run_config_write(
-                lambda: main.config.update(
+                main.app,
+                lambda: main.app.state.config_data.update(
                     {
                         "mindroom_user": {
                             "username": "mindroom_assistant_prod1",
@@ -916,10 +933,10 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                 error_prefix="Failed to save configuration",
             )
     finally:
-        main.config_lock = original_lock
+        main.app.state.config_lock = original_lock
 
     assert exc_info.value.status_code == 422
-    assert main.config == original_config
+    assert main.app.state.config_data == original_config
 
 
 def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -> None:
@@ -939,17 +956,17 @@ def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -
     )
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
 
-    main._load_config_from_file(runtime_paths)
+    main._load_config_from_file(runtime_paths, main.app)
 
-    assert main.config["teams"] == {}
-    assert main.config["plugins"] == []
+    assert main.app.state.config_data["teams"] == {}
+    assert main.app.state.config_data["plugins"] == []
 
 
 def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> None:
     """API config writes should accept legacy null optional sections already loaded in memory."""
     config_path = tmp_path / "config.yaml"
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
-    main.config = {
+    main.app.state.config_data = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {},
@@ -958,13 +975,14 @@ def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> Non
     }
 
     main._run_config_write(
+        main.app,
         lambda: None,
         runtime_paths=runtime_paths,
         error_prefix="Failed to save configuration",
     )
 
-    assert main.config["teams"] == {}
-    assert main.config["plugins"] == []
+    assert main.app.state.config_data["teams"] == {}
+    assert main.app.state.config_data["plugins"] == []
 
 
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
@@ -1334,12 +1352,21 @@ def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> 
 
 
 @pytest.fixture
-def api_key_client(temp_config_file: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     runtime_paths = constants.set_runtime_paths(config_path=temp_config_file)
     main.app.state.runtime_paths = runtime_paths
-    monkeypatch.setattr(main, "_MINDROOM_API_KEY", "test-key")
-    main._load_config_from_file(main.app.state.runtime_paths)
+    main.app.state.auth_state = main._ApiAuthState(
+        settings=main._ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+        ),
+        supabase_auth=None,
+    )
+    main._load_config_from_file(main.app.state.runtime_paths, main.app)
     return TestClient(main.app)
 
 
@@ -1444,9 +1471,9 @@ def test_api_key_keeps_oauth_callbacks_open(
 
 
 def _set_platform_auth(
-    monkeypatch: pytest.MonkeyPatch,
     *,
     valid_tokens: set[str],
+    platform_login_url: str = "https://platform.example.com/login",
 ) -> None:
     """Configure the API module for platform-managed cookie auth tests."""
 
@@ -1467,18 +1494,24 @@ def _set_platform_auth(
     class _FakeClient:
         auth = _FakeAuth()
 
-    monkeypatch.setattr(main, "_MINDROOM_API_KEY", None)
-    monkeypatch.setattr(main, "_supabase_auth", _FakeClient())
-    monkeypatch.setattr(main, "_ACCOUNT_ID", None)
+    main.app.state.auth_state = main._ApiAuthState(
+        settings=main._ApiAuthSettings(
+            platform_login_url=platform_login_url,
+            supabase_url="https://supabase.example.com",
+            supabase_anon_key="anon-key",
+            account_id=None,
+            mindroom_api_key=None,
+        ),
+        supabase_auth=_FakeClient(),
+    )
 
 
 def test_supabase_cookie_auth_allows_access(
     test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Platform requests should authenticate from the mindroom_jwt cookie."""
     valid_cookie_token = "valid-cookie-token"  # noqa: S105
-    _set_platform_auth(monkeypatch, valid_tokens={valid_cookie_token})
+    _set_platform_auth(valid_tokens={valid_cookie_token})
 
     response = test_client.post(
         "/api/config/load",
@@ -1498,8 +1531,10 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
-    _set_platform_auth(monkeypatch, valid_tokens=set())
-    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+    _set_platform_auth(
+        valid_tokens=set(),
+        platform_login_url="https://app.example.com/auth/login",
+    )
 
     response = test_client.get("/agents", follow_redirects=False)
     assert response.status_code == 307
@@ -1517,8 +1552,10 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
-    _set_platform_auth(monkeypatch, valid_tokens={"valid-cookie-token"})
-    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+    _set_platform_auth(
+        valid_tokens={"valid-cookie-token"},
+        platform_login_url="https://app.example.com/auth/login",
+    )
 
     response = test_client.get(
         "/agents",
@@ -1541,8 +1578,10 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
     monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
-    _set_platform_auth(monkeypatch, valid_tokens={valid_cookie_token})
-    monkeypatch.setattr(main, "_PLATFORM_LOGIN_URL", "https://app.example.com/auth/login")
+    _set_platform_auth(
+        valid_tokens={valid_cookie_token},
+        platform_login_url="https://app.example.com/auth/login",
+    )
 
     response = test_client.get(
         "/",

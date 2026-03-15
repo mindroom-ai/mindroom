@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import uuid
 from collections import OrderedDict
@@ -24,6 +23,7 @@ from mindroom.constants import (
     VOICE_PREFIX,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
 )
+from mindroom.credentials_sync import get_secret_from_env
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import agent_username_localpart
 from mindroom.matrix.media import download_media_bytes, extract_media_caption, media_mime_type
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 _VOICE_MENTION_PATTERN = re.compile(
@@ -127,6 +128,7 @@ async def _compute_normalized_voice_message(
     room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -147,7 +149,14 @@ async def _compute_normalized_voice_message(
         filename=event.body if isinstance(event.body, str) else None,
     )
 
-    transcribed_message = await _handle_voice_message(client, room, event, config, audio=audio)
+    transcribed_message = await _handle_voice_message(
+        client,
+        room,
+        event,
+        config,
+        runtime_paths,
+        audio=audio,
+    )
     if not isinstance(transcribed_message, str) or not transcribed_message.strip():
         transcribed_message = None
 
@@ -163,6 +172,7 @@ async def _normalize_voice_message(
     room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     thread_id: str | None,
 ) -> _NormalizedVoiceMessage | None:
@@ -181,6 +191,7 @@ async def _normalize_voice_message(
                 room,
                 event,
                 config,
+                runtime_paths,
                 thread_id=thread_id,
             ),
         )
@@ -197,6 +208,7 @@ async def prepare_voice_message(
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
     *,
+    runtime_paths: RuntimePaths,
     sender_domain: str,
     thread_id: str | None,
 ) -> _PreparedVoiceMessage | None:
@@ -207,6 +219,7 @@ async def prepare_voice_message(
         room,
         event,
         config,
+        runtime_paths,
         thread_id=thread_id,
     )
     if normalized is None:
@@ -234,6 +247,7 @@ async def prepare_voice_message(
     content.update(
         format_message_with_mentions(
             config,
+            runtime_paths,
             text,
             sender_domain=sender_domain,
             extra_content=extra_content,
@@ -254,6 +268,7 @@ async def _handle_voice_message(
     room: nio.MatrixRoom,
     event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
     config: Config,
+    runtime_paths: RuntimePaths,
     audio: Audio | None = None,
 ) -> str | None:
     """Handle a voice message event.
@@ -263,6 +278,7 @@ async def _handle_voice_message(
         room: Matrix room
         event: Voice message event
         config: Application configuration
+        runtime_paths: Explicit runtime context for secrets and agent mention resolution
         audio: Optional pre-downloaded audio payload to reuse across fallbacks
 
     Returns:
@@ -279,19 +295,25 @@ async def _handle_voice_message(
             return None
 
         # Transcribe the audio
-        transcription = await _transcribe_audio(voice_audio.content, config)
+        transcription = await _transcribe_audio(voice_audio.content, config, runtime_paths)
         if not transcription:
             logger.warning("Failed to transcribe audio or empty transcription")
             return None
 
         logger.info(f"Raw transcription: {transcription}")
 
-        available_agent_names, available_team_names = _get_available_entities_for_sender(room, event.sender, config)
+        available_agent_names, available_team_names = _get_available_entities_for_sender(
+            room,
+            event.sender,
+            config,
+            runtime_paths,
+        )
 
         # Process transcription with AI for command/agent recognition
         formatted_message = await _process_transcription(
             transcription,
             config,
+            runtime_paths,
             available_agent_names=available_agent_names,
             available_team_names=available_team_names,
         )
@@ -320,12 +342,13 @@ async def _download_audio(
     return Audio(content=audio_data, mime_type=media_mime_type(event))
 
 
-async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
+async def _transcribe_audio(audio_data: bytes, config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Transcribe audio using OpenAI-compatible API.
 
     Args:
         audio_data: Audio file bytes
         config: Application configuration
+        runtime_paths: Explicit runtime context for STT credential lookup
 
     Returns:
         Transcription text or None if failed
@@ -335,7 +358,10 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
         stt_host = config.voice.stt.host
         url = f"{stt_host}/v1/audio/transcriptions" if stt_host else "https://api.openai.com/v1/audio/transcriptions"
 
-        api_key = config.voice.stt.api_key or os.getenv("OPENAI_API_KEY")
+        api_key = config.voice.stt.api_key or get_secret_from_env("OPENAI_API_KEY", runtime_paths)
+        if not api_key:
+            logger.error("No OpenAI-compatible STT API key configured for voice transcription")
+            return None
         headers = {"Authorization": f"Bearer {api_key}"}
 
         files = {"file": ("audio.ogg", audio_data, "audio/ogg")}
@@ -358,6 +384,7 @@ async def _transcribe_audio(audio_data: bytes, config: Config) -> str | None:
 async def _process_transcription(
     transcription: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     available_agent_names: list[str] | None = None,
     available_team_names: list[str] | None = None,
@@ -367,6 +394,7 @@ async def _process_transcription(
     Args:
         transcription: Raw transcription text
         config: Application configuration
+        runtime_paths: Explicit runtime context for agent and team mention resolution
         available_agent_names: Optional room-scoped list of available agent names
         available_team_names: Optional room-scoped list of available team names
 
@@ -378,8 +406,6 @@ async def _process_transcription(
         # Get list of available agents and teams
         agent_names = available_agent_names if available_agent_names is not None else list(config.agents.keys())
         team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
-        runtime_paths = config.require_runtime_paths()
-
         agent_display_names = {name: config.agents[name].display_name for name in agent_names if name in config.agents}
         team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
 
@@ -447,7 +473,7 @@ Transcription: "{transcription}"
 Output the formatted message only, no explanation:"""
 
         # Get the AI model to process the transcription
-        model = get_model_instance(config, config.voice.intelligence.model)
+        model = get_model_instance(config, runtime_paths, config.voice.intelligence.model)
 
         # Create an agent for voice command processing
         agent = Agent(
@@ -490,13 +516,14 @@ def _get_available_entities_for_sender(
     room: nio.MatrixRoom,
     sender_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> tuple[list[str], list[str]]:
     """Return available agent and team names in this room for a specific sender."""
     available_agent_names: list[str] = []
     available_team_names: list[str] = []
 
-    for matrix_id in get_available_agents_for_sender(room, sender_id, config):
-        name = matrix_id.agent_name(config)
+    for matrix_id in get_available_agents_for_sender(room, sender_id, config, runtime_paths):
+        name = matrix_id.agent_name(config, runtime_paths)
         if name is None:
             continue
         if name in config.agents:

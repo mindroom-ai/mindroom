@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom import constants
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.scheduler import SchedulerTools
@@ -16,15 +14,11 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def _bind_runtime_paths(config: Config) -> Config:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=Path("config.yaml"),
-        storage_path=Path("mindroom_data"),
-    )
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(config)
 
 
 def _make_context(config: Config) -> ToolRuntimeContext:
@@ -36,6 +30,7 @@ def _make_context(config: Config) -> ToolRuntimeContext:
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
@@ -45,8 +40,12 @@ def _make_context(config: Config) -> ToolRuntimeContext:
 def test_extract_mentioned_agents_from_text() -> None:
     """Agent mentions should be extracted from scheduling text."""
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    result = _extract_mentioned_agents_from_text("in 5 minutes @general check deployment", config)
-    expected_agent = MatrixID.from_agent("general", config.domain, config.require_runtime_paths())
+    result = _extract_mentioned_agents_from_text(
+        "in 5 minutes @general check deployment",
+        config,
+        runtime_paths_for(config),
+    )
+    expected_agent = MatrixID.from_agent("general", config.domain, runtime_paths_for(config))
     assert result == [expected_agent]
 
 
@@ -84,6 +83,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         scheduled_by=context.requester_id,
         full_text="tomorrow at 3pm check deployment",
         config=context.config,
+        runtime_paths=context.runtime_paths,
         room=context.room,
     )
 
@@ -120,6 +120,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         full_text="tomorrow at 9am check deployment",
         scheduled_by=context.requester_id,
         config=context.config,
+        runtime_paths=context.runtime_paths,
         room=context.room,
         thread_id=context.resolved_thread_id,
     )

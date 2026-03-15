@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import orchestrator_runtime_paths
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TestDynamicConfigUpdate:
@@ -155,6 +152,7 @@ class TestDynamicConfigUpdate:
                 result = await _parse_workflow_schedule(
                     request,
                     updated_config,
+                    resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
                     available_agents=[
                         MatrixID(username="email_assistant", domain="localhost"),
                         MatrixID(username="callagent", domain="localhost"),

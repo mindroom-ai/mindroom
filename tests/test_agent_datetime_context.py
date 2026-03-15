@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.agents import _get_datetime_context, create_agent
 from mindroom.config.main import Config
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 
 def test_get_datetime_context_format() -> None:
@@ -53,11 +54,12 @@ def test_get_datetime_context_invalid_timezone() -> None:
 def test_agent_prompt_includes_datetime() -> None:
     """Test that agent's role prompt includes datetime context."""
     # Create a test config
-    config = Config.from_yaml(Path("config.yaml"))
+    config = bind_runtime_paths(Config.from_yaml(Path("config.yaml")))
     config.timezone = "America/Los_Angeles"
+    runtime_paths = runtime_paths_for(config)
 
     # Create an agent
-    agent = create_agent("general", config)
+    agent = create_agent("general", config, runtime_paths)
 
     # Check that the role includes all expected sections
     role = agent.role
@@ -83,15 +85,16 @@ def test_agent_prompt_includes_datetime() -> None:
 
 def test_agent_prompt_datetime_changes_with_timezone() -> None:
     """Test that changing timezone in config changes the agent's datetime context."""
-    config = Config.from_yaml(Path("config.yaml"))
+    config = bind_runtime_paths(Config.from_yaml(Path("config.yaml")))
+    runtime_paths = runtime_paths_for(config)
 
     # Test with New York timezone
     config.timezone = "America/New_York"
-    agent_ny = create_agent("general", config)
+    agent_ny = create_agent("general", config, runtime_paths)
 
     # Test with Tokyo timezone
     config.timezone = "Asia/Tokyo"
-    agent_tokyo = create_agent("general", config)
+    agent_tokyo = create_agent("general", config, runtime_paths)
 
     # The prompts should be different (different timezones)
     assert "America/New_York timezone" in agent_ny.role

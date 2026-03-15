@@ -214,6 +214,7 @@ def create_bot_for_entity(
     entity_name: str,
     agent_user: AgentMatrixUser,
     config: Config,
+    runtime_paths: RuntimePaths,
     storage_path: Path,
     config_path: Path | None = None,
 ) -> AgentBot | TeamBot | None:
@@ -223,6 +224,7 @@ def create_bot_for_entity(
         entity_name: Name of the entity to create a bot for
         agent_user: Matrix user for the bot
         config: Configuration object
+        runtime_paths: Explicit runtime context for paths, env, and Matrix identity resolution
         storage_path: Path for storing agent data
         config_path: Path to the YAML config file used by config-aware tools
 
@@ -231,8 +233,6 @@ def create_bot_for_entity(
 
     """
     enable_streaming = config.defaults.enable_streaming
-    runtime_paths = config.require_runtime_paths()
-
     if entity_name == ROUTER_AGENT_NAME:
         all_room_aliases = config.get_all_configured_rooms()
         rooms = resolve_room_aliases(list(all_room_aliases), runtime_paths)
@@ -240,6 +240,7 @@ def create_bot_for_entity(
             agent_user,
             storage_path,
             config,
+            runtime_paths,
             rooms,
             config_path=config_path,
             enable_streaming=enable_streaming,
@@ -252,12 +253,14 @@ def create_bot_for_entity(
         # Team streaming resolves config agents from these IDs, so they must keep
         # the `mindroom_` prefix used by MatrixID.from_agent().
         team_matrix_ids = [
-            MatrixID.from_agent(agent_name, config.domain, runtime_paths) for agent_name in team_config.agents
+            MatrixID.from_agent(agent_name, config.get_domain(runtime_paths), runtime_paths)
+            for agent_name in team_config.agents
         ]
         return TeamBot(
             agent_user=agent_user,
             storage_path=storage_path,
             config=config,
+            runtime_paths=runtime_paths,
             rooms=rooms,
             config_path=config_path,
             team_agents=team_matrix_ids,
@@ -273,6 +276,7 @@ def create_bot_for_entity(
             agent_user,
             storage_path,
             config,
+            runtime_paths,
             rooms,
             config_path=config_path,
             enable_streaming=enable_streaming,
@@ -361,6 +365,7 @@ class AgentBot:
     agent_user: AgentMatrixUser
     storage_path: Path
     config: Config
+    runtime_paths: RuntimePaths
     rooms: list[str] = field(default_factory=list)
     config_path: Path | None = None
 
@@ -385,11 +390,6 @@ class AgentBot:
         """Get the Matrix ID for this agent bot."""
         return self.agent_user.matrix_id
 
-    @property
-    def runtime_paths(self) -> RuntimePaths:
-        """Return the active runtime paths for this bot instance."""
-        return self.config.require_runtime_paths()
-
     def _resolve_reply_thread_id(
         self,
         thread_id: str | None,
@@ -407,6 +407,7 @@ class AgentBot:
         """
         effective_thread_mode = thread_mode_override or self.config.get_entity_thread_mode(
             self.agent_name,
+            self.runtime_paths,
             room_id=room_id,
         )
         if effective_thread_mode == "room":
@@ -456,6 +457,7 @@ class AgentBot:
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             knowledge=knowledge,
         )
 
@@ -498,7 +500,7 @@ class AgentBot:
 
         assert self.client is not None
 
-        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config)
+        restored_tasks = await restore_scheduled_tasks(self.client, room_id, self.config, self.runtime_paths)
         if restored_tasks > 0:
             self.logger.info(f"Restored {restored_tasks} scheduled tasks in room {room_id}")
 
@@ -615,7 +617,7 @@ class AgentBot:
         # Router bot has additional responsibilities
         if self.agent_name == ROUTER_AGENT_NAME:
             try:
-                await cleanup_all_orphaned_bots(self.client, self.config)
+                await cleanup_all_orphaned_bots(self.client, self.config, self.runtime_paths)
             except Exception as e:
                 self.logger.warning(f"Could not cleanup orphaned bots (non-critical): {e}")
 
@@ -714,7 +716,7 @@ class AgentBot:
             self.logger.info("Room is empty, sending welcome message", room_id=room_id)
 
             # Generate and send the welcome message
-            welcome_msg = _generate_welcome_message(room_id, self.config)
+            welcome_msg = _generate_welcome_message(room_id, self.config, self.runtime_paths)
             await self._send_response(
                 room_id=room_id,
                 reply_to_event_id=None,
@@ -847,6 +849,7 @@ class AgentBot:
             event.sender,
             self.config,
             room.room_id,
+            self.runtime_paths,
             room_alias=room.canonical_alias,
         ):
             self.logger.debug(f"Ignoring reaction from unauthorized sender: {event.sender}")
@@ -866,7 +869,7 @@ class AgentBot:
         # 3. The message is currently being generated by this agent
         if event.key == "🛑":
             # Check if this is from a bot/agent
-            sender_agent_name = extract_agent_name(event.sender, self.config)
+            sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
             # Only handle stop from users, not agents, and only if tracking this message
             if not sender_agent_name and await self.stop_manager.handle_stop_reaction(event.reacts_to):
                 self.logger.info(
@@ -891,7 +894,13 @@ class AgentBot:
             await config_confirmation.handle_confirmation_reaction(self, room, event, pending_change)
             return
 
-        result = await interactive.handle_reaction(self.client, event, self.agent_name, self.config)
+        result = await interactive.handle_reaction(
+            self.client,
+            event,
+            self.agent_name,
+            self.config,
+            self.runtime_paths,
+        )
 
         if result:
             selected_value, thread_id = result
@@ -999,7 +1008,7 @@ class AgentBot:
         if requester_user_id is None:
             return
 
-        if is_agent_id(event.sender, self.config):
+        if is_agent_id(event.sender, self.config, self.runtime_paths):
             self.logger.debug(
                 "Ignoring agent audio event for voice transcription",
                 event_id=event.event_id,
@@ -1022,6 +1031,7 @@ class AgentBot:
             room,
             event,
             self.config,
+            runtime_paths=self.runtime_paths,
             sender_domain=self.matrix_id.domain,
             thread_id=effective_thread_id,
         )
@@ -1249,7 +1259,12 @@ class AgentBot:
             and isinstance(content.get(ORIGINAL_SENDER_KEY), str)
         ):
             return content[ORIGINAL_SENDER_KEY]
-        return get_effective_sender_id_for_reply_permissions(event.sender, event.source, self.config)
+        return get_effective_sender_id_for_reply_permissions(
+            event.sender,
+            event.source,
+            self.config,
+            self.runtime_paths,
+        )
 
     def _precheck_event(
         self,
@@ -1281,6 +1296,7 @@ class AgentBot:
             event.sender,
             self.config,
             room.room_id,
+            self.runtime_paths,
             room_alias=room.canonical_alias,
         ):
             self.response_tracker.mark_responded(event.event_id)
@@ -1306,7 +1322,7 @@ class AgentBot:
             return None
 
         context = await self._extract_message_context(room, event)
-        sender_agent_name = extract_agent_name(effective_requester_user_id, self.config)
+        sender_agent_name = extract_agent_name(effective_requester_user_id, self.config, self.runtime_paths)
         if sender_agent_name and not context.am_i_mentioned:
             self.logger.debug(f"Ignoring {event_label} from other agent (not mentioned)")
             return None
@@ -1403,7 +1419,7 @@ class AgentBot:
 
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""
-        return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config)
+        return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config, self.runtime_paths)
 
     async def _handle_router_dispatch(
         self,
@@ -1423,14 +1439,28 @@ class AgentBot:
         if self.agent_name != ROUTER_AGENT_NAME:
             return _RouterDispatchResult(handled=False)
 
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
-        sender_visible = filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config, self.runtime_paths)
+        sender_visible = filter_agents_by_sender_permissions(
+            agents_in_thread,
+            requester_user_id,
+            self.config,
+            self.runtime_paths,
+        )
 
         if not context.mentioned_agents and not context.has_non_agent_mentions and not sender_visible:
-            if context.is_thread and has_multiple_non_agent_users_in_thread(context.thread_history, self.config):
+            if context.is_thread and has_multiple_non_agent_users_in_thread(
+                context.thread_history,
+                self.config,
+                self.runtime_paths,
+            ):
                 self.logger.info("Skipping routing: multiple non-agent users in thread (mention required)")
                 return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
-            available_agents = get_available_agents_for_sender(room, requester_user_id, self.config)
+            available_agents = get_available_agents_for_sender(
+                room,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            )
             if len(available_agents) == 1:
                 self.logger.info("Skipping routing: only one agent present")
                 return _RouterDispatchResult(handled=True, mark_visible_echo_responded=True)
@@ -1459,7 +1489,7 @@ class AgentBot:
         Shared by text and image handlers to avoid duplicating the team
         formation + should-respond decision.
         """
-        agents_in_thread = get_agents_in_thread(context.thread_history, self.config)
+        agents_in_thread = get_agents_in_thread(context.thread_history, self.config, self.runtime_paths)
         form_team = await self._decide_team_for_sender(
             agents_in_thread,
             context,
@@ -1482,6 +1512,7 @@ class AgentBot:
             room=room,
             thread_history=context.thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
@@ -1500,18 +1531,43 @@ class AgentBot:
         is_dm: bool,
     ) -> TeamFormationDecision:
         """Decide team formation using only agents the sender is allowed to interact with."""
-        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(context.thread_history, self.config)
+        all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
+            context.thread_history,
+            self.config,
+            self.runtime_paths,
+        )
         available_agents_in_room: list[MatrixID] | None = None
         if is_dm:
-            available_agents_in_room = get_available_agents_for_sender(room, requester_user_id, self.config)
+            available_agents_in_room = get_available_agents_for_sender(
+                room,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            )
         return await decide_team_formation(
             self.matrix_id,
-            filter_agents_by_sender_permissions(context.mentioned_agents, requester_user_id, self.config),
-            filter_agents_by_sender_permissions(agents_in_thread, requester_user_id, self.config),
-            filter_agents_by_sender_permissions(all_mentioned_in_thread, requester_user_id, self.config),
+            filter_agents_by_sender_permissions(
+                context.mentioned_agents,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            ),
+            filter_agents_by_sender_permissions(
+                agents_in_thread,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            ),
+            filter_agents_by_sender_permissions(
+                all_mentioned_in_thread,
+                requester_user_id,
+                self.config,
+                self.runtime_paths,
+            ),
             room=room,
             message=message,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             is_dm_room=is_dm,
             is_thread=context.is_thread,
             available_agents_in_room=available_agents_in_room,
@@ -1533,13 +1589,14 @@ class AgentBot:
                 event.source,
                 self.matrix_id,
                 self.config,
+                self.runtime_paths,
             )
 
         if am_i_mentioned:
             self.logger.info("Mentioned", event_id=event.event_id, room_id=room.room_id)
 
         event_info = EventInfo.from_event(event.source)
-        if self.config.get_entity_thread_mode(self.agent_name, room_id=room.room_id) == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room.room_id) == "room":
             is_thread = False
             thread_id = None
             thread_history: list[dict[str, Any]] = []
@@ -1586,6 +1643,7 @@ class AgentBot:
             requester_id=user_id or self.matrix_id.full_id,
             client=self.client,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             room=self._cached_room(room_id),
             reply_to_event_id=reply_to_event_id,
             storage_path=self.storage_path,
@@ -1672,8 +1730,8 @@ class AgentBot:
         assert self.client is not None
 
         # Get the appropriate model for this team and room
-        model_name = select_model_for_team(self.agent_name, room_id, self.config)
-        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
+        model_name = select_model_for_team(self.agent_name, room_id, self.config, self.runtime_paths)
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
 
         # Decide streaming based on presence
         use_streaming = await should_use_streaming(
@@ -1687,7 +1745,7 @@ class AgentBot:
         mode = TeamMode.COORDINATE if team_mode == "coordinate" else TeamMode.COLLABORATE
 
         # Convert MatrixID list to agent names for non-streaming APIs
-        agent_names = [mid.agent_name(self.config) or mid.username for mid in team_agents]
+        agent_names = [mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in team_agents]
         include_matrix_prompt_context = any(self._agent_has_matrix_messaging_tool(name) for name in agent_names)
         model_message = self._append_matrix_prompt_context(
             payload.prompt,
@@ -1742,6 +1800,7 @@ class AgentBot:
                             thread_id,
                             self.matrix_id.domain,
                             self.config,
+                            self.runtime_paths,
                             response_stream,
                             streaming_cls=ReplacementStreamingResponse,
                             header=None,
@@ -2143,6 +2202,7 @@ class AgentBot:
                         self.storage_path,
                         session_id,
                         self.config,
+                        self.runtime_paths,
                         thread_history,
                         user_id,
                         execution_identity=execution_identity,
@@ -2219,7 +2279,7 @@ class AgentBot:
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
         knowledge = self._knowledge_for_agent(self.agent_name)
-        room_mode = self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room"
+        room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2270,6 +2330,7 @@ class AgentBot:
                         thread_id,
                         self.matrix_id.domain,
                         self.config,
+                        self.runtime_paths,
                         response_stream,
                         streaming_cls=StreamingResponse,
                         existing_event_id=existing_event_id,
@@ -2415,6 +2476,7 @@ class AgentBot:
                         self.storage_path,
                         session_id,
                         self.config,
+                        self.runtime_paths,
                         thread_history,
                         user_id,
                         execution_identity=execution_identity,
@@ -2476,6 +2538,7 @@ class AgentBot:
             # Room mode: plain message, no thread metadata
             content = format_message_with_mentions(
                 self.config,
+                self.runtime_paths,
                 response_text,
                 sender_domain=sender_domain,
                 thread_event_id=None,
@@ -2495,6 +2558,7 @@ class AgentBot:
 
             content = format_message_with_mentions(
                 self.config,
+                self.runtime_paths,
                 response_text,
                 sender_domain=sender_domain,
                 thread_event_id=effective_thread_id,
@@ -2534,10 +2598,11 @@ class AgentBot:
         sender_id = self.matrix_id
         sender_domain = sender_id.domain
 
-        if self.config.get_entity_thread_mode(self.agent_name, room_id=room_id) == "room":
+        if self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room":
             # Room mode: no thread metadata on edits
             content = format_message_with_mentions(
                 self.config,
+                self.runtime_paths,
                 new_text,
                 sender_domain=sender_domain,
                 tool_trace=tool_trace,
@@ -2559,6 +2624,7 @@ class AgentBot:
 
             content = format_message_with_mentions(
                 self.config,
+                self.runtime_paths,
                 new_text,
                 sender_domain=sender_domain,
                 thread_event_id=thread_id,
@@ -2591,8 +2657,13 @@ class AgentBot:
 
         # Use configured agents only - router should not suggest random agents
         permission_sender_id = requester_user_id or event.sender
-        available_agents = get_configured_agents_for_room(room.room_id, self.config)
-        available_agents = filter_agents_by_sender_permissions(available_agents, permission_sender_id, self.config)
+        available_agents = get_configured_agents_for_room(room.room_id, self.config, self.runtime_paths)
+        available_agents = filter_agents_by_sender_permissions(
+            available_agents,
+            permission_sender_id,
+            self.config,
+            self.runtime_paths,
+        )
         if not available_agents:
             self.logger.debug("No configured agents to route to in this room for sender", sender=permission_sender_id)
             return
@@ -2604,6 +2675,7 @@ class AgentBot:
             routing_text,
             available_agents,
             self.config,
+            self.runtime_paths,
             thread_history,
         )
 
@@ -2616,7 +2688,9 @@ class AgentBot:
             response_text = f"@{suggested_agent} could you help with this?"
 
         target_thread_mode = (
-            self.config.get_entity_thread_mode(suggested_agent, room_id=room.room_id) if suggested_agent else None
+            self.config.get_entity_thread_mode(suggested_agent, self.runtime_paths, room_id=room.room_id)
+            if suggested_agent
+            else None
         )
         thread_event_id = self._resolve_reply_thread_id(
             thread_id,
@@ -2678,7 +2752,7 @@ class AgentBot:
             return
 
         # Skip edits from other agents
-        sender_agent_name = extract_agent_name(event.sender, self.config)
+        sender_agent_name = extract_agent_name(event.sender, self.config, self.runtime_paths)
         if sender_agent_name:
             self.logger.debug(f"Ignoring edit from other agent: {sender_agent_name}")
             return
@@ -2709,6 +2783,7 @@ class AgentBot:
             room=room,
             thread_history=context.thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             mentioned_agents=context.mentioned_agents,
             has_non_agent_mentions=context.has_non_agent_mentions,
             sender_id=requester_user_id,
@@ -2829,7 +2904,7 @@ class TeamBot(AgentBot):
             session_id=session_id,
         )
         # Convert MatrixID list to agent names for memory storage
-        agent_names = [mid.agent_name(self.config) or mid.username for mid in self.team_agents]
+        agent_names = [mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in self.team_agents]
         with tool_execution_identity(execution_identity):
             create_background_task(
                 store_conversation_memory(
@@ -2838,6 +2913,7 @@ class TeamBot(AgentBot):
                     self.storage_path,
                     session_id,
                     self.config,
+                    self.runtime_paths,
                     thread_history,
                     user_id,
                     execution_identity=execution_identity,

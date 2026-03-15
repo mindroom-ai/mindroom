@@ -21,7 +21,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -63,6 +63,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,  # Disable streaming for simpler testing
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Mock the orchestrator
@@ -1146,6 +1147,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Mock the orchestrator
@@ -1249,6 +1251,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
@@ -1355,6 +1358,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
@@ -1448,6 +1452,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config

@@ -35,6 +35,8 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 
+_BOUND_RUNTIME_PATHS: dict[int, RuntimePaths] = {}
+
 if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -47,15 +49,28 @@ def _runtime_paths(storage_path: Path, *, config_path: Path | None = None) -> Ru
 
 
 def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
-    config._runtime_paths = runtime_paths
-    return config
+    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+    return bound
+
+
+def _runtime_for_config(config: Config) -> RuntimePaths:
+    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
+    if runtime_paths is not None:
+        return runtime_paths
+    return resolve_runtime_paths(config_path=Path("config.yaml"), storage_path=Path("mindroom_data"))
+
+
+def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
+    """Create an agent with the test config's explicit runtime context."""
+    return create_agent(agent_name, config, _runtime_for_config(config), **kwargs)
 
 
 @patch("mindroom.agents.SqliteDb")
 def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the calculator agent is created correctly."""
     config = Config.from_yaml()
-    agent = create_agent("calculator", config=config)
+    agent = _create_agent_for_test("calculator", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CalculatorAgent"
 
@@ -64,7 +79,7 @@ def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
 def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the general agent is created correctly."""
     config = Config.from_yaml()
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "GeneralAgent"
     assert isinstance(agent.learning, LearningMachine)
@@ -80,7 +95,7 @@ def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None: 
     config = Config.from_yaml()
     config.agents["general"].show_tool_calls = False
 
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
 
     assert agent_prompts.HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
 
@@ -91,7 +106,7 @@ def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # 
     config = Config.from_yaml()
     config.agents["summary"].tools = []
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
 
     assert "scheduler" in tool_names
@@ -104,7 +119,7 @@ def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None
     config.defaults.tools = ["scheduler", "calculator"]
     config.agents["summary"].tools = []
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
 
     assert "scheduler" in tool_names
@@ -118,7 +133,7 @@ def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> 
     config.defaults.tools = ["scheduler"]
     config.agents["summary"].tools = ["scheduler"]
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
 
     assert tool_names.count("scheduler") == 1
@@ -132,7 +147,7 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
     config.agents["summary"].tools = []
     config.agents["summary"].include_default_tools = False
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
 
     assert "scheduler" not in tool_names
@@ -198,7 +213,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    create_agent("summary", config=config)
+    _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
     assert looked_up_tools == config.get_agent_tools("summary")
@@ -243,7 +258,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
 
     tool_names = [tool.name for tool in agent.tools]
     assert "browser" not in tool_names
@@ -265,7 +280,7 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     config.agents["summary"].include_default_tools = False
     config.agents["summary"].worker_tools = ["openclaw_compat"]
 
-    create_agent("summary", config=config)
+    _create_agent_for_test("summary", config=config)
 
     expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
     worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
@@ -292,7 +307,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
-    create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
@@ -316,7 +331,7 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
-    create_agent("general", config=config)
+    _create_agent_for_test("general", config=config)
 
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
@@ -338,7 +353,7 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
 
     with patch("mindroom.agents.SqliteDb"):
-        create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
+        _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     mock_load_plugins.assert_called_once_with(config)
 
@@ -404,7 +419,7 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     config.agents["general"].worker_scope = "user"
     config.agents["general"].worker_tools = ["coding"]
 
-    create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
@@ -426,7 +441,7 @@ def test_create_agent_uses_default_worker_tool_policy_when_unset(
     config.agents["summary"].include_default_tools = False
     config.agents["summary"].worker_tools = None
 
-    create_agent("summary", config=config)
+    _create_agent_for_test("summary", config=config)
 
     worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
     assert worker_overrides
@@ -444,7 +459,7 @@ def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) ->
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     tool_names = [tool.name for tool in agent.tools]
     assert "matrix_message" in tool_names
 
@@ -483,7 +498,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
 def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the code agent is created correctly."""
     config = Config.from_yaml()
-    agent = create_agent("code", config=config)
+    agent = _create_agent_for_test("code", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "CodeAgent"
 
@@ -492,7 +507,7 @@ def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
 def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the shell agent is created correctly."""
     config = Config.from_yaml()
-    agent = create_agent("shell", config=config)
+    agent = _create_agent_for_test("shell", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "ShellAgent"
 
@@ -501,7 +516,7 @@ def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
 def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """Tests that the summary agent is created correctly."""
     config = Config.from_yaml()
-    agent = create_agent("summary", config=config)
+    agent = _create_agent_for_test("summary", config=config)
     assert isinstance(agent, Agent)
     assert agent.name == "SummaryAgent"
 
@@ -510,7 +525,7 @@ def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
     config = Config.from_yaml()
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        create_agent("unknown", config=config)
+        _create_agent_for_test("unknown", config=config)
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -518,7 +533,7 @@ def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
     """Tests that learning can be disabled per agent."""
     config = Config.from_yaml()
     config.agents["general"].learning = False
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
     assert agent.learning is False
     assert mock_storage.call_count == 1
@@ -531,7 +546,7 @@ def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_st
     config.defaults.learning = False
     config.agents["general"].learning = None
 
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
 
     assert isinstance(agent, Agent)
     assert agent.learning is False
@@ -544,7 +559,7 @@ def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # no
     """Tests that learning mode can be configured as agentic."""
     config = Config.from_yaml()
     config.agents["general"].learning_mode = "agentic"
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
     assert isinstance(agent, Agent)
     assert isinstance(agent.learning, LearningMachine)
     assert isinstance(agent.learning.user_profile, UserProfileConfig)
@@ -563,7 +578,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
     config.defaults.learning = True
     config.defaults.learning_mode = "agentic"
 
-    agent = create_agent("general", config=config)
+    agent = _create_agent_for_test("general", config=config)
 
     assert isinstance(agent, Agent)
     assert isinstance(agent.learning, LearningMachine)
@@ -578,7 +593,7 @@ def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
 def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
     """Session and learning databases should live under the canonical agent state root."""
     config = Config.from_yaml()
-    create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
@@ -604,7 +619,7 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     assert worker_key is not None
 
     with tool_execution_identity(execution_identity):
-        create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+        _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     agent_root = agent_state_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
@@ -623,7 +638,7 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     config.agents["general"].worker_scope = "shared"
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
 
-    create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     shared_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -703,7 +718,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
-    agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 
@@ -848,7 +863,7 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     )
 
     with tool_execution_identity(execution_identity):
-        agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+        agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Canonical soul context." in agent.role
     assert mock_get_tool_by_name.call_args is not None
@@ -857,14 +872,14 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     canonical_soul.write_text("Updated canonical soul context.", encoding="utf-8")
 
     with tool_execution_identity(execution_identity):
-        updated_agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+        updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Updated canonical soul context." in updated_agent.role
 
     canonical_soul.unlink()
 
     with tool_execution_identity(execution_identity):
-        deleted_agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+        deleted_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert not canonical_soul.exists()
     assert "Canonical soul context." not in deleted_agent.role
@@ -910,7 +925,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
         models={"default": ModelConfig(provider="openai", id="gpt-4")},
     )
 
-    agent = create_agent("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
+    agent = _create_agent_for_test("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
 
     workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
     assert (workspace / "SOUL.md").exists()
@@ -946,7 +961,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
 
-    create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(tmp_path, "general")
     canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
@@ -984,7 +999,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
     runtime_paths = _runtime_paths(shared_root, config_path=config_dir / "config.yaml")
 
-    create_agent("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(shared_root, "general")
     canonical_workspace = agent_workspace_root_path(shared_root, "general") / "mind_data"
@@ -1009,7 +1024,7 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
 
     config.agents["general"].context_files = ["SOUL.md", "USER.md"]
 
-    agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "## Personality Context" in agent.role
     assert "### SOUL.md" in agent.role
@@ -1018,7 +1033,7 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
     assert "User preference: concise answers." in agent.role
     soul_path.write_text("Canonical soul directive.", encoding="utf-8")
 
-    updated_agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Canonical soul directive." in updated_agent.role
 
@@ -1041,7 +1056,7 @@ def test_agent_preload_cap_truncates_context_files_in_order(
 
     config.agents["general"].context_files = ["FIRST.md", "SECOND.md"]
 
-    agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "[Content truncated - " in agent.role
     assert "### FIRST.md" not in agent.role
@@ -1055,7 +1070,7 @@ def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path
     config = Config.from_yaml()
     config.agents["general"].context_files = ["does-not-exist.md"]
 
-    agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "## Personality Context" not in agent.role
     assert "does-not-exist.md" not in agent.role
@@ -1077,7 +1092,7 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     os.chdir(other_cwd)
     try:
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+            agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
     finally:
         os.chdir(original_cwd)
 
@@ -1377,12 +1392,12 @@ def test_create_agent_shares_culture_manager_for_same_culture(
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
     with patch("mindroom.ai.get_model_instance", return_value=model):
-        create_agent(
+        _create_agent_for_test(
             "agent_one",
             config=_bind_runtime_paths(config, runtime_paths),
             include_interactive_questions=False,
         )
-        create_agent(
+        _create_agent_for_test(
             "agent_two",
             config=config,
             include_interactive_questions=False,
@@ -1442,7 +1457,7 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     model.id = "gpt-4o-mini"
     runtime_paths = _runtime_paths(tmp_path)
     with patch("mindroom.ai.get_model_instance", return_value=model) as mock_get_model_instance:
-        create_agent(
+        _create_agent_for_test(
             "agent_one",
             config=_bind_runtime_paths(config, runtime_paths),
             include_interactive_questions=False,

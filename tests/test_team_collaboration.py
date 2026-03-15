@@ -13,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import get_agents_in_thread
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for team tests."""
     return bind_runtime_paths(config, runtime_root)
+
+
+def _agent_names(ids: list[object], config: Config) -> list[str]:
+    runtime_paths = runtime_paths_for(config)
+    return [mid.agent_name(config, runtime_paths) for mid in ids]
 
 
 # Test fixtures for team agents
@@ -107,10 +112,10 @@ class TestTeamFormation:
         # Create bots
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        research_bot = AgentBot(mock_research_agent, tmp_path, config, rooms=[team_room_id])
+        research_bot = AgentBot(mock_research_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, rooms=[team_room_id])
+        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
 
         # Setup bots
         research_bot.client = AsyncMock()
@@ -183,8 +188,8 @@ class TestTeamFormation:
         # (message_event setup omitted as it's tested via thread_history)
 
         # Verify both agents are in thread
-        agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents_in_thread, self.config)
         assert "code" in agent_names
         assert "security" in agent_names
         assert len(agent_names) == 2
@@ -322,8 +327,8 @@ class TestTeamResponseBehavior:
 
         # No mentions in follow-up would cause single agent to continue
 
-        agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents_in_thread, self.config)
         assert agent_names == ["code"]
         # Single agent should continue responding
 
@@ -382,8 +387,8 @@ class TestTeamResponseBehavior:
             },
         ]
 
-        agents = get_agents_in_thread(thread_with_both, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents]
+        agents = get_agents_in_thread(thread_with_both, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents, self.config)
         assert len(agents) == 2
         assert "research" in agent_names
         assert "analyst" in agent_names
@@ -498,6 +503,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
+            runtime_paths=runtime_paths_for(config),
             message="Hello",
             config=config,
             is_dm_room=True,  # This is a DM room
@@ -507,7 +513,7 @@ class TestRouterTeamFormation:
 
         # Should form a team with both agents
         assert result.should_form_team is True
-        agent_names = sorted([mid.agent_name(config) for mid in result.agents])
+        agent_names = sorted(_agent_names(result.agents, config))
         assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
@@ -517,6 +523,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
             message="Hello",
             config=config,
             is_dm_room=True,
@@ -566,6 +573,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
             message="Follow-up without mentions",
             config=config,
             is_dm_room=True,

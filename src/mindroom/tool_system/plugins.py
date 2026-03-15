@@ -55,14 +55,13 @@ _TOOL_MODULE_CACHE: dict[Path, float] = {}
 
 def load_plugins(
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[_Plugin]:
     """Load plugins from config and register their tools and skills."""
     plugin_paths = config.plugins
     if not plugin_paths:
         set_plugin_skill_roots([])
         return []
-    runtime_paths = config.require_runtime_paths()
-
     plugins: list[_Plugin] = []
     skill_roots: list[Path] = []
 

@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,10 +29,20 @@ def setup_test_bot(
     """Set up a test bot with all required mocks."""
     if config is None:
         config = bind_runtime_paths(Config(router=RouterConfig(model="default")), storage_path)
-    elif config.runtime_paths is None:
-        config = bind_runtime_paths(config, storage_path)
+    else:
+        try:
+            runtime_paths_for(config)
+        except KeyError:
+            config = bind_runtime_paths(config, storage_path)
 
-    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
+    bot = AgentBot(
+        agent,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        rooms=[room_id],
+        enable_streaming=enable_streaming,
+    )
     bot.client = AsyncMock()
 
     # Mock orchestrator

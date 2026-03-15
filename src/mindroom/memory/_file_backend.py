@@ -36,12 +36,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
 
 def _file_memory_root(
     storage_path: Path,
+    resolution: FileMemoryResolution,
     config: Config,
     *,
     use_configured_path: bool,
@@ -50,7 +52,7 @@ def _file_memory_root(
     if configured_path:
         return resolve_config_relative_path(
             configured_path,
-            runtime_paths=config.require_runtime_paths(),
+            runtime_paths=resolution.runtime_paths,
         )
     return (storage_path.expanduser().resolve() / FILE_MEMORY_DEFAULT_DIRNAME).resolve()
 
@@ -86,6 +88,7 @@ def _scope_dir(
 
     scope_path = _file_memory_root(
         resolution.storage_path,
+        resolution,
         config,
         use_configured_path=resolution.use_configured_path,
     ) / _scope_dir_name(scope_user_id)
@@ -398,12 +401,14 @@ def _find_file_anchor_memory_result(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
         for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
+                runtime_paths,
                 agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
             )
@@ -436,6 +441,7 @@ def _mutate_file_memory_targets(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
 ) -> tuple[str, int]:
     updated_targets = 0
@@ -444,6 +450,7 @@ def _mutate_file_memory_targets(
         resolution = resolve_file_memory_resolution(
             target_storage_path,
             config,
+            runtime_paths,
             agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
         )
@@ -460,9 +467,10 @@ def add_file_agent_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Append one file-backed memory for an agent scope."""
-    resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
+    resolution = resolve_file_memory_resolution(storage_path, config, runtime_paths, agent_name=agent_name)
     _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
     logger.info("File memory added", agent=agent_name)
 
@@ -472,6 +480,7 @@ def append_agent_daily_file_memory(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
@@ -479,6 +488,7 @@ def append_agent_daily_file_memory(
     resolution = resolve_file_memory_resolution(
         storage_path,
         config,
+        runtime_paths,
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
@@ -500,11 +510,12 @@ def search_file_agent_memories(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     limit: int,
 ) -> list[MemoryResult]:
     """Search file-backed memories visible to an agent."""
-    agent_resolution = resolve_file_memory_resolution(storage_path, config, agent_name=agent_name)
+    agent_resolution = resolve_file_memory_resolution(storage_path, config, runtime_paths, agent_name=agent_name)
     results = _search_scope_memory_entries(
         agent_scope_user_id(agent_name),
         query,
@@ -518,6 +529,7 @@ def search_file_agent_memories(
             team_resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
+                runtime_paths,
                 original_storage_path=storage_path,
             )
             team_results = _search_scope_memory_entries(team_id, query, team_resolution, config, limit=limit)
@@ -535,6 +547,7 @@ def list_file_agent_memories(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     limit: int,
     preserve_resolved_storage_path: bool = False,
@@ -543,6 +556,7 @@ def list_file_agent_memories(
     resolution = resolve_file_memory_resolution(
         storage_path,
         config,
+        runtime_paths,
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
@@ -555,6 +569,7 @@ def get_file_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
     for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
@@ -562,6 +577,7 @@ def get_file_agent_memory(
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
+                runtime_paths,
                 agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
             )
@@ -577,9 +593,18 @@ def update_file_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Update one file-backed memory across its replica targets."""
-    if (anchor_result := _find_file_anchor_memory_result(memory_id, caller_context, storage_path, config)) is None:
+    if (
+        anchor_result := _find_file_anchor_memory_result(
+            memory_id,
+            caller_context,
+            storage_path,
+            config,
+            runtime_paths,
+        )
+    ) is None:
         raise MemoryNotFoundError(memory_id)
 
     scope_user_id, updated_targets = _mutate_file_memory_targets(
@@ -588,6 +613,7 @@ def update_file_agent_memory(
         caller_context=caller_context,
         storage_path=storage_path,
         config=config,
+        runtime_paths=runtime_paths,
         anchor_result=anchor_result,
     )
     if updated_targets > 0:
@@ -606,9 +632,18 @@ def delete_file_agent_memory(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Delete one file-backed memory across its replica targets."""
-    if (anchor_result := _find_file_anchor_memory_result(memory_id, caller_context, storage_path, config)) is None:
+    if (
+        anchor_result := _find_file_anchor_memory_result(
+            memory_id,
+            caller_context,
+            storage_path,
+            config,
+            runtime_paths,
+        )
+    ) is None:
         raise MemoryNotFoundError(memory_id)
 
     scope_user_id, deleted_targets = _mutate_file_memory_targets(
@@ -617,6 +652,7 @@ def delete_file_agent_memory(
         caller_context=caller_context,
         storage_path=storage_path,
         config=config,
+        runtime_paths=runtime_paths,
         anchor_result=anchor_result,
     )
     if deleted_targets > 0:
@@ -635,6 +671,7 @@ def store_file_conversation_memory(
     agent_name: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Persist condensed conversation text to file-backed memory scopes."""
     condensed_prompt = " ".join(prompt.strip().split())
@@ -649,6 +686,7 @@ def store_file_conversation_memory(
         resolution = resolve_file_memory_resolution(
             target_storage_path,
             config,
+            runtime_paths,
             agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
         )

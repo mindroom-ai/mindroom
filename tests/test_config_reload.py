@@ -16,7 +16,7 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
@@ -241,6 +241,7 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room1", "room2"],  # Initial rooms
     )
     mock_client = AsyncMock()
@@ -317,6 +318,7 @@ async def test_router_updates_rooms_on_config_reload(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=list(updated_router_rooms),
     )
     mock_client = AsyncMock()
@@ -386,6 +388,7 @@ async def test_new_agent_joins_rooms_on_config_reload(
         agent_user=mock_agent_users["agent3"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room5"],
     )
     mock_client = AsyncMock()
@@ -456,6 +459,7 @@ async def test_team_room_changes_on_config_reload(
         agent_user=mock_agent_users["team1"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room3", "room6"],
     )
     mock_client = AsyncMock()
@@ -689,6 +693,7 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=bot_config["new"],
         )
         setup_test_bot(bot, mock_client)

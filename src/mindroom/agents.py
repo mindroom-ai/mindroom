@@ -16,8 +16,8 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from agno.run.agent import RunOutput
 from agno.session.agent import AgentSession
 
+import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
-from mindroom import tools as _tools_module  # noqa: F401
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_credentials_manager
 from mindroom.logging_config import get_logger
@@ -397,24 +397,25 @@ def build_agent_toolkit(
             agent_name=agent_name,
             storage_path=storage_path,
             config=config,
+            runtime_paths=runtime_paths,
         )
 
     if tool_name == "delegate":
-        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
-        from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
+        # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
+        from mindroom.custom_tools import delegate  # noqa: PLC0415
 
         if not agent_config.delegate_to:
             logger.warning(
                 f"Skipping 'delegate' tool for agent '{agent_name}': delegate_to is empty",
             )
             return None
-        if delegation_depth >= _MAX_DEPTH:
+        if delegation_depth >= delegate.MAX_DELEGATION_DEPTH:
             logger.warning(
                 f"Skipping explicit 'delegate' tool for agent '{agent_name}': "
-                f"delegation depth {delegation_depth} >= max {_MAX_DEPTH}",
+                f"delegation depth {delegation_depth} >= max {delegate.MAX_DELEGATION_DEPTH}",
             )
             return None
-        return DelegateTools(
+        return delegate.DelegateTools(
             agent_name=agent_name,
             delegate_to=agent_config.delegate_to,
             runtime_paths=runtime_paths,
@@ -425,10 +426,11 @@ def build_agent_toolkit(
     if tool_name == "self_config":
         from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
 
-        return SelfConfigTools(agent_name=agent_name, config_path=config_path)
+        return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
 
     return get_tool_by_name(
         tool_name,
+        runtime_paths,
         credentials_manager=credentials_manager,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
@@ -436,6 +438,7 @@ def build_agent_toolkit(
         ),
         runtime_overrides={
             "config_path": config_path,
+            "runtime_paths": runtime_paths,
             "credentials_manager": credentials_manager,
             "output_dir": storage_path / "browser",
             "shared_storage_root": shared_storage_path,
@@ -457,9 +460,9 @@ def get_agent_toolkit_names(
     agent_config = config.get_agent(agent_name)
 
     if agent_config.delegate_to and "delegate" not in tool_names:
-        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH as _MAX_DEPTH  # noqa: PLC0415
+        from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
-        if delegation_depth < _MAX_DEPTH:
+        if delegation_depth < MAX_DELEGATION_DEPTH:
             tool_names.append("delegate")
 
     allow_self_config = (
@@ -672,6 +675,7 @@ def _resolve_agent_culture(
 def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     *,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
@@ -682,6 +686,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     Args:
         agent_name: Name of the agent to create
         config: Application configuration
+        runtime_paths: Explicit runtime context for paths, env, and credentials.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -698,21 +703,20 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    runtime_paths = config.require_runtime_paths()
     resolved_storage_path = runtime_paths.storage_root
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config)
+    load_plugins(config, runtime_paths)
 
     tool_names = get_agent_toolkit_names(
         agent_name,
         config,
         delegation_depth=delegation_depth,
     )
-    worker_tools = config.get_agent_worker_tools(agent_name)
+    worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     tool_init_context = build_agent_tool_init_context(
         config,
         agent_name,
@@ -787,10 +791,10 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions = list(agent_config.instructions)
 
     # Create agent with defaults applied
-    model = get_model_instance(config, agent_config.model)
+    model = get_model_instance(config, runtime_paths, agent_config.model)
     logger.info(f"Creating agent '{agent_name}' with model: {model.__class__.__name__}(id={model.id})")
 
-    skills = build_agent_skills(agent_name, config)
+    skills = build_agent_skills(agent_name, config, runtime_paths)
     if skills and skills.get_skill_names():
         instructions.append(agent_prompts.SKILLS_TOOL_USAGE_PROMPT)
 
@@ -948,15 +952,20 @@ def describe_agent(agent_name: str, config: Config) -> str:
     return "\n  ".join(parts)
 
 
-def get_agent_ids_for_room(room_key: str, config: Config) -> list[str]:
+def get_agent_ids_for_room(
+    room_key: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> list[str]:
     """Get all agent Matrix IDs assigned to a specific room."""
+    config_ids = config.get_ids(runtime_paths)
     # Always include the router agent
-    agent_ids = [config.ids[ROUTER_AGENT_NAME].full_id]
+    agent_ids = [config_ids[ROUTER_AGENT_NAME].full_id]
 
     # Add agents from config
     for agent_name, agent_cfg in config.agents.items():
         if room_key in agent_cfg.rooms:
-            agent_ids.append(config.ids[agent_name].full_id)
+            agent_ids.append(config_ids[agent_name].full_id)
     return agent_ids
 
 

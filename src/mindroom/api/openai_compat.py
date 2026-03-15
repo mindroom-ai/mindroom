@@ -35,7 +35,7 @@ from mindroom.ai import (
     get_model_instance,
     stream_agent_response,
 )
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
@@ -80,7 +80,7 @@ def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
     loader to avoid circular imports (main.py imports this router).
     """
     runtime_paths = request.app.state.runtime_paths
-    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths
+    return load_config(runtime_paths), runtime_paths
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -546,6 +546,7 @@ def _parse_chat_request(
 async def _resolve_auto_route(
     prompt: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
@@ -554,7 +555,7 @@ async def _resolve_auto_route(
     and no agents are available.
     """
     available = _openai_compatible_agent_names(config)
-    routed = await suggest_agent(prompt, available, config, thread_history)
+    routed = await suggest_agent(prompt, available, config, runtime_paths, thread_history)
     if routed is None:
         if not available:
             return _error_response(
@@ -691,6 +692,7 @@ async def chat_completions(
         result = await _resolve_auto_route(
             prompt,
             config,
+            runtime_paths,
             thread_history,
         )
         if isinstance(result, JSONResponse):
@@ -1041,7 +1043,7 @@ async def _stream_completion(
 def _build_team(
     team_name: str,
     config: Config,
-    _runtime_paths: RuntimePaths,
+    runtime_paths: RuntimePaths,
 ) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
@@ -1051,7 +1053,7 @@ def _build_team(
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
     model_name = team_config.model or "default"
-    model = get_model_instance(config, model_name)
+    model = get_model_instance(config, runtime_paths, model_name)
 
     agents: list[Agent] = []
     for member_name in team_config.agents:
@@ -1063,6 +1065,7 @@ def _build_team(
                 create_agent(
                     member_name,
                     config,
+                    runtime_paths,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),

@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from mindroom import constants
 from mindroom.bot import create_bot_for_entity
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -16,16 +15,11 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD, orchestrator_runtime_paths
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-    )
-    config._runtime_paths = runtime_paths
-    return config
+    return bind_runtime_paths(config, tmp_path)
 
 
 @pytest.fixture
@@ -62,7 +56,7 @@ async def test_router_gets_all_configured_rooms(
     tmp_path: Path,
 ) -> None:
     """Test that the router agent is configured to join all rooms from agents and teams."""
-    _bind_runtime_paths(config_with_rooms, tmp_path)
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
     def mock_resolve_room_aliases(
@@ -83,7 +77,13 @@ async def test_router_gets_all_configured_rooms(
     )
 
     # Create the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, tmp_path)
+    router_bot = create_bot_for_entity(
+        ROUTER_AGENT_NAME,
+        router_user,
+        config_with_rooms,
+        runtime_paths_for(config_with_rooms),
+        tmp_path,
+    )
 
     # Check that the router has all rooms
     expected_rooms = {"room1", "room2", "room3", "room4"}
@@ -97,7 +97,7 @@ def test_team_bot_uses_defaults_streaming_setting(
     tmp_path: Path,
 ) -> None:
     """Team bots should inherit defaults.enable_streaming from config."""
-    _bind_runtime_paths(config_with_rooms, tmp_path)
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
     # Mock resolve_room_aliases to return the same aliases (no resolution)
     def mock_resolve_room_aliases(
@@ -117,13 +117,19 @@ def test_team_bot_uses_defaults_streaming_setting(
         password=TEST_PASSWORD,
     )
 
-    team_bot = create_bot_for_entity("team1", team_user, config_with_rooms, tmp_path)
+    team_bot = create_bot_for_entity(
+        "team1",
+        team_user,
+        config_with_rooms,
+        runtime_paths_for(config_with_rooms),
+        tmp_path,
+    )
 
     assert team_bot is not None
     assert team_bot.enable_streaming is False
     assert team_bot.team_agents == [
-        MatrixID.from_agent("agent1", config_with_rooms.domain, config_with_rooms.require_runtime_paths()),
-        MatrixID.from_agent("agent2", config_with_rooms.domain, config_with_rooms.require_runtime_paths()),
+        MatrixID.from_agent("agent1", config_with_rooms.domain, runtime_paths_for(config_with_rooms)),
+        MatrixID.from_agent("agent2", config_with_rooms.domain, runtime_paths_for(config_with_rooms)),
     ]
 
 
@@ -134,7 +140,7 @@ async def test_router_joins_rooms_on_start(
     tmp_path: Path,
 ) -> None:
     """Test that the router actually joins all configured rooms when started."""
-    _bind_runtime_paths(config_with_rooms, tmp_path)
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
     # Track which rooms were joined
     joined_rooms: list[str] = []
 
@@ -169,7 +175,13 @@ async def test_router_joins_rooms_on_start(
     )
 
     # Create and configure the router bot
-    router_bot = create_bot_for_entity(ROUTER_AGENT_NAME, router_user, config_with_rooms, tmp_path)
+    router_bot = create_bot_for_entity(
+        ROUTER_AGENT_NAME,
+        router_user,
+        config_with_rooms,
+        runtime_paths_for(config_with_rooms),
+        tmp_path,
+    )
 
     # Mock the client
     mock_client = AsyncMock()
@@ -193,7 +205,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
     tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly initializes the router with all rooms."""
-    _bind_runtime_paths(config_with_rooms, tmp_path)
+    config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
     # Mock various async operations
     async def mock_ensure_all_agent_users(_homeserver: str) -> dict[str, AgentMatrixUser]:
@@ -377,9 +389,3 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
     # Router should be recreated with new rooms
     new_router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
     assert set(new_router_bot.rooms) == {"room1", "room2", "room3"}
-    _bind_runtime_paths(config_with_rooms, tmp_path)
-
-    _bind_runtime_paths(config_with_rooms, tmp_path)
-    _bind_runtime_paths(config_with_rooms, tmp_path)
-
-    _bind_runtime_paths(config_with_rooms, tmp_path)

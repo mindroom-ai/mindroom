@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from mindroom.config.matrix import MindRoomUserConfig
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.matrix.client import get_joined_rooms, get_room_name, matrix_client, send_message
 
 DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
@@ -21,6 +22,8 @@ DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
 
 async def test_message_sizes() -> None:  # noqa: PLR0915
     """Test messages of different sizes."""
+    runtime_paths = resolve_primary_runtime_paths()
+
     # Get credentials from environment
     homeserver = os.getenv("MATRIX_HOMESERVER", "https://m-test-3.mindroom.chat")
     username = os.getenv("MATRIX_USERNAME", DEFAULT_INTERNAL_USERNAME)
@@ -32,7 +35,7 @@ async def test_message_sizes() -> None:  # noqa: PLR0915
 
     print(f"🔌 Connecting to {homeserver} as {user_id}")
 
-    async with matrix_client(homeserver, user_id) as client:
+    async with matrix_client(homeserver, runtime_paths, user_id=user_id) as client:
         # Login
         print("🔐 Logging in...")
         response = await client.login(password, device_name="test_sizes")

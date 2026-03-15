@@ -6,8 +6,8 @@ import json
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +18,7 @@ import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -38,9 +39,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
 REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
@@ -51,7 +49,7 @@ REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _load_tools() -> None:
-    ensure_tool_registry_loaded()
+    ensure_tool_registry_loaded(resolve_runtime_paths(config_path=Path("config.yaml")))
 
 
 @pytest.fixture(autouse=True)
@@ -162,7 +160,13 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
         credentials_module._credentials_manager = None
         credentials_module._credentials_manager_signature = None
 
-        toolkit, _ = sandbox_runner_module._resolve_entrypoint(tool_name=tool_name, function_name="run")
+        runtime_paths, config = sandbox_runner_module._load_config_from_env()
+        toolkit, _ = sandbox_runner_module._resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=config,
+            tool_name=tool_name,
+            function_name="run",
+        )
 
         assert toolkit.token == stored_value
     finally:
@@ -215,7 +219,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
         credentials_module._credentials_manager = None
         credentials_module._credentials_manager_signature = None
 
-        toolkit = get_tool_by_name(tool_name)
+        toolkit = get_tool_by_name(tool_name, resolve_runtime_paths(config_path=Path("config.yaml")))
 
         assert toolkit.token == stored_value
     finally:
