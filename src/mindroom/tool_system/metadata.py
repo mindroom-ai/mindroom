@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
@@ -162,7 +162,7 @@ def _resolve_tool_credentials_manager(
     if not needs_persisted_credentials:
         return None
 
-    return get_credentials_manager(storage_root=runtime_paths.storage_root)
+    return get_runtime_credentials_manager(runtime_paths)
 
 
 def _build_tool_instance(
@@ -203,6 +203,8 @@ def _build_tool_instance(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=resolved_credentials_manager,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
         if resolved_credentials_manager is not None
         else {}
@@ -238,6 +240,7 @@ def _build_tool_instance(
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
+        runtime_paths=runtime_paths,
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,

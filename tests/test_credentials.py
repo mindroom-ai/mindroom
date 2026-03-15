@@ -17,6 +17,7 @@ from mindroom.credentials import (
     CredentialsManager,
     _sync_env_credentials_to_worker,
     get_credentials_manager,
+    get_runtime_credentials_manager,
     load_scoped_credentials,
     merge_scoped_credentials,
     save_scoped_credentials,
@@ -574,7 +575,6 @@ class TestGlobalCredentialsManager:
     def test_global_manager_uses_explicit_shared_credentials_path(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers should be able to configure a distinct shared credential mirror path."""
         config_path = tmp_path / "config.yaml"
@@ -584,11 +584,13 @@ class TestGlobalCredentialsManager:
         )
         storage_path = (tmp_path / "worker-root").resolve()
         shared_path = storage_path / ".shared_credentials"
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
-        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(shared_path))
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str(shared_path)},
+        )
 
-        manager = get_credentials_manager(storage_root=storage_path)
+        manager = get_runtime_credentials_manager(runtime_paths)
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
@@ -616,11 +618,15 @@ class TestGlobalCredentialsManager:
     def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated worker processes should load mirrored shared credentials through the global manager."""
         root = (tmp_path / "shared-storage").resolve()
         base_manager = CredentialsManager(root / "credentials")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
@@ -637,11 +643,18 @@ class TestGlobalCredentialsManager:
         sync_shared_credentials_to_worker(worker_key, credentials_manager=base_manager)
         worker_root = base_manager.for_worker(worker_key).storage_root
 
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
-        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
         mindroom.credentials._credentials_manager = None
 
-        manager = get_credentials_manager(storage_root=worker_root)
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=worker_root,
+            process_env={
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_root / ".shared_credentials"),
+                _DEDICATED_WORKER_KEY_ENV: worker_key,
+                _DEDICATED_WORKER_ROOT_ENV: str(worker_root),
+            },
+        )
+        manager = get_runtime_credentials_manager(runtime_paths)
         loaded_credentials = load_scoped_credentials(
             "google",
             worker_scope="shared",
@@ -706,13 +719,14 @@ class TestSharedIntegrationCredentialTagging:
     def test_dedicated_worker_manager_uses_current_worker_root_for_shared_scope(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers mounted at arbitrary paths should read and write shared-scope credentials in the mounted root."""
         worker_root = (tmp_path / "app-worker").resolve()
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
+            current_worker_key="v1:tenant-123:shared:general",
+            current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -725,11 +739,7 @@ class TestSharedIntegrationCredentialTagging:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:shared:general"
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
-
-        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",
@@ -756,13 +766,14 @@ class TestSharedIntegrationCredentialTagging:
     def test_dedicated_worker_manager_uses_current_worker_root_for_isolating_scope(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers mounted at arbitrary paths should not nest isolating-scope credentials under another workers/ tree."""
         worker_root = (tmp_path / "app-worker").resolve()
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
+            current_worker_key="v1:tenant-123:user:@alice:example.org",
+            current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -775,12 +786,8 @@ class TestSharedIntegrationCredentialTagging:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager.shared_manager().save_credentials("google", {"api_key": "env-key", "_source": "env"})
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
-
-        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",

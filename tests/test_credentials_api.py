@@ -35,7 +35,7 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
     app.include_router(router)
     app.state.runtime_paths = resolve_runtime_paths(storage_path=mock_credentials_manager.storage_root)
 
-    with patch("mindroom.api.credentials.get_credentials_manager") as mock_get:
+    with patch("mindroom.api.credentials.get_runtime_credentials_manager") as mock_get:
         mock_get.return_value = mock_credentials_manager
         client = TestClient(app)
         # Store the mock for use in tests

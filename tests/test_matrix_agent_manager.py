@@ -196,13 +196,13 @@ class TestMatrixUserManagement:
         mock_load.return_value = mock_state
         runtime_paths = _runtime_paths(tmp_path)
 
-        creds = _get_agent_credentials("calculator", runtime_paths=runtime_paths)
+        creds = _get_agent_credentials("calculator", runtime_paths)
         assert creds is not None
         assert creds["username"] == "mindroom_calculator"
         assert creds["password"] == "calc_pass"  # noqa: S105
 
         # Test non-existent agent
-        creds = _get_agent_credentials("nonexistent", runtime_paths=runtime_paths)
+        creds = _get_agent_credentials("nonexistent", runtime_paths)
         assert creds is None
 
     @patch("mindroom.matrix.state.MatrixState.save")
@@ -214,7 +214,7 @@ class TestMatrixUserManagement:
         mock_load.return_value = mock_state
         runtime_paths = _runtime_paths(tmp_path)
 
-        _save_agent_credentials("calculator", "mindroom_calculator", "calc_pass", runtime_paths=runtime_paths)
+        _save_agent_credentials("calculator", "mindroom_calculator", "calc_pass", runtime_paths)
 
         # Verify the account was added
         assert "agent_calculator" in mock_state.accounts

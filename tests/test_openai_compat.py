@@ -119,6 +119,19 @@ def test_load_config_uses_dynamic_runtime_config_path(
     assert "only_alt" in config.agents
 
 
+def test_load_config_requires_runtime_paths() -> None:
+    """OpenAI-compatible config loading should fail fast without app runtime paths."""
+    request = Request(
+        {
+            "type": "http",
+            "app": type("_App", (), {"state": type("_State", (), {})()})(),
+        },
+    )
+
+    with pytest.raises(TypeError, match="API runtime paths are not initialized"):
+        openai_compat._load_config(request)
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------

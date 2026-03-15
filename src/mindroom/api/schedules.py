@@ -113,7 +113,6 @@ def _cron_schedule_from_expression(cron_expression: str) -> CronSchedule:
 
 def _to_response_task(
     task: ScheduledTaskRecord,
-    *,
     runtime_paths: RuntimePaths,
 ) -> ScheduledTaskResponse:
     """Map an internal scheduled task record to the API response model."""
@@ -269,7 +268,7 @@ async def list_schedules(
                 room_id=resolved_room_id,
                 include_non_pending=include_cancelled,
             )
-            tasks.extend(_to_response_task(task, runtime_paths=runtime_paths) for task in room_tasks)
+            tasks.extend(_to_response_task(task, runtime_paths) for task in room_tasks)
     finally:
         await client.close()
 
@@ -311,7 +310,7 @@ async def update_schedule(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
 
-        return _to_response_task(updated_task, runtime_paths=runtime_paths)
+        return _to_response_task(updated_task, runtime_paths)
     finally:
         await client.close()
 

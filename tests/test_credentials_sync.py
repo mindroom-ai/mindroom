@@ -53,8 +53,8 @@ class TestCredentialsSync:
         monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
         monkeypatch.setenv("OLLAMA_HOST", "http://test:11434")
 
-        # Mock get_credentials_manager to use our temp directory
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        # Mock get_runtime_credentials_manager to use our temp directory
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = CredentialsManager(base_path=temp_credentials_dir)
             runtime_paths = _runtime_paths(temp_credentials_dir.parent)
 
@@ -97,7 +97,7 @@ class TestCredentialsSync:
 
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
             sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
@@ -115,7 +115,7 @@ class TestCredentialsSync:
 
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
             sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
@@ -132,7 +132,7 @@ class TestCredentialsSync:
 
         monkeypatch.setenv("OPENAI_API_KEY", "new-env-key")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
             sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
@@ -148,8 +148,8 @@ class TestCredentialsSync:
         monkeypatch.setenv("OPENAI_API_KEY", "valid-key")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
 
-        # Mock get_credentials_manager
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        # Mock get_runtime_credentials_manager
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             cm = CredentialsManager(base_path=temp_credentials_dir)
             mock_get_cm.return_value = cm
 
@@ -168,7 +168,7 @@ class TestCredentialsSync:
         """GITHUB_TOKEN should seed github_private credentials for Git KB auth."""
         monkeypatch.setenv("GITHUB_TOKEN", "ghp-test-token")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             cm = CredentialsManager(base_path=temp_credentials_dir)
             mock_get_cm.return_value = cm
             sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
@@ -194,7 +194,7 @@ class TestCredentialsSync:
         )
         monkeypatch.setenv("GITHUB_TOKEN", "ghp-env-token")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = cm
             sync_env_to_credentials(runtime_paths=_runtime_paths(temp_credentials_dir.parent))
 
@@ -210,7 +210,7 @@ class TestCredentialsSync:
         credentials_manager.set_api_key("google", "test-google-key")
         runtime_paths = _runtime_paths(credentials_manager.storage_root)
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = credentials_manager
 
             # Test normal providers
@@ -230,7 +230,7 @@ class TestCredentialsSync:
         """Test getting Ollama host configuration."""
         # Test when no Ollama config exists
         runtime_paths = _runtime_paths(credentials_manager.storage_root)
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             mock_get_cm.return_value = credentials_manager
             assert get_ollama_host(runtime_paths=runtime_paths) is None
 
@@ -257,7 +257,7 @@ class TestCredentialsSync:
         """Test that running sync multiple times doesn't cause issues."""
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-        with patch("mindroom.credentials_sync.get_credentials_manager") as mock_get_cm:
+        with patch("mindroom.credentials_sync.get_runtime_credentials_manager") as mock_get_cm:
             cm = CredentialsManager(base_path=temp_credentials_dir)
             mock_get_cm.return_value = cm
 

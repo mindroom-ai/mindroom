@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 import time
 from pathlib import Path
@@ -47,6 +48,7 @@ _LABEL_WORKER_ID = "mindroom.ai/worker-id"
 _CONTAINER_NAME = "sandbox-runner"
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
+_RUNTIME_PATHS_ENV_NAME = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
@@ -502,10 +504,33 @@ class KubernetesResourceManager:
     def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
         venv_path = f"{dedicated_root}/venv"
+        runtime_process_env = {
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+            "MINDROOM_STORAGE_PATH": dedicated_root,
+            _SHARED_STORAGE_ROOT_ENV: self.config.storage_mount_path,
+            SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
+            _DEDICATED_WORKER_KEY_ENV: worker_key,
+            _DEDICATED_WORKER_ROOT_ENV: dedicated_root,
+        }
+        if self.config.config_map_name is not None:
+            runtime_process_env["MINDROOM_CONFIG_PATH"] = self.config.config_path
+        runtime_process_env.update(dict(sorted(self.config.extra_env.items())))
+        runtime_payload = json.dumps(
+            {
+                "config_path": runtime_process_env.get("MINDROOM_CONFIG_PATH", self.config.config_path),
+                "storage_root": dedicated_root,
+                "process_env": runtime_process_env,
+                "env_file_values": {},
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
+            {"name": _RUNTIME_PATHS_ENV_NAME, "value": runtime_payload},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
             {"name": _SHARED_STORAGE_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "VIRTUAL_ENV", "value": venv_path},

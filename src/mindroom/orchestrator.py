@@ -676,7 +676,7 @@ class MultiAgentOrchestrator:
                 await ensure_user_in_rooms(
                     constants.runtime_matrix_homeserver(runtime_paths=self._require_runtime_paths()),
                     all_room_ids,
-                    runtime_paths=self._require_runtime_paths(),
+                    self._require_runtime_paths(),
                 )
 
         # First invitation and join pass for rooms the router already manages.
@@ -994,7 +994,6 @@ async def main(
     api_host: str = "0.0.0.0",  # noqa: S104
 ) -> None:
     """Main entry point for the multi-agent bot system."""
-    constants.sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
     storage_path = runtime_paths.storage_root
 
     # Configure logging before any background tasks or account setup begin.

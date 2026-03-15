@@ -87,7 +87,7 @@ def local_stack_setup(
     cinny_config_path = _write_local_cinny_config(
         homeserver_url,
         inferred_server_name,
-        runtime_paths=runtime_paths,
+        runtime_paths,
     )
     console.print(f"Cinny config written: [dim]{cinny_config_path}[/dim]")
 
@@ -124,7 +124,6 @@ def _infer_server_name(homeserver_url: str) -> str:
 def _write_local_cinny_config(
     homeserver_url: str,
     server_name: str,
-    *,
     runtime_paths: RuntimePaths,
 ) -> Path:
     """Write a minimal Cinny config for local MindRoom development."""

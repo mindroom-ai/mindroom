@@ -25,7 +25,7 @@ from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
@@ -174,16 +174,13 @@ def _coerce_int(value: object) -> int | None:
 def _authenticated_repo_url(
     repo_url: str,
     credentials_service: str | None,
-    *,
     runtime_paths: RuntimePaths,
 ) -> str:
     """Inject HTTPS credentials from CredentialsManager into a repository URL."""
     if not credentials_service:
         return repo_url
 
-    credentials = (
-        get_credentials_manager(storage_root=runtime_paths.storage_root).load_credentials(credentials_service) or {}
-    )
+    credentials = get_runtime_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")
@@ -439,7 +436,7 @@ class KnowledgeManager:
             expected_remote = _authenticated_repo_url(
                 git_config.repo_url,
                 git_config.credentials_service,
-                runtime_paths=self.runtime_paths,
+                self.runtime_paths,
             )
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
@@ -457,7 +454,7 @@ class KnowledgeManager:
         clone_url = _authenticated_repo_url(
             git_config.repo_url,
             git_config.credentials_service,
-            runtime_paths=self.runtime_paths,
+            self.runtime_paths,
         )
         await self._run_git(
             [

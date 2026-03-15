@@ -772,11 +772,10 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
             },
         )
 
-        def _get_credentials_manager(*, storage_root: Path | None = None) -> FakeCredentialsManager:
-            del storage_root
+        def _get_runtime_credentials_manager(_runtime_paths: object) -> FakeCredentialsManager:
             return fake_credentials
 
-        monkeypatch.setattr("mindroom.agents.get_credentials_manager", _get_credentials_manager)
+        monkeypatch.setattr("mindroom.agents.get_runtime_credentials_manager", _get_runtime_credentials_manager)
         monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
         monkeypatch.setenv("ACCOUNT_ID", "account-456")
 

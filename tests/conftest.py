@@ -37,12 +37,16 @@ class FakeCredentialsManager:
         worker_managers: dict[str, "FakeCredentialsManager"] | None = None,
         *,
         storage_root: Path | None = None,
+        current_worker_key: str | None = None,
+        current_worker_root: Path | None = None,
     ) -> None:
         self._credentials_by_service = credentials_by_service
         self._worker_managers = worker_managers or {}
         self.storage_root = storage_root or Path("/var/empty/mindroom-fake-storage")
         self.base_path = self.storage_root / "credentials"
         self.shared_base_path = self.base_path
+        self.current_worker_key = current_worker_key
+        self.current_worker_root = current_worker_root
 
     def load_credentials(self, service: str) -> dict[str, object]:
         """Return stored credentials for *service*, or empty dict."""
@@ -55,6 +59,8 @@ class FakeCredentialsManager:
             FakeCredentialsManager(
                 {},
                 storage_root=self.storage_root / "workers" / worker_key,
+                current_worker_key=worker_key,
+                current_worker_root=self.storage_root / "workers" / worker_key,
             ),
         )
 
@@ -175,18 +181,12 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_paths() -> Generator[None, None, None]:
-    """Restore runtime-synced process env after each test."""
-    from mindroom import constants  # noqa: PLC0415
-
+    """Restore process env and bound test runtime mappings after each test."""
     original_env = os.environ.copy()
-    original_synced_env = dict(constants._RUNTIME_SYNCED_ENV_VALUES)
-    original_synced_originals = dict(constants._RUNTIME_SYNCED_ENV_ORIGINALS)
     original_bound_configs = dict(_TEST_RUNTIME_PATHS_BY_CONFIG_ID)
     yield
     os.environ.clear()
     os.environ.update(original_env)
-    constants._RUNTIME_SYNCED_ENV_ORIGINALS = dict(original_synced_originals)
-    constants._replace_runtime_synced_env(original_synced_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
 

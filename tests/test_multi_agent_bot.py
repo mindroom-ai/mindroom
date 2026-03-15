@@ -631,7 +631,7 @@ class TestAgentBot:
             nonlocal observed_logging_root
             observed_logging_root = runtime_paths.storage_root
 
-        def _capture_credentials_sync(*, runtime_paths: RuntimePaths) -> None:
+        def _capture_credentials_sync(runtime_paths: RuntimePaths) -> None:
             nonlocal observed_credentials_root
             observed_credentials_root = runtime_paths.storage_root
 

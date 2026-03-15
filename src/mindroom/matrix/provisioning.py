@@ -24,7 +24,6 @@ def registration_token_from_env(runtime_paths: RuntimePaths) -> str | None:
 
 
 def _local_provisioning_client_credentials_from_env(
-    *,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, str] | None:
     """Get local provisioning client credentials from environment if configured."""
@@ -52,7 +51,7 @@ def required_local_provisioning_client_credentials_for_registration(
     if registration_token or not provisioning_url:
         return None
 
-    creds = _local_provisioning_client_credentials_from_env(runtime_paths=runtime_paths)
+    creds = _local_provisioning_client_credentials_from_env(runtime_paths)
     if creds is None:
         msg = (
             "MINDROOM_PROVISIONING_URL is set but local client credentials are missing. "

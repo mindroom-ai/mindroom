@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
@@ -77,15 +77,19 @@ def _request_runtime_paths(request: Request) -> RuntimePaths:
 
 
 def _worker_manager(request: Request) -> WorkerManager:
+    runtime_paths = _request_runtime_paths(request)
+    proxy_config = sandbox_proxy_config(runtime_paths)
     if not primary_worker_backend_available(
-        proxy_url=sandbox_proxy_module._PROXY_URL,
-        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
     ):
         raise HTTPException(status_code=503, detail="Worker backend is not configured.")
     return get_primary_worker_manager(
-        proxy_url=sandbox_proxy_module._PROXY_URL,
-        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
-        storage_root=_request_runtime_paths(request).storage_root,
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=runtime_paths.storage_root,
     )
 
 

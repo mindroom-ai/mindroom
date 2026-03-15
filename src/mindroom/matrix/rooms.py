@@ -175,7 +175,6 @@ def _add_room(
     room_id: str,
     alias: str,
     name: str,
-    *,
     runtime_paths: RuntimePaths,
 ) -> None:
     """Add a new room to the state."""
@@ -269,7 +268,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
-            _add_room(room_key, room_id, full_alias, room_name, runtime_paths=runtime_paths)
+            _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Room existence and room membership are separate concerns. Existing
@@ -340,7 +339,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 
     if created_room_id:
         # Save room info
-        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths=runtime_paths)
+        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
 
         if config.matrix_room_access.is_multi_user_mode():
@@ -521,7 +520,6 @@ async def ensure_root_space(
 async def ensure_user_in_rooms(
     homeserver: str,
     room_ids: dict[str, str],
-    *,
     runtime_paths: RuntimePaths,
 ) -> None:
     """Ensure the user account is a member of all specified rooms.

@@ -334,7 +334,6 @@ async def test_router_updates_rooms_on_config_change(monkeypatch: pytest.MonkeyP
 
     def mock_resolve_room_aliases(
         aliases: list[str],
-        *,
         runtime_paths: object | None = None,
     ) -> list[str]:
         del runtime_paths

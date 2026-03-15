@@ -714,11 +714,16 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared worker credentials should be available during agent construction outside request context."""
-    config = _test_config()
+    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"CUSTOMER_ID": "tenant-123"},
+    )
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.defaults.tools = []
     config.agents["general"].tools = ["credentialed_toolkit"]
     config.agents["general"].worker_scope = "shared"
-    monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
 
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     shared_identity = ToolExecutionIdentity(
@@ -756,6 +761,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=cast("CredentialsManager", credentials_manager),
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
@@ -766,7 +773,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
-    agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    agent = _create_agent_for_test("general", config=config)
 
     assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 

@@ -61,7 +61,6 @@ class AgentMatrixUser:
 
 def _get_agent_credentials(
     agent_name: str,
-    *,
     runtime_paths: RuntimePaths,
 ) -> dict[str, str] | None:
     """Get credentials for a specific agent from matrix_state.yaml.
@@ -86,7 +85,6 @@ def _save_agent_credentials(
     agent_name: str,
     username: str,
     password: str,
-    *,
     runtime_paths: RuntimePaths,
 ) -> None:
     """Save credentials for a specific agent to matrix_state.yaml.
@@ -107,7 +105,6 @@ def _save_agent_credentials(
 
 async def _homeserver_requires_registration_token(
     homeserver: str,
-    *,
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Check whether the homeserver advertises registration-token flow."""
@@ -138,7 +135,6 @@ async def _registration_failure_message(
     response: nio.ErrorResponse,
     homeserver: str,
     registration_token: str | None,
-    *,
     runtime_paths: RuntimePaths,
 ) -> str | None:
     if (
@@ -151,7 +147,7 @@ async def _registration_failure_message(
     if (
         response.message == "unknown error"
         and not registration_token
-        and await _homeserver_requires_registration_token(homeserver, runtime_paths=runtime_paths)
+        and await _homeserver_requires_registration_token(homeserver, runtime_paths)
     ):
         return (
             "Matrix homeserver requires registration tokens for account creation. "
@@ -421,7 +417,7 @@ async def _handle_register_response(
         response,
         homeserver,
         registration_token,
-        runtime_paths=runtime_paths,
+        runtime_paths,
     )
     if failure_message:
         raise matrix_startup_error(failure_message, permanent=True)
@@ -629,7 +625,7 @@ async def create_agent_user(
 
     """
     # Check if credentials already exist in matrix_state.yaml
-    existing_creds = _get_agent_credentials(agent_name, runtime_paths=runtime_paths)
+    existing_creds = _get_agent_credentials(agent_name, runtime_paths)
     preferred_username = username
 
     if (
@@ -693,7 +689,7 @@ async def create_agent_user(
 
     # Save credentials only after registration/verification succeeds.
     if registration_needed:
-        _save_agent_credentials(agent_name, matrix_username, password, runtime_paths=runtime_paths)
+        _save_agent_credentials(agent_name, matrix_username, password, runtime_paths)
         logger.info(f"Saved credentials for agent {agent_name} after successful registration")
 
     return AgentMatrixUser(

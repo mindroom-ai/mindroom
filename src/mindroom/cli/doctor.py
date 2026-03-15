@@ -294,7 +294,6 @@ def _validate_provider_key(
 
 def _validate_vertexai_claude_connection(
     model_config: ModelConfig,
-    *,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
@@ -366,7 +365,7 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     validated_keys: set[str] = set()
 
     for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths=runtime_paths)
+        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths)
         passed += p
         failed += f
         warnings += w
@@ -396,7 +395,6 @@ def _check_single_provider(
     provider: str,
     config: Config,
     validated_keys: set[str],
-    *,
     runtime_paths: RuntimePaths,
 ) -> tuple[int, int, int]:
     """Validate a single provider. Returns (passed, failed, warnings)."""
@@ -407,7 +405,7 @@ def _check_single_provider(
         for model_config in config.models.values():
             if model_config.provider != provider:
                 continue
-            valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths=runtime_paths)
+            valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths)
             p, f, w = _print_validation(
                 valid,
                 detail,

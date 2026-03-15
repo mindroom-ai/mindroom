@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from mindroom.constants import RuntimePaths
 from mindroom.credentials import (
     CredentialsManager,
-    get_credentials_manager,
+    get_runtime_credentials_manager,
     merge_scoped_credentials,
     validate_service_name,
 )
@@ -208,9 +208,7 @@ def resolve_request_credentials_target(
     """Resolve the credential storage target for one authenticated dashboard request."""
     _reject_raw_worker_targeting(request)
 
-    base_manager = credentials_manager or get_credentials_manager(
-        storage_root=_request_runtime_paths(request).storage_root,
-    )
+    base_manager = credentials_manager or get_runtime_credentials_manager(_request_runtime_paths(request))
 
     if not agent_name:
         return RequestCredentialsTarget(

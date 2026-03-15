@@ -17,7 +17,8 @@ from agno.skills import LocalSkills, Skills
 from agno.skills.loaders import SkillLoader
 from agno.skills.skill import Skill
 
-from mindroom.credentials import get_credentials_manager
+from mindroom.constants import runtime_env_values
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ class _MindroomSkillsLoader(SkillLoader):
 
     def load(self) -> list[Skill]:
         """Return the eligible skills for the configured roots and allowlist."""
-        env_vars = os.environ if self.env_vars is None else self.env_vars
+        env_vars = runtime_env_values(self.runtime_paths) if self.env_vars is None else self.env_vars
         credential_keys = (
             self.credential_keys
             if self.credential_keys is not None
@@ -169,7 +170,7 @@ def resolve_skill_command_spec(  # noqa: C901
     if not allowlist or requested_name.lower() not in allowlist:
         return None
 
-    env_vars = os.environ if env_vars is None else env_vars
+    env_vars = runtime_env_values(runtime_paths) if env_vars is None else env_vars
     credential_keys = (
         credential_keys if credential_keys is not None else _collect_credential_keys(config, runtime_paths)
     )
@@ -619,9 +620,7 @@ def _config_path_truthy(config_data: Mapping[str, Any], path: str) -> bool:
 
 
 def _collect_credential_keys(_config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    credentials_manager = get_credentials_manager(
-        storage_root=runtime_paths.storage_root,
-    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
     keys: set[str] = set()
     for service in credentials_manager.list_services():
         credentials = credentials_manager.load_credentials(service) or {}

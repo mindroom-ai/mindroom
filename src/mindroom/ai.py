@@ -38,7 +38,7 @@ from mindroom.constants import (
     RuntimePaths,
     runtime_ai_cache_enabled,
 )
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
@@ -496,7 +496,6 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
     model_id: str,
     model_config: ModelConfig,
     extra_kwargs: dict,
-    *,
     runtime_paths: RuntimePaths,
 ) -> Model:
     """Create a model instance for a specific provider.
@@ -609,7 +608,7 @@ def get_model_instance(
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
     # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
     model_api_key = model_creds.get("api_key") if model_creds else None
 
@@ -621,7 +620,7 @@ def get_model_instance(
         model_id,
         model_config,
         extra_kwargs,
-        runtime_paths=runtime_paths,
+        runtime_paths,
     )
 
 

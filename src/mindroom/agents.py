@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 import mindroom.tools  # noqa: F401
 from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -385,7 +385,7 @@ def build_agent_toolkit(
     agent_config = config.get_agent(agent_name)
     storage_path = runtime_paths.storage_root
     config_path = runtime_paths.config_path
-    credentials_manager = get_credentials_manager(storage_root=storage_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
 
     if tool_name == "memory":

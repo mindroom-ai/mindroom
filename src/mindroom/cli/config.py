@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import typer
 import yaml
@@ -29,10 +29,12 @@ from mindroom.constants import (
     exported_process_env,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
-    sync_runtime_env_to_process,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 console = Console()
 
@@ -203,11 +205,24 @@ def _print_config_init_next_steps(
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
 
 
-def _resolve_config_path(path: Path | None) -> Path:
+def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
+    """Return the exported env snapshot used for config discovery and display."""
+    process_env = exported_process_env()
+    if path is not None:
+        process_env["MINDROOM_CONFIG_PATH"] = str(path.expanduser().resolve())
+    return process_env
+
+
+def _resolve_config_path(
+    path: Path | None,
+    *,
+    process_env: Mapping[str, str] | None = None,
+) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return resolve_primary_runtime_paths(process_env=exported_process_env()).config_path.resolve()
+    resolved_process_env = dict(process_env) if process_env is not None else exported_process_env()
+    return resolve_primary_runtime_paths(process_env=resolved_process_env).config_path.resolve()
 
 
 def _activate_cli_runtime(
@@ -217,20 +232,16 @@ def _activate_cli_runtime(
 ) -> RuntimePaths:
     """Create the CLI runtime context once and return it for explicit threading."""
     if path is not None:
-        runtime_paths = resolve_primary_runtime_paths(
+        return resolve_primary_runtime_paths(
             config_path=path.expanduser().resolve(),
             storage_path=storage_path,
             process_env=exported_process_env(),
         )
-        sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
-        return runtime_paths
 
-    runtime_paths = resolve_primary_runtime_paths(
+    return resolve_primary_runtime_paths(
         storage_path=storage_path,
         process_env=exported_process_env(),
     )
-    sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
-    return runtime_paths
 
 
 def _get_editor() -> str:
@@ -372,13 +383,14 @@ def config_show(
     ),
 ) -> None:
     """Display the current config file with syntax highlighting."""
-    config_file = _resolve_config_path(path)
+    process_env = _config_discovery_env(path)
+    config_file = _resolve_config_path(path, process_env=process_env)
 
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         console.print("\nSearch locations (first match wins):")
-        for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
+        for i, loc in enumerate(config_search_locations(process_env), 1):
             status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
             console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
@@ -481,13 +493,14 @@ def config_path_cmd(
     path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Show the resolved config file path and search locations."""
-    resolved = _resolve_config_path(path)
+    process_env = _config_discovery_env(path)
+    resolved = _resolve_config_path(path, process_env=process_env)
     exists = resolved.exists()
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
 
     console.print("\nSearch locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
+    for i, loc in enumerate(config_search_locations(process_env), 1):
         loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({loc_status})")
 
@@ -525,7 +538,6 @@ def _load_config_quiet(
 
 def _find_missing_env_keys(
     config: Config,
-    *,
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
@@ -593,7 +605,7 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
 
 def _check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
-    missing = _find_missing_env_keys(config, runtime_paths=runtime_paths)
+    missing = _find_missing_env_keys(config, runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
         for provider, env_key in missing:

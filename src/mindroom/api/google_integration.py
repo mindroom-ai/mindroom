@@ -27,7 +27,7 @@ from mindroom.api.credentials import (
     resolve_request_credentials_target,
 )
 from mindroom.constants import RuntimePaths
-from mindroom.credentials import get_credentials_manager, save_scoped_credentials
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
@@ -187,13 +187,11 @@ def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> N
 
 def _refresh_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
     """Reload one runtime context after mutating its sibling `.env` file."""
-    refreshed_runtime_paths = constants.resolve_runtime_paths(
+    return constants.resolve_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=runtime_paths.storage_root,
         process_env=dict(runtime_paths.process_env),
     )
-    constants.sync_runtime_env_to_process(refreshed_runtime_paths, sync_path_env=False)
-    return refreshed_runtime_paths
 
 
 def _save_env_credentials(
@@ -433,7 +431,7 @@ async def reset(request: Request) -> dict[str, Any]:
     runtime_paths = _request_runtime_paths(request)
     try:
         # Remove credentials using the manager
-        get_credentials_manager(storage_root=runtime_paths.storage_root).delete_credentials("google")
+        get_runtime_credentials_manager(runtime_paths).delete_credentials("google")
 
         # Remove from environment variables
         env_path = runtime_paths.env_path

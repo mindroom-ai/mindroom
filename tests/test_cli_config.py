@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -13,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import typer
 import yaml
 from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 import mindroom.constants as constants_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli.config import _activate_cli_runtime
-from mindroom.cli.main import app
+from mindroom.cli.main import _load_active_config_or_exit, app
 from mindroom.config.main import Config
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
@@ -35,6 +35,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
+
+
+def _unwrap_console_output(text: str) -> str:
+    return _strip_ansi(text).replace("\n", "")
 
 
 @pytest.fixture(autouse=True)
@@ -558,6 +562,16 @@ class TestConfigShow:
         assert result.exit_code == 1
         assert "No config file found" in result.output
 
+    def test_show_missing_config_lists_explicit_path_first(self, tmp_path: Path) -> None:
+        """Config show should render the explicit missing path as the first search location."""
+        missing = tmp_path / "nonexistent.yaml"
+        result = runner.invoke(app, ["config", "show", "--path", str(missing)], terminal_width=200)
+
+        assert result.exit_code == 1
+        output = _unwrap_console_output(result.output)
+        assert str(missing.resolve()) in output
+        assert output.index(str(missing.resolve())) < output.index(str(Path("config.yaml").resolve()))
+
 
 # ---------------------------------------------------------------------------
 # mindroom config edit
@@ -692,6 +706,16 @@ class TestConfigPath:
         assert result.exit_code == 0
         assert "Resolved config path" in result.output
 
+    def test_path_with_explicit_path_lists_that_path_first(self, tmp_path: Path) -> None:
+        """Config path should render the explicit path as the first search location."""
+        missing = tmp_path / "missing.yaml"
+        result = runner.invoke(app, ["config", "path", "--path", str(missing)], terminal_width=200)
+
+        assert result.exit_code == 0
+        output = _unwrap_console_output(result.output)
+        assert str(missing.resolve()) in output
+        assert output.index(str(missing.resolve())) < output.index(str(Path("config.yaml").resolve()))
+
 
 # ---------------------------------------------------------------------------
 # run command error handling
@@ -707,6 +731,25 @@ class TestRunErrorHandling:
         assert result.exit_code == 1
         assert "No config.yaml found" in result.output
         assert "mindroom config init" in result.output
+
+    def test_load_active_config_or_exit_uses_runtime_process_env_for_missing_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Top-level missing-config output should respect the explicit runtime snapshot."""
+        missing = tmp_path / "runtime-missing.yaml"
+        ambient = tmp_path / "ambient-missing.yaml"
+        runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=missing, process_env={})
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(ambient))
+
+        with pytest.raises(typer.Exit):
+            _load_active_config_or_exit(runtime_paths)
+
+        output = _unwrap_console_output(capsys.readouterr().out)
+        assert str(missing.resolve()) in output
+        assert str(ambient.resolve()) not in output
 
     def test_run_invalid_config(self, tmp_path: Path) -> None:
         """Run shows friendly error when config is invalid."""
@@ -830,12 +873,12 @@ class TestRunApiFlags:
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
 
-    def test_run_storage_path_updates_runtime_env_and_runtime_paths(
+    def test_run_storage_path_updates_runtime_paths(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Run should unify `--storage-path` with `MINDROOM_STORAGE_PATH` for runtime code."""
+        """Run should thread `--storage-path` through the explicit runtime context."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-4-6\n"
@@ -853,7 +896,6 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            assert os.getenv("MINDROOM_STORAGE_PATH") == str(runtime_storage.resolve())
             assert (
                 ResponseTracker("agent", base_path=runtime_storage.resolve() / "tracking").base_path
                 == runtime_storage.resolve() / "tracking"

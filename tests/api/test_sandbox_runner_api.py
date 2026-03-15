@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
-import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
@@ -39,6 +41,12 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.models import WorkerSpec
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+
 SANDBOX_TOKEN = "secret-token"  # noqa: S105
 SANDBOX_HEADERS = {"x-mindroom-sandbox-token": SANDBOX_TOKEN}
 REQUIRES_LINUX_LOCAL_WORKER = pytest.mark.skipif(
@@ -60,15 +68,60 @@ def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
 
 
 @pytest.fixture
-def runner_client() -> TestClient:
+def runner_client() -> Iterator[TestClient]:
     """Create a test client for the sandbox runner app."""
-    return TestClient(sandbox_runner_app)
+
+    class _RuntimeRefreshingTestClient(TestClient):
+        def request(
+            self,
+            method: str,
+            url: httpx._types.URLTypes,
+            *,
+            content: httpx._types.RequestContent | None = None,
+            data: httpx._types.RequestData | None = None,
+            files: httpx._types.RequestFiles | None = None,
+            json: object | None = None,
+            params: httpx._types.QueryParamTypes | None = None,
+            headers: httpx._types.HeaderTypes | None = None,
+            cookies: httpx._types.CookieTypes | None = None,
+            auth: httpx._types.AuthTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
+            follow_redirects: bool | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
+            timeout: httpx._types.TimeoutTypes | httpx._client.UseClientDefault = httpx._client.USE_CLIENT_DEFAULT,
+            extensions: dict[str, object] | None = None,
+        ) -> httpx.Response:
+            _refresh_runner_app_from_env()
+            return super().request(
+                method,
+                url,
+                content=content,
+                data=data,
+                files=files,
+                json=json,
+                params=params,
+                headers=headers,
+                cookies=cookies,
+                auth=auth,
+                follow_redirects=follow_redirects,
+                timeout=timeout,
+                extensions=extensions,
+            )
+
+    _refresh_runner_app_from_env()
+    with _RuntimeRefreshingTestClient(sandbox_runner_app) as client:
+        yield client
 
 
 def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set the sandbox token in both the module cache and env for subprocess workers."""
-    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", SANDBOX_TOKEN)
+    """Set the sandbox token through the runner's explicit runtime env boundary."""
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
+
+
+def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config | None]:
+    runtime_paths = resolve_runtime_paths(process_env=dict(os.environ))
+    sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
+    config = sandbox_runner_module.load_config(runtime_paths) if runtime_paths.config_path.exists() else None
+    sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
+    return runtime_paths, config
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,7 +213,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
         credentials_module._credentials_manager = None
         credentials_module._credentials_manager_signature = None
 
-        runtime_paths, config = sandbox_runner_module._load_config_from_env()
+        runtime_paths, config = _refresh_runner_app_from_env()
         toolkit, _ = sandbox_runner_module._resolve_entrypoint(
             runtime_paths=runtime_paths,
             config=config,
@@ -312,7 +365,7 @@ def test_sandbox_runner_rejects_when_token_not_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sandbox runner should fail closed when no token is configured."""
-    monkeypatch.setattr(sandbox_proxy_module, "_PROXY_TOKEN", None)
+    monkeypatch.delenv("MINDROOM_SANDBOX_PROXY_TOKEN", raising=False)
     response = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
@@ -652,16 +705,18 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     prepare_calls = 0
     original_prepare = sandbox_runner_module._prepare_worker
 
-    def _counting_prepare(worker_key: str) -> object:
+    def _counting_prepare(worker_key: str, runtime_paths: object) -> object:
         nonlocal prepare_calls
         prepare_calls += 1
-        return original_prepare(worker_key)
+        return original_prepare(worker_key, runtime_paths)
 
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
+        runtime_paths: object,
         prepared_worker: object | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
+        assert runtime_paths is not None
         assert prepared_worker is not None
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
 
@@ -1211,10 +1266,14 @@ def test_dedicated_worker_mode_uses_mounted_root(
         assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
         assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
-        assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
-        assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
-        request_payload = json.loads(request_input)
+        assert env[local_workers_module.LOCAL_WORKER_ROOT_ENV] == str(worker_root.parent)
+        assert "MINDROOM_STORAGE_PATH" not in env
+        request_envelope = json.loads(request_input)
+        request_payload = request_envelope["request"]
+        runtime_payload = request_envelope["runtime_paths"]
         assert request_payload["worker_key"] == "worker-a"
+        assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
+        assert runtime_payload["process_env"]["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == str(worker_root)
         note_path = worker_root / "workspace" / request_payload["args"][1]
         note_path.parent.mkdir(parents=True, exist_ok=True)
         note_path.write_text(request_payload["args"][0], encoding="utf-8")
@@ -1267,7 +1326,8 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
         cmd: list[str],
         **run_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
-        request_payload = json.loads(str(run_kwargs["input"]))
+        request_envelope = json.loads(str(run_kwargs["input"]))
+        request_payload = request_envelope["request"]
         assert request_payload["worker_key"] == "worker-a"
 
         note_path = worker_root / "workspace" / request_payload["args"][1]
@@ -1333,7 +1393,7 @@ def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_ove
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Subprocess workers should resolve back to the parent worker root even when only storage path is set."""
+    """Subprocess workers should keep worker-local state without inheriting runtime path env."""
     monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
@@ -1348,6 +1408,7 @@ def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_ove
     assert child_worker_root == worker_root
     assert child_paths.root == paths.root
     assert subprocess_env["MINDROOM_SANDBOX_WORKER_ROOT"] == str(worker_root)
+    assert "MINDROOM_STORAGE_PATH" not in subprocess_env
 
 
 def test_get_local_worker_manager_singleton_creation_is_thread_safe(

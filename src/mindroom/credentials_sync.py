@@ -10,7 +10,7 @@ while still picking up .env changes for keys that were never manually set.
 from pathlib import Path
 
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths
-from mindroom.credentials import get_credentials_manager
+from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -46,7 +46,7 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
 
-    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
     existing = creds_manager.load_credentials("github_private")
     if existing is not None:
         source = existing.get("_source")
@@ -82,7 +82,7 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
     Runtime-bound credentials stay in the credential store instead of being
     mirrored back into ambient process env.
     """
-    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
@@ -138,7 +138,7 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
         The API key if found, None otherwise
 
     """
-    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
 
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
@@ -158,7 +158,7 @@ def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
         The Ollama host URL if configured, None otherwise
 
     """
-    creds_manager = get_credentials_manager(storage_root=runtime_paths.storage_root)
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
     ollama_creds = creds_manager.load_credentials("ollama")
     if ollama_creds:
         return ollama_creds.get("host")

@@ -40,8 +40,8 @@ from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
 from mindroom.runtime_state import get_runtime_state
-from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
 from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_tool_extra
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_backend_available
 
 if TYPE_CHECKING:
@@ -85,15 +85,18 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
 
 def _cleanup_workers_once(runtime_paths: constants.RuntimePaths) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
+    proxy_config = sandbox_proxy_config(runtime_paths)
     if not primary_worker_backend_available(
-        proxy_url=sandbox_proxy_module._PROXY_URL,
-        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
     ):
         return 0
 
     worker_manager = get_primary_worker_manager(
-        proxy_url=sandbox_proxy_module._PROXY_URL,
-        proxy_token=sandbox_proxy_module._PROXY_TOKEN,
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
         storage_root=runtime_paths.storage_root,
     )
     cleaned_workers = worker_manager.cleanup_idle_workers()
@@ -211,7 +214,6 @@ async def _watch_config(
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
-    constants.sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
     constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
     _load_config_from_file(runtime_paths, _app)
     print(f"Loading config from: {runtime_paths.config_path}")

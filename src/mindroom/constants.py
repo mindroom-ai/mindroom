@@ -24,8 +24,6 @@ ROUTER_AGENT_NAME = "router"
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
-_RUNTIME_SYNCED_ENV_VALUES: dict[str, str] = {}
-_RUNTIME_SYNCED_ENV_ORIGINALS: dict[str, str | None] = {}
 
 
 @dataclass(frozen=True)
@@ -41,7 +39,7 @@ class RuntimePaths:
 
     Runtime env precedence is:
     1. Explicit runtime arguments passed to `resolve_runtime_paths()`
-    2. Exported process env values that were not injected by runtime activation
+    2. Exported process env values
     3. The config-adjacent `.env`
     4. Code defaults in the caller
     """
@@ -76,18 +74,7 @@ class RuntimePaths:
 def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, str]:
     if process_env is not None:
         return dict(process_env)
-
-    exported_env: dict[str, str] = {}
-    for key, value in os.environ.items():
-        synced_value = _RUNTIME_SYNCED_ENV_VALUES.get(key)
-        if synced_value is not None and synced_value == value:
-            original_value = _RUNTIME_SYNCED_ENV_ORIGINALS.get(key)
-            if original_value is None:
-                continue
-            exported_env[key] = original_value
-            continue
-        exported_env[key] = value
-    return exported_env
+    return dict(os.environ)
 
 
 def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
@@ -209,49 +196,50 @@ def resolve_primary_runtime_paths(
     )
 
 
-def _replace_runtime_synced_env(next_values: dict[str, str]) -> None:
-    global _RUNTIME_SYNCED_ENV_ORIGINALS, _RUNTIME_SYNCED_ENV_VALUES
-
-    previous_values = _RUNTIME_SYNCED_ENV_VALUES
-    previous_originals = _RUNTIME_SYNCED_ENV_ORIGINALS
-    exported_env = _copy_process_env()
-    for key, old_value in previous_values.items():
-        if key in next_values:
-            continue
-        if os.environ.get(key) == old_value:
-            original_value = previous_originals.get(key)
-            if original_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = original_value
-
-    for key, value in next_values.items():
-        os.environ[key] = value
-
-    _RUNTIME_SYNCED_ENV_VALUES = dict(next_values)
-    _RUNTIME_SYNCED_ENV_ORIGINALS = {key: exported_env.get(key) for key in next_values}
+def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
+    """Return a JSON-compatible payload for explicit cross-process runtime handoff."""
+    return {
+        "config_path": str(runtime_paths.config_path),
+        "storage_root": str(runtime_paths.storage_root),
+        "process_env": dict(runtime_paths.process_env),
+        "env_file_values": dict(runtime_paths.env_file_values),
+    }
 
 
-def sync_runtime_env_to_process(
-    paths: RuntimePaths,
-    *,
-    sync_path_env: bool = True,
-) -> None:
-    """Sync one resolved runtime context into process env for compatibility."""
-    exported_process_env = _copy_process_env()
-    next_values: dict[str, str] = {}
+def deserialize_runtime_paths(payload: Mapping[str, object]) -> RuntimePaths:
+    """Build one RuntimePaths object from an explicit serialized payload."""
+    raw_config_path = payload.get("config_path")
+    raw_storage_root = payload.get("storage_root")
+    raw_process_env = payload.get("process_env")
+    raw_env_file_values = payload.get("env_file_values")
+    if not isinstance(raw_config_path, str) or not raw_config_path.strip():
+        msg = "Serialized runtime payload is missing config_path"
+        raise TypeError(msg)
+    if not isinstance(raw_storage_root, str) or not raw_storage_root.strip():
+        msg = "Serialized runtime payload is missing storage_root"
+        raise TypeError(msg)
+    if not isinstance(raw_process_env, Mapping):
+        msg = "Serialized runtime payload is missing process_env"
+        raise TypeError(msg)
+    if not isinstance(raw_env_file_values, Mapping):
+        msg = "Serialized runtime payload is missing env_file_values"
+        raise TypeError(msg)
 
-    for key, value in paths.env_file_values.items():
-        if key in _RUNTIME_PATH_ENV_KEYS:
-            continue
-        if key in exported_process_env:
-            continue
-        next_values[key] = value
-    if sync_path_env:
-        next_values["MINDROOM_CONFIG_PATH"] = str(paths.config_path)
-        next_values["MINDROOM_STORAGE_PATH"] = str(paths.storage_root)
-
-    _replace_runtime_synced_env(next_values)
+    process_env = {
+        key: value for key, value in raw_process_env.items() if isinstance(key, str) and isinstance(value, str)
+    }
+    env_file_values = {
+        key: value for key, value in raw_env_file_values.items() if isinstance(key, str) and isinstance(value, str)
+    }
+    config_path = Path(raw_config_path).expanduser().resolve()
+    return RuntimePaths(
+        config_path=config_path,
+        config_dir=config_path.parent,
+        env_path=config_path.parent / ".env",
+        storage_root=Path(raw_storage_root).expanduser().resolve(),
+        process_env=cast("Mapping[str, str]", MappingProxyType(process_env)),
+        env_file_values=cast("Mapping[str, str]", MappingProxyType(env_file_values)),
+    )
 
 
 def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
@@ -273,8 +261,17 @@ def _expand_runtime_path_vars(value: str, paths: RuntimePaths) -> str:
 
 
 def exported_process_env() -> dict[str, str]:
-    """Return the current exported env snapshot without compatibility-injected values."""
+    """Return the current exported env snapshot."""
     return _copy_process_env()
+
+
+def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+    """Return the effective runtime env mapping for one explicit runtime context."""
+    merged_env = dict(runtime_paths.env_file_values)
+    merged_env.update(runtime_paths.process_env)
+    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
 def runtime_env_flag(
@@ -448,18 +445,12 @@ def find_config(*, process_env: Mapping[str, str]) -> Path:
 
 
 def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) -> Path:
-    """Update the process-wide runtime storage root.
-
-    `mindroom run --storage-path ...` should behave the same as setting
-    `MINDROOM_STORAGE_PATH` before startup, so runtime code only has one
-    storage-root contract to reason about.
-    """
+    """Return the storage root for the updated primary runtime context."""
     updated_runtime_paths = resolve_primary_runtime_paths(
         config_path=runtime_paths.config_path,
         storage_path=storage_path,
         process_env=dict(runtime_paths.process_env),
     )
-    sync_runtime_env_to_process(updated_runtime_paths, sync_path_env=True)
     return updated_runtime_paths.storage_root
 
 
@@ -468,13 +459,11 @@ def set_runtime_paths(
     config_path: Path | None = None,
     storage_path: Path | None = None,
 ) -> RuntimePaths:
-    """Resolve one primary runtime context and sync it into process env for compatibility."""
-    runtime_paths = resolve_primary_runtime_paths(
+    """Resolve one primary runtime context without mutating process-global state."""
+    return resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=storage_path,
     )
-    sync_runtime_env_to_process(runtime_paths, sync_path_env=True)
-    return runtime_paths
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:
