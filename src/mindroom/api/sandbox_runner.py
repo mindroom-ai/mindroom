@@ -43,7 +43,6 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.local import (
-    LOCAL_WORKER_ROOT_ENV,
     LocalWorkerStatePaths,
     ensure_local_worker_state_locked,
     get_local_worker_manager,
@@ -506,7 +505,6 @@ def _generic_subprocess_env() -> dict[str, str]:
 def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     env = _subprocess_passthrough_env()
     env["HOME"] = str(paths.root)
-    env[LOCAL_WORKER_ROOT_ENV] = str(paths.root.parent)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
     env["UV_CACHE_DIR"] = str(paths.cache_dir / "uv")
@@ -576,7 +574,7 @@ def _prepare_worker(worker_key: str, runtime_paths: RuntimePaths) -> WorkerHandl
                 "api_root": "/api/sandbox-runner",
             },
         )
-    return get_local_worker_manager().ensure_worker(WorkerSpec(worker_key))
+    return get_local_worker_manager(runtime_paths).ensure_worker(WorkerSpec(worker_key))
 
 
 def _normalize_request_worker_key(
@@ -737,7 +735,7 @@ def _subprocess_failure_response(
     runtime_paths: RuntimePaths,
 ) -> SandboxRunnerExecuteResponse:
     if request.worker_key is not None and not _runner_uses_dedicated_worker(runtime_paths):
-        get_local_worker_manager().record_failure(request.worker_key, error)
+        get_local_worker_manager(runtime_paths).record_failure(request.worker_key, error)
     return SandboxRunnerExecuteResponse(ok=False, error=error)
 
 
@@ -887,18 +885,21 @@ async def create_credential_lease(
 
 
 @router.get("/workers", response_model=SandboxWorkerListResponse)
-async def list_workers(include_idle: bool = True) -> SandboxWorkerListResponse:
+async def list_workers(request: Request, include_idle: bool = True) -> SandboxWorkerListResponse:
     """List known workers and their current lifecycle status."""
+    runtime_paths = sandbox_runner_runtime_paths(request)
     workers = [
-        _serialize_worker(worker) for worker in get_local_worker_manager().list_workers(include_idle=include_idle)
+        _serialize_worker(worker)
+        for worker in get_local_worker_manager(runtime_paths).list_workers(include_idle=include_idle)
     ]
     return SandboxWorkerListResponse(workers=workers)
 
 
 @router.post("/workers/cleanup", response_model=SandboxWorkerCleanupResponse)
-async def cleanup_idle_workers() -> SandboxWorkerCleanupResponse:
+async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Mark idle workers inactive while retaining their persisted state."""
-    worker_manager = get_local_worker_manager()
+    runtime_paths = sandbox_runner_runtime_paths(request)
+    worker_manager = get_local_worker_manager(runtime_paths)
     cleaned_workers = [_serialize_worker(worker) for worker in worker_manager.cleanup_idle_workers()]
     return SandboxWorkerCleanupResponse(
         idle_timeout_seconds=worker_manager.idle_timeout_seconds,

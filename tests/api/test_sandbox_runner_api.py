@@ -64,7 +64,8 @@ def _load_tools() -> None:
 def _reset_worker_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
+    monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
 
 
 @pytest.fixture
@@ -117,7 +118,7 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config | None]:
-    runtime_paths = resolve_runtime_paths(process_env=dict(os.environ))
+    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
     config = sandbox_runner_module.load_config(runtime_paths) if runtime_paths.config_path.exists() else None
     sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
@@ -720,8 +721,7 @@ def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_t
 ) -> None:
     """Worker requests should still run tools that do not declare a base_dir init field."""
     _set_sandbox_token(monkeypatch)
-    worker_root = tmp_path / "workers"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -772,10 +772,8 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
 ) -> None:
     """Worker request validation should reuse the prepared worker for parent dispatch."""
     _set_sandbox_token(monkeypatch)
-    worker_root = tmp_path / "workers"
     storage_root = tmp_path / "storage"
     worker_key = "v1:tenant-123:shared:general"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
 
     prepare_calls = 0
@@ -961,7 +959,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     """Worker-routed file tools should persist state by worker key and isolate different workers."""
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
 
     save_response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1020,10 +1018,8 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
 ) -> None:
     """Worker requests should honor a forwarded canonical base_dir inside shared agent storage."""
     _set_sandbox_token(monkeypatch)
-    worker_root = tmp_path / "workers"
     storage_root = tmp_path / "storage"
     worker_key = "v1:tenant-123:shared:general"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
 
     response = runner_client.post(
@@ -1043,6 +1039,7 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
     assert response.json()["ok"] is True
 
     canonical_file = agent_workspace_root_path(storage_root, "general") / "mind_data" / "note.txt"
+    worker_root = storage_root / "workers"
     assert canonical_file.read_text(encoding="utf-8") == "hello from canonical workspace"
     assert not (worker_root / worker_dir_name(worker_key) / "workspace" / "note.txt").exists()
 
@@ -1165,7 +1162,7 @@ def test_sandbox_runner_worker_python_uses_persistent_virtualenv(
     """Worker-routed python tools should execute inside the worker-specific virtualenv."""
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
 
     response = runner_client.post(
         "/api/sandbox-runner/execute",
@@ -1195,7 +1192,7 @@ def test_sandbox_runner_worker_python_supports_matrix_scoped_worker_keys(
     """Scoped worker keys should be sanitized before they reach the venv path."""
     _set_sandbox_token(monkeypatch)
     worker_root = tmp_path / "workers"
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
     worker_key = resolve_worker_key(
         "user",
         ToolExecutionIdentity(
@@ -1263,7 +1260,8 @@ def test_sandbox_runner_lists_known_workers(
     assert worker["status"] == "ready"
     assert worker["backend_name"] == "local_sandbox_runner"
     assert worker["startup_count"] == 1
-    assert worker["debug_metadata"]["state_root"] == str((tmp_path / "workers" / worker_dir_name("worker-a")).resolve())
+    worker_root = tmp_path / ".mindroom" / "workers"
+    assert worker["debug_metadata"]["state_root"] == str((worker_root / worker_dir_name("worker-a")).resolve())
 
 
 @REQUIRES_LINUX_LOCAL_WORKER
@@ -1290,7 +1288,8 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
     assert save_response.status_code == 200
     assert save_response.json()["ok"] is True
 
-    metadata_path = tmp_path / "workers" / worker_dir_name("worker-a") / "metadata" / "worker.json"
+    worker_root = tmp_path / ".mindroom" / "workers"
+    metadata_path = worker_root / worker_dir_name("worker-a") / "metadata" / "worker.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["last_used_at"] = 0.0
     metadata["status"] = "ready"
@@ -1307,7 +1306,7 @@ def test_sandbox_runner_cleanup_marks_idle_workers_without_deleting_state(
     listed_worker = next(worker for worker in workers_response.json()["workers"] if worker["worker_key"] == "worker-a")
     assert listed_worker["status"] == "idle"
 
-    worker_file = tmp_path / "workers" / worker_dir_name("worker-a") / "workspace" / "note.txt"
+    worker_file = worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
 
 
@@ -1342,8 +1341,8 @@ def test_dedicated_worker_mode_uses_mounted_root(
         assert cmd[0] == str(worker_root / "venv" / "bin" / "python")
         assert isinstance(cwd, str)
         assert cwd == str(worker_root / "workspace")
-        assert env[local_workers_module.LOCAL_WORKER_ROOT_ENV] == str(worker_root.parent)
         assert "MINDROOM_STORAGE_PATH" not in env
+        assert "MINDROOM_SANDBOX_WORKER_ROOT" not in env
         request_envelope = json.loads(request_input)
         request_payload = request_envelope["request"]
         runtime_payload = request_envelope["runtime_paths"]
@@ -1465,26 +1464,25 @@ def test_dedicated_worker_mode_rejects_mismatched_worker_key(
     assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
 
 
-def test_worker_subprocess_env_preserves_parent_worker_root_without_explicit_override(
+def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Subprocess workers should keep worker-local state without inheriting runtime path env."""
-    monkeypatch.delenv("MINDROOM_SANDBOX_WORKER_ROOT", raising=False)
-    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / ".mindroom"))
+    """Local worker state roots should come from the committed runtime storage root."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "ambient-workers"))
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "explicit-storage",
+        process_env=dict(os.environ),
+    )
 
-    worker_root = local_workers_module._default_worker_root()
-    paths = local_workers_module._local_worker_state_paths("worker-a", worker_root=worker_root)
-    subprocess_env = sandbox_runner_module._worker_subprocess_env(paths)
+    worker = sandbox_runner_module._prepare_worker("worker-a", runtime_paths)
 
-    with patch.dict("os.environ", subprocess_env, clear=True):
-        child_worker_root = local_workers_module._default_worker_root()
-
-    child_paths = local_workers_module._local_worker_state_paths("worker-a", worker_root=child_worker_root)
-    assert child_worker_root == worker_root
-    assert child_paths.root == paths.root
-    assert subprocess_env["MINDROOM_SANDBOX_WORKER_ROOT"] == str(worker_root)
-    assert "MINDROOM_STORAGE_PATH" not in subprocess_env
+    assert worker.debug_metadata["state_root"] == str(
+        tmp_path / "explicit-storage" / "workers" / worker_dir_name("worker-a"),
+    )
 
 
 def test_get_local_worker_manager_singleton_creation_is_thread_safe(
@@ -1494,7 +1492,10 @@ def test_get_local_worker_manager_singleton_creation_is_thread_safe(
     """Concurrent access should build the local worker manager only once per config."""
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    monkeypatch.setenv("MINDROOM_SANDBOX_WORKER_ROOT", str(tmp_path / "workers"))
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / ".mindroom",
+    )
 
     first_init_started = threading.Event()
     allow_first_init_to_finish = threading.Event()
@@ -1519,7 +1520,7 @@ def test_get_local_worker_manager_singleton_creation_is_thread_safe(
 
     def load_manager() -> None:
         try:
-            managers.append(local_workers_module.get_local_worker_manager())
+            managers.append(local_workers_module.get_local_worker_manager(runtime_paths))
         except Exception as exc:  # pragma: no cover - surfaced by assertion below
             exceptions.append(exc)
 
