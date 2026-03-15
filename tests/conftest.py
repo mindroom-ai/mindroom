@@ -109,7 +109,13 @@ def orchestrator_runtime_paths(
     *,
     config_path: Path | None = None,
 ) -> RuntimePaths:
-    """Build an explicit runtime context for orchestrator tests."""
+    """Build an explicit runtime context for orchestrator tests.
+
+    Default the config path to an isolated file under the provided test root so
+    callers never fall back to the tracked repo-root config.yaml.
+    """
+    if config_path is None:
+        config_path = storage_path / "config.yaml"
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=storage_path,

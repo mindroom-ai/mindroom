@@ -100,6 +100,7 @@ async def test_stop_entities_cancels_sync_tasks() -> None:
 async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
+        patch("mindroom.orchestrator.load_config") as mock_load_config,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.ensure_all_rooms_exist") as mock_ensure_rooms,
@@ -122,11 +123,15 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config = MagicMock(spec=Config)
         config.agents = {"test_agent": MagicMock()}
         config.teams = {}
+        config.plugins = []
+        config.mindroom_user = None
         config.get_all_configured_rooms.return_value = []
+        mock_load_config.return_value = config
 
         # Create orchestrator
         orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        orchestrator.config = config
+
+        assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
         # Initialize bots
         await orchestrator.initialize()
