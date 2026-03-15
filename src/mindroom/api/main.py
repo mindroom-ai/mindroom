@@ -7,19 +7,22 @@ import importlib
 import secrets
 import threading
 from contextlib import asynccontextmanager, suppress
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 from urllib.parse import quote, unquote
 
-import yaml
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from mindroom import constants
+from mindroom.api.config_lifecycle import ApiConfigLock
+from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
+from mindroom.api.config_lifecycle import load_runtime_config as load_api_runtime_config
+from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
+from mindroom.api.config_lifecycle import watch_config as watch_api_config
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
@@ -33,8 +36,6 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
-from mindroom.config.main import Config
-from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -46,7 +47,8 @@ from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-    from types import TracebackType
+
+    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -68,22 +70,11 @@ class _ApiAuthState:
     supabase_auth: _SupabaseClientProtocol | None
 
 
-class _ApiLock(Protocol):
-    def __enter__(self) -> object: ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None: ...
-
-
 @dataclass
 class _ApiContext:
     runtime_paths: constants.RuntimePaths
     config_data: dict[str, Any]
-    config_lock: _ApiLock
+    config_lock: ApiConfigLock
     auth_state: _ApiAuthState | None = None
 
 
@@ -162,7 +153,7 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
     previous_context = getattr(api_app.state, "api_context", None)
-    config_lock: _ApiLock
+    config_lock: ApiConfigLock
     auth_state: _ApiAuthState | None = None
     if isinstance(previous_context, _ApiContext):
         config_lock = previous_context.config_lock
@@ -171,7 +162,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             auth_state = previous_context.auth_state
     else:
         config_data = {}
-        config_lock = cast("_ApiLock", threading.Lock())
+        config_lock = cast("ApiConfigLock", threading.Lock())
     api_app.state.api_context = _ApiContext(
         runtime_paths=runtime_paths,
         config_data=config_data,
@@ -185,7 +176,7 @@ def api_config_data(request: Request) -> dict[str, Any]:
     return _app_config_data(request.app)
 
 
-def api_config_lock(request: Request) -> _ApiLock:
+def api_config_lock(request: Request) -> ApiConfigLock:
     """Return the API config lock for one request."""
     return _app_config_lock(request.app)
 
@@ -195,7 +186,7 @@ def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
     return _app_context(api_app).config_data
 
 
-def _app_config_lock(api_app: FastAPI) -> _ApiLock:
+def _app_config_lock(api_app: FastAPI) -> ApiConfigLock:
     """Return the config lock for one app instance."""
     return _app_context(api_app).config_lock
 
@@ -238,12 +229,12 @@ async def _watch_config(
     runtime_paths: constants.RuntimePaths,
 ) -> None:
     """Watch config.yaml for changes."""
-
-    async def _on_config_change() -> None:
-        logger.info("Config file changed", path=str(runtime_paths.config_path))
-        _load_config_from_file(runtime_paths, api_app)
-
-    await watch_file(runtime_paths.config_path, _on_config_change, stop_event=stop_event)
+    await watch_api_config(
+        stop_event,
+        runtime_paths,
+        lambda: _load_config_from_file(runtime_paths, api_app),
+        watch_file_impl=watch_file,
+    )
 
 
 @asynccontextmanager
@@ -305,7 +296,24 @@ def load_runtime_config(
     runtime_paths: constants.RuntimePaths,
 ) -> tuple[Config, Path]:
     """Load the current runtime config and return it with its path."""
-    return load_runtime_config_model(runtime_paths), runtime_paths.config_path
+    return load_api_runtime_config(runtime_paths)
+
+
+def _run_config_write[T](
+    api_app: FastAPI,
+    mutate: Callable[[dict[str, Any]], T],
+    *,
+    error_prefix: str,
+) -> T:
+    """Validate, save, and swap config under lock."""
+    context = _app_context(api_app)
+    return run_api_config_write(
+        context.runtime_paths,
+        context.config_data,
+        context.config_lock,
+        mutate,
+        error_prefix=error_prefix,
+    )
 
 
 def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | None:
@@ -332,59 +340,6 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
         return None
 
     return index_path if index_path.is_file() else None
-
-
-def _save_config_to_file(
-    config: dict[str, Any],
-    runtime_paths: constants.RuntimePaths,
-) -> None:
-    """Save config to YAML file with deterministic ordering."""
-    config_path = runtime_paths.config_path
-    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        yaml.dump(
-            config,
-            f,
-            default_flow_style=False,
-            sort_keys=True,
-            allow_unicode=True,
-        )
-    constants.safe_replace(tmp_path, config_path)
-
-
-def _validated_config_payload(
-    raw_config: dict[str, Any],
-    runtime_paths: constants.RuntimePaths,
-) -> dict[str, Any]:
-    """Normalize and validate one config payload against the active runtime."""
-    validated_config = Config.validate_with_runtime(raw_config, runtime_paths)
-    return validated_config.model_dump(exclude_none=True)
-
-
-def _run_config_write[T](
-    api_app: FastAPI,
-    mutate: Callable[[dict[str, Any]], T],
-    *,
-    error_prefix: str,
-) -> T:
-    """Validate, save, and swap config under lock."""
-    context = _app_context(api_app)
-    with context.config_lock:
-        try:
-            candidate_config = deepcopy(context.config_data)
-            result = mutate(candidate_config)
-            validated_payload = _validated_config_payload(candidate_config, context.runtime_paths)
-            _save_config_to_file(validated_payload, runtime_paths=context.runtime_paths)
-        except HTTPException:
-            raise
-        except ValidationError as e:
-            raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
-        else:
-            context.config_data.clear()
-            context.config_data.update(validated_payload)
-            return result
 
 
 def _sanitize_entity_payload(entity_data: dict[str, Any]) -> dict[str, Any]:
@@ -699,18 +654,12 @@ async def verify_user(
 
 def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
-    try:
-        validated_payload = load_runtime_config_model(runtime_paths).model_dump(exclude_none=True)
-        context = _app_context(api_app)
-        with context.config_lock:
-            context.config_data.clear()
-            context.config_data.update(validated_payload)
-    except Exception:
-        logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
-        return False
-    else:
-        logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
-        return True
+    context = _app_context(api_app)
+    return load_api_config_from_file(
+        runtime_paths,
+        config_data=context.config_data,
+        config_lock=context.config_lock,
+    )
 
 
 # Include routers
