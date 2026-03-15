@@ -41,7 +41,7 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
 
 
 def _bind_runtime_paths(config: Config, storage_path: Path) -> Config:
-    return bind_runtime_paths(config, storage_path)
+    return bind_runtime_paths(config, _runtime_paths(storage_path))
 
 
 class TestDelegateTools:
@@ -143,6 +143,7 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 tools._config,
+                tools._runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -199,6 +200,7 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
+                runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=2,
@@ -233,6 +235,7 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
+                runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -290,6 +293,7 @@ class TestDelegateKnowledge:
             mock_create.assert_called_once_with(
                 "researcher",
                 config,
+                runtime_paths,
                 knowledge=mock_knowledge,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -328,6 +332,7 @@ class TestDelegateKnowledge:
             mock_create.assert_called_once_with(
                 "worker",
                 config,
+                runtime_paths,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -416,7 +421,7 @@ class TestDelegateAutoInjection:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "leader",
             config=config,
@@ -434,7 +439,7 @@ class TestDelegateAutoInjection:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "worker",
             config=config,
@@ -457,7 +462,7 @@ class TestDelegateAutoInjection:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "leader",
             config=config,
@@ -480,7 +485,7 @@ class TestDelegateAutoInjection:
                 ),
             },
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "leader",
             config=config,
@@ -509,7 +514,7 @@ class TestDelegateAutoInjection:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "leader",
             config=config,
@@ -540,7 +545,7 @@ class TestDelegateAutoInjection:
             models={"default": ModelConfig(provider="openai", id="gpt-4")},
             defaults=DefaultsConfig(tools=["delegate"]),
         )
-        _bind_runtime_paths(config, tmp_path)
+        config = _bind_runtime_paths(config, tmp_path)
         agent = create_agent(
             "leader",
             config=config,
