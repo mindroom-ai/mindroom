@@ -250,22 +250,13 @@ def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path)
     assert "delete_file" in tool.functions
 
 
-def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
+def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Google BigQuery should honor runtime-scoped env fallbacks without ambient env."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
-    credentials_path = tmp_path / "google-credentials.json"
+    """Google BigQuery should be configured from persisted tool credentials."""
+    config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
-    (config_dir / ".env").write_text(
-        "GOOGLE_CLOUD_PROJECT=demo-project\n"
-        "GOOGLE_CLOUD_LOCATION=us-central1\n"
-        f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
-        encoding="utf-8",
-    )
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
@@ -274,23 +265,20 @@ def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
         "google_bigquery",
-        {"dataset": "demo_dataset"},
+        {
+            "dataset": "demo_dataset",
+            "project": "demo-project",
+            "location": "us-central1",
+        },
         credentials_manager=credentials_manager,
     )
     captured: dict[str, object] = {}
-    fake_google_credentials = object()
-
-    def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
-        captured["credentials_path"] = path
-        captured["scopes"] = scopes
-        return fake_google_credentials, "ignored-project"
 
     class _FakeBigQueryClient:
-        def __init__(self, *, project: str, credentials: object) -> None:
+        def __init__(self, *, project: str, credentials: object | None = None) -> None:
             captured["project"] = project
             captured["credentials"] = credentials
 
-    monkeypatch.setattr("google.auth.load_credentials_from_file", fake_load_credentials_from_file)
     monkeypatch.setattr("agno.tools.google_bigquery.bigquery.Client", _FakeBigQueryClient)
 
     tool = get_tool_by_name("google_bigquery", runtime_paths)
@@ -299,12 +287,11 @@ def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
     assert tool.project == "demo-project"
     assert tool.location == "us-central1"
     assert captured["project"] == "demo-project"
-    assert captured["credentials"] is fake_google_credentials
-    assert captured["credentials_path"] == str(credentials_path)
+    assert captured["credentials"] is None
 
 
-def test_get_tool_by_name_builds_clickup_from_runtime_env(tmp_path: Path) -> None:
-    """Constructor-time env fallbacks should work from the runtime .env snapshot."""
+def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> None:
+    """Runtime-scoped env values should not configure ClickUp during toolkit construction."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -319,10 +306,8 @@ def test_get_tool_by_name_builds_clickup_from_runtime_env(tmp_path: Path) -> Non
         process_env={},
     )
 
-    tool = get_tool_by_name("clickup", runtime_paths)
-
-    assert tool.api_key == "clickup-test"
-    assert tool.master_space_id == "space-123"
+    with pytest.raises(ValueError, match="CLICKUP_API_KEY not set"):
+        get_tool_by_name("clickup", runtime_paths)
 
 
 def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path) -> None:

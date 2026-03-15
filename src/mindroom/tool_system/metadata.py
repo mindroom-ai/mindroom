@@ -6,8 +6,6 @@ import functools
 import importlib
 import inspect
 import os
-import threading
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -15,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
-from mindroom import constants
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
@@ -28,7 +25,7 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable
 
     from agno.tools import Toolkit
 
@@ -39,34 +36,10 @@ if TYPE_CHECKING:
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
-_TOOL_RUNTIME_ENV_LOCK = threading.Lock()
 
 
 class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
-
-
-def _tool_runtime_env(runtime_paths: RuntimePaths) -> dict[str, str]:
-    """Build the runtime env visible to one direct tool execution."""
-    return dict(constants.runtime_env_values(runtime_paths))
-
-
-@contextmanager
-def _tool_runtime_env_overlay(runtime_paths: RuntimePaths) -> Generator[None, None, None]:
-    """Temporarily expose one runtime's env values during toolkit construction."""
-    env_values = _tool_runtime_env(runtime_paths)
-    _TOOL_RUNTIME_ENV_LOCK.acquire()
-    previous_env = {name: os.environ.get(name) for name in env_values}
-    os.environ.update(env_values)
-    try:
-        yield
-    finally:
-        for name, previous_value in previous_env.items():
-            if previous_value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = previous_value
-        _TOOL_RUNTIME_ENV_LOCK.release()
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -112,10 +85,8 @@ def sanitize_tool_init_overrides(
 
 
 def _build_tool_config_init_kwargs(
-    tool_name: str,
     metadata: ToolMetadata,
     *,
-    runtime_paths: RuntimePaths,
     credentials: dict[str, object],
     tool_init_overrides: dict[str, object] | None,
     runtime_overrides: dict[str, object] | None,
@@ -126,24 +97,6 @@ def _build_tool_config_init_kwargs(
 
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
-    if tool_name == "google_bigquery":
-        if "project" not in init_kwargs and (project := runtime_paths.env_value("GOOGLE_CLOUD_PROJECT")):
-            init_kwargs["project"] = project
-        if "location" not in init_kwargs and (location := runtime_paths.env_value("GOOGLE_CLOUD_LOCATION")):
-            init_kwargs["location"] = location
-        if "credentials" not in init_kwargs and (
-            google_application_credentials := constants.runtime_env_path(
-                runtime_paths,
-                "GOOGLE_APPLICATION_CREDENTIALS",
-            )
-        ):
-            google_auth = importlib.import_module("google.auth")
-            load_credentials_from_file = google_auth.load_credentials_from_file
-            credentials_obj, _project_id = load_credentials_from_file(
-                str(google_application_credentials),
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            init_kwargs["credentials"] = credentials_obj
     if tool_init_overrides:
         init_kwargs.update(
             {
@@ -270,9 +223,7 @@ def _build_tool_instance(
     metadata = TOOL_METADATA[tool_name]
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
-        tool_name,
         metadata,
-        runtime_paths=runtime_paths,
         credentials=credentials,
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
@@ -287,8 +238,7 @@ def _build_tool_instance(
         routing_agent_name=routing_agent_name,
     )
 
-    with _tool_runtime_env_overlay(runtime_paths):
-        toolkit = cast("Any", tool_class)(**init_kwargs)
+    toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
     shared_storage_root_path = None

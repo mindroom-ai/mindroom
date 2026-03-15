@@ -27,7 +27,7 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import CredentialsManager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ConfigField,
@@ -235,20 +235,20 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
 
 
-def test_resolve_entrypoint_builds_clickup_from_runtime_env(tmp_path: Path) -> None:
-    """Sandbox-side tool rebuilds should honor constructor env fallbacks from runtime paths."""
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.yaml"
+def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Path) -> None:
+    """Sandbox-side tool rebuilds should use persisted tool credentials."""
+    config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
-    (config_dir / ".env").write_text(
-        "CLICKUP_API_KEY=clickup-test\nMASTER_SPACE_ID=space-123\n",
-        encoding="utf-8",
-    )
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
         process_env={},
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "clickup",
+        {"api_key": "clickup-test", "master_space_id": "space-123"},
+        credentials_manager=credentials_manager,
     )
 
     toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
@@ -343,7 +343,7 @@ def test_worker_subprocess_env_preserves_parent_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker subprocesses should keep the parent PATH after prepending the worker venv."""
+    """Worker subprocesses should keep PATH without re-exporting tool config env vars."""
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -356,16 +356,15 @@ def test_worker_subprocess_env_preserves_parent_path(
         f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
         encoding="utf-8",
     )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
 
-    env = sandbox_runner_module._worker_subprocess_env(paths, runtime_paths)
+    env = sandbox_runner_module._worker_subprocess_env(paths)
 
     assert env["PATH"].startswith(f"{paths.venv_dir}/bin:")
     assert env["PATH"].endswith("/usr/local/bin:/usr/bin:/bin")
-    assert env["GOOGLE_CLOUD_PROJECT"] == "demo-project"
-    assert env["GOOGLE_CLOUD_LOCATION"] == "us-central1"
-    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == str(credentials_path)
+    assert "GOOGLE_CLOUD_PROJECT" not in env
+    assert "GOOGLE_CLOUD_LOCATION" not in env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
