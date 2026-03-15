@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,21 +16,30 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
 from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for thread mode tests."""
-    return bind_runtime_paths(config, runtime_root)
+    if runtime_root is None:
+        runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _entity_thread_mode(config: Config, entity_name: str, *, room_id: str | None = None) -> str:
