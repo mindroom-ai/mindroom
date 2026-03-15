@@ -27,6 +27,7 @@ from mindroom.tool_system.metadata import (
     ToolMetadata,
     ToolStatus,
     ensure_tool_registry_loaded,
+    get_tool_by_name,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -162,6 +163,59 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
         credentials_module._credentials_manager_signature = None
 
         toolkit, _ = sandbox_runner_module._resolve_entrypoint(tool_name=tool_name, function_name="run")
+
+        assert toolkit.token == stored_value
+    finally:
+        metadata_module._TOOL_REGISTRY.clear()
+        metadata_module._TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        credentials_module._credentials_manager = original_manager
+        credentials_module._credentials_manager_signature = original_signature
+
+
+def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_manager(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Config-backed tool rebuilds should use the runtime credential store by default."""
+
+    class DummyTool:
+        def __init__(self, token: str | None = None) -> None:
+            self.name = "dummy"
+            self.token = token
+            self.functions = {"run": type("F", (), {"entrypoint": lambda _unused: None})()}
+            self.async_functions = {}
+            self.requires_connect = False
+
+    tool_name = "dummy_runtime_cred_tool"
+    stored_value = "value123"
+    original_registry = metadata_module._TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_manager = credentials_module._credentials_manager
+    original_signature = credentials_module._credentials_manager_signature
+    storage_root = tmp_path / "runtime-storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        display_name="Dummy",
+        description="Dummy",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.REQUIRES_CONFIG,
+        setup_type=SetupType.API_KEY,
+        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    )
+
+    try:
+        CredentialsManager(base_path=storage_root / "credentials").save_credentials(
+            tool_name,
+            {"token": stored_value},
+        )
+        credentials_module._credentials_manager = None
+        credentials_module._credentials_manager_signature = None
+
+        toolkit = get_tool_by_name(tool_name)
 
         assert toolkit.token == stored_value
     finally:

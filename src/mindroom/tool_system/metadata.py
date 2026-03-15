@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from loguru import logger
 
 from mindroom.config.main import Config
-from mindroom.credentials import load_scoped_credentials
+from mindroom.constants import exported_process_env, resolve_primary_runtime_paths
+from mindroom.credentials import get_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
@@ -136,6 +137,36 @@ def _add_worker_context_init_kwargs(
         init_kwargs["routing_agent_name"] = routing_agent_name
 
 
+def _default_credentials_manager() -> CredentialsManager:
+    """Resolve the persisted credential store for the current runtime context."""
+    runtime_paths = resolve_primary_runtime_paths(process_env=exported_process_env())
+    return get_credentials_manager(storage_root=runtime_paths.storage_root)
+
+
+def _resolve_tool_credentials_manager(
+    tool_name: str,
+    tool_class: type[Toolkit],
+    credentials_manager: CredentialsManager | None,
+) -> CredentialsManager | None:
+    """Return the credential manager a tool rebuild should use, if any."""
+    if credentials_manager is not None:
+        return credentials_manager
+
+    init_signature = inspect.signature(tool_class.__init__)
+    metadata = TOOL_METADATA[tool_name]
+    has_secret_config = any(field.type == "password" for field in metadata.config_fields or [])
+    needs_persisted_credentials = (
+        metadata.auth_provider is not None
+        or metadata.setup_type != SetupType.NONE
+        or has_secret_config
+        or "credentials_manager" in init_signature.parameters
+    )
+    if not needs_persisted_credentials:
+        return None
+
+    return _default_credentials_manager()
+
+
 def _build_tool_instance(
     tool_name: str,
     *,
@@ -161,14 +192,19 @@ def _build_tool_instance(
         raise ValueError(msg)
 
     tool_class = _TOOL_REGISTRY[tool_name]()
+    resolved_credentials_manager = _resolve_tool_credentials_manager(
+        tool_name,
+        tool_class,
+        credentials_manager,
+    )
     credentials = (
         load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
-            credentials_manager=credentials_manager,
+            credentials_manager=resolved_credentials_manager,
         )
-        if credentials_manager is not None
+        if resolved_credentials_manager is not None
         else {}
     ) or {}
     if credential_overrides:
@@ -184,7 +220,7 @@ def _build_tool_instance(
     _add_worker_context_init_kwargs(
         tool_class,
         init_kwargs=init_kwargs,
-        credentials_manager=credentials_manager,
+        credentials_manager=resolved_credentials_manager,
         runtime_overrides=runtime_overrides,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
@@ -201,7 +237,7 @@ def _build_tool_instance(
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
-        credentials_manager=credentials_manager,
+        credentials_manager=resolved_credentials_manager,
         tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
