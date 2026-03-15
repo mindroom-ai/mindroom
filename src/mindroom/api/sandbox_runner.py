@@ -16,6 +16,7 @@ import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
@@ -72,6 +73,7 @@ _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUB
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 _SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
@@ -175,6 +177,8 @@ class SandboxRunnerExecuteRequest(BaseModel):
     Clients must provide credentials via ``lease_id``.
     ``credential_overrides`` is reserved for internal in-process and subprocess
     execution after the lease has been resolved.
+    ``execution_env`` is reserved for execution tools such as ``shell`` and
+    sandboxed ``python`` that intentionally receive runtime env during execution.
     """
 
     tool_name: str
@@ -188,6 +192,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution_identity: dict[str, Any] = Field(default_factory=dict)
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
+    execution_env: dict[str, str] = Field(default_factory=dict)
 
 
 class SandboxRunnerLeaseRequest(BaseModel):
@@ -495,6 +500,36 @@ def _runner_uses_dedicated_worker(runtime_paths: RuntimePaths) -> bool:
     return _runner_dedicated_worker_key(runtime_paths) is not None
 
 
+def _request_execution_env(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+) -> dict[str, str]:
+    if request.execution_env:
+        return dict(request.execution_env)
+    if request.tool_name not in _EXECUTION_ENV_TOOL_NAMES:
+        return {}
+    return dict(constants.runtime_env_values(runtime_paths))
+
+
+def _runtime_paths_with_execution_env(
+    runtime_paths: RuntimePaths,
+    execution_env: dict[str, str],
+) -> RuntimePaths:
+    if not execution_env:
+        return runtime_paths
+
+    process_env = dict(runtime_paths.process_env)
+    process_env.update(execution_env)
+    return constants.RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=runtime_paths.storage_root,
+        process_env=MappingProxyType(process_env),
+        env_file_values=runtime_paths.env_file_values,
+    )
+
+
 def _project_src_path() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -727,14 +762,18 @@ async def _execute_request_inprocess(
     except _WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
     runtime_overrides = _ready_runtime_overrides(prepared.runtime_overrides if prepared is not None else None)
+    effective_runtime_paths = _runtime_paths_with_execution_env(
+        runtime_paths,
+        _request_execution_env(request, runtime_paths),
+    )
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    config = load_config(runtime_paths) if runtime_paths.config_path.exists() else None
+    config = load_config(effective_runtime_paths) if effective_runtime_paths.config_path.exists() else None
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
-            runtime_paths=runtime_paths,
+            runtime_paths=effective_runtime_paths,
             config=config,
             tool_name=request.tool_name,
             function_name=request.function_name,
@@ -794,6 +833,23 @@ def _resolve_subprocess_worker_context(
     )
 
 
+def _subprocess_env_for_request(
+    request: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    base_env: dict[str, str] | None,
+) -> dict[str, str] | None:
+    if base_env is None:
+        return None
+
+    execution_env = _request_execution_env(request, runtime_paths)
+    if not execution_env:
+        return base_env
+
+    env = dict(base_env)
+    env.update(execution_env)
+    return env
+
+
 def _parse_subprocess_response(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -838,6 +894,7 @@ def _execute_request_subprocess_sync(
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
     python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared)
+    subprocess_env = _subprocess_env_for_request(request, runtime_paths, subprocess_env)
     envelope = _SandboxSubprocessEnvelope(
         request=request,
         runtime_paths=constants.serialize_runtime_paths(runtime_paths),
@@ -964,7 +1021,7 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
 
 
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(
+async def execute_tool_call(  # noqa: C901
     request: Request,
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
@@ -990,6 +1047,8 @@ async def execute_tool_call(
         )
 
     payload.credential_overrides = credential_overrides
+    if payload.execution_env and payload.tool_name not in _EXECUTION_ENV_TOOL_NAMES:
+        raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
     prepared_worker: _PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:
@@ -997,6 +1056,13 @@ async def execute_tool_call(
         except _WorkerRequestPreparationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if _runner_uses_subprocess(runtime_paths):
+        return await _execute_request_subprocess(
+            payload,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
+    if payload.tool_name == "python" and _request_execution_env(payload, runtime_paths):
         return await _execute_request_subprocess(
             payload,
             runtime_paths,

@@ -310,8 +310,8 @@ def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> No
         get_tool_by_name("clickup", runtime_paths)
 
 
-def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path) -> None:
-    """Direct tool execution should see runtime-scoped env values through os.environ."""
+def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution(tmp_path: Path) -> None:
+    """Direct in-process Python execution should not emulate committed runtime env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -336,14 +336,14 @@ def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path
     )
 
     assert ast.literal_eval(result) == {
-        "openai_base_url": "http://example.invalid/v1",
-        "namespace": "alpha1234",
-        "storage": str((tmp_path / "storage").resolve()),
+        "openai_base_url": None,
+        "namespace": None,
+        "storage": None,
     }
 
 
-def test_get_tool_by_name_exposes_runtime_env_to_file_backed_python_execution(tmp_path: Path) -> None:
-    """All Python execution entrypoints should inherit the committed runtime env."""
+def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_execution(tmp_path: Path) -> None:
+    """Direct file-backed Python execution should also avoid runtime env emulation."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -373,9 +373,9 @@ def test_get_tool_by_name_exposes_runtime_env_to_file_backed_python_execution(tm
     save_result = save_entrypoint("runtime_values.py", code, "result")
     run_result = run_file_entrypoint("runtime_values.py", "result")
     expected = {
-        "openai_base_url": "http://example.invalid/v1",
-        "namespace": "alpha1234",
-        "storage": str((tmp_path / "storage").resolve()),
+        "openai_base_url": None,
+        "namespace": None,
+        "storage": None,
     }
 
     assert ast.literal_eval(save_result) == expected
@@ -402,6 +402,86 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
     result = entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "visible-in-shell"
+
+
+def test_proxy_forwards_execution_env_only_for_execution_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sandbox proxy should forward execution env only for shell/python-style execution tools."""
+    captured: dict[str, Any] = {}
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="all",
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured),
+    )
+    monkeypatch.setenv("TEST_EXECUTION_ENV", "visible-in-shell")
+
+    shell_tool = get_tool_by_name("shell", _runtime_paths_from_env())
+    shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
+    assert shell_entrypoint is not None
+    result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
+
+    assert result == "sandbox-result"
+    assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
+
+    captured.clear()
+    calculator = get_tool_by_name("calculator", runtime_paths)
+    calculator_entrypoint = calculator.functions["add"].entrypoint
+    assert calculator_entrypoint is not None
+    calculator_entrypoint(1, 2)
+
+    assert "execution_env" not in captured["json"]
+
+
+def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker routing should not require ToolRuntimeContext just to recover storage_root."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_get_primary_worker_manager(
+        runtime_paths_arg: RuntimePaths,
+        *,
+        proxy_url: str | None,
+        proxy_token: str | None,
+        storage_root: Path | None = None,
+    ) -> str:
+        captured["runtime_paths"] = runtime_paths_arg
+        captured["proxy_url"] = proxy_url
+        captured["proxy_token"] = proxy_token
+        captured["storage_root"] = storage_root
+        return "manager"
+
+    monkeypatch.setattr(sandbox_proxy_module, "get_primary_worker_manager", _fake_get_primary_worker_manager)
+    monkeypatch.setattr(sandbox_proxy_module, "get_tool_runtime_context", lambda: None)
+
+    manager = sandbox_proxy_module._get_worker_manager(
+        runtime_paths,
+        sandbox_proxy_module.SandboxProxyConfig(
+            runner_mode=False,
+            proxy_url="http://sandbox",
+            proxy_token="token",  # noqa: S106
+            proxy_timeout_seconds=30.0,
+            execution_mode="all",
+            credential_lease_ttl_seconds=60,
+            proxy_tools=None,
+            credential_policy={},
+        ),
+    )
+
+    assert manager == "manager"
+    assert captured["runtime_paths"] == runtime_paths
+    assert captured["storage_root"] == (tmp_path / "storage").resolve()
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:

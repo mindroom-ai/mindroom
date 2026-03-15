@@ -182,6 +182,47 @@ def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) ->
     }
 
 
+def test_public_startup_runtime_still_allows_python_execution_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Public startup payloads may stay secret-free while Python execution receives explicit env per request."""
+    _set_sandbox_token(monkeypatch)
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(
+        serialize_public_runtime_paths(
+            resolve_primary_runtime_paths(
+                config_path=tmp_path / "config.yaml",
+                storage_path=tmp_path / "storage",
+                process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+            ),
+        ),
+    )
+    child_runtime.config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="python",
+            function_name="run_python_code",
+            args=[
+                'import os\nresult = {"api_key": os.environ.get("OPENAI_API_KEY"), "test": os.environ.get("TEST_EXECUTION_ENV")}',
+                "result",
+            ],
+            execution_env={"OPENAI_API_KEY": "sk-secret", "TEST_EXECUTION_ENV": "visible"},
+        ),
+        child_runtime,
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert ast.literal_eval(str(response.result)) == {
+        "api_key": "sk-secret",
+        "test": "visible",
+    }
+
+
 def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -644,6 +685,29 @@ def test_sandbox_runner_rejects_direct_credential_overrides(
 
     assert response.status_code == 400
     assert "lease_id" in response.json()["detail"]
+
+
+def test_sandbox_runner_rejects_execution_env_for_non_execution_tools(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit execution env is only supported for shell/python execution tools."""
+    _set_sandbox_token(monkeypatch)
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "calculator",
+            "function_name": "add",
+            "args": [2, 3],
+            "kwargs": {},
+            "execution_env": {"TEST_EXECUTION_ENV": "visible"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert "execution tools" in response.json()["detail"]
 
 
 def test_sandbox_runner_rejects_unsafe_tool_init_overrides(

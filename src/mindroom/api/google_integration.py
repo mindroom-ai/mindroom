@@ -415,9 +415,10 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             api_runtime_paths(request),
             project_id,
         )
-        from mindroom.api.main import initialize_api_app  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
         initialize_api_app(request.app, runtime_paths)
+        _load_config_from_file(runtime_paths, request.app)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
     else:
@@ -452,9 +453,10 @@ async def reset(request: Request) -> dict[str, Any]:
             with env_path.open("w", encoding="utf-8") as f:
                 f.writelines(filtered_lines)
         refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
-        from mindroom.api.main import initialize_api_app  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
         initialize_api_app(request.app, refreshed_runtime_paths)
+        _load_config_from_file(refreshed_runtime_paths, request.app)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
     else:

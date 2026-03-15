@@ -572,11 +572,11 @@ class KubernetesResourceManager:
         if raw_value is None or not raw_value.strip():
             return None
         if not Path(self.config.storage_mount_path).exists():
-            return raw_value
+            return None
 
         source_path = constants.runtime_env_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         if source_path is None or not source_path.is_file():
-            return raw_value
+            return None
 
         runtime_dir = dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -593,6 +593,9 @@ class KubernetesResourceManager:
             else self.runtime_paths.config_path.expanduser().resolve()
         )
         process_env = dict(self.runtime_paths.process_env)
+        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        env_file_values = dict(self.runtime_paths.env_file_values)
+        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
         if google_application_credentials := self._worker_google_application_credentials_path(dedicated_root):
             process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
@@ -615,7 +618,7 @@ class KubernetesResourceManager:
             env_path=config_path.parent / ".env",
             storage_root=dedicated_root.resolve(),
             process_env=MappingProxyType(process_env),
-            env_file_values=MappingProxyType(dict(self.runtime_paths.env_file_values)),
+            env_file_values=MappingProxyType(env_file_values),
         )
 
     def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:

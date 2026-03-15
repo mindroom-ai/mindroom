@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["google-cloud-bigquery"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_bigquery",
-    helper_text="Configure dataset, project, and location explicitly. Provide a credentials object if the runtime does not already have BigQuery access.",
+    helper_text="Configure dataset, project, and location explicitly. If the toolkit needs credentials, pass them explicitly through saved config or a credentials object.",
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""

@@ -252,11 +252,14 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     runtime_paths = _app_runtime_paths(_app)
     constants.ensure_writable_config_path(create_minimal=True, runtime_paths=runtime_paths)
     _load_config_from_file(runtime_paths, _app)
-    print(f"Loading config from: {runtime_paths.config_path}")
-    print(f"Config exists: {runtime_paths.config_path.exists()}")
+    logger.info(
+        "Initialized API runtime config",
+        config_path=str(runtime_paths.config_path),
+        config_exists=runtime_paths.config_path.exists(),
+    )
 
     # Sync API keys from environment to CredentialsManager
-    print("Syncing API keys from environment to CredentialsManager...")
+    logger.info("Syncing API credentials from runtime env")
     sync_env_to_credentials(runtime_paths=runtime_paths)
 
     stop_event = asyncio.Event()
@@ -702,9 +705,9 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastA
         with context.config_lock:
             context.config_data.clear()
             context.config_data.update(validated_payload)
-        print("Config loaded successfully")
-    except Exception as e:
-        print(f"Error loading config: {e}")
+        logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
+    except Exception:
+        logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
 
 
 # Include routers

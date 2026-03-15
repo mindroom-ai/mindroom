@@ -269,4 +269,4 @@ Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API
 
 Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
 
-Execution tools such as `shell` and `python` still see the committed runtime env during execution. That runtime env is execution context, not a supported tool-configuration fallback.
+Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.

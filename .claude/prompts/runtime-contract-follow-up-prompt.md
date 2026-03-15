@@ -76,6 +76,8 @@ Non-goals for this PR unless they become directly necessary:
 - a full tool-construction redesign
 - a full model-factory redesign
 - deleting env-sync compatibility for subprocesses and third-party libraries
+- restoring generic tool-constructor env fallback
+- restoring direct in-process Python runtime-env emulation
 
 Those can be separate follow-up PRs.
 This PR should focus on making the internal runtime contract singular and explicit in the core helper layers.

@@ -362,6 +362,34 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert expected_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
+def test_kubernetes_backend_drops_host_local_adc_path_when_not_mounted(tmp_path: Path) -> None:
+    """Dedicated worker payloads must not serialize unusable host-local ADC paths."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": "/host/path/adc.json"},
+    )
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(tmp_path / "not-mounted-storage"),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") is None
+
+
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
     """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
     config_path = tmp_path / "workspace-config.yaml"

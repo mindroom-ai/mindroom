@@ -12,6 +12,7 @@ Path resolution, env loading, and import-time runtime snapshots must be unified 
 Do this as a merge-and-forget refactor.
 Do not preserve old path behavior when it conflicts with the new contract.
 Do not add compatibility wrappers whose only purpose is to keep old tests passing.
+Do not treat removed tool-constructor env fallback as part of the runtime contract.
 
 Context:
 This repo keeps regressing on:

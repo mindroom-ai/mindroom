@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.constants import runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -45,6 +46,7 @@ _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
 _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
+_EXECUTION_ENV_TOOL_NAMES = frozenset({"python", "shell"})
 
 
 @dataclass(frozen=True)
@@ -341,13 +343,26 @@ def _get_worker_manager(
     proxy_config: SandboxProxyConfig,
 ) -> WorkerManager:
     context = get_tool_runtime_context()
-    storage_root = context.storage_path if context is not None else None
+    storage_root = (
+        context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
+    )
     return get_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
         storage_root=storage_root,
     )
+
+
+def _execution_env_payload(
+    tool_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+) -> dict[str, str] | None:
+    """Return explicit execution env only for tools that intentionally support it."""
+    if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
+        return None
+    return dict(runtime_env_values(runtime_paths))
 
 
 def _request_headers_for_handle(
@@ -437,7 +452,7 @@ def _sandbox_proxy_enabled_for_tool(
     return backend_name == "kubernetes"
 
 
-def _call_proxy_sync(
+def _call_proxy_sync(  # noqa: C901
     *,
     runtime_paths: RuntimePaths,
     tool_name: str,
@@ -465,6 +480,8 @@ def _call_proxy_sync(
         routing_agent_name=routing_agent_name,
     )
     payload.update(worker_payload)
+    if execution_env := _execution_env_payload(tool_name, runtime_paths=runtime_paths):
+        payload["execution_env"] = execution_env
     if worker_handle is None and proxy_config.proxy_url is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)

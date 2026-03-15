@@ -880,6 +880,48 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     assert "GOOGLE_CLIENT_ID" in connect_response.json()["detail"]
 
 
+def test_google_runtime_refresh_keeps_config_cache_live(
+    api_key_client: TestClient,
+) -> None:
+    """Google configure/reset should reload config instead of leaving the dashboard cache empty."""
+    before_response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert before_response.status_code == 200
+    assert "test_agent" in before_response.json()["agents"]
+
+    configure_response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+        },
+    )
+    assert configure_response.status_code == 200
+
+    after_configure = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert after_configure.status_code == 200
+    assert "test_agent" in after_configure.json()["agents"]
+
+    reset_response = api_key_client.post(
+        "/api/google/reset",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert reset_response.status_code == 200
+
+    after_reset = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert after_reset.status_code == 200
+    assert "test_agent" in after_reset.json()["agents"]
+
+
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
     """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
     config = _config_with_worker_scope("shared")
