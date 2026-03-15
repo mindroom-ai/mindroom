@@ -277,16 +277,6 @@ def exported_process_env() -> dict[str, str]:
     return _copy_process_env()
 
 
-def runtime_env_value(
-    name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    default: str | None = None,
-) -> str | None:
-    """Resolve one runtime env value from the runtime context contract."""
-    return runtime_paths.env_value(name, default=default)
-
-
 def runtime_env_flag(
     name: str,
     runtime_paths: RuntimePaths,
@@ -294,7 +284,7 @@ def runtime_env_flag(
     default: bool = False,
 ) -> bool:
     """Read a boolean runtime env flag with config-adjacent `.env` fallback."""
-    value = runtime_env_value(name, runtime_paths=runtime_paths)
+    value = runtime_paths.env_value(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -302,14 +292,7 @@ def runtime_env_flag(
 
 def runtime_matrix_homeserver(runtime_paths: RuntimePaths) -> str:
     """Return the effective Matrix homeserver for one runtime context."""
-    return (
-        runtime_env_value(
-            "MATRIX_HOMESERVER",
-            runtime_paths=runtime_paths,
-            default="http://localhost:8008",
-        )
-        or "http://localhost:8008"
-    )
+    return runtime_paths.env_value("MATRIX_HOMESERVER", default="http://localhost:8008") or "http://localhost:8008"
 
 
 def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
@@ -319,12 +302,12 @@ def runtime_matrix_ssl_verify(runtime_paths: RuntimePaths) -> bool:
 
 def runtime_matrix_server_name(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional Matrix server-name override for one runtime context."""
-    return runtime_env_value("MATRIX_SERVER_NAME", runtime_paths=runtime_paths)
+    return runtime_paths.env_value("MATRIX_SERVER_NAME")
 
 
 def runtime_mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
     """Return the optional installation namespace for one runtime context."""
-    value = runtime_env_value("MINDROOM_NAMESPACE", runtime_paths=runtime_paths)
+    value = runtime_paths.env_value("MINDROOM_NAMESPACE")
     if value is None:
         return None
     normalized = value.strip().lower()
@@ -624,7 +607,7 @@ def ensure_writable_config_path(
     if config_path.exists():
         return True
 
-    template_env = runtime_env_value("MINDROOM_CONFIG_TEMPLATE", runtime_paths=runtime_paths)
+    template_env = runtime_paths.env_value("MINDROOM_CONFIG_TEMPLATE")
     template_path = Path(template_env).expanduser().resolve() if template_env else config_path
     if template_path != config_path and template_path.exists():
         shutil.copyfile(template_path, config_path)

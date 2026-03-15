@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -35,7 +35,7 @@ from mindroom.ai import (
     stream_agent_response,
 )
 from mindroom.config.main import Config, load_config
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag, runtime_env_value
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -72,13 +72,32 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
+class _OpenAICompatState(Protocol):
+    """Typed subset of FastAPI app state used by the OpenAI-compatible routes."""
+
+    runtime_paths: RuntimePaths
+
+
+def _request_runtime_paths(request: Request) -> RuntimePaths:
+    """Return the explicit runtime context for one OpenAI-compatible request."""
+    try:
+        runtime_paths = cast("_OpenAICompatState", request.app.state).runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
+    if not isinstance(runtime_paths, RuntimePaths):
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg)
+    return runtime_paths
+
+
 def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
     """Load the current runtime config and return it with its path.
 
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    runtime_paths = request.app.state.runtime_paths
+    runtime_paths = _request_runtime_paths(request)
     return load_config(runtime_paths), runtime_paths
 
 
@@ -300,7 +319,7 @@ def _authenticate_request(
     runtime_paths: RuntimePaths,
 ) -> JSONResponse | None:
     """Authenticate one `/v1` request."""
-    keys_env = runtime_env_value("OPENAI_COMPAT_API_KEYS", runtime_paths, default="") or ""
+    keys_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEYS", default="") or ""
     allow_unauthenticated = runtime_env_flag(
         "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED",
         runtime_paths,
@@ -514,8 +533,8 @@ def _build_tool_execution_identity(
         thread_id=None,
         resolved_thread_id=None,
         session_id=session_id,
-        tenant_id=runtime_env_value("CUSTOMER_ID", runtime_paths),
-        account_id=runtime_env_value("ACCOUNT_ID", runtime_paths),
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
 
 
@@ -678,7 +697,7 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    runtime_paths = request.app.state.runtime_paths
+    runtime_paths = _request_runtime_paths(request)
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error

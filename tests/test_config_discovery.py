@@ -426,7 +426,7 @@ class TestResolveConfigRelativePath:
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
 
         assert not hasattr(config, "runtime_paths")
-        assert constants_mod.runtime_env_value("OPENAI_API_KEY", runtime_paths=resolved_runtime_paths) == "from-shell"
+        assert resolved_runtime_paths.env_value("OPENAI_API_KEY") == "from-shell"
 
     def test_config_from_yaml_explicit_path_keeps_exported_storage_override(
         self,

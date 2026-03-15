@@ -19,7 +19,6 @@ from mindroom import __version__, constants
 from mindroom.constants import (
     config_search_locations,
     ensure_writable_config_path,
-    exported_process_env,
 )
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -37,6 +36,8 @@ from .doctor import doctor
 from .local_stack import local_stack_setup
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -126,7 +127,7 @@ def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
 
     config_path = runtime_paths.config_path
     if not config_path.exists():
-        _print_missing_config_error()
+        _print_missing_config_error(runtime_paths.process_env)
         raise typer.Exit(1)
 
     try:
@@ -271,9 +272,7 @@ def connect(
 
     runtime_paths = _activate_cli_runtime(path)
     resolved_provisioning_url = (
-        provisioning_url
-        or constants.runtime_env_value("MINDROOM_PROVISIONING_URL", runtime_paths=runtime_paths)
-        or "https://mindroom.chat"
+        provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
     ).strip()
     if not resolved_provisioning_url:
         console.print("[red]Error:[/red] Invalid provisioning URL.")
@@ -373,14 +372,14 @@ def _local_client_fingerprint(*, config_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _print_missing_config_error() -> None:
+def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("[red]Error:[/red] No config.yaml found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
     console.print("Config search locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(exported_process_env()), 1):
+    for i, loc in enumerate(config_search_locations(process_env), 1):
         status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({status})")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")

@@ -9,7 +9,7 @@ while still picking up .env changes for keys that were never manually set.
 
 from pathlib import Path
 
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_value
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths
 from mindroom.credentials import get_credentials_manager
 from mindroom.logging_config import get_logger
 
@@ -25,11 +25,11 @@ def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
     a readable file, return its stripped contents. Else return None.
     """
-    val = runtime_env_value(name, runtime_paths=runtime_paths)
+    val = runtime_paths.env_value(name)
     if val:
         return val
     file_var = f"{name}_FILE"
-    file_path = runtime_env_value(file_var, runtime_paths=runtime_paths)
+    file_path = runtime_paths.env_value(file_var)
     if file_path and Path(file_path).exists():
         try:
             return Path(file_path).read_text(encoding="utf-8").strip()

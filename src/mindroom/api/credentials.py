@@ -11,7 +11,7 @@ from typing import Any, Protocol, cast
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from mindroom.constants import RuntimePaths, runtime_env_value
+from mindroom.constants import RuntimePaths
 from mindroom.credentials import (
     CredentialsManager,
     get_credentials_manager,
@@ -77,7 +77,15 @@ class RequestCredentialsTarget:
 
 
 def _request_runtime_paths(request: Request) -> RuntimePaths:
-    return cast("_CredentialsApiState", request.app.state).runtime_paths
+    try:
+        runtime_paths = cast("_CredentialsApiState", request.app.state).runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
+    if not isinstance(runtime_paths, RuntimePaths):
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg)
+    return runtime_paths
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -157,12 +165,9 @@ def _build_dashboard_execution_identity(request: Request, agent_name: str) -> To
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
-    runtime_paths = request.app.state.runtime_paths
-    if not isinstance(runtime_paths, RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    tenant_id = runtime_env_value("CUSTOMER_ID", runtime_paths)
-    account_id = runtime_env_value("ACCOUNT_ID", runtime_paths)
+    runtime_paths = _request_runtime_paths(request)
+    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
+    account_id = runtime_paths.env_value("ACCOUNT_ID")
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,

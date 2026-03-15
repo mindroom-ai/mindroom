@@ -37,9 +37,7 @@ def _matrix_homeserver_startup_timeout_seconds_from_env(
     runtime_paths: RuntimePaths,
 ) -> int | None:
     """Return the startup wait timeout from the environment, if configured."""
-    raw_timeout = (
-        constants.runtime_env_value(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV, runtime_paths=runtime_paths) or ""
-    ).strip()
+    raw_timeout = (runtime_paths.env_value(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV) or "").strip()
     if not raw_timeout:
         return None
     timeout_seconds = int(raw_timeout)

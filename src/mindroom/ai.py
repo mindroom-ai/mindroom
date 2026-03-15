@@ -37,7 +37,6 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     runtime_ai_cache_enabled,
-    runtime_env_value,
 )
 from mindroom.credentials import get_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -525,15 +524,15 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
 
     if canonical_provider == "vertexai_claude":
         if "project_id" not in extra_kwargs:
-            project_id = runtime_env_value("ANTHROPIC_VERTEX_PROJECT_ID", runtime_paths=runtime_paths)
+            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
             if project_id:
                 extra_kwargs["project_id"] = project_id
         if "region" not in extra_kwargs:
-            region = runtime_env_value("CLOUD_ML_REGION", runtime_paths=runtime_paths)
+            region = runtime_paths.env_value("CLOUD_ML_REGION")
             if region:
                 extra_kwargs["region"] = region
         if "base_url" not in extra_kwargs:
-            base_url = runtime_env_value("ANTHROPIC_VERTEX_BASE_URL", runtime_paths=runtime_paths)
+            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
             if base_url:
                 extra_kwargs["base_url"] = base_url
 

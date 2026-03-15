@@ -11,7 +11,7 @@ from mindroom.authorization import get_available_agents_for_sender
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import handle_config_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_value
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.scheduling import (
@@ -378,8 +378,8 @@ async def _run_skill_command_tool(
             thread_id=thread_id,
             resolved_thread_id=thread_id,
             session_id=create_session_id(room_id, thread_id),
-            tenant_id=runtime_env_value("CUSTOMER_ID", runtime_paths),
-            account_id=runtime_env_value("ACCOUNT_ID", runtime_paths),
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
 
     try:

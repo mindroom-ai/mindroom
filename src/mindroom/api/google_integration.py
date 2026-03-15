@@ -26,7 +26,7 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.constants import RuntimePaths, runtime_env_value
+from mindroom.constants import RuntimePaths
 from mindroom.credentials import get_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
@@ -60,7 +60,11 @@ _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 def _request_runtime_paths(request: Request) -> RuntimePaths:
     """Return the explicit runtime context for one API request."""
-    runtime_paths = request.app.state.runtime_paths
+    try:
+        runtime_paths = request.app.state.runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
     if not isinstance(runtime_paths, RuntimePaths):
         msg = "API runtime paths are not initialized"
         raise TypeError(msg)
@@ -68,18 +72,12 @@ def _request_runtime_paths(request: Request) -> RuntimePaths:
 
 
 def _mindroom_port(runtime_paths: RuntimePaths) -> str:
-    return runtime_env_value("MINDROOM_PORT", runtime_paths, default="8765") or "8765"
+    return runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
 
 
 def _redirect_uri(runtime_paths: RuntimePaths) -> str:
-    return (
-        runtime_env_value(
-            "GOOGLE_REDIRECT_URI",
-            runtime_paths,
-            default=f"http://localhost:{_mindroom_port(runtime_paths)}/api/google/callback",
-        )
-        or f"http://localhost:{_mindroom_port(runtime_paths)}/api/google/callback"
-    )
+    default_redirect_uri = f"http://localhost:{_mindroom_port(runtime_paths)}/api/google/callback"
+    return runtime_paths.env_value("GOOGLE_REDIRECT_URI", default=default_redirect_uri) or default_redirect_uri
 
 
 def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
@@ -111,8 +109,8 @@ class GoogleAuthUrl(BaseModel):
 
 def _get_oauth_credentials(runtime_paths: RuntimePaths) -> dict[str, Any] | None:
     """Get OAuth credentials from environment variables."""
-    client_id = runtime_env_value("GOOGLE_CLIENT_ID", runtime_paths)
-    client_secret = runtime_env_value("GOOGLE_CLIENT_SECRET", runtime_paths)
+    client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
+    client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         return None
@@ -245,8 +243,8 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
     """Check Google integration status."""
     # Check environment variables
     runtime_paths = _request_runtime_paths(request)
-    client_id = runtime_env_value("GOOGLE_CLIENT_ID", runtime_paths)
-    client_secret = runtime_env_value("GOOGLE_CLIENT_SECRET", runtime_paths)
+    client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
+    client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
     has_credentials = bool(client_id and client_secret)
 
     # Get current credentials

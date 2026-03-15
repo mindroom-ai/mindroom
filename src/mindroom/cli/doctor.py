@@ -299,14 +299,8 @@ def _validate_vertexai_claude_connection(
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with the runtime request path."""
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_id = extra_kwargs.get("project_id") or constants.runtime_env_value(
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        runtime_paths=runtime_paths,
-    )
-    region = extra_kwargs.get("region") or constants.runtime_env_value(
-        "CLOUD_ML_REGION",
-        runtime_paths=runtime_paths,
-    )
+    project_id = extra_kwargs.get("project_id") or runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
+    region = extra_kwargs.get("region") or runtime_paths.env_value("CLOUD_ML_REGION")
     missing = []
     if not project_id:
         missing.append("ANTHROPIC_VERTEX_PROJECT_ID")
@@ -347,10 +341,7 @@ def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     for model in config.models.values():
         if model.provider == "ollama" and model.host:
             return model.host
-    return (
-        constants.runtime_env_value("OLLAMA_HOST", runtime_paths=runtime_paths, default="http://localhost:11434")
-        or "http://localhost:11434"
-    )
+    return runtime_paths.env_value("OLLAMA_HOST", default="http://localhost:11434") or "http://localhost:11434"
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -450,7 +441,7 @@ def _check_single_provider(
         return 0, 0, 0
     validated_keys.add(env_key)
 
-    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths)
+    api_key = runtime_paths.env_value(env_key)
     if not api_key:
         console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, 1
@@ -513,7 +504,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
-    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths) if env_key else None
+    api_key = runtime_paths.env_value(env_key) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
@@ -555,7 +546,7 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
 
     env_key = env_key_for_provider(emb.provider)
-    api_key = constants.runtime_env_value(env_key, runtime_paths=runtime_paths) if env_key else None
+    api_key = runtime_paths.env_value(env_key) if env_key else None
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
