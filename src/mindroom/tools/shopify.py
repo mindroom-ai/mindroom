@@ -26,14 +26,14 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="my-store",
-            description="Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com). Falls back to SHOPIFY_SHOP_NAME env var.",
+            description="Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com).",
         ),
         ConfigField(
             name="access_token",
             label="Access Token",
             type="password",
             required=True,
-            description="Shopify Admin API access token. Falls back to SHOPIFY_ACCESS_TOKEN env var.",
+            description="Shopify Admin API access token.",
         ),
         ConfigField(
             name="api_version",

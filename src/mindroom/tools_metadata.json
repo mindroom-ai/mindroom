@@ -2666,7 +2666,7 @@
         },
         {
           "default": null,
-          "description": "Google Cloud credentials object (optional, uses Application Default Credentials if not set)",
+          "description": "Optional Google Cloud credentials object passed directly to the toolkit",
           "label": "Credentials",
           "name": "credentials",
           "options": null,
@@ -2727,7 +2727,7 @@
       "description": "Query Google BigQuery - list tables, describe schemas, and run SQL queries",
       "display_name": "Google BigQuery",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/google_bigquery",
-      "helper_text": "Requires Google Cloud credentials. Set up [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc)",
+      "helper_text": "Configure dataset, project, and location explicitly. Provide a credentials object if the runtime does not already have BigQuery access.",
       "icon": "SiGooglebigquery",
       "icon_color": "text-blue-600",
       "name": "google_bigquery",
@@ -5308,7 +5308,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com). Falls back to SHOPIFY_SHOP_NAME env var.",
+          "description": "Your Shopify store name (e.g., 'my-store' from my-store.myshopify.com).",
           "label": "Shop Name",
           "name": "shop_name",
           "options": null,
@@ -5319,7 +5319,7 @@
         },
         {
           "default": null,
-          "description": "Shopify Admin API access token. Falls back to SHOPIFY_ACCESS_TOKEN env var.",
+          "description": "Shopify Admin API access token.",
           "label": "Access Token",
           "name": "access_token",
           "options": null,

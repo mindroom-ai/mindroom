@@ -59,13 +59,6 @@ _SCOPES = [
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 
-def _request_runtime_paths(request: Request) -> RuntimePaths:
-    """Return the explicit runtime context for one API request."""
-    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
-
-    return api_runtime_paths(request)
-
-
 def _mindroom_port(runtime_paths: RuntimePaths) -> str:
     return runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
 
@@ -234,8 +227,10 @@ def _save_env_credentials(
 @router.get("/status")
 async def get_status(request: Request, agent_name: str | None = None) -> GoogleStatus:
     """Check Google integration status."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     # Check environment variables
-    runtime_paths = _request_runtime_paths(request)
+    runtime_paths = api_runtime_paths(request)
     client_id = runtime_paths.env_value("GOOGLE_CLIENT_ID")
     client_secret = runtime_paths.env_value("GOOGLE_CLIENT_SECRET")
     has_credentials = bool(client_id and client_secret)
@@ -289,7 +284,9 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
 @router.post("/connect")
 async def connect(request: Request, agent_name: str | None = None) -> GoogleAuthUrl:
     """Start Google OAuth flow."""
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     oauth_config = _get_oauth_credentials(runtime_paths)
     if not oauth_config:
         raise HTTPException(
@@ -342,7 +339,9 @@ async def callback(request: Request) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "google", state)
     agent_name = pending.agent_name
 
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     oauth_config = _get_oauth_credentials(runtime_paths)
     if not oauth_config:
         raise HTTPException(status_code=503, detail="OAuth not configured")
@@ -396,6 +395,8 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
 @router.post("/configure")
 async def configure(request: Request, credentials: dict[str, str]) -> dict[str, Any]:
     """Configure Google OAuth credentials manually."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     client_id = credentials.get("client_id")
     client_secret = credentials.get("client_secret")
     project_id = credentials.get("project_id", "mindroom-integration")
@@ -411,7 +412,7 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
         runtime_paths = _save_env_credentials(
             client_id,
             client_secret,
-            _request_runtime_paths(request),
+            api_runtime_paths(request),
             project_id,
         )
         from mindroom.api.main import initialize_api_app  # noqa: PLC0415
@@ -426,7 +427,9 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 @router.post("/reset")
 async def reset(request: Request) -> dict[str, Any]:
     """Reset Google integration by removing all credentials and tokens."""
-    runtime_paths = _request_runtime_paths(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     try:
         # Remove credentials using the manager
         get_runtime_credentials_manager(runtime_paths).delete_credentials("google")

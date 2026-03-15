@@ -310,7 +310,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sandbox subprocess shell execution should inherit runtime env values without ambient exports."""
+    """Sandbox subprocess shell execution should inherit arbitrary runtime env values without tool-env fallback logic."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
@@ -321,14 +321,14 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={"DAYTONA_API_KEY": "dt_test"},
+        process_env={"TEST_EXECUTION_ENV": "visible-in-shell"},
     )
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
             tool_name="shell",
             function_name="run_shell_command",
-            args=[["bash", "-lc", "printf '%s' \"$DAYTONA_API_KEY\""]],
+            args=[["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""]],
             kwargs={},
         ),
         runtime_paths,
@@ -336,7 +336,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     )
 
     assert response.ok is True
-    assert response.result == "dt_test"
+    assert response.result == "visible-in-shell"
 
 
 def test_worker_subprocess_env_preserves_parent_path(

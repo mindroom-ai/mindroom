@@ -11,7 +11,11 @@ from pydantic import ValidationError
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import load_config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
-from mindroom.custom_tools.config_manager import _is_known_tool_entry, validate_knowledge_bases
+from mindroom.custom_tools.config_manager import (
+    _is_known_tool_entry,
+    _save_runtime_validated_config,
+    validate_knowledge_bases,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -191,7 +195,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            config.save_to_yaml(self.config_path)
+            _save_runtime_validated_config(config, self.runtime_paths, self.config_path)
         except Exception as e:
             return f"Error saving configuration: {e}"
 

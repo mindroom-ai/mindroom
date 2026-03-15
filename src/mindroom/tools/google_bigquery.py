@@ -50,7 +50,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
-            description="Google Cloud credentials object (optional, uses Application Default Credentials if not set)",
+            description="Optional Google Cloud credentials object passed directly to the toolkit",
         ),
         ConfigField(
             name="enable_list_tables",
@@ -83,7 +83,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["google-cloud-bigquery"],
     docs_url="https://docs.agno.com/tools/toolkits/others/google_bigquery",
-    helper_text="Requires Google Cloud credentials. Set up [Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc)",
+    helper_text="Configure dataset, project, and location explicitly. Provide a credentials object if the runtime does not already have BigQuery access.",
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""

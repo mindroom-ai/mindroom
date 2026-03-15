@@ -342,8 +342,8 @@ def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path
     }
 
 
-def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
-    """Direct shell execution should inherit the committed runtime env without ambient exports."""
+def test_get_tool_by_name_exposes_runtime_env_to_file_backed_python_execution(tmp_path: Path) -> None:
+    """All Python execution entrypoints should inherit the committed runtime env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -352,16 +352,56 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={"DAYTONA_API_KEY": "dt_test"},
+        process_env={
+            "OPENAI_BASE_URL": "http://example.invalid/v1",
+            "MINDROOM_NAMESPACE": "alpha1234",
+        },
+    )
+
+    tool = get_tool_by_name("python", runtime_paths, tool_init_overrides={"base_dir": str(tmp_path)})
+    save_entrypoint = tool.functions["save_to_file_and_run"].entrypoint
+    run_file_entrypoint = tool.functions["run_python_file_return_variable"].entrypoint
+    assert save_entrypoint is not None
+    assert run_file_entrypoint is not None
+
+    code = (
+        "import os\n"
+        'result = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), '
+        '"namespace": os.environ.get("MINDROOM_NAMESPACE"), '
+        '"storage": os.environ.get("MINDROOM_STORAGE_PATH")}'
+    )
+    save_result = save_entrypoint("runtime_values.py", code, "result")
+    run_result = run_file_entrypoint("runtime_values.py", "result")
+    expected = {
+        "openai_base_url": "http://example.invalid/v1",
+        "namespace": "alpha1234",
+        "storage": str((tmp_path / "storage").resolve()),
+    }
+
+    assert ast.literal_eval(save_result) == expected
+    assert ast.literal_eval(run_result) == expected
+
+
+def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
+    """Direct shell execution should inherit arbitrary runtime env values without configuring the tool from env."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"TEST_EXECUTION_ENV": "visible-in-shell"},
     )
 
     tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
-    result = entrypoint(["bash", "-lc", "printf '%s' \"$DAYTONA_API_KEY\""])
+    result = entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
-    assert result == "dt_test"
+    assert result == "visible-in-shell"
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -813,7 +853,7 @@ class TestWorkerToolsOverride:
     """Tests for per-agent worker_tools_override parameter."""
 
     def test_override_none_defers_to_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """None override should defer to the standard env var logic."""
+        """None override should defer to the standard sandbox-proxy env controls."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
@@ -821,7 +861,7 @@ class TestWorkerToolsOverride:
             proxy_tools={"shell"},
         )
 
-        # None override → falls through to env var logic
+        # None override -> falls through to sandbox-proxy env controls
         assert (
             sandbox_proxy_module._sandbox_proxy_enabled_for_tool(
                 "shell",
@@ -840,7 +880,7 @@ class TestWorkerToolsOverride:
         )
 
     def test_override_empty_list_disables_sandboxing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Empty list override should disable sandboxing even when env vars enable it."""
+        """Empty list override should disable sandboxing even when sandbox env controls enable it."""
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     display_name="Spider",
     description="Web scraper and crawler that returns LLM-ready data",
     category=ToolCategory.RESEARCH,  # Based on web_scrape category in docs
-    status=ToolStatus.AVAILABLE,  # API key handled via SPIDER_API_KEY env var
+    status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     icon="FaSpider",
     icon_color="text-red-600",  # Spider red color

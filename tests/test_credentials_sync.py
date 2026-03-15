@@ -1,4 +1,4 @@
-"""Tests for credentials sync functionality."""
+"""Tests for syncing shared provider/bootstrap credentials from runtime env."""
 
 import os
 from pathlib import Path
@@ -33,7 +33,7 @@ def _runtime_paths(
 
 
 class TestCredentialsSync:
-    """Test the credentials sync functionality."""
+    """Test the shared provider/bootstrap credential sync behavior."""
 
     @pytest.fixture
     def temp_credentials_dir(self, tmp_path: Path) -> Path:
@@ -52,8 +52,8 @@ class TestCredentialsSync:
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Test syncing new API keys from environment."""
-        # Set environment variables
+        """Supported shared provider/bootstrap env values should seed credentials."""
+        # Set shared provider/bootstrap env values.
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-key")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-anthropic-key")
         monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
@@ -158,8 +158,8 @@ class TestCredentialsSync:
         temp_credentials_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Test that empty environment variables are skipped."""
-        # Set one valid and one empty environment variable
+        """Empty shared env values should be ignored."""
+        # Set one valid and one empty shared env value.
         monkeypatch.setenv("OPENAI_API_KEY", "valid-key")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
 
@@ -263,7 +263,7 @@ class TestCredentialsSync:
         assert get_ollama_host(runtime_paths=runtime_paths) == "http://localhost:11434"
 
     def test_all_env_vars_mapped(self) -> None:
-        """Test that all expected environment variables are in the mapping."""
+        """All supported shared provider/bootstrap env vars should be mapped."""
         expected_services = {
             "OPENAI_API_KEY": "openai",
             "ANTHROPIC_API_KEY": "anthropic",

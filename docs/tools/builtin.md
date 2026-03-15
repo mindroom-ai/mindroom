@@ -277,3 +277,6 @@ That `.env` file is resolved next to the active `config.yaml`, not from an arbit
 Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API_KEY` or `DAYTONA_API_KEY`.
 
 Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
+
+Execution tools such as `shell` and `python` still see the committed runtime env during execution.
+That runtime env is execution context, not a supported tool-configuration fallback.

@@ -2009,6 +2009,8 @@ Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API
 
 Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
 
+Execution tools such as `shell` and `python` still see the committed runtime env during execution. That runtime env is execution context, not a supported tool-configuration fallback.
+
 # MCP (Planned)
 
 > [!WARNING] MindRoom does not currently support direct MCP server configuration in `config.yaml`.

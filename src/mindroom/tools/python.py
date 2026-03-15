@@ -162,4 +162,24 @@ def python_tools() -> type[PythonTools]:
             with _python_runtime_env_overlay(self._runtime_paths):
                 return super().run_python_code(code, variable_to_return)
 
+        def save_to_file_and_run(
+            self,
+            file_name: str,
+            code: str,
+            variable_to_return: str | None = None,
+            overwrite: bool = True,
+        ) -> str:
+            """Execute file-backed Python code under the committed runtime env."""
+            with _python_runtime_env_overlay(self._runtime_paths):
+                return super().save_to_file_and_run(file_name, code, variable_to_return, overwrite)
+
+        def run_python_file_return_variable(
+            self,
+            file_name: str,
+            variable_to_return: str | None = None,
+        ) -> str:
+            """Run an existing Python file under the committed runtime env."""
+            with _python_runtime_env_overlay(self._runtime_paths):
+                return super().run_python_file_return_variable(file_name, variable_to_return)
+
     return MindRoomPythonTools

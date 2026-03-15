@@ -128,7 +128,7 @@ def test_load_config_requires_runtime_paths() -> None:
         },
     )
 
-    with pytest.raises(TypeError, match="API runtime paths are not initialized"):
+    with pytest.raises(TypeError, match="API context is not initialized"):
         openai_compat._load_config(request)
 
 

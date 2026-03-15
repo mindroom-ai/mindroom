@@ -1,10 +1,14 @@
-"""Sync API keys from environment variables to CredentialsManager.
+"""Sync shared provider/bootstrap credentials from runtime env into CredentialsManager.
 
-On first run, API keys from .env are seeded into the CredentialsManager.
-On subsequent runs, env-sourced credentials (_source=env) are updated from
-.env, but UI-sourced credentials (_source=ui) are never overwritten.
-This lets users change keys via the UI without losing them on restart,
-while still picking up .env changes for keys that were never manually set.
+On first run, supported provider/bootstrap env values from the config-adjacent
+`.env` or exported process env are seeded into the shared credentials store.
+On subsequent runs, env-sourced shared credentials (`_source=env`) are updated,
+but UI-sourced credentials (`_source=ui`) are never overwritten.
+
+This is intentionally limited to supported shared credentials such as model
+provider API keys, Ollama host settings, and `GITHUB_TOKEN` mirroring for
+private Git knowledge sync.
+It is not a generic bridge for tool-specific env var configuration.
 """
 
 from pathlib import Path
@@ -71,16 +75,16 @@ def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
 
 
 def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
-    """Sync API keys from environment variables into CredentialsManager.
+    """Sync supported shared provider/bootstrap env values into CredentialsManager.
 
-    - If no credential file exists for a service, seed it from .env.
-    - If the existing credential has ``_source=env``, update it from .env
-      (the user never touched it via UI, so .env should still win).
+    - If no shared credential file exists for a supported service, seed it from runtime env.
+    - If the existing credential has ``_source=env``, update it from runtime env
+      (the user never touched it via UI, so runtime env should still win).
     - If the existing credential has ``_source=ui`` (or no ``_source``,
       for legacy files), skip it to protect the user's manual override.
 
-    Runtime-bound credentials stay in the credential store instead of being
-    mirrored back into ambient process env.
+    This keeps conventional provider/bootstrap `.env` support without treating
+    arbitrary tool-specific env vars as a supported tool configuration path.
     """
     creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     synced_count = 0
@@ -127,8 +131,8 @@ def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
 def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str | None:
     """Get API key for a provider, checking CredentialsManager first.
 
-    Since we sync from .env to CredentialsManager on startup,
-    CredentialsManager will always have the latest keys from .env.
+    Supported provider env values are mirrored into the shared credentials store
+    during startup, so model creation reads from one explicit source of truth.
 
     Args:
         provider: The provider name (e.g., 'openai', 'anthropic')

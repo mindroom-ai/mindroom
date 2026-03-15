@@ -107,7 +107,7 @@ For Google image work, use the official product name from the docs even if older
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
-| `credentials_sync.py` | `.env` to credentials vault sync |
+| `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
 | `response_tracker.py` | Duplicate response prevention |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
@@ -567,7 +567,7 @@ mindroom connect --pair-code ABCD-EFGH
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 
 # Update credentials
-# Edit .env and restart; sync step mirrors keys to credentials vault
+# Edit .env for provider/bootstrap keys and restart; configure tool credentials through the dashboard or persisted tool config
 
 # Discover commands
 # Send !help from any bridged room

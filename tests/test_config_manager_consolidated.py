@@ -8,6 +8,7 @@ from pathlib import Path
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
@@ -242,6 +243,34 @@ class TestConsolidatedConfigManager:
 
             config = Config.from_yaml(config_path)
             assert "test_agent" not in config.agents
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_manage_agent_create_rejects_runtime_invalid_config(self) -> None:
+        """Create must not persist configs that fail runtime-aware validation."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            config_path = Path(f.name)
+            Config(
+                agents={},
+                mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
+                models={"default": {"provider": "openai", "id": "gpt-4o"}},
+            ).save_to_yaml(config_path)
+
+        try:
+            cm = _config_manager(config_path)
+            result = cm.manage_agent(
+                operation="create",
+                agent_name="assistant",
+                display_name="Assistant",
+                role="Test role",
+                tools=[],
+                model="default",
+            )
+
+            assert "Error" in result
+            assert "conflicts" in result
+            config = Config.from_yaml(config_path)
+            assert "assistant" not in config.agents
         finally:
             config_path.unlink(missing_ok=True)
 

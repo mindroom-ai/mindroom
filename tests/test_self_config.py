@@ -10,6 +10,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
@@ -311,6 +312,28 @@ class TestUpdateOwnConfig:
 
             reloaded = Config.from_yaml(config_path)
             assert reloaded.agents["coder"].thread_mode == "thread"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_rejects_runtime_invalid_rooms(self) -> None:
+        """Runtime-sensitive validation errors should block persistence."""
+        config = Config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", rooms=["lobby"])},
+            matrix_space=MatrixSpaceConfig(enabled=True),
+            models=_DEFAULT_MODELS,
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
+            config_path = Path(tmp.name)
+        config.save_to_yaml(config_path)
+
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            result = tool.update_own_config(rooms=["_mindroom_root_space"])
+            assert "Error" in result
+            assert "reserved root Space alias" in result
+
+            reloaded = Config.from_yaml(config_path)
+            assert reloaded.agents["coder"].rooms == ["lobby"]
         finally:
             config_path.unlink(missing_ok=True)
 
