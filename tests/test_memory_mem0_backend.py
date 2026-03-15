@@ -80,7 +80,13 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             del messages
             captured_calls.append((self.scope_storage_path, user_id, metadata or {}))
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeScopedMemory:
+        del runtime_paths
         return FakeScopedMemory(scope_storage_path)
 
     execution_identity = ToolExecutionIdentity(
@@ -167,7 +173,13 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             ]
             return {"results": matches[:limit]}
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeScopedMemory:
+        del runtime_paths
         return FakeScopedMemory(scope_storage_path)
 
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
@@ -219,7 +231,13 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
 
     memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeMem0ScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 

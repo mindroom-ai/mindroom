@@ -80,9 +80,9 @@ def _redirect_uri(runtime_paths: RuntimePaths) -> str:
     return runtime_paths.env_value("GOOGLE_REDIRECT_URI", default=default_redirect_uri) or default_redirect_uri
 
 
-def _ensure_google_packages() -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
+def _ensure_google_packages(runtime_paths: RuntimePaths) -> tuple[type[GoogleRequest], type[Credentials], type[Flow]]:
     """Lazily import Google auth packages, auto-installing if needed."""
-    ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "gmail")
+    ensure_tool_deps(_GOOGLE_OAUTH_DEPS, "gmail", runtime_paths)
 
     from google.auth.transport.requests import Request as _GoogleRequest  # noqa: PLC0415
     from google.oauth2.credentials import Credentials as _Credentials  # noqa: PLC0415
@@ -145,14 +145,14 @@ def _build_google_token_data(creds: Credentials) -> dict[str, Any]:
     return token_data
 
 
-def _get_google_credentials(target: RequestCredentialsTarget) -> Credentials | None:
+def _get_google_credentials(target: RequestCredentialsTarget, runtime_paths: RuntimePaths) -> Credentials | None:
     """Get Google credentials from stored token."""
     token_data = load_credentials_for_target("google", target)
     if not token_data:
         return None
 
     try:
-        google_request_cls, credentials_cls, _ = _ensure_google_packages()
+        google_request_cls, credentials_cls, _ = _ensure_google_packages(runtime_paths)
         creds = credentials_cls(
             token=token_data.get("token"),
             refresh_token=token_data.get("refresh_token"),
@@ -247,7 +247,7 @@ async def get_status(request: Request, agent_name: str | None = None) -> GoogleS
 
     # Get current credentials
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
-    creds = _get_google_credentials(target)
+    creds = _get_google_credentials(target, runtime_paths)
 
     if not creds:
         return GoogleStatus(
@@ -304,7 +304,7 @@ async def connect(request: Request, agent_name: str | None = None) -> GoogleAuth
 
     try:
         resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
-        _, _, flow_cls = _ensure_google_packages()
+        _, _, flow_cls = _ensure_google_packages(runtime_paths)
         state = issue_pending_oauth_state(request, "google", agent_name)
 
         # Create OAuth flow with all scopes
@@ -353,7 +353,7 @@ async def callback(request: Request) -> RedirectResponse:
         raise HTTPException(status_code=503, detail="OAuth not configured")
 
     try:
-        _, _, flow_cls = _ensure_google_packages()
+        _, _, flow_cls = _ensure_google_packages(runtime_paths)
 
         # Create OAuth flow and exchange code for tokens
         # Use current environment variable for redirect URI to support multiple deployments

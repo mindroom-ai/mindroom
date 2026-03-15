@@ -534,7 +534,7 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
 
     if emb.provider == "sentence_transformers":
-        valid, detail = _validate_sentence_transformers_embedder(emb.config.model)
+        valid, detail = _validate_sentence_transformers_embedder(runtime_paths, emb.config.model)
         return _print_validation(
             valid,
             detail,
@@ -572,10 +572,10 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
     )
 
 
-def _validate_sentence_transformers_embedder(model: str) -> tuple[bool, str]:
+def _validate_sentence_transformers_embedder(runtime_paths: RuntimePaths, model: str) -> tuple[bool, str]:
     """Validate a local sentence-transformers model with a tiny embedding request."""
     try:
-        embedder = create_sentence_transformers_embedder(model)
+        embedder = create_sentence_transformers_embedder(runtime_paths, model)
         embedding = embedder.get_embedding("mindroom doctor embedder check")
     except Exception as exc:
         return False, str(exc)

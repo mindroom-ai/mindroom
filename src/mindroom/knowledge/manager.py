@@ -25,7 +25,7 @@ from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
@@ -146,6 +146,7 @@ def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
 
     if provider == "sentence_transformers":
         return create_sentence_transformers_embedder(
+            runtime_paths,
             embedder_config.model,
             dimensions=embedder_config.dimensions,
         )
@@ -180,7 +181,7 @@ def _authenticated_repo_url(
     if not credentials_service:
         return repo_url
 
-    credentials = get_runtime_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
+    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")

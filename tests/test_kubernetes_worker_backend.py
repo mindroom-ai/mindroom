@@ -153,6 +153,7 @@ def _backend(
     idle_timeout_seconds: float = 60.0,
     worker_port: int = 8766,
     storage_subpath_prefix: str = "workers",
+    config_map_name: str | None = "mindroom-config",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
@@ -168,7 +169,7 @@ def _backend(
         storage_pvc_name="mindroom-storage",
         storage_mount_path="/app/worker",
         storage_subpath_prefix=storage_subpath_prefix,
-        config_map_name="mindroom-config",
+        config_map_name=config_map_name,
         config_key="config.yaml",
         config_path="/app/config.yaml",
         token_secret_name=_TEST_TOKEN_SECRET_NAME,
@@ -328,6 +329,26 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+
+
+def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
+    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
+    config_path = tmp_path / "workspace-config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+
+    assert committed_runtime.config_path == config_path.resolve()
 
 
 def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
@@ -45,13 +46,22 @@ from ._prompting import (
 from ._shared import MemoryResult, new_memory_id
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from ._shared import ScopedMemoryCrud
+
 logger = get_logger(__name__)
+
+
+def _create_memory_factory(
+    runtime_paths: RuntimePaths,
+) -> Callable[[Path, Config], Awaitable[ScopedMemoryCrud]]:
+    return partial(create_memory_instance, runtime_paths=runtime_paths)
 
 
 async def add_agent_memory(
@@ -72,7 +82,7 @@ async def add_agent_memory(
         storage_path,
         config,
         metadata=metadata,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -113,7 +123,7 @@ async def search_agent_memories(
         storage_path,
         config,
         limit=limit,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -141,7 +151,7 @@ async def list_all_agent_memories(
         storage_path,
         config,
         limit=limit,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -160,7 +170,7 @@ async def get_agent_memory(
         caller_context,
         storage_path,
         config,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -182,7 +192,7 @@ async def update_agent_memory(
         caller_context,
         storage_path,
         config,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -202,7 +212,7 @@ async def delete_agent_memory(
         caller_context,
         storage_path,
         config,
-        create_memory=create_memory_instance,
+        create_memory=_create_memory_factory(runtime_paths),
     )
 
 
@@ -269,5 +279,5 @@ async def store_conversation_memory(
             session_id,
             config,
             replica_key=new_memory_id() if isinstance(agent_name, list) else None,
-            create_memory=create_memory_instance,
+            create_memory=_create_memory_factory(runtime_paths),
         )

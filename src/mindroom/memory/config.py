@@ -7,7 +7,8 @@ from typing import Any
 from mem0 import AsyncMemory
 
 from mindroom.config.main import Config
-from mindroom.credentials import get_credentials_manager
+from mindroom.constants import RuntimePaths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.embeddings import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 
@@ -31,12 +32,13 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C901, PLR0912
+def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:  # noqa: C901, PLR0912
     """Get Mem0 configuration with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
         config: Application configuration
+        runtime_paths: Explicit runtime context for credential-backed provider settings.
 
     Returns:
         Configuration dictionary for Mem0
@@ -45,7 +47,7 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
     app_config = config
     # Canonicalize once so Chroma path is independent of runtime cwd changes.
     resolved_storage_path = storage_path.expanduser().resolve()
-    creds_manager = get_credentials_manager(storage_root=resolved_storage_path)
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
 
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
@@ -142,20 +144,21 @@ def _get_memory_config(storage_path: Path, config: Config) -> dict:  # noqa: C90
     }
 
 
-async def create_memory_instance(storage_path: Path, config: Config) -> AsyncMemory:
+async def create_memory_instance(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> AsyncMemory:
     """Create a Mem0 memory instance with ChromaDB backend.
 
     Args:
         storage_path: Base directory for memory storage
         config: Application configuration
+        runtime_paths: Explicit runtime context for credential-backed provider settings.
 
     Returns:
         Configured AsyncMemory instance
 
     """
-    config_dict = _get_memory_config(storage_path, config)
+    config_dict = _get_memory_config(storage_path, config, runtime_paths)
     if config.memory.embedder.provider == "sentence_transformers":
-        ensure_sentence_transformers_dependencies()
+        ensure_sentence_transformers_dependencies(runtime_paths)
 
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects

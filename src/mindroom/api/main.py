@@ -190,7 +190,11 @@ def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     settings = _build_auth_settings(_app_runtime_paths(api_app))
     state = _ApiAuthState(
         settings=settings,
-        supabase_auth=_init_supabase_auth(settings.supabase_url, settings.supabase_anon_key),
+        supabase_auth=_init_supabase_auth(
+            _app_runtime_paths(api_app),
+            settings.supabase_url,
+            settings.supabase_anon_key,
+        ),
     )
     api_app.state.auth_state = state
     return state
@@ -409,6 +413,7 @@ class _SupabaseClientProtocol(Protocol):
 
 
 def _init_supabase_auth(
+    runtime_paths: constants.RuntimePaths,
     supabase_url: str | None,
     supabase_anon_key: str | None,
 ) -> _SupabaseClientProtocol | None:
@@ -420,9 +425,9 @@ def _init_supabase_auth(
         create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
-        if not auto_install_enabled():
+        if not auto_install_enabled(runtime_paths):
             disabled_hint = " Auto-install is disabled by MINDROOM_NO_AUTO_INSTALL_TOOLS."
-        if not auto_install_tool_extra("supabase"):
+        if not auto_install_tool_extra("supabase", runtime_paths):
             msg = (
                 "SUPABASE_URL and SUPABASE_ANON_KEY are set but the 'supabase' package is not available."
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
@@ -1053,7 +1058,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
 
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    frontend_dir = ensure_frontend_dist_dir()
+    frontend_dir = ensure_frontend_dist_dir(_app_runtime_paths(request.app))
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")
 

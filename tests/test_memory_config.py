@@ -11,15 +11,21 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.memory.config import _get_memory_config, _memory_collection_name, create_memory_instance
 from mindroom.orchestrator import MultiAgentOrchestrator
 from tests.conftest import orchestrator_runtime_paths
 
 
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
+
+
 class TestMemoryConfig:
     """Test memory configuration."""
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_with_ollama(
         self,
         mock_get_creds_manager: MagicMock,
@@ -53,7 +59,7 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = _get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config, _runtime_paths(tmp_path))
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "ollama"
@@ -70,7 +76,7 @@ class TestMemoryConfig:
         assert result["vector_store"]["config"]["collection_name"] == _memory_collection_name(config)
         assert str(storage_path / "chroma") in result["vector_store"]["config"]["path"]
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_get_memory_config_with_openai(
         self,
@@ -97,7 +103,7 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = _get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config, _runtime_paths(tmp_path))
 
         # Verify embedder config
         assert result["embedder"]["provider"] == "openai"
@@ -112,7 +118,7 @@ class TestMemoryConfig:
         # Verify the environment variable was set
         assert os.environ.get("OPENAI_API_KEY") == "test-key"
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
@@ -135,11 +141,11 @@ class TestMemoryConfig:
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
-        result = _get_memory_config(tmp_path / "memory", config)
+        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert result["embedder"]["config"]["embedding_dims"] == 3072
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_with_sentence_transformers(
         self,
         mock_get_creds_manager: MagicMock,
@@ -160,13 +166,13 @@ class TestMemoryConfig:
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
-        result = _get_memory_config(tmp_path / "memory", config)
+        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert result["embedder"]["provider"] == "huggingface"
         assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
         assert result["embedder"]["config"]["embedding_dims"] == 384
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_get_memory_config_keeps_existing_huggingface_provider_support(
         self,
         mock_get_creds_manager: MagicMock,
@@ -186,7 +192,7 @@ class TestMemoryConfig:
             router=RouterConfig(model="default"),
         )
 
-        result = _get_memory_config(tmp_path / "memory", config)
+        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert result["embedder"]["provider"] == "huggingface"
         assert result["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
@@ -211,6 +217,29 @@ class TestMemoryConfig:
         local_config = Config(memory=local_memory, router=RouterConfig(model="default"))
 
         assert _memory_collection_name(openai_config) != _memory_collection_name(local_config)
+
+    def test_get_memory_config_uses_runtime_shared_credentials_path(self, tmp_path: Path) -> None:
+        """Runtime-shared credential overrides should be visible to Mem0 provider config."""
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={"MINDROOM_SHARED_CREDENTIALS_PATH": str(tmp_path / ".shared_credentials")},
+        )
+        get_runtime_shared_credentials_manager(runtime_paths).set_api_key("openai", "shared-openai-key")
+
+        config = Config(
+            memory={
+                "embedder": {
+                    "provider": "openai",
+                    "config": {"model": "text-embedding-3-small"},
+                },
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["embedder"]["config"]["api_key"] == "shared-openai-key"
 
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
@@ -244,7 +273,7 @@ class TestMemoryConfig:
 
         assert _memory_collection_name(implicit_config) == _memory_collection_name(explicit_config)
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     @patch.dict("os.environ", {}, clear=True)
     def test_get_memory_config_no_model_fallback(
         self,
@@ -268,14 +297,14 @@ class TestMemoryConfig:
 
         # Test config generation
         storage_path = tmp_path / "memory"
-        result = _get_memory_config(storage_path, config)
+        result = _get_memory_config(storage_path, config, _runtime_paths(tmp_path))
 
         # Verify LLM fallback config
         assert result["llm"]["provider"] == "ollama"
         assert result["llm"]["config"]["model"] == "llama3.2"
         assert result["llm"]["config"]["ollama_base_url"] == "http://localhost:11434"
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_chroma_directory_creation(
         self,
         mock_get_creds_manager: MagicMock,
@@ -296,7 +325,7 @@ class TestMemoryConfig:
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
         # Get config
-        result = _get_memory_config(tmp_path, config)
+        result = _get_memory_config(tmp_path, config, _runtime_paths(tmp_path))
 
         # Verify chroma path in config
         chroma_path = tmp_path / "chroma"
@@ -306,7 +335,7 @@ class TestMemoryConfig:
         assert chroma_path.exists()
         assert chroma_path.is_dir()
 
-    @patch("mindroom.memory.config.get_credentials_manager")
+    @patch("mindroom.memory.config.get_runtime_shared_credentials_manager")
     def test_relative_storage_path_remains_stable_after_cwd_change(
         self,
         mock_get_creds_manager: MagicMock,
@@ -335,7 +364,7 @@ class TestMemoryConfig:
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
 
-        result = _get_memory_config(orchestrator.storage_path, config)
+        result = _get_memory_config(orchestrator.storage_path, config, orchestrator.runtime_paths)
 
         expected_storage = (project_root / "mindroom_data").resolve()
         expected_chroma = (expected_storage / "chroma").resolve()
@@ -363,10 +392,10 @@ class TestMemoryConfig:
         expected_memory = object()
         mock_from_config.return_value = expected_memory
 
-        result = await create_memory_instance(tmp_path / "memory", config)
+        result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert result is expected_memory
-        mock_ensure_sentence_transformers_dependencies.assert_called_once_with()
+        mock_ensure_sentence_transformers_dependencies.assert_called_once_with(_runtime_paths(tmp_path))
         mock_from_config.assert_awaited_once()
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:

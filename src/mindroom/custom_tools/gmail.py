@@ -14,6 +14,7 @@ from loguru import logger
 from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 
 if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -27,6 +28,7 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
     def __init__(
         self,
         *,
+        runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
@@ -41,6 +43,7 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
         if credentials_manager is None:
             msg = "GmailTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
+        self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         creds = self._initialize_google_oauth(
             worker_scope=worker_scope,

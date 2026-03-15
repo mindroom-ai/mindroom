@@ -22,6 +22,14 @@ from mindroom.workers.models import WorkerHandle
 TEST_WORKER_AUTH = "token"
 
 
+def _runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = None) -> constants.RuntimePaths:
+    return constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env=process_env or {},
+    )
+
+
 def _config_with_worker_scope(worker_scope: str | None) -> Config:
     config = Config.model_validate(
         {
@@ -42,53 +50,59 @@ def _config_with_worker_scope(worker_scope: str | None) -> Config:
     return config
 
 
-def test_init_supabase_auth_returns_none_without_credentials() -> None:
+def test_init_supabase_auth_returns_none_without_credentials(tmp_path: Path) -> None:
     """Supabase auth should stay disabled when credentials are incomplete."""
-    assert main._init_supabase_auth(None, None) is None
-    assert main._init_supabase_auth("https://supabase.test", None) is None
-    assert main._init_supabase_auth(None, "anon-key") is None
+    runtime_paths = _runtime_paths(tmp_path)
+    assert main._init_supabase_auth(runtime_paths, None, None) is None
+    assert main._init_supabase_auth(runtime_paths, "https://supabase.test", None) is None
+    assert main._init_supabase_auth(runtime_paths, None, "anon-key") is None
 
 
-def test_init_supabase_auth_raises_when_auto_install_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_supabase_auth_raises_when_auto_install_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Missing supabase dependency should error with disable hint when auto-install is off."""
     install_calls: list[str] = []
+    runtime_paths = _runtime_paths(tmp_path)
 
     def _missing_supabase(_name: str) -> NoReturn:
         module_name = "supabase"
         raise ModuleNotFoundError(module_name)
 
-    def _auto_install(extra_name: str) -> bool:
+    def _auto_install(extra_name: str, _runtime_paths: constants.RuntimePaths) -> bool:
         install_calls.append(extra_name)
         return False
 
     monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
-    monkeypatch.setattr(main, "auto_install_enabled", lambda: False)
+    monkeypatch.setattr(main, "auto_install_enabled", lambda _runtime_paths: False)
     monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
-        main._init_supabase_auth("https://supabase.test", "anon-key")
+        main._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
 
     assert install_calls == ["supabase"]
 
 
-def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Missing dependency should error with install hint when auto-install attempt fails."""
     install_calls: list[str] = []
+    runtime_paths = _runtime_paths(tmp_path)
 
     def _missing_supabase(_name: str) -> NoReturn:
         module_name = "supabase"
         raise ModuleNotFoundError(module_name)
 
-    def _auto_install(extra_name: str) -> bool:
+    def _auto_install(extra_name: str, _runtime_paths: constants.RuntimePaths) -> bool:
         install_calls.append(extra_name)
         return False
 
     monkeypatch.setattr(main.importlib, "import_module", _missing_supabase)
-    monkeypatch.setattr(main, "auto_install_enabled", lambda: True)
+    monkeypatch.setattr(main, "auto_install_enabled", lambda _runtime_paths: True)
     monkeypatch.setattr(main, "auto_install_tool_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
-        main._init_supabase_auth("https://supabase.test", "anon-key")
+        main._init_supabase_auth(runtime_paths, "https://supabase.test", "anon-key")
 
     assert install_calls == ["supabase"]
     assert "MINDROOM_NO_AUTO_INSTALL_TOOLS" not in str(err.value)
@@ -119,7 +133,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
     monkeypatch.setattr(frontend_assets.subprocess, "run", _fake_run)
 
-    assert frontend_assets.ensure_frontend_dist_dir() == frontend_dist_dir
+    assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
     assert commands == [
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
         (["/usr/bin/bun", "run", "tsc"], frontend_source_dir),
@@ -136,14 +150,18 @@ def test_ensure_frontend_dist_dir_respects_disable_flag(
     frontend_source_dir.mkdir()
     (frontend_source_dir / "package.json").write_text("{}")
 
-    monkeypatch.setenv("MINDROOM_AUTO_BUILD_FRONTEND", "0")
     monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
     monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
     monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_source_dir / "dist")
     monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda _name: "/usr/bin/bun")
 
-    assert frontend_assets.ensure_frontend_dist_dir() is None
+    assert (
+        frontend_assets.ensure_frontend_dist_dir(
+            _runtime_paths(tmp_path, process_env={"MINDROOM_AUTO_BUILD_FRONTEND": "0"}),
+        )
+        is None
+    )
 
 
 def test_ensure_writable_config_path_seeds_from_template(
@@ -630,7 +648,7 @@ def test_google_connect_uses_pending_oauth_state(
     )
     monkeypatch.setattr(
         "mindroom.api.google_integration._ensure_google_packages",
-        lambda: (object, object, _FakeFlowFactory),
+        lambda _runtime_paths: (object, object, _FakeFlowFactory),
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -701,7 +719,7 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
 
     monkeypatch.setattr(
         "mindroom.api.google_integration._ensure_google_packages",
-        lambda: (object, object, _FakeFlowFactory),
+        lambda _runtime_paths: (object, object, _FakeFlowFactory),
     )
     with patch("mindroom.api.main.load_runtime_config", return_value=(config, temp_config_file)):
         connect_response = api_key_client.post(
@@ -889,7 +907,7 @@ def test_spotify_connect_uses_pending_oauth_state(
 
     monkeypatch.setattr(
         "mindroom.api.integrations._ensure_spotify_packages",
-        lambda: (object, _spotify_oauth_factory),
+        lambda _runtime_paths: (object, _spotify_oauth_factory),
     )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -1169,7 +1187,7 @@ def test_frontend_root_serves_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/")
     assert response.status_code == 200
@@ -1186,7 +1204,7 @@ def test_frontend_spa_routes_fall_back_to_index(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/agents")
     assert response.status_code == 200
@@ -1203,7 +1221,7 @@ def test_frontend_does_not_shadow_unknown_api_routes(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = test_client.get("/api/not-real")
     assert response.status_code == 404
@@ -1221,7 +1239,7 @@ def test_frontend_blocks_path_traversal(
     secret = tmp_path / "secret.txt"
     secret.write_text("do-not-leak")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     # Starlette normalizes bare `..` segments, so percent-encoded traversal
     # is the real attack vector that _resolve_frontend_asset must block.
@@ -1241,7 +1259,7 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
@@ -1277,7 +1295,7 @@ def test_frontend_serves_after_api_key_login(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
@@ -1682,7 +1700,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_login_url="https://app.example.com/auth/login",
@@ -1703,7 +1721,7 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens={"valid-cookie-token"},
         platform_login_url="https://app.example.com/auth/login",
@@ -1729,7 +1747,7 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
 
-    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda: frontend_dir)
+    monkeypatch.setattr(main, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens={valid_cookie_token},
         platform_login_url="https://app.example.com/auth/login",

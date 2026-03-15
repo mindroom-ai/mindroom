@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from agno.tools.gmail import GmailTools as AgnoGmailTools
 
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.gmail import GmailTools
 
@@ -32,6 +33,18 @@ def mock_credentials_manager(tmp_path: Path) -> CredentialsManager:
     return manager
 
 
+@pytest.fixture
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Create an isolated runtime context for Gmail tool tests."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={},
+    )
+
+
 class TestGmailTools:
     """Test suite for custom Gmail tools wrapper."""
 
@@ -40,6 +53,7 @@ class TestGmailTools:
         self,
         mock_credentials_class: Mock,
         mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test that GmailTools loads credentials from storage on init."""
         mock_creds_instance = MagicMock()
@@ -47,7 +61,7 @@ class TestGmailTools:
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_credentials_manager)  # noqa: F841
+            GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
             mock_credentials_class.assert_called_once_with(
                 token="test_access_token",  # noqa: S106
@@ -69,6 +83,7 @@ class TestGmailTools:
     def test_initialization_without_credentials(
         self,
         mock_logger: Mock,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when no credentials are stored."""
         mock_manager = MagicMock()
@@ -77,7 +92,7 @@ class TestGmailTools:
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_manager)  # noqa: F841
+            GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
 
             mock_logger.warning.assert_not_called()
             mock_parent_init.assert_called_once_with(creds=None)
@@ -89,6 +104,7 @@ class TestGmailTools:
         mock_credentials_class: Mock,
         mock_logger: Mock,
         mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test initialization when credentials are invalid."""
         mock_credentials_manager.save_credentials("google", {"invalid": "data"})
@@ -96,7 +112,7 @@ class TestGmailTools:
 
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_credentials_manager)  # noqa: F841
+            GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
             mock_logger.exception.assert_called_once()
             mock_parent_init.assert_called_once_with(creds=None)
@@ -106,11 +122,12 @@ class TestGmailTools:
         self,
         mock_request_class: Mock,  # noqa: ARG002
         mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth method with valid credentials."""
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_credentials_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
@@ -124,11 +141,12 @@ class TestGmailTools:
         mock_credentials_class: Mock,
         mock_request_class: Mock,
         mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth refreshes expired credentials."""
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_credentials_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
 
             gmail_tools.creds = None
 
@@ -151,6 +169,7 @@ class TestGmailTools:
     def test_auth_without_stored_credentials(
         self,
         mock_logger: Mock,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth falls back to original auth when no credentials stored."""
         mock_manager = MagicMock()
@@ -160,7 +179,7 @@ class TestGmailTools:
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
 
-            gmail_tools = GmailTools(credentials_manager=mock_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_manager)
             gmail_tools.creds = None
 
             mock_parent_auth = Mock()
@@ -179,11 +198,12 @@ class TestGmailTools:
     def test_auth_error_handling(
         self,
         mock_credentials_manager: CredentialsManager,
+        runtime_paths: RuntimePaths,
     ) -> None:
         """Test _auth handles errors properly."""
         with patch("mindroom.custom_tools.gmail.AgnoGmailTools.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
-            gmail_tools = GmailTools(credentials_manager=mock_credentials_manager)
+            gmail_tools = GmailTools(runtime_paths=runtime_paths, credentials_manager=mock_credentials_manager)
             gmail_tools.creds = None
 
             # Mock Credentials to raise an exception

@@ -287,7 +287,7 @@ def get_tool_by_name(
     metadata = TOOL_METADATA.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
     if deps and not check_deps_installed(deps):
-        if not auto_install_tool_extra(tool_name):
+        if not auto_install_tool_extra(tool_name, runtime_paths):
             missing = ", ".join(deps)
             logger.warning(f"Missing dependencies for tool '{tool_name}': {missing}")
             logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
@@ -300,7 +300,7 @@ def get_tool_by_name(
         return build()
     except ImportError as first_error:
         # Safety net: deps may not be exhaustively listed in metadata
-        if not auto_install_tool_extra(tool_name):
+        if not auto_install_tool_extra(tool_name, runtime_paths):
             logger.warning(f"Could not import tool '{tool_name}': {first_error}")
             logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
             raise

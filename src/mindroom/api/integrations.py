@@ -78,9 +78,11 @@ class _SpotifyOAuthFactoryProtocol(Protocol):
     ) -> _SpotifyOAuthClientProtocol: ...
 
 
-def _ensure_spotify_packages() -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
+def _ensure_spotify_packages(
+    runtime_paths: RuntimePaths,
+) -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
-    ensure_tool_deps(["spotipy"], "spotify")
+    ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
     spotipy_module = importlib.import_module("spotipy")
 
     return (
@@ -125,7 +127,7 @@ async def get_spotify_status(
 
     status.connected = True
     try:
-        spotify_cls, _ = _ensure_spotify_packages()
+        spotify_cls, _ = _ensure_spotify_packages(_request_runtime_paths(request))
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
         status.details = {
@@ -156,7 +158,7 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
 
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     state = issue_pending_oauth_state(request, "spotify", agent_name)
-    _, spotify_oauth_cls = _ensure_spotify_packages()
+    _, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
@@ -189,7 +191,7 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
         raise HTTPException(status_code=500, detail="Spotify OAuth not configured")
 
     try:
-        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages()
+        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,

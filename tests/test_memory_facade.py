@@ -561,7 +561,11 @@ class TestMemoryFacade:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             await store_conversation_memory("What is 2+2?", "calculator", storage_path, "session123", config)
 
-        mock_create.assert_called_once_with(agent_state_root_path(storage_path, "calculator"), config)
+        mock_create.assert_called_once_with(
+            agent_state_root_path(storage_path, "calculator"),
+            config,
+            runtime_paths=runtime_paths_for(config),
+        )
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio
@@ -585,9 +589,16 @@ class TestMemoryFacade:
             )
 
         assert mock_create.call_count == 2
-        assert [call.args for call in mock_create.call_args_list] == [
-            (agent_state_root_path(storage_path, "calculator"), config),
-            (agent_state_root_path(storage_path, "finance"), config),
+        expected_runtime_paths = runtime_paths_for(config)
+        assert [(call.args, call.kwargs) for call in mock_create.call_args_list] == [
+            (
+                (agent_state_root_path(storage_path, "calculator"), config),
+                {"runtime_paths": expected_runtime_paths},
+            ),
+            (
+                (agent_state_root_path(storage_path, "finance"), config),
+                {"runtime_paths": expected_runtime_paths},
+            ),
         ]
         assert mock_memory.add.call_count == 2
         team_memory_file = storage_path / "memory-files" / "team_calculator+finance" / "MEMORY.md"
@@ -651,7 +662,11 @@ class TestMemoryFacade:
         with patch("mindroom.memory.functions.create_memory_instance", return_value=mock_memory) as mock_create:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
-        mock_create.assert_called_once_with(agent_state_root_path(storage_path, "general"), config)
+        mock_create.assert_called_once_with(
+            agent_state_root_path(storage_path, "general"),
+            config,
+            runtime_paths=runtime_paths_for(config),
+        )
         mock_memory.add.assert_called_once()
 
     @pytest.mark.asyncio

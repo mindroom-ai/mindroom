@@ -294,6 +294,18 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
     return _credentials_manager
 
 
+def shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
+    """Return the shared credential layer for one execution context."""
+    if credentials_manager.shared_base_path == credentials_manager.base_path:
+        return credentials_manager
+    return credentials_manager.shared_manager()
+
+
+def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
+    """Return the shared credential layer for one explicit runtime context."""
+    return shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
+
+
 def _resolve_worker_credentials_manager(
     *,
     worker_scope: WorkerScope | None,
@@ -392,11 +404,12 @@ def sync_shared_credentials_to_worker(
     """
     manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
+    source_manager = shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
     allowed_services: set[str] = set()
 
-    for service in manager.list_services():
-        shared_credentials = manager.load_credentials(service)
+    for service in source_manager.list_services():
+        shared_credentials = source_manager.load_credentials(service)
         if not isinstance(shared_credentials, Mapping):
             continue
         source = shared_credentials.get("_source")

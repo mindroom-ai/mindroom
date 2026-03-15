@@ -162,7 +162,7 @@ async def _run(
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
-        frontend_dir = ensure_frontend_dist_dir()
+        frontend_dir = ensure_frontend_dist_dir(runtime_paths)
         display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
         if frontend_dir is None:
             console.print("Dashboard: unavailable (frontend assets missing)")

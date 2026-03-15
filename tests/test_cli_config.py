@@ -1628,7 +1628,7 @@ class TestDoctor:
 
         monkeypatch.setattr(
             "mindroom.cli.doctor.create_sentence_transformers_embedder",
-            lambda _model: _FakeEmbedder(),
+            lambda _runtime_paths, _model: _FakeEmbedder(),
         )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)

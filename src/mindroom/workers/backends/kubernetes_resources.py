@@ -565,7 +565,11 @@ class KubernetesResourceManager:
         return env
 
     def _worker_runtime_paths(self, *, worker_key: str, dedicated_root: Path) -> RuntimePaths:
-        config_path = Path(self.config.config_path)
+        config_path = (
+            Path(self.config.config_path)
+            if self.config.config_map_name is not None
+            else self.runtime_paths.config_path.expanduser().resolve()
+        )
         process_env = dict(self.runtime_paths.process_env)
         process_env.update(
             {

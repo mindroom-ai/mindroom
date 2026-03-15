@@ -38,7 +38,7 @@ from mindroom.constants import (
     RuntimePaths,
     runtime_ai_cache_enabled,
 )
-from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
@@ -608,7 +608,7 @@ def get_model_instance(
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
     # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_runtime_credentials_manager(runtime_paths)
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
     model_api_key = model_creds.get("api_key") if model_creds else None
 
