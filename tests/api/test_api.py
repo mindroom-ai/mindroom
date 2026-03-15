@@ -922,6 +922,50 @@ def test_google_runtime_refresh_keeps_config_cache_live(
     assert "test_agent" in after_reset.json()["agents"]
 
 
+def test_google_configure_reports_reload_failures_without_clearing_cached_config(
+    api_key_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """Google configure should fail closed when the refreshed runtime cannot reload config."""
+    before_response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert before_response.status_code == 200
+    assert "test_agent" in before_response.json()["agents"]
+
+    temp_config_file.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "router": {"model": "default"},
+                "defaults": {"markdown": True},
+                "mindroom_user": {"username": "mindroom_router"},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    configure_response = api_key_client.post(
+        "/api/google/configure",
+        headers={"Authorization": "Bearer test-key"},
+        json={
+            "client_id": "configured-client-id",
+            "client_secret": "configured-client-secret",
+        },
+    )
+
+    assert configure_response.status_code == 500
+    assert "Failed to save credentials" in configure_response.json()["detail"]
+
+    after_response = api_key_client.post(
+        "/api/config/load",
+        headers={"Authorization": "Bearer test-key"},
+    )
+    assert after_response.status_code == 200
+    assert "test_agent" in after_response.json()["agents"]
+
+
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
     """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
     config = _config_with_worker_scope("shared")

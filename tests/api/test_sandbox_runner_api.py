@@ -160,6 +160,34 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def test_startup_runtime_rehydrates_runtime_env_from_process_env_and_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup runtime should recover trusted env from real process env while keeping runner auth separate."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=dotenv-secret\n", encoding="utf-8")
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
+    )
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_public_runtime_paths(payload_runtime)))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+    monkeypatch.setenv("TEST_EXECUTION_ENV", "worker-visible")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+
+    assert startup_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert startup_runtime.env_value("OPENAI_API_KEY") == "dotenv-secret"
+    assert startup_runtime.env_value("TEST_EXECUTION_ENV") == "worker-visible"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+
+
 def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
     """Public startup runtime payloads should not serialize the runner auth token."""
     config_path = tmp_path / "config.yaml"
@@ -351,7 +379,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Sandbox subprocess shell execution should inherit arbitrary runtime env values without tool-env fallback logic."""
+    """Sandbox subprocess shell execution should inherit committed runtime env values without tool-env fallback logic."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
     config_path = tmp_path / "config.yaml"
@@ -359,10 +387,11 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
+    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={"TEST_EXECUTION_ENV": "visible-in-shell"},
+        process_env={},
     )
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
@@ -378,6 +407,45 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
 
     assert response.ok is True
     assert response.result == "visible-in-shell"
+
+
+def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execution env should carry committed runtime values without leaking control secrets or arbitrary host env."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
+    monkeypatch.setenv("MINDROOM_API_KEY", "dashboard-secret")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=dotenv-secret\nTEST_EXECUTION_ENV=visible-in-shell\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env=dict(os.environ),
+    )
+
+    execution_env = sandbox_runner_module._request_execution_env(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+        ),
+        runtime_paths,
+    )
+
+    assert execution_env["OPENAI_API_KEY"] == "dotenv-secret"
+    assert execution_env["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert execution_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "storage").resolve())
+    assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in execution_env
+    assert "MINDROOM_API_KEY" not in execution_env
+    assert "CI_JOB_TOKEN" not in execution_env
 
 
 def test_worker_subprocess_env_preserves_parent_path(

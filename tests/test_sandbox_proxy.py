@@ -383,16 +383,17 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
 
 
 def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
-    """Direct shell execution should inherit arbitrary runtime env values without configuring the tool from env."""
+    """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
+    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={"TEST_EXECUTION_ENV": "visible-in-shell"},
+        process_env={},
     )
 
     tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
@@ -404,10 +405,13 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
     assert result == "visible-in-shell"
 
 
-def test_proxy_forwards_execution_env_only_for_execution_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_proxy_forwards_execution_env_only_for_execution_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Sandbox proxy should forward execution env only for shell/python-style execution tools."""
     captured: dict[str, Any] = {}
-    runtime_paths = _configure_proxy_runtime(
+    _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
@@ -418,15 +422,28 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(monkeypatch: pyte
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(captured=captured),
     )
-    monkeypatch.setenv("TEST_EXECUTION_ENV", "visible-in-shell")
+    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    config_path.with_name(".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=config_path.parent / "storage",
+        process_env=dict(os.environ),
+    )
 
-    shell_tool = get_tool_by_name("shell", _runtime_paths_from_env())
+    shell_tool = get_tool_by_name("shell", runtime_paths)
     shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
     result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
 
     assert result == "sandbox-result"
     assert captured["json"]["execution_env"]["TEST_EXECUTION_ENV"] == "visible-in-shell"
+    assert "CI_JOB_TOKEN" not in captured["json"]["execution_env"]
+    assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
     captured.clear()
     calculator = get_tool_by_name("calculator", runtime_paths)

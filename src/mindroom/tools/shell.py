@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from mindroom.constants import RuntimePaths, runtime_env_values
+from mindroom.constants import RuntimePaths, execution_runtime_env_values
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -79,7 +79,7 @@ def shell_tools() -> type[ShellTools]:
                 all=all,
                 **kwargs,
             )
-            self._runtime_env = dict(runtime_env_values(runtime_paths))
+            self._runtime_env = dict(execution_runtime_env_values(runtime_paths))
 
         def run_shell_command(self, args: list[str], tail: int = 100) -> str:
             import subprocess

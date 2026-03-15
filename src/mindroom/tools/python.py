@@ -17,7 +17,6 @@ from mindroom.tool_system.metadata import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from agno.tools.python import PythonTools
 
@@ -105,22 +104,6 @@ def python_tools() -> type[PythonTools]:
 
     class MindRoomPythonTools(python_tools_class):
         """MindRoom wrapper around Agno's Python tool implementation."""
-
-        def __init__(
-            self,
-            base_dir: Path | None = None,
-            safe_globals: dict[str, object] | None = None,
-            safe_locals: dict[str, object] | None = None,
-            restrict_to_base_dir: bool = True,
-            **kwargs: object,
-        ) -> None:
-            super().__init__(
-                base_dir=base_dir,
-                safe_globals=safe_globals,
-                safe_locals=safe_locals,
-                restrict_to_base_dir=restrict_to_base_dir,
-                **kwargs,
-            )
 
         def pip_install_package(self, package_name: str) -> str:
             """Install a package into the current interpreter environment."""

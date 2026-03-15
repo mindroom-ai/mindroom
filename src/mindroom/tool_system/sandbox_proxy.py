@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.constants import runtime_env_values
+from mindroom.constants import execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -362,7 +362,7 @@ def _execution_env_payload(
     """Return explicit execution env only for tools that intentionally support it."""
     if tool_name not in _EXECUTION_ENV_TOOL_NAMES:
         return None
-    return dict(runtime_env_values(runtime_paths))
+    return dict(execution_runtime_env_values(runtime_paths))
 
 
 def _request_headers_for_handle(

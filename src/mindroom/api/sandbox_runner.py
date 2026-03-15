@@ -110,7 +110,26 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     if not isinstance(payload.get("process_env"), dict):
         msg = f"{_STARTUP_RUNTIME_PATHS_ENV} is missing process_env."
         raise TypeError(msg)
-    return constants.deserialize_runtime_paths(payload)
+    startup_runtime_paths = constants.deserialize_runtime_paths(payload)
+    process_env = dict(startup_runtime_paths.process_env)
+    process_env.update(
+        {key: value for key, value in os.environ.items() if key not in {_RUNNER_TOKEN_ENV, _STARTUP_RUNTIME_PATHS_ENV}},
+    )
+    resolved_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=startup_runtime_paths.config_path,
+        storage_path=startup_runtime_paths.storage_root,
+        process_env=process_env,
+    )
+    env_file_values = dict(startup_runtime_paths.env_file_values)
+    env_file_values.update(resolved_runtime_paths.env_file_values)
+    return constants.RuntimePaths(
+        config_path=resolved_runtime_paths.config_path,
+        config_dir=resolved_runtime_paths.config_dir,
+        env_path=resolved_runtime_paths.env_path,
+        storage_root=resolved_runtime_paths.storage_root,
+        process_env=resolved_runtime_paths.process_env,
+        env_file_values=MappingProxyType(env_file_values),
+    )
 
 
 def _startup_runner_token_from_env() -> str | None:
@@ -508,7 +527,7 @@ def _request_execution_env(
         return dict(request.execution_env)
     if request.tool_name not in _EXECUTION_ENV_TOOL_NAMES:
         return {}
-    return dict(constants.runtime_env_values(runtime_paths))
+    return dict(constants.execution_runtime_env_values(runtime_paths))
 
 
 def _runtime_paths_with_execution_env(

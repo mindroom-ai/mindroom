@@ -697,7 +697,7 @@ async def verify_user(
     return auth_user
 
 
-def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> None:
+def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastAPI) -> bool:
     """Load config from YAML file."""
     try:
         validated_payload = load_runtime_config_model(runtime_paths).model_dump(exclude_none=True)
@@ -705,9 +705,12 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastA
         with context.config_lock:
             context.config_data.clear()
             context.config_data.update(validated_payload)
-        logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
     except Exception:
         logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
+        return False
+    else:
+        logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
+        return True
 
 
 # Include routers

@@ -53,6 +53,14 @@ _RUNTIME_STARTUP_SECRET_SUFFIXES = (
     "_SECRET",
     "_TOKEN",
 )
+_EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
+    {
+        *_RUNTIME_STARTUP_EXCLUDED_NAMES,
+        "MINDROOM_API_KEY",
+        "MINDROOM_LOCAL_CLIENT_SECRET",
+        "MINDROOM_RUNTIME_PATHS_JSON",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -322,6 +330,37 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     """Return the effective runtime env mapping for one explicit runtime context."""
     merged_env = dict(runtime_paths.env_file_values)
     merged_env.update(runtime_paths.process_env)
+    merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
+    merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
+    return cast("Mapping[str, str]", MappingProxyType(merged_env))
+
+
+def _is_execution_runtime_process_env_name(name: str) -> bool:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+        return False
+    return (
+        _is_public_runtime_startup_env_name(name)
+        or name in PROVIDER_ENV_KEYS.values()
+        or name in VERTEXAI_CLAUDE_ENV_KEYS
+    )
+
+
+def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
+    """Return the runtime env that execution tools may observe.
+
+    This intentionally differs from ``runtime_env_values()``:
+    - config-adjacent ``.env`` values remain visible to execution tools
+    - exported process env is filtered to the committed runtime contract
+    - internal control env such as sandbox auth tokens stay excluded
+    """
+    merged_env = {
+        key: value
+        for key, value in runtime_paths.env_file_values.items()
+        if key not in _EXECUTION_RUNTIME_EXCLUDED_NAMES
+    }
+    merged_env.update(
+        {key: value for key, value in runtime_paths.process_env.items() if _is_execution_runtime_process_env_name(key)},
+    )
     merged_env["MINDROOM_CONFIG_PATH"] = str(runtime_paths.config_path)
     merged_env["MINDROOM_STORAGE_PATH"] = str(runtime_paths.storage_root)
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
