@@ -11,9 +11,10 @@ private Git knowledge sync.
 It is not a generic bridge for tool-specific env var configuration.
 """
 
-from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.constants import RuntimePaths, runtime_env_path
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.provider_env import PROVIDER_ENV_KEYS
 
 logger = get_logger(__name__)
 

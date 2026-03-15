@@ -22,8 +22,8 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
     runtime_matrix_homeserver,
-    safe_replace,
 )
+from mindroom.file_ops import safe_replace
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     agent_username_localpart,

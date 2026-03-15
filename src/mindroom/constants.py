@@ -1,14 +1,13 @@
 """Shared constants for the mindroom package.
 
 This module contains constants that are used across multiple modules
-to avoid circular imports. It does not import anything from the internal
-codebase.
+to avoid circular imports.
+It keeps the runtime path and env source-of-truth together.
 """
 
 import os
 import re
 import shutil
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +15,8 @@ from types import MappingProxyType
 from typing import cast
 
 from dotenv import dotenv_values
+
+from mindroom.provider_env import PROVIDER_ENV_KEYS, VERTEXAI_CLAUDE_ENV_KEYS
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
@@ -576,100 +577,6 @@ AI_RUN_METADATA_KEY = "io.mindroom.ai_run"
 # automatically replace this token with the owner Matrix user ID returned
 # by the provisioning service.
 OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
-
-
-# Canonical mapping from provider name to the environment variable it requires.
-# Other modules derive their own views from this single source of truth.
-PROVIDER_ENV_KEYS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "cerebras": "CEREBRAS_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "ollama": "OLLAMA_HOST",
-}
-VERTEXAI_CLAUDE_ENV_KEYS: tuple[str, str] = ("ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")
-
-_CHROMADB_PY314_PATCHED = False
-
-
-def env_key_for_provider(provider: str) -> str | None:
-    """Get the environment variable name for a provider's API key.
-
-    Handles the gemini→google alias so callers don't need to.
-    """
-    if provider == "gemini":
-        return PROVIDER_ENV_KEYS.get("google")
-    return PROVIDER_ENV_KEYS.get(provider)
-
-
-def patch_chromadb_for_python314() -> None:
-    """Patch pydantic internals so chromadb works on Python 3.14+.
-
-    chromadb currently relies on pydantic v1 `BaseSettings` behavior and defines
-    untyped fields in its settings model. This runtime shim can be removed once
-    chromadb ships an upstream fix.
-    """
-    global _CHROMADB_PY314_PATCHED
-    if _CHROMADB_PY314_PATCHED or sys.version_info < (3, 14):
-        return
-
-    import pydantic  # noqa: PLC0415
-    from pydantic._internal import _model_construction  # noqa: PLC0415
-    from pydantic_settings import BaseSettings  # noqa: PLC0415
-
-    # pydantic-settings v2 defaults to extra="forbid", but pydantic v1's
-    # BaseSettings silently ignored env vars / .env keys that didn't match
-    # any field.  chromadb relies on that tolerance, so we must restore it.
-    class _PermissiveBaseSettings(BaseSettings):
-        model_config = BaseSettings.model_config.copy()
-        model_config["extra"] = "ignore"
-
-    pydantic.BaseSettings = _PermissiveBaseSettings
-
-    original_inspect_namespace = _model_construction.inspect_namespace
-
-    def _patched_inspect_namespace(*args: object, **kwargs: object) -> object:
-        try:
-            return original_inspect_namespace(*args, **kwargs)
-        except pydantic.errors.PydanticUserError as exc:
-            if "non-annotated attribute" not in str(exc):
-                raise
-
-            namespace = args[0] if args else kwargs.get("namespace")
-            raw_annotations = args[1] if len(args) > 1 else kwargs.get("raw_annotations")
-            if not isinstance(namespace, dict) or not isinstance(raw_annotations, dict):
-                raise
-            namespace_dict = cast("dict[str, object]", namespace)
-            raw_annotations_dict = cast("dict[str, object]", raw_annotations)
-
-            for field in (
-                "chroma_coordinator_host",
-                "chroma_logservice_host",
-                "chroma_logservice_port",
-            ):
-                if field in namespace_dict and field not in raw_annotations_dict:
-                    raw_annotations_dict[field] = type(namespace_dict[field])
-            return original_inspect_namespace(*args, **kwargs)
-
-    _model_construction.inspect_namespace = _patched_inspect_namespace
-    _CHROMADB_PY314_PATCHED = True
-
-
-def safe_replace(tmp_path: Path, target_path: Path) -> None:
-    """Replace *target_path* with *tmp_path*, with a fallback for bind mounts.
-
-    ``Path.replace`` performs an atomic rename which fails on some filesystems
-    (e.g. Docker bind mounts) with ``OSError: [Errno 16] Device or resource
-    busy``.  When that happens we fall back to a non-atomic copy.
-    """
-    try:
-        tmp_path.replace(target_path)
-    except OSError:
-        shutil.copy2(tmp_path, target_path)
-        tmp_path.unlink(missing_ok=True)
 
 
 def ensure_writable_config_path(

@@ -22,15 +22,14 @@ from rich.syntax import Syntax
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
-    VERTEXAI_CLAUDE_ENV_KEYS,
     RuntimePaths,
     config_search_locations,
-    env_key_for_provider,
     exported_process_env,
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
+from mindroom.provider_env import VERTEXAI_CLAUDE_ENV_KEYS, env_key_for_provider
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 
 if TYPE_CHECKING:

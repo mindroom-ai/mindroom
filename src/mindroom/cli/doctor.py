@@ -18,12 +18,9 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.constants import (
-    RuntimePaths,
-    env_key_for_provider,
-)
 from mindroom.embeddings import create_sentence_transformers_embedder
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
+from mindroom.provider_env import env_key_for_provider
 
 from .config import _activate_cli_runtime, _load_config_quiet, console
 
@@ -32,6 +29,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
+    from mindroom.constants import RuntimePaths
 
 
 def doctor() -> None:

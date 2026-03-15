@@ -36,6 +36,7 @@ from mindroom.api.workers import router as workers_router
 from mindroom.config.main import Config
 from mindroom.config.main import load_config as load_runtime_config_model
 from mindroom.credentials_sync import sync_env_to_credentials
+from mindroom.file_ops import safe_replace
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 from mindroom.logging_config import get_logger
@@ -349,7 +350,7 @@ def _save_config_to_file(
             sort_keys=True,
             allow_unicode=True,
         )
-    constants.safe_replace(tmp_path, config_path)
+    safe_replace(tmp_path, config_path)
 
 
 def _validated_config_payload(
