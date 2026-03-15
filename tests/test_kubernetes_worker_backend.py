@@ -153,6 +153,7 @@ def _backend(
     idle_timeout_seconds: float = 60.0,
     worker_port: int = 8766,
     storage_subpath_prefix: str = "workers",
+    storage_mount_path: str = "/app/worker",
     config_map_name: str | None = "mindroom-config",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
@@ -167,7 +168,7 @@ def _backend(
         worker_port=worker_port,
         service_account_name="mindroom-worker",
         storage_pvc_name="mindroom-storage",
-        storage_mount_path="/app/worker",
+        storage_mount_path=storage_mount_path,
         storage_subpath_prefix=storage_subpath_prefix,
         config_map_name=config_map_name,
         config_key="config.yaml",
@@ -308,6 +309,10 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    storage_mount_path = tmp_path / "worker-storage"
+    storage_mount_path.mkdir()
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
@@ -317,7 +322,7 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_NAMESPACE=alpha1234\n"
             "MATRIX_HOMESERVER=http://dotenv-hs\n"
             "MATRIX_SERVER_NAME=alpha.example\n"
-            "GOOGLE_APPLICATION_CREDENTIALS=/var/run/secrets/google.json\n"
+            f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n"
             "GOOGLE_CLOUD_PROJECT=demo-project\n"
             "GOOGLE_CLOUD_LOCATION=us-central1\n"
             "ANTHROPIC_API_KEY=sk-secret\n"
@@ -331,7 +336,10 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
         },
     )
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        storage_mount_path=str(storage_mount_path),
+    )
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
@@ -339,16 +347,19 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     env_values = {env["name"]: env.get("value") for env in container["env"]}
     committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+    expected_worker_root = storage_mount_path / "workers" / worker_dir_name(_TEST_SCOPED_WORKER_KEY_A)
+    expected_credentials_path = expected_worker_root / ".runtime" / credentials_path.name
 
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
-    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == "/var/run/secrets/google.json"
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == str(expected_credentials_path)
     assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
     assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
+    assert expected_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
     runtime_ai_cache_enabled,
+    runtime_env_path,
 )
 from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
@@ -537,12 +538,12 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
                 extra_kwargs["base_url"] = base_url
         client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
         if "credentials" not in client_params and (
-            google_application_credentials := runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
         ):
             google_auth = importlib.import_module("google.auth")
             load_credentials_from_file = google_auth.load_credentials_from_file
             credentials, _project_id = load_credentials_from_file(
-                google_application_credentials,
+                str(google_application_credentials),
                 scopes=["https://www.googleapis.com/auth/cloud-platform"],
             )
             client_params["credentials"] = credentials

@@ -163,9 +163,15 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     """Initialize one API app instance with explicit runtime-bound state."""
     previous_context = getattr(api_app.state, "api_context", None)
     config_lock: _ApiLock
+    auth_state: _ApiAuthState | None = None
     if isinstance(previous_context, _ApiContext):
-        config_data = previous_context.config_data
         config_lock = previous_context.config_lock
+        if previous_context.runtime_paths.config_path == runtime_paths.config_path:
+            config_data = previous_context.config_data
+        else:
+            config_data = {}
+        if previous_context.runtime_paths == runtime_paths:
+            auth_state = previous_context.auth_state
     else:
         config_data = {}
         config_lock = cast("_ApiLock", threading.Lock())
@@ -173,6 +179,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         runtime_paths=runtime_paths,
         config_data=config_data,
         config_lock=config_lock,
+        auth_state=auth_state,
     )
 
 

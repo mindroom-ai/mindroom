@@ -253,6 +253,53 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
+def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
+    """Swapping an app to a different config file should drop the previous cached payload."""
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first_runtime = constants.resolve_primary_runtime_paths(
+        config_path=first_dir / "config.yaml",
+        storage_path=first_dir / "mindroom_data",
+        process_env={},
+    )
+    second_runtime = constants.resolve_primary_runtime_paths(
+        config_path=second_dir / "config.yaml",
+        storage_path=second_dir / "mindroom_data",
+        process_env={},
+    )
+    first_runtime.config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
+                "defaults": {"markdown": True},
+            },
+        ),
+        encoding="utf-8",
+    )
+    second_runtime.config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
+                "defaults": {"markdown": True},
+            },
+        ),
+        encoding="utf-8",
+    )
+    fresh_app = FastAPI()
+
+    main.initialize_api_app(fresh_app, first_runtime)
+    main._load_config_from_file(first_runtime, fresh_app)
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+
+    main.initialize_api_app(fresh_app, second_runtime)
+
+    assert main._app_config_data(fresh_app) == {}
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

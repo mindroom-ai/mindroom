@@ -6,11 +6,13 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+from mindroom import constants
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
@@ -564,6 +566,26 @@ class KubernetesResourceManager:
             env.append({"name": name, "value": value})
         return env
 
+    def _worker_google_application_credentials_path(self, dedicated_root: Path) -> str | None:
+        """Return a worker-visible ADC file path, copying the source into shared storage when needed."""
+        raw_value = self.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        if raw_value is None or not raw_value.strip():
+            return None
+        if not Path(self.config.storage_mount_path).exists():
+            return raw_value
+
+        source_path = constants.runtime_env_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        if source_path is None or not source_path.is_file():
+            return raw_value
+
+        runtime_dir = dedicated_root / ".runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        target_path = runtime_dir / source_path.name
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+            target_path.chmod(0o600)
+        return str(target_path)
+
     def _worker_runtime_paths(self, *, worker_key: str, dedicated_root: Path) -> RuntimePaths:
         config_path = (
             Path(self.config.config_path)
@@ -571,6 +593,8 @@ class KubernetesResourceManager:
             else self.runtime_paths.config_path.expanduser().resolve()
         )
         process_env = dict(self.runtime_paths.process_env)
+        if google_application_credentials := self._worker_google_application_credentials_path(dedicated_root):
+            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
         process_env.update(
             {
                 "MINDROOM_SANDBOX_RUNNER_MODE": "true",

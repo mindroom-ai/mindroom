@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
+from mindroom.constants import RuntimePaths, runtime_env_values
 from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
@@ -14,6 +16,8 @@ from mindroom.tool_system.metadata import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from agno.tools.shell import ShellTools
 
 
@@ -57,4 +61,44 @@ def shell_tools() -> type[ShellTools]:
     """Return shell tools for command execution."""
     from agno.tools.shell import ShellTools
 
-    return ShellTools
+    class MindRoomShellTools(ShellTools):
+        """MindRoom wrapper that runs shell commands with the committed runtime env."""
+
+        def __init__(
+            self,
+            base_dir: Path | str | None = None,
+            enable_run_shell_command: bool = True,
+            all: bool = False,  # noqa: A002
+            *,
+            runtime_paths: RuntimePaths,
+            **kwargs: object,
+        ) -> None:
+            super().__init__(
+                base_dir=base_dir,
+                enable_run_shell_command=enable_run_shell_command,
+                all=all,
+                **kwargs,
+            )
+            self._runtime_env = dict(runtime_env_values(runtime_paths))
+
+        def run_shell_command(self, args: list[str], tail: int = 100) -> str:
+            import subprocess
+
+            try:
+                env = dict(os.environ)
+                env.update(self._runtime_env)
+                result = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(self.base_dir) if self.base_dir else None,
+                    env=env,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    return f"Error: {result.stderr}"
+                return "\n".join(result.stdout.split("\n")[-tail:])
+            except Exception as exc:
+                return f"Error: {exc}"
+
+    return MindRoomShellTools

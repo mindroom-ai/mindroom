@@ -303,6 +303,28 @@ def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
     assert captured["credentials_path"] == str(credentials_path)
 
 
+def test_get_tool_by_name_builds_clickup_from_runtime_env(tmp_path: Path) -> None:
+    """Constructor-time env fallbacks should work from the runtime .env snapshot."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "CLICKUP_API_KEY=clickup-test\nMASTER_SPACE_ID=space-123\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    tool = get_tool_by_name("clickup", runtime_paths)
+
+    assert tool.api_key == "clickup-test"
+    assert tool.master_space_id == "space-123"
+
+
 def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path) -> None:
     """Direct tool execution should see runtime-scoped env values through os.environ."""
     config_path = tmp_path / "config.yaml"
@@ -333,6 +355,28 @@ def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path
         "namespace": "alpha1234",
         "storage": str((tmp_path / "storage").resolve()),
     }
+
+
+def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
+    """Direct shell execution should inherit the committed runtime env without ambient exports."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"DAYTONA_API_KEY": "dt_test"},
+    )
+
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    entrypoint = tool.functions["run_shell_command"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(["bash", "-lc", "printf '%s' \"$DAYTONA_API_KEY\""])
+
+    assert result == "dt_test"
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:

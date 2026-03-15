@@ -235,6 +235,34 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
 
 
+def test_resolve_entrypoint_builds_clickup_from_runtime_env(tmp_path: Path) -> None:
+    """Sandbox-side tool rebuilds should honor constructor env fallbacks from runtime paths."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "CLICKUP_API_KEY=clickup-test\nMASTER_SPACE_ID=space-123\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=None,
+        tool_name="clickup",
+        function_name="list_spaces",
+    )
+
+    assert toolkit.api_key == "clickup-test"
+    assert toolkit.master_space_id == "space-123"
+    assert entrypoint is not None
+
+
 def test_sandbox_runner_subprocess_python_sees_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -276,6 +304,39 @@ def test_sandbox_runner_subprocess_python_sees_runtime_env(
         "namespace": "alpha1234",
         "storage": str((tmp_path / "storage").resolve()),
     }
+
+
+def test_sandbox_runner_subprocess_shell_sees_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox subprocess shell execution should inherit runtime env values without ambient exports."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"DAYTONA_API_KEY": "dt_test"},
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-lc", "printf '%s' \"$DAYTONA_API_KEY\""]],
+            kwargs={},
+        ),
+        runtime_paths,
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert response.result == "dt_test"
 
 
 def test_worker_subprocess_env_preserves_parent_path(
