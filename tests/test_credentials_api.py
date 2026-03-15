@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from mindroom.api import credentials as credentials_api
+from mindroom.api.main import initialize_api_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 
@@ -33,7 +34,10 @@ def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestC
 
     app = FastAPI()
     app.include_router(router)
-    app.state.runtime_paths = resolve_runtime_paths(storage_path=mock_credentials_manager.storage_root)
+    initialize_api_app(
+        app,
+        resolve_runtime_paths(storage_path=mock_credentials_manager.storage_root),
+    )
 
     with patch("mindroom.api.credentials.get_runtime_credentials_manager") as mock_get:
         mock_get.return_value = mock_credentials_manager

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -15,29 +15,19 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.constants import RuntimePaths
 from mindroom.tool_system.dependencies import ensure_tool_deps
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
-class _IntegrationsApiState(Protocol):
-    """Typed subset of FastAPI app state used by integrations routes."""
-
-    runtime_paths: RuntimePaths
-
-
 def _request_runtime_paths(request: Request) -> RuntimePaths:
     """Return the explicit runtime context for one API request."""
-    try:
-        runtime_paths = cast("_IntegrationsApiState", request.app.state).runtime_paths
-    except AttributeError as exc:
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    return runtime_paths
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    return api_runtime_paths(request)
 
 
 def get_dashboard_url(request: Request) -> str:

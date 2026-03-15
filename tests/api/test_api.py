@@ -200,7 +200,7 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
         _app: FastAPI,
         runtime_paths: constants.RuntimePaths,
     ) -> None:
-        assert runtime_paths == main.app.state.runtime_paths
+        assert runtime_paths == main._app_runtime_paths(main.app)
         watch_calls.append("watch")
         await stop_event.wait()
 
@@ -248,7 +248,7 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     main.initialize_api_app(fresh_app, initial_runtime)
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key is None
 
-    fresh_app.state.runtime_paths = refreshed_runtime
+    main._app_context(fresh_app).runtime_paths = refreshed_runtime
 
     assert main._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
@@ -274,7 +274,7 @@ def test_api_lifespan_loads_config_from_injected_runtime(
         storage_path=tmp_path / "storage",
     )
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
+    main._app_context(main.app).config_data = {"agents": {"wrong": {"display_name": "Wrong"}}}
 
     async def _idle_watch_config(
         stop_event: asyncio.Event,
@@ -323,7 +323,7 @@ async def test_watch_config_uses_single_file_watcher(monkeypatch: pytest.MonkeyP
         lambda _runtime_paths, _app: watched_paths.append(Path("loaded")),
     )
 
-    await main._watch_config(stop_event, main.app, main.app.state.runtime_paths)
+    await main._watch_config(stop_event, main.app, main._app_runtime_paths(main.app))
 
     assert watched_paths == [config_path, Path("loaded")]
 
@@ -376,7 +376,7 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     """Background worker cleanup should no-op when no backend is configured."""
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: False)
 
-    assert main._cleanup_workers_once(main.app.state.runtime_paths) == 0
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
 
 def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -402,7 +402,7 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(main, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(main, "get_primary_worker_manager", lambda *_args, **_kwargs: _FakeWorkerManager())
 
-    assert main._cleanup_workers_once(main.app.state.runtime_paths) == 1
+    assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
 
 
 def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -912,17 +912,17 @@ def test_spotify_connect_uses_pending_oauth_state(
     main.initialize_api_app(
         main.app,
         constants.resolve_primary_runtime_paths(
-            config_path=main.app.state.runtime_paths.config_path,
-            storage_path=main.app.state.runtime_paths.storage_root,
+            config_path=main._app_runtime_paths(main.app).config_path,
+            storage_path=main._app_runtime_paths(main.app).storage_root,
             process_env={
-                **dict(main.app.state.runtime_paths.process_env),
+                **dict(main._app_runtime_paths(main.app).process_env),
                 "SPOTIFY_CLIENT_ID": "client-id",
                 "SPOTIFY_CLIENT_SECRET": "client-secret",
             },
         ),
     )
-    main.app.state.auth_state = main._ApiAuthState(
-        runtime_paths=main.app.state.runtime_paths,
+    main._app_context(main.app).auth_state = main._ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
         settings=main._ApiAuthSettings(
             platform_login_url=None,
             supabase_url=None,
@@ -1095,17 +1095,21 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
 
 
 def test_run_config_write_restores_original_config_before_releasing_lock(tmp_path: Path) -> None:
-    """Failed config writes should roll back before the write lock is released."""
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        process_env={"MINDROOM_NAMESPACE": "prod1"},
+    """Failed config writes should leave committed config unchanged before the lock exits."""
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={"MINDROOM_NAMESPACE": "prod1"},
+        ),
     )
     original_config = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {"assistant": {"display_name": "Assistant", "role": "test", "rooms": []}},
     }
-    main.app.state.config_data = yaml.safe_load(yaml.safe_dump(original_config))
+    context = main._app_context(main.app)
+    context.config_data = yaml.safe_load(yaml.safe_dump(original_config))
 
     class _AssertingLock:
         def __enter__(self) -> object:
@@ -1113,16 +1117,16 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
 
         def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
             if exc_type is not None:
-                assert main.app.state.config_data == original_config
+                assert context.config_data == original_config
             return False
 
-    original_lock = main.app.state.config_lock
-    main.app.state.config_lock = _AssertingLock()
+    original_lock = context.config_lock
+    context.config_lock = _AssertingLock()
     try:
         with pytest.raises(HTTPException) as exc_info:
             main._run_config_write(
                 main.app,
-                lambda: main.app.state.config_data.update(
+                lambda candidate_config: candidate_config.update(
                     {
                         "mindroom_user": {
                             "username": "mindroom_assistant_prod1",
@@ -1130,14 +1134,13 @@ def test_run_config_write_restores_original_config_before_releasing_lock(tmp_pat
                         },
                     },
                 ),
-                runtime_paths=runtime_paths,
                 error_prefix="Failed to save configuration",
             )
     finally:
-        main.app.state.config_lock = original_lock
+        context.config_lock = original_lock
 
     assert exc_info.value.status_code == 422
-    assert main.app.state.config_data == original_config
+    assert context.config_data == original_config
 
 
 def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -> None:
@@ -1159,15 +1162,18 @@ def test_load_config_from_file_normalizes_legacy_null_sections(tmp_path: Path) -
 
     main._load_config_from_file(runtime_paths, main.app)
 
-    assert main.app.state.config_data["teams"] == {}
-    assert main.app.state.config_data["plugins"] == []
+    assert main._app_context(main.app).config_data["teams"] == {}
+    assert main._app_context(main.app).config_data["plugins"] == []
 
 
 def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> None:
     """API config writes should accept legacy null optional sections already loaded in memory."""
     config_path = tmp_path / "config.yaml"
-    runtime_paths = constants.resolve_primary_runtime_paths(config_path=config_path, process_env={})
-    main.app.state.config_data = {
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(config_path=config_path, process_env={}),
+    )
+    main._app_context(main.app).config_data = {
         "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
         "router": {"model": "default"},
         "agents": {},
@@ -1177,13 +1183,12 @@ def test_run_config_write_normalizes_legacy_null_sections(tmp_path: Path) -> Non
 
     main._run_config_write(
         main.app,
-        lambda: None,
-        runtime_paths=runtime_paths,
+        lambda _candidate_config: None,
         error_prefix="Failed to save configuration",
     )
 
-    assert main.app.state.config_data["teams"] == {}
-    assert main.app.state.config_data["plugins"] == []
+    assert main._app_context(main.app).config_data["teams"] == {}
+    assert main._app_context(main.app).config_data["plugins"] == []
 
 
 def test_error_handling_agent_not_found(test_client: TestClient) -> None:
@@ -1557,7 +1562,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=temp_config_file, process_env={})
     main.initialize_api_app(main.app, runtime_paths)
-    main.app.state.auth_state = main._ApiAuthState(
+    main._app_context(main.app).auth_state = main._ApiAuthState(
         runtime_paths=runtime_paths,
         settings=main._ApiAuthSettings(
             platform_login_url=None,
@@ -1568,7 +1573,7 @@ def api_key_client(temp_config_file: Path) -> TestClient:
         ),
         supabase_auth=None,
     )
-    main._load_config_from_file(main.app.state.runtime_paths, main.app)
+    main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app)
 
 
@@ -1696,8 +1701,8 @@ def _set_platform_auth(
     class _FakeClient:
         auth = _FakeAuth()
 
-    main.app.state.auth_state = main._ApiAuthState(
-        runtime_paths=main.app.state.runtime_paths,
+    main._app_context(main.app).auth_state = main._ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
         settings=main._ApiAuthSettings(
             platform_login_url=platform_login_url,
             supabase_url="https://supabase.example.com",

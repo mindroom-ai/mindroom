@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mindroom import constants
+from mindroom.api import main
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
@@ -182,17 +183,20 @@ class TestCredentialsAPI:
         mock_credentials_manager.for_worker.return_value = worker_manager
         monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
         monkeypatch.setenv("ACCOUNT_ID", "account-456")
-        runtime_paths = client.app.state.runtime_paths
-        client.app.state.runtime_paths = constants.resolve_primary_runtime_paths(
-            config_path=runtime_paths.config_path,
-            storage_path=runtime_paths.storage_root,
-            process_env={
-                **dict(runtime_paths.process_env),
-                "CUSTOMER_ID": "tenant-123",
-                "ACCOUNT_ID": "account-456",
-            },
+        runtime_paths = main._app_runtime_paths(client.app)
+        main.initialize_api_app(
+            client.app,
+            constants.resolve_primary_runtime_paths(
+                config_path=runtime_paths.config_path,
+                storage_path=runtime_paths.storage_root,
+                process_env={
+                    **dict(runtime_paths.process_env),
+                    "CUSTOMER_ID": "tenant-123",
+                    "ACCOUNT_ID": "account-456",
+                },
+            ),
         )
-        client.app.state.auth_state = None
+        main._app_context(client.app).auth_state = None
 
         expected_worker_key = resolve_worker_key(
             "shared",

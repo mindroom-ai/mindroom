@@ -59,7 +59,7 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.get_status.return_value = {"indexed_count": 3, "file_count": 4}
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
@@ -112,7 +112,7 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
 
     manager = MagicMock()
     manager.list_files.return_value = [included_file]
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
@@ -152,7 +152,7 @@ def test_knowledge_upload_rolls_back_on_oversized_file(
         ("files", ("first.txt", b"1234", "text/plain")),
         ("files", ("second.txt", b"123456", "text/plain")),
     ]
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.post("/api/knowledge/bases/research/upload", files=files)
@@ -170,7 +170,7 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     config = _knowledge_config(tmp_path)
     manager = MagicMock()
     manager.index_file = AsyncMock(return_value=True)
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
@@ -201,7 +201,7 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     target.write_text("hello", encoding="utf-8")
     manager = MagicMock()
     manager.remove_file = AsyncMock(return_value=True)
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
@@ -222,7 +222,7 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
 def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_path: Path) -> None:
     """Delete endpoint should reject traversal paths."""
     config = _knowledge_config(tmp_path)
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.delete("/api/knowledge/bases/research/files/..%2Fsecret.txt")
@@ -234,7 +234,7 @@ def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_pa
 def test_unknown_knowledge_base_returns_404(test_client: TestClient, tmp_path: Path) -> None:
     """Endpoints should return 404 for unknown knowledge base IDs."""
     config = _knowledge_config(tmp_path, base_id="legal")
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
         response = test_client.get("/api/knowledge/bases/research/status")
@@ -248,7 +248,7 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     config = _knowledge_config(tmp_path, with_git=True)
     manager = MagicMock()
     call_order: list[str] = []
-    runtime_paths = test_client.app.state.runtime_paths
+    runtime_paths = main._app_runtime_paths(test_client.app)
 
     async def _sync() -> dict[str, int | bool]:
         call_order.append("sync")

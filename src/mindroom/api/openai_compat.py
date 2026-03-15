@@ -12,7 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -72,23 +72,15 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-class _OpenAICompatState(Protocol):
-    """Typed subset of FastAPI app state used by the OpenAI-compatible routes."""
-
-    runtime_paths: RuntimePaths
-
-
 def _request_runtime_paths(request: Request) -> RuntimePaths:
     """Return the explicit runtime context for one OpenAI-compatible request."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     try:
-        runtime_paths = cast("_OpenAICompatState", request.app.state).runtime_paths
-    except AttributeError as exc:
+        return api_runtime_paths(request)
+    except TypeError as exc:
         msg = "API runtime paths are not initialized"
         raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    return runtime_paths
 
 
 def _load_config(request: Request) -> tuple[Config, RuntimePaths]:

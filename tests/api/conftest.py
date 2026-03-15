@@ -47,7 +47,7 @@ def test_client(temp_config_file: Path) -> TestClient:
     main.initialize_api_app(main.app, runtime_paths)
 
     # Force reload of config
-    main._load_config_from_file(main.app.state.runtime_paths, main.app)
+    main._load_config_from_file(main._app_runtime_paths(main.app), main.app)
 
     # Create test client
     return TestClient(main.app)

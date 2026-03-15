@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -50,10 +50,6 @@ class WorkerCleanupResponse(BaseModel):
 router = APIRouter(prefix="/api/workers", tags=["workers"])
 
 
-class _ApiState(Protocol):
-    runtime_paths: RuntimePaths
-
-
 def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
     return WorkerResponse(
         worker_id=worker.worker_id,
@@ -73,7 +69,9 @@ def _serialize_worker(worker: WorkerHandle) -> WorkerResponse:
 
 
 def _request_runtime_paths(request: Request) -> RuntimePaths:
-    return cast("_ApiState", request.app.state).runtime_paths
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    return api_runtime_paths(request)
 
 
 def _worker_manager(request: Request) -> WorkerManager:

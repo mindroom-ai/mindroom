@@ -6,12 +6,11 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from mindroom.constants import RuntimePaths
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -27,6 +26,9 @@ from mindroom.tool_system.worker_routing import (
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -45,12 +47,6 @@ class _PendingOAuthState:
 
 
 _pending_oauth_states: dict[str, _PendingOAuthState] = {}
-
-
-class _CredentialsApiState(Protocol):
-    """Typed subset of FastAPI app state used by credentials routes."""
-
-    runtime_paths: RuntimePaths
 
 
 def _filter_internal_keys(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -77,15 +73,9 @@ class RequestCredentialsTarget:
 
 
 def _request_runtime_paths(request: Request) -> RuntimePaths:
-    try:
-        runtime_paths = cast("_CredentialsApiState", request.app.state).runtime_paths
-    except AttributeError as exc:
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    return runtime_paths
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    return api_runtime_paths(request)
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:

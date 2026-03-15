@@ -26,7 +26,6 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
-from mindroom.constants import RuntimePaths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
@@ -34,6 +33,8 @@ if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import Flow
+
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/google", tags=["google-integration"])
 
@@ -60,15 +61,9 @@ _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
 def _request_runtime_paths(request: Request) -> RuntimePaths:
     """Return the explicit runtime context for one API request."""
-    try:
-        runtime_paths = request.app.state.runtime_paths
-    except AttributeError as exc:
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    return runtime_paths
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    return api_runtime_paths(request)
 
 
 def _mindroom_port(runtime_paths: RuntimePaths) -> str:
@@ -413,12 +408,15 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
 
     try:
         # Save to environment
-        request.app.state.runtime_paths = _save_env_credentials(
+        runtime_paths = _save_env_credentials(
             client_id,
             client_secret,
             _request_runtime_paths(request),
             project_id,
         )
+        from mindroom.api.main import initialize_api_app  # noqa: PLC0415
+
+        initialize_api_app(request.app, runtime_paths)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save credentials: {e!s}") from e
     else:
@@ -450,7 +448,10 @@ async def reset(request: Request) -> dict[str, Any]:
 
             with env_path.open("w", encoding="utf-8") as f:
                 f.writelines(filtered_lines)
-        request.app.state.runtime_paths = _refresh_runtime_paths(runtime_paths)
+        refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
+        from mindroom.api.main import initialize_api_app  # noqa: PLC0415
+
+        initialize_api_app(request.app, refreshed_runtime_paths)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset: {e!s}") from e
     else:

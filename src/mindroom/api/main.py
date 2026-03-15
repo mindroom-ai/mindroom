@@ -46,16 +46,10 @@ from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
+    from types import TracebackType
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
-
-
-class _ApiState(Protocol):
-    runtime_paths: constants.RuntimePaths
-    config_data: dict[str, Any]
-    config_lock: threading.Lock
-    auth_state: _ApiAuthState | None
 
 
 @dataclass(frozen=True)
@@ -72,6 +66,25 @@ class _ApiAuthState:
     runtime_paths: constants.RuntimePaths
     settings: _ApiAuthSettings
     supabase_auth: _SupabaseClientProtocol | None
+
+
+class _ApiLock(Protocol):
+    def __enter__(self) -> object: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+@dataclass
+class _ApiContext:
+    runtime_paths: constants.RuntimePaths
+    config_data: dict[str, Any]
+    config_lock: _ApiLock
+    auth_state: _ApiAuthState | None = None
 
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
@@ -132,33 +145,35 @@ def api_runtime_paths(request: Request) -> constants.RuntimePaths:
     return _app_runtime_paths(request.app)
 
 
+def _app_context(api_app: FastAPI) -> _ApiContext:
+    """Return the committed API context for one app instance."""
+    context = getattr(api_app.state, "api_context", None)
+    if not isinstance(context, _ApiContext):
+        msg = "API context is not initialized"
+        raise TypeError(msg)
+    return context
+
+
 def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
     """Return the committed runtime paths for one API app instance."""
-    state = cast("_ApiState", api_app.state)
-    try:
-        runtime_paths = state.runtime_paths
-    except AttributeError as exc:
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg) from exc
-    if not isinstance(runtime_paths, constants.RuntimePaths):
-        msg = "API runtime paths are not initialized"
-        raise TypeError(msg)
-    return runtime_paths
+    return _app_context(api_app).runtime_paths
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
     """Initialize one API app instance with explicit runtime-bound state."""
-    state = cast("_ApiState", api_app.state)
-    try:
-        _ = state.config_data
-    except AttributeError:
-        api_app.state.config_data = {}
-    try:
-        _ = state.config_lock
-    except AttributeError:
-        api_app.state.config_lock = threading.Lock()
-    api_app.state.runtime_paths = runtime_paths
-    api_app.state.auth_state = None
+    previous_context = getattr(api_app.state, "api_context", None)
+    config_lock: _ApiLock
+    if isinstance(previous_context, _ApiContext):
+        config_data = previous_context.config_data
+        config_lock = previous_context.config_lock
+    else:
+        config_data = {}
+        config_lock = cast("_ApiLock", threading.Lock())
+    api_app.state.api_context = _ApiContext(
+        runtime_paths=runtime_paths,
+        config_data=config_data,
+        config_lock=config_lock,
+    )
 
 
 def api_config_data(request: Request) -> dict[str, Any]:
@@ -166,19 +181,19 @@ def api_config_data(request: Request) -> dict[str, Any]:
     return _app_config_data(request.app)
 
 
-def api_config_lock(request: Request) -> threading.Lock:
+def api_config_lock(request: Request) -> _ApiLock:
     """Return the API config lock for one request."""
     return _app_config_lock(request.app)
 
 
 def _app_config_data(api_app: FastAPI) -> dict[str, Any]:
     """Return the mutable config cache for one app instance."""
-    return cast("_ApiState", api_app.state).config_data
+    return _app_context(api_app).config_data
 
 
-def _app_config_lock(api_app: FastAPI) -> threading.Lock:
+def _app_config_lock(api_app: FastAPI) -> _ApiLock:
     """Return the config lock for one app instance."""
-    return cast("_ApiState", api_app.state).config_lock
+    return _app_context(api_app).config_lock
 
 
 def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSettings:
@@ -194,8 +209,9 @@ def _build_auth_settings(runtime_paths: constants.RuntimePaths) -> _ApiAuthSetti
 
 def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
     """Return the committed auth state for one API app instance."""
-    runtime_paths = _app_runtime_paths(api_app)
-    state = cast("_ApiState", api_app.state).auth_state
+    context = _app_context(api_app)
+    runtime_paths = context.runtime_paths
+    state = context.auth_state
     if state is not None and state.runtime_paths == runtime_paths:
         return state
     settings = _build_auth_settings(runtime_paths)
@@ -208,7 +224,7 @@ def _app_auth_state(api_app: FastAPI) -> _ApiAuthState:
             settings.supabase_anon_key,
         ),
     )
-    api_app.state.auth_state = state
+    context.auth_state = state
     return state
 
 
@@ -255,8 +271,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
-app.state.config_data = {}
-app.state.config_lock = threading.Lock()
 initialize_api_app(app, constants.resolve_primary_runtime_paths())
 
 # Configure CORS for the standalone frontend dev server.
@@ -342,36 +356,27 @@ def _validated_config_payload(
 
 def _run_config_write[T](
     api_app: FastAPI,
-    mutate: Callable[[], T],
+    mutate: Callable[[dict[str, Any]], T],
     *,
-    runtime_paths: constants.RuntimePaths,
     error_prefix: str,
-    save_payload: dict[str, Any] | None = None,
 ) -> T:
-    """Mutate config under lock and persist atomically."""
-    config_data = _app_config_data(api_app)
-    with _app_config_lock(api_app):
+    """Validate, save, and swap config under lock."""
+    context = _app_context(api_app)
+    with context.config_lock:
         try:
-            original_config = deepcopy(config_data)
-            result = mutate()
-            candidate_config = config_data if save_payload is None else save_payload
-            validated_payload = _validated_config_payload(candidate_config, runtime_paths)
-            config_data.clear()
-            config_data.update(validated_payload)
-            _save_config_to_file(validated_payload, runtime_paths=runtime_paths)
+            candidate_config = deepcopy(context.config_data)
+            result = mutate(candidate_config)
+            validated_payload = _validated_config_payload(candidate_config, context.runtime_paths)
+            _save_config_to_file(validated_payload, runtime_paths=context.runtime_paths)
         except HTTPException:
-            config_data.clear()
-            config_data.update(original_config)
             raise
         except ValidationError as e:
-            config_data.clear()
-            config_data.update(original_config)
             raise HTTPException(status_code=422, detail=e.errors(include_context=False)) from e
         except Exception as e:
-            config_data.clear()
-            config_data.update(original_config)
             raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
         else:
+            context.config_data.clear()
+            context.config_data.update(validated_payload)
             return result
 
 
@@ -689,10 +694,10 @@ def _load_config_from_file(runtime_paths: constants.RuntimePaths, api_app: FastA
     """Load config from YAML file."""
     try:
         validated_payload = load_runtime_config_model(runtime_paths).model_dump(exclude_none=True)
-        with _app_config_lock(api_app):
-            config_data = _app_config_data(api_app)
-            config_data.clear()
-            config_data.update(validated_payload)
+        context = _app_context(api_app)
+        with context.config_lock:
+            context.config_data.clear()
+            context.config_data.update(validated_payload)
         print("Config loaded successfully")
     except Exception as e:
         print(f"Error loading config: {e}")
@@ -774,10 +779,11 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
 @app.post("/api/config/load")
 async def load_config(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Load configuration from file."""
-    with _app_config_lock(request.app):
-        if not _app_config_data(request.app):
+    context = _app_context(request.app)
+    with context.config_lock:
+        if not context.config_data:
             raise HTTPException(status_code=500, detail="Failed to load configuration")
-        return _app_config_data(request.app)
+        return context.config_data
 
 
 @app.put("/api/config/save")
@@ -787,18 +793,14 @@ async def save_config(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Save configuration to file."""
-    runtime_paths = _app_runtime_paths(request.app)
 
-    config_data = _app_config_data(request.app)
-
-    def mutate() -> None:
-        config_data.clear()
-        config_data.update(new_config)
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        candidate_config.clear()
+        candidate_config.update(new_config)
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=runtime_paths,
         error_prefix="Failed to save configuration",
     )
     return {"success": True}
@@ -807,8 +809,9 @@ async def save_config(
 @app.get("/api/config/agents")
 async def get_agents(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all agents."""
-    with _app_config_lock(request.app):
-        agents = _app_config_data(request.app).get("agents", {})
+    context = _app_context(request.app)
+    with context.config_lock:
+        agents = context.config_data.get("agents", {})
         # Convert to list format with IDs
         agent_list = []
         for agent_id, agent_data in agents.items():
@@ -825,17 +828,15 @@ async def update_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific agent."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        if "agents" not in config_data:
-            config_data["agents"] = {}
-        config_data["agents"][agent_id] = _sanitize_entity_payload(agent_data)
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        if "agents" not in candidate_config:
+            candidate_config["agents"] = {}
+        candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to save agent",
     )
     return {"success": True}
@@ -849,19 +850,17 @@ async def create_agent(
 ) -> dict[str, Any]:
     """Create a new agent."""
     base_agent_id = agent_data.get("display_name", "new_agent").lower().replace(" ", "_")
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> str:
-        if "agents" not in config_data:
-            config_data["agents"] = {}
-        agent_id = _resolve_unique_entity_id(base_agent_id, config_data["agents"])
-        config_data["agents"][agent_id] = _sanitize_entity_payload(agent_data)
+    def mutate(candidate_config: dict[str, Any]) -> str:
+        if "agents" not in candidate_config:
+            candidate_config["agents"] = {}
+        agent_id = _resolve_unique_entity_id(base_agent_id, candidate_config["agents"])
+        candidate_config["agents"][agent_id] = _sanitize_entity_payload(agent_data)
         return agent_id
 
     agent_id = _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to create agent",
     )
     return {"id": agent_id, "success": True}
@@ -874,17 +873,15 @@ async def delete_agent(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete an agent."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        if "agents" not in config_data or agent_id not in config_data["agents"]:
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        if "agents" not in candidate_config or agent_id not in candidate_config["agents"]:
             raise HTTPException(status_code=404, detail="Agent not found")
-        del config_data["agents"][agent_id]
+        del candidate_config["agents"][agent_id]
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to delete agent",
     )
     return {"success": True}
@@ -893,8 +890,9 @@ async def delete_agent(
 @app.get("/api/config/teams")
 async def get_teams(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> list[dict[str, Any]]:
     """Get all teams."""
-    with _app_config_lock(request.app):
-        teams = _app_config_data(request.app).get("teams", {})
+    context = _app_context(request.app)
+    with context.config_lock:
+        teams = context.config_data.get("teams", {})
         # Convert to list format with IDs
         team_list = []
         for team_id, team_data in teams.items():
@@ -911,17 +909,15 @@ async def update_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a specific team."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        if "teams" not in config_data:
-            config_data["teams"] = {}
-        config_data["teams"][team_id] = _sanitize_entity_payload(team_data)
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        if "teams" not in candidate_config:
+            candidate_config["teams"] = {}
+        candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to save team",
     )
     return {"success": True}
@@ -935,19 +931,17 @@ async def create_team(
 ) -> dict[str, Any]:
     """Create a new team."""
     base_team_id = team_data.get("display_name", "new_team").lower().replace(" ", "_")
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> str:
-        if "teams" not in config_data:
-            config_data["teams"] = {}
-        team_id = _resolve_unique_entity_id(base_team_id, config_data["teams"])
-        config_data["teams"][team_id] = _sanitize_entity_payload(team_data)
+    def mutate(candidate_config: dict[str, Any]) -> str:
+        if "teams" not in candidate_config:
+            candidate_config["teams"] = {}
+        team_id = _resolve_unique_entity_id(base_team_id, candidate_config["teams"])
+        candidate_config["teams"][team_id] = _sanitize_entity_payload(team_data)
         return team_id
 
     team_id = _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to create team",
     )
     return {"id": team_id, "success": True}
@@ -960,17 +954,15 @@ async def delete_team(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Delete a team."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        if "teams" not in config_data or team_id not in config_data["teams"]:
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        if "teams" not in candidate_config or team_id not in candidate_config["teams"]:
             raise HTTPException(status_code=404, detail="Team not found")
-        del config_data["teams"][team_id]
+        del candidate_config["teams"][team_id]
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to delete team",
     )
     return {"success": True}
@@ -979,8 +971,9 @@ async def delete_team(
 @app.get("/api/config/models")
 async def get_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get all model configurations."""
-    with _app_config_lock(request.app):
-        models = _app_config_data(request.app).get("models", {})
+    context = _app_context(request.app)
+    with context.config_lock:
+        models = context.config_data.get("models", {})
         return dict(models) if models else {}
 
 
@@ -992,17 +985,15 @@ async def update_model(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update a model configuration."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        if "models" not in config_data:
-            config_data["models"] = {}
-        config_data["models"][model_id] = model_data
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        if "models" not in candidate_config:
+            candidate_config["models"] = {}
+        candidate_config["models"][model_id] = model_data
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to save model",
     )
     return {"success": True}
@@ -1011,8 +1002,9 @@ async def update_model(
 @app.get("/api/config/room-models")
 async def get_room_models(request: Request, _user: Annotated[dict, Depends(verify_user)]) -> dict[str, Any]:
     """Get room-specific model overrides."""
-    with _app_config_lock(request.app):
-        room_models = _app_config_data(request.app).get("room_models", {})
+    context = _app_context(request.app)
+    with context.config_lock:
+        room_models = context.config_data.get("room_models", {})
         return dict(room_models) if room_models else {}
 
 
@@ -1023,15 +1015,13 @@ async def update_room_models(
     _user: Annotated[dict, Depends(verify_user)],
 ) -> dict[str, bool]:
     """Update room-specific model overrides."""
-    config_data = _app_config_data(request.app)
 
-    def mutate() -> None:
-        config_data["room_models"] = room_models
+    def mutate(candidate_config: dict[str, Any]) -> None:
+        candidate_config["room_models"] = room_models
 
     _run_config_write(
         request.app,
         mutate,
-        runtime_paths=_app_runtime_paths(request.app),
         error_prefix="Failed to save room models",
     )
     return {"success": True}
@@ -1042,8 +1032,9 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
     """Get list of available rooms."""
     # Extract unique rooms from all agents
     rooms = set()
-    with _app_config_lock(request.app):
-        for agent_data in _app_config_data(request.app).get("agents", {}).values():
+    context = _app_context(request.app)
+    with context.config_lock:
+        for agent_data in context.config_data.get("agents", {}).values():
             agent_rooms = agent_data.get("rooms", [])
             rooms.update(agent_rooms)
 
