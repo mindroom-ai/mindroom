@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom.bot import AgentBot, _should_skip_mentions
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_should_skip_mentions_with_metadata() -> None:
@@ -45,7 +50,7 @@ def test_should_skip_mentions_explicit_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_response_with_skip_mentions() -> None:
+async def test_send_response_with_skip_mentions(tmp_path: Path) -> None:
     """Test that _send_response adds metadata when skip_mentions is True."""
     # Create a mock bot
     bot = AsyncMock(spec=AgentBot)
@@ -53,8 +58,9 @@ async def test_send_response_with_skip_mentions() -> None:
     bot.matrix_id = AsyncMock()
     bot.matrix_id.domain = "localhost"
     bot.client = AsyncMock()
-    bot.logger = AsyncMock()
+    bot.logger = MagicMock()
     bot.response_tracker = AsyncMock()
+    bot.runtime_paths = test_runtime_paths(tmp_path)
 
     # Mock the format_message_with_mentions to return a dict we can check
     mock_content = {"body": "test", "msgtype": "m.text"}
@@ -99,14 +105,17 @@ async def test_send_response_with_skip_mentions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_extract_context_with_skip_mentions() -> None:
+async def test_extract_context_with_skip_mentions(tmp_path: Path) -> None:
     """Test that _extract_message_context ignores mentions when skip_mentions is set."""
     # Create a mock bot
     bot = AsyncMock(spec=AgentBot)
-    bot.config = AsyncMock()
+    bot.config = MagicMock()
+    bot.config.get_entity_thread_mode.return_value = "thread"
     bot.agent_name = "email_agent"
     bot.client = AsyncMock()
-    bot.logger = AsyncMock()
+    bot.logger = MagicMock()
+    bot.matrix_id = MagicMock()
+    bot.runtime_paths = test_runtime_paths(tmp_path)
     bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
 
     # Create room

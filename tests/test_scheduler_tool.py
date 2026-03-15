@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +16,11 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import _extract_mentioned_agents_from_text
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _bind_runtime_paths(config: Config) -> Config:
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def _make_context(config: Config) -> ToolRuntimeContext:
@@ -25,6 +32,7 @@ def _make_context(config: Config) -> ToolRuntimeContext:
         requester_id="@user:localhost",
         client=AsyncMock(),
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room=MagicMock(),
         reply_to_event_id=None,
         storage_path=None,
@@ -33,9 +41,13 @@ def _make_context(config: Config) -> ToolRuntimeContext:
 
 def test_extract_mentioned_agents_from_text() -> None:
     """Agent mentions should be extracted from scheduling text."""
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
-    result = _extract_mentioned_agents_from_text("in 5 minutes @general check deployment", config)
-    expected_agent = MatrixID.from_agent("general", config.domain)
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+    result = _extract_mentioned_agents_from_text(
+        "in 5 minutes @general check deployment",
+        config,
+        runtime_paths_for(config),
+    )
+    expected_agent = MatrixID.from_agent("general", config.domain, runtime_paths_for(config))
     assert result == [expected_agent]
 
 
@@ -53,7 +65,7 @@ async def test_scheduler_tool_requires_context() -> None:
 async def test_scheduler_tool_uses_shared_backend() -> None:
     """Tool should call the same scheduling backend path as !schedule."""
     tools = SchedulerTools()
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     context = _make_context(config)
 
     with (
@@ -73,6 +85,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         scheduled_by=context.requester_id,
         full_text="tomorrow at 3pm check deployment",
         config=context.config,
+        runtime_paths=context.runtime_paths,
         room=context.room,
     )
 
@@ -89,7 +102,7 @@ async def test_edit_schedule_tool_requires_context() -> None:
 async def test_edit_schedule_tool_calls_backend() -> None:
     """Edit tool should call edit_scheduled_task with correct arguments."""
     tools = SchedulerTools()
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     context = _make_context(config)
 
     with (
@@ -109,6 +122,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         full_text="tomorrow at 9am check deployment",
         scheduled_by=context.requester_id,
         config=context.config,
+        runtime_paths=context.runtime_paths,
         room=context.room,
         thread_id=context.resolved_thread_id,
     )
@@ -126,7 +140,7 @@ async def test_list_schedules_tool_requires_context() -> None:
 async def test_list_schedules_tool_calls_backend() -> None:
     """List tool should call list_scheduled_tasks with correct arguments."""
     tools = SchedulerTools()
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     context = _make_context(config)
 
     with (
@@ -159,7 +173,7 @@ async def test_cancel_schedule_tool_requires_context() -> None:
 async def test_cancel_schedule_tool_calls_backend() -> None:
     """Cancel tool should call cancel_scheduled_task with correct arguments."""
     tools = SchedulerTools()
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
     context = _make_context(config)
 
     with (

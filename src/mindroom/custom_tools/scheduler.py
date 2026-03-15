@@ -45,6 +45,7 @@ class SchedulerTools(Toolkit):
             scheduled_by=context.requester_id,
             full_text=request,
             config=context.config,
+            runtime_paths=context.runtime_paths,
             room=context.room,
         )
         return response_text
@@ -71,6 +72,7 @@ class SchedulerTools(Toolkit):
             full_text=request,
             scheduled_by=context.requester_id,
             config=context.config,
+            runtime_paths=context.runtime_paths,
             room=context.room,
             thread_id=context.resolved_thread_id,
         )

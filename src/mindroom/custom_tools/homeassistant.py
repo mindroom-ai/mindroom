@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 import httpx
 from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     unsupported_shared_only_integration_message,
@@ -25,6 +25,7 @@ class HomeAssistantTools(Toolkit):
     def __init__(
         self,
         *,
+        credentials_manager: CredentialsManager | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> None:
@@ -38,7 +39,10 @@ class HomeAssistantTools(Toolkit):
             )
             raise ValueError(msg)
 
-        self._creds_manager = get_credentials_manager()
+        if credentials_manager is None:
+            msg = "HomeAssistantTools requires an explicit credentials_manager"
+            raise RuntimeError(msg)
+        self._creds_manager = credentials_manager
         self._worker_scope = worker_scope
         self._routing_agent_name = routing_agent_name
 

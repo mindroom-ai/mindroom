@@ -1259,19 +1259,7 @@
     {
       "auth_provider": null,
       "category": "development",
-      "config_fields": [
-        {
-          "default": null,
-          "description": "Path to the configuration file (uses default if not specified)",
-          "label": "Configuration Path",
-          "name": "config_path",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        }
-      ],
+      "config_fields": [],
       "default_execution_target": "primary",
       "dependencies": [
         "agno",
@@ -6952,7 +6940,19 @@
     {
       "auth_provider": null,
       "category": "research",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "default": null,
+          "description": "Optional directory for browser screenshots, PDFs, and downloads.",
+          "label": "Output Directory",
+          "name": "output_dir",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "text",
+          "validation": null
+        }
+      ],
       "default_execution_target": "primary",
       "dependencies": [
         "playwright"

@@ -15,6 +15,7 @@ from mindroom.matrix.identity import is_agent_id
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -65,6 +66,7 @@ async def handle_reaction(
     event: nio.ReactionEvent,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str, str | None] | None:
     """Handle a reaction event that might be an answer to a question.
 
@@ -73,6 +75,7 @@ async def handle_reaction(
         event: The reaction event
         agent_name: The name of the agent handling this
         config: Application configuration
+        runtime_paths: Explicit runtime context for agent detection
 
     Returns:
         Tuple of (selected_value, thread_id) if this was a valid response, None otherwise
@@ -108,7 +111,7 @@ async def handle_reaction(
         return None
 
     # Ignore reactions from other agents
-    if is_agent_id(event.sender, config):
+    if is_agent_id(event.sender, config, runtime_paths):
         logger.debug("Ignoring reaction from agent", sender=event.sender, reaction=reaction_key)
         return None
 

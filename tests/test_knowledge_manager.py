@@ -281,7 +281,8 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
     sentinel = object()
     captured: dict[str, object] = {}
 
-    def _fake_create(model: str, *, dimensions: int | None = None) -> object:
+    def _fake_create(runtime_paths: object, model: str, *, dimensions: int | None = None) -> object:
+        captured["runtime_paths"] = runtime_paths
         captured["model"] = model
         captured["dimensions"] = dimensions
         return sentinel
@@ -302,8 +303,10 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
         },
     )
 
-    assert _create_embedder(config) is sentinel
+    runtime_paths = resolve_runtime_paths()
+    assert _create_embedder(config, runtime_paths) is sentinel
     assert captured == {
+        "runtime_paths": runtime_paths,
         "model": "sentence-transformers/all-MiniLM-L6-v2",
         "dimensions": 384,
     }

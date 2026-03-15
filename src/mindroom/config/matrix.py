@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
 from mindroom.matrix.identity import managed_room_key_from_alias_localpart, room_alias_localpart
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _RoomAccessMode = Literal["single_user_private", "multi_user"]
 _MultiUserJoinRule = Literal["public", "knock"]
@@ -127,6 +130,7 @@ class MatrixRoomAccessConfig(BaseModel):
     def is_invite_only_room(
         self,
         room_key: str,
+        runtime_paths: RuntimePaths,
         room_id: str | None = None,
         room_alias: str | None = None,
     ) -> bool:
@@ -139,7 +143,7 @@ class MatrixRoomAccessConfig(BaseModel):
             localpart = room_alias_localpart(room_alias)
             if localpart:
                 identifiers.add(localpart)
-                managed_room_key = managed_room_key_from_alias_localpart(localpart)
+                managed_room_key = managed_room_key_from_alias_localpart(localpart, runtime_paths)
                 if managed_room_key:
                     identifiers.add(managed_room_key)
         return any(identifier in self.invite_only_rooms for identifier in identifiers)
@@ -147,25 +151,27 @@ class MatrixRoomAccessConfig(BaseModel):
     def get_target_join_rule(
         self,
         room_key: str,
+        runtime_paths: RuntimePaths,
         room_id: str | None = None,
         room_alias: str | None = None,
     ) -> RoomJoinRule | None:
         """Get the configured target join rule for a managed room."""
         if not self.is_multi_user_mode():
             return None
-        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+        if self.is_invite_only_room(room_key, runtime_paths, room_id=room_id, room_alias=room_alias):
             return "invite"
         return self.multi_user_join_rule
 
     def get_target_directory_visibility(
         self,
         room_key: str,
+        runtime_paths: RuntimePaths,
         room_id: str | None = None,
         room_alias: str | None = None,
     ) -> RoomDirectoryVisibility | None:
         """Get the configured target room directory visibility for a managed room."""
         if not self.is_multi_user_mode():
             return None
-        if self.is_invite_only_room(room_key, room_id=room_id, room_alias=room_alias):
+        if self.is_invite_only_room(room_key, runtime_paths, room_id=room_id, room_alias=room_alias):
             return "private"
         return "public" if self.publish_to_room_directory else "private"

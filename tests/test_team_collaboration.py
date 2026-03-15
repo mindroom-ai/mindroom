@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,11 +15,20 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import get_agents_in_thread
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
-    from pathlib import Path
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for team tests."""
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
+
+
+def _agent_names(ids: list[object], config: Config) -> list[str]:
+    runtime_paths = runtime_paths_for(config)
+    return [mid.agent_name(config, runtime_paths) for mid in ids]
 
 
 # Test fixtures for team agents
@@ -76,16 +87,18 @@ class TestTeamFormation:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -98,12 +111,12 @@ class TestTeamFormation:
     ) -> None:
         """Test that multiple agents tagged in a message form a team."""
         # Create bots
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        research_bot = AgentBot(mock_research_agent, tmp_path, config, rooms=[team_room_id])
-        config = Config(router=RouterConfig(model="default"))
+        research_bot = AgentBot(mock_research_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
-        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, rooms=[team_room_id])
+        analyst_bot = AgentBot(mock_analyst_agent, tmp_path, config, runtime_paths_for(config), rooms=[team_room_id])
 
         # Setup bots
         research_bot.client = AsyncMock()
@@ -176,8 +189,8 @@ class TestTeamFormation:
         # (message_event setup omitted as it's tested via thread_history)
 
         # Verify both agents are in thread
-        agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents_in_thread, self.config)
         assert "code" in agent_names
         assert "security" in agent_names
         assert len(agent_names) == 2
@@ -277,16 +290,18 @@ class TestTeamResponseBehavior:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
-                "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-                "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "code": AgentConfig(display_name="Code", rooms=["#test:example.org"]),
+                    "security": AgentConfig(display_name="Security", rooms=["#test:example.org"]),
+                    "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
+                    "analyst": AgentConfig(display_name="Analyst", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -313,8 +328,8 @@ class TestTeamResponseBehavior:
 
         # No mentions in follow-up would cause single agent to continue
 
-        agents_in_thread = get_agents_in_thread(thread_history, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents_in_thread]
+        agents_in_thread = get_agents_in_thread(thread_history, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents_in_thread, self.config)
         assert agent_names == ["code"]
         # Single agent should continue responding
 
@@ -373,8 +388,8 @@ class TestTeamResponseBehavior:
             },
         ]
 
-        agents = get_agents_in_thread(thread_with_both, self.config)
-        agent_names = [mid.agent_name(self.config) for mid in agents]
+        agents = get_agents_in_thread(thread_with_both, self.config, runtime_paths_for(self.config))
+        agent_names = _agent_names(agents, self.config)
         assert len(agents) == 2
         assert "research" in agent_names
         assert "analyst" in agent_names
@@ -468,12 +483,14 @@ class TestRouterTeamFormation:
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "agent1": AgentConfig(display_name="Agent 1", role="First agent"),
-                "agent2": AgentConfig(display_name="Agent 2", role="Second agent"),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "agent1": AgentConfig(display_name="Agent 1", role="First agent"),
+                    "agent2": AgentConfig(display_name="Agent 2", role="Second agent"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
         # Mock room with multiple agents
@@ -487,6 +504,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],  # No agents mentioned
             agents_in_thread=[],  # No agents have spoken yet
             all_mentioned_in_thread=[],  # No mentions in thread
+            runtime_paths=runtime_paths_for(config),
             message="Hello",
             config=config,
             is_dm_room=True,  # This is a DM room
@@ -496,7 +514,7 @@ class TestRouterTeamFormation:
 
         # Should form a team with both agents
         assert result.should_form_team is True
-        agent_names = sorted([mid.agent_name(config) for mid in result.agents])
+        agent_names = sorted(_agent_names(result.agents, config))
         assert agent_names == ["agent1", "agent2"]
 
         # Test DM room with single agent (should not form team)
@@ -506,6 +524,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
             message="Hello",
             config=config,
             is_dm_room=True,
@@ -528,12 +547,14 @@ class TestRouterTeamFormation:
         from mindroom.config.models import ModelConfig  # noqa: PLC0415
         from mindroom.teams import decide_team_formation  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", role="Math"),
-                "general": AgentConfig(display_name="General", role="General"),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
         # DM room with multiple agents
@@ -553,6 +574,7 @@ class TestRouterTeamFormation:
             tagged_agents=[],
             agents_in_thread=agents_in_thread,
             all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
             message="Follow-up without mentions",
             config=config,
             is_dm_room=True,

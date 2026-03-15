@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from loguru import logger
 
-from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.dependencies import auto_install_tool_extra, check_deps_installed
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 
     from agno.tools import Toolkit
 
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -83,8 +85,10 @@ def sanitize_tool_init_overrides(
 
 
 def _build_tool_config_init_kwargs(
+    tool_name: str,
     metadata: ToolMetadata,
     *,
+    runtime_paths: RuntimePaths,
     credentials: dict[str, object],
     tool_init_overrides: dict[str, object] | None,
     runtime_overrides: dict[str, object] | None,
@@ -95,6 +99,21 @@ def _build_tool_config_init_kwargs(
 
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_name == "google_bigquery":
+        if "project" not in init_kwargs and (project := runtime_paths.env_value("GOOGLE_CLOUD_PROJECT")):
+            init_kwargs["project"] = project
+        if "location" not in init_kwargs and (location := runtime_paths.env_value("GOOGLE_CLOUD_LOCATION")):
+            init_kwargs["location"] = location
+        if "credentials" not in init_kwargs and (
+            google_application_credentials := runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            google_auth = importlib.import_module("google.auth")
+            load_credentials_from_file = google_auth.load_credentials_from_file
+            credentials_obj, _project_id = load_credentials_from_file(
+                google_application_credentials,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            init_kwargs["credentials"] = credentials_obj
     if tool_init_overrides:
         init_kwargs.update(
             {
@@ -116,22 +135,69 @@ def _add_worker_context_init_kwargs(
     tool_class: type[Toolkit],
     *,
     init_kwargs: dict[str, object],
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager | None,
+    runtime_overrides: dict[str, object] | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
 ) -> None:
     """Inject worker-routing constructor args when a toolkit supports them."""
     init_signature = inspect.signature(tool_class.__init__)
+    if "runtime_paths" in init_signature.parameters:
+        init_kwargs["runtime_paths"] = runtime_paths
+    if credentials_manager is not None and "credentials_manager" in init_signature.parameters:
+        init_kwargs["credentials_manager"] = credentials_manager
+    if runtime_overrides:
+        for key, value in runtime_overrides.items():
+            if key in init_signature.parameters and key not in init_kwargs:
+                init_kwargs[key] = value
     if "worker_scope" in init_signature.parameters:
         init_kwargs["worker_scope"] = worker_scope
     if "routing_agent_name" in init_signature.parameters:
         init_kwargs["routing_agent_name"] = routing_agent_name
 
 
+def _resolve_tool_credentials_manager(
+    tool_name: str,
+    tool_class: type[Toolkit],
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager | None,
+) -> CredentialsManager | None:
+    """Return the credential manager a tool rebuild should use, if any."""
+    if credentials_manager is not None:
+        return credentials_manager
+
+    init_signature = inspect.signature(tool_class.__init__)
+    metadata = TOOL_METADATA[tool_name]
+    has_config_fields = bool(metadata.config_fields)
+    has_secret_config = any(field.type == "password" for field in metadata.config_fields or [])
+    needs_persisted_credentials = (
+        metadata.auth_provider is not None
+        or metadata.setup_type != SetupType.NONE
+        or has_secret_config
+        or "credentials_manager" in init_signature.parameters
+    )
+    if needs_persisted_credentials:
+        return get_runtime_credentials_manager(runtime_paths)
+
+    if not has_config_fields:
+        return None
+
+    shared_credentials_path = runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH")
+    if shared_credentials_path and Path(shared_credentials_path).expanduser().resolve().exists():
+        return get_runtime_credentials_manager(runtime_paths)
+    if (runtime_paths.storage_root / "credentials").exists():
+        return get_runtime_credentials_manager(runtime_paths)
+    return None
+
+
 def _build_tool_instance(
     tool_name: str,
+    runtime_paths: RuntimePaths,
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    credentials_manager: CredentialsManager | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -151,22 +217,32 @@ def _build_tool_instance(
         raise ValueError(msg)
 
     tool_class = _TOOL_REGISTRY[tool_name]()
-    creds_manager = get_credentials_manager()
+    resolved_credentials_manager = _resolve_tool_credentials_manager(
+        tool_name,
+        tool_class,
+        runtime_paths,
+        credentials_manager,
+    )
     credentials = (
         load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
-            credentials_manager=creds_manager,
+            credentials_manager=resolved_credentials_manager,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
-        or {}
-    )
+        if resolved_credentials_manager is not None
+        else {}
+    ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
     metadata = TOOL_METADATA[tool_name]
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
+        tool_name,
         metadata,
+        runtime_paths=runtime_paths,
         credentials=credentials,
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
@@ -174,6 +250,9 @@ def _build_tool_instance(
     _add_worker_context_init_kwargs(
         tool_class,
         init_kwargs=init_kwargs,
+        runtime_paths=runtime_paths,
+        credentials_manager=resolved_credentials_manager,
+        runtime_overrides=runtime_overrides,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
     )
@@ -181,21 +260,31 @@ def _build_tool_instance(
     toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
+    shared_storage_root_path = None
+    if isinstance(runtime_overrides, dict):
+        candidate_shared_storage_root = runtime_overrides.get("shared_storage_root")
+        if isinstance(candidate_shared_storage_root, Path):
+            shared_storage_root_path = candidate_shared_storage_root
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
+        runtime_paths=runtime_paths,
+        credentials_manager=resolved_credentials_manager,
         tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        shared_storage_root_path=shared_storage_root_path,
     )
 
 
 def get_tool_by_name(
     tool_name: str,
+    runtime_paths: RuntimePaths,
     *,
     disable_sandbox_proxy: bool = False,
     credential_overrides: dict[str, object] | None = None,
+    credentials_manager: CredentialsManager | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -211,8 +300,10 @@ def get_tool_by_name(
     build = functools.partial(
         _build_tool_instance,
         tool_name,
+        runtime_paths,
         disable_sandbox_proxy=disable_sandbox_proxy,
         credential_overrides=credential_overrides,
+        credentials_manager=credentials_manager,
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
@@ -224,7 +315,7 @@ def get_tool_by_name(
     metadata = TOOL_METADATA.get(tool_name)
     deps = metadata.dependencies if metadata and metadata.dependencies else []
     if deps and not check_deps_installed(deps):
-        if not auto_install_tool_extra(tool_name):
+        if not auto_install_tool_extra(tool_name, runtime_paths):
             missing = ", ".join(deps)
             logger.warning(f"Missing dependencies for tool '{tool_name}': {missing}")
             logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
@@ -237,7 +328,7 @@ def get_tool_by_name(
         return build()
     except ImportError as first_error:
         # Safety net: deps may not be exhaustively listed in metadata
-        if not auto_install_tool_extra(tool_name):
+        if not auto_install_tool_extra(tool_name, runtime_paths):
             logger.warning(f"Could not import tool '{tool_name}': {first_error}")
             logger.warning(f"Make sure the required dependencies are installed for {tool_name}")
             raise
@@ -406,20 +497,16 @@ def register_tool_with_metadata(
 
 
 def ensure_tool_registry_loaded(
+    runtime_paths: RuntimePaths,
     config: Config | None = None,
-    *,
-    config_path: Path | None = None,
 ) -> None:
     """Ensure core and plugin tools are registered in the metadata registry."""
     import mindroom.tools  # noqa: F401, PLC0415  # import here to avoid tools_metadata cycle
 
-    if config is None and config_path is not None:
-        config = Config.from_yaml(config_path)
-
     if config is None:
         return
 
-    load_plugins(config, config_path=config_path)
+    load_plugins(config, runtime_paths)
 
 
 def default_worker_routed_tools(tool_names: list[str]) -> list[str]:

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
@@ -50,6 +53,7 @@ _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
+_STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
@@ -214,8 +218,15 @@ def _list_selector(*, extra_labels: dict[str, str]) -> str:
 class KubernetesResourceManager:
     """Own Kubernetes API access, manifest construction, and cached cluster metadata."""
 
-    def __init__(self, *, config: _KubernetesWorkerBackendConfig, auth_token: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_paths: RuntimePaths,
+        config: _KubernetesWorkerBackendConfig,
+        auth_token: str | None,
+    ) -> None:
         """Initialize one resource manager for a concrete backend configuration."""
+        self.runtime_paths = runtime_paths
         self.config = config
         self.auth_token = auth_token
         self.apps_api: _AppsApiProtocol | None = None
@@ -502,10 +513,23 @@ class KubernetesResourceManager:
     def _worker_env(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         dedicated_root = f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")
         venv_path = f"{dedicated_root}/venv"
+        startup_runtime_paths = self._worker_runtime_paths(
+            worker_key=worker_key,
+            dedicated_root=Path(dedicated_root),
+        )
         env: list[dict[str, object]] = [
             {"name": "MINDROOM_SANDBOX_RUNNER_MODE", "value": "true"},
             {"name": "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "value": "subprocess"},
             {"name": _RUNNER_PORT_ENV_NAME, "value": str(self.config.worker_port)},
+            {
+                "name": _STARTUP_RUNTIME_PATHS_ENV,
+                "value": json.dumps(
+                    serialize_public_runtime_paths(startup_runtime_paths),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            },
+            {"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path},
             {"name": "MINDROOM_STORAGE_PATH", "value": dedicated_root},
             {"name": _SHARED_STORAGE_ROOT_ENV, "value": self.config.storage_mount_path},
             {"name": "VIRTUAL_ENV", "value": venv_path},
@@ -518,8 +542,6 @@ class KubernetesResourceManager:
             {"name": _DEDICATED_WORKER_ROOT_ENV, "value": dedicated_root},
             {"name": "HOME", "value": dedicated_root},
         ]
-        if self.config.config_map_name is not None:
-            env.append({"name": "MINDROOM_CONFIG_PATH", "value": self.config.config_path})
         if self.config.token_secret_name is not None:
             env.append(
                 {
@@ -541,6 +563,36 @@ class KubernetesResourceManager:
         for name, value in sorted(self.config.extra_env.items()):
             env.append({"name": name, "value": value})
         return env
+
+    def _worker_runtime_paths(self, *, worker_key: str, dedicated_root: Path) -> RuntimePaths:
+        config_path = (
+            Path(self.config.config_path)
+            if self.config.config_map_name is not None
+            else self.runtime_paths.config_path.expanduser().resolve()
+        )
+        process_env = dict(self.runtime_paths.process_env)
+        process_env.update(
+            {
+                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
+                "MINDROOM_CONFIG_PATH": str(config_path),
+                "MINDROOM_STORAGE_PATH": str(dedicated_root),
+                _SHARED_STORAGE_ROOT_ENV: self.config.storage_mount_path,
+                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
+                _DEDICATED_WORKER_KEY_ENV: worker_key,
+                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
+            },
+        )
+        process_env.update(self.config.extra_env)
+        return RuntimePaths(
+            config_path=config_path,
+            config_dir=config_path.parent,
+            env_path=config_path.parent / ".env",
+            storage_root=dedicated_root.resolve(),
+            process_env=MappingProxyType(process_env),
+            env_file_values=MappingProxyType(dict(self.runtime_paths.env_file_values)),
+        )
 
     def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         mounts = self._scoped_storage_mounts(worker_key, state_subpath)

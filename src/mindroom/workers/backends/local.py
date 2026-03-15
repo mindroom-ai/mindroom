@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import threading
 import time
 import venv
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.manager import WorkerManager
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
 
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_WORKER_API_ROOT = "/api/sandbox-runner"
-LOCAL_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_WORKER_ROOT"
 _WORKER_ENDPOINT_ENV = "MINDROOM_SANDBOX_WORKER_ENDPOINT"
 _WORKER_IDLE_TIMEOUT_ENV = "MINDROOM_SANDBOX_WORKER_IDLE_TIMEOUT_SECONDS"
 _SHARED_INITIALIZATION_LOCK = threading.Lock()
@@ -53,17 +55,15 @@ class _LocalWorkerMetadata:
     failure_reason: str | None = None
 
 
-def _default_worker_root() -> Path:
-    configured_root = os.getenv(LOCAL_WORKER_ROOT_ENV)
-    if configured_root:
-        return Path(configured_root).expanduser().resolve()
-
-    storage_path = os.getenv("MINDROOM_STORAGE_PATH", "/app/workspace/.mindroom")
-    return Path(storage_path).expanduser().resolve() / "workers"
+def _default_worker_root(runtime_paths: RuntimePaths) -> Path:
+    return runtime_paths.storage_root.resolve() / "workers"
 
 
-def _read_idle_timeout_seconds() -> float:
-    raw_timeout = os.getenv(_WORKER_IDLE_TIMEOUT_ENV, str(_DEFAULT_IDLE_TIMEOUT_SECONDS))
+def _read_idle_timeout_seconds(runtime_paths: RuntimePaths) -> float:
+    raw_timeout = runtime_paths.env_value(
+        _WORKER_IDLE_TIMEOUT_ENV,
+        default=str(_DEFAULT_IDLE_TIMEOUT_SECONDS),
+    ) or str(_DEFAULT_IDLE_TIMEOUT_SECONDS)
     try:
         timeout = float(raw_timeout)
     except ValueError:
@@ -79,8 +79,9 @@ def _normalize_worker_api_root(raw_endpoint: str) -> str:
     return normalized or _DEFAULT_WORKER_API_ROOT
 
 
-def _read_worker_api_root() -> str:
-    return _normalize_worker_api_root(os.getenv(_WORKER_ENDPOINT_ENV, _DEFAULT_WORKER_API_ROOT))
+def _read_worker_api_root(runtime_paths: RuntimePaths) -> str:
+    raw_api_root = runtime_paths.env_value(_WORKER_ENDPOINT_ENV, default=_DEFAULT_WORKER_API_ROOT)
+    return _normalize_worker_api_root(raw_api_root or _DEFAULT_WORKER_API_ROOT)
 
 
 def _local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
@@ -383,13 +384,13 @@ _local_worker_manager_config: tuple[str, str, float] | None = None
 _local_worker_manager_lock = threading.Lock()
 
 
-def get_local_worker_manager() -> WorkerManager:
+def get_local_worker_manager(runtime_paths: RuntimePaths) -> WorkerManager:
     """Return the local sandbox worker manager for the current config."""
     global _local_worker_manager, _local_worker_manager_config
 
-    worker_root = _default_worker_root()
-    api_root = _read_worker_api_root()
-    idle_timeout_seconds = _read_idle_timeout_seconds()
+    worker_root = _default_worker_root(runtime_paths)
+    api_root = _read_worker_api_root(runtime_paths)
+    idle_timeout_seconds = _read_idle_timeout_seconds(runtime_paths)
     config = (str(worker_root), api_root, idle_timeout_seconds)
 
     with _local_worker_manager_lock:

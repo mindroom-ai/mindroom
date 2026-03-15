@@ -11,6 +11,8 @@ from uuid import uuid4
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 
 class MemoryResult(TypedDict, total=False):
     """Type for memory search results from the configured backend."""
@@ -80,6 +82,7 @@ class FileMemoryResolution:
     """Resolved file-memory storage settings for a specific caller/context."""
 
     storage_path: Path
+    runtime_paths: RuntimePaths
     use_configured_path: bool
     agent_memory_scope_path: Path | None = None
 

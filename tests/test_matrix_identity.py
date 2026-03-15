@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
-import mindroom.matrix.identity as matrix_identity
+from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -15,6 +17,14 @@ from mindroom.matrix.identity import (
     extract_agent_name,
     is_agent_id,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 class TestMatrixID:
@@ -48,49 +58,67 @@ class TestMatrixID:
         with pytest.raises(ValueError, match="Invalid Matrix ID, missing domain"):
             MatrixID.parse("@nodomainpart")
 
-    def test_from_agent(self) -> None:
+    def test_from_agent(self, tmp_path: Path) -> None:
         """Test creating MatrixID from agent name."""
-        mid = MatrixID.from_agent("calculator", "localhost")
+        mid = MatrixID.from_agent(
+            "calculator",
+            "localhost",
+            runtime_paths_for(_bind_runtime_paths(self.config, tmp_path)),
+        )
         assert mid.username == "mindroom_calculator"
         assert mid.domain == "localhost"
         assert mid.full_id == "@mindroom_calculator:localhost"
 
-    def test_agent_name_extraction(self) -> None:
+    def test_agent_name_extraction(self, tmp_path: Path) -> None:
         """Test extracting agent name."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
 
         # Valid agent
         mid = MatrixID.parse(f"@mindroom_calculator:{domain}")
-        assert mid.agent_name(self.config) == "calculator"
+        assert mid.agent_name(self.config, runtime_paths_for(self.config)) == "calculator"
 
         # Not an agent
         mid = MatrixID.parse(f"@user:{domain}")
-        assert mid.agent_name(self.config) is None
+        assert mid.agent_name(self.config, runtime_paths_for(self.config)) is None
 
         # Agent prefix but not in config
         mid = MatrixID.parse(f"@mindroom_unknown:{domain}")
-        assert mid.agent_name(self.config) is None
+        assert mid.agent_name(self.config, runtime_paths_for(self.config)) is None
 
-    def test_parse_router(self) -> None:
+    def test_parse_router(self, tmp_path: Path) -> None:
         """Test parsing a router agent ID."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
         mid = MatrixID.parse(f"@mindroom_router:{domain}")
         assert mid.username == "mindroom_router"
         assert mid.domain == domain
         assert mid.full_id == f"@mindroom_router:{domain}"
-        assert mid.agent_name(self.config) == "router"
+        assert mid.agent_name(self.config, runtime_paths_for(self.config)) == "router"
 
-    def test_namespaced_agent_localpart_and_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_namespaced_agent_localpart_and_parsing(self, tmp_path: Path) -> None:
         """Agent IDs should use and require configured namespace suffixes."""
-        monkeypatch.setattr(matrix_identity, "_ACTIVE_NAMESPACE", "a1b2c3d4")
-        domain = self.config.domain
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            process_env={"MINDROOM_NAMESPACE": "a1b2c3d4"},
+        )
+        config = Config(
+            agents=self.config.agents,
+            teams=self.config.teams,
+            room_models=self.config.room_models,
+            models=self.config.models,
+        )
+        config = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+        domain = config.get_domain(runtime_paths)
 
-        assert agent_username_localpart("calculator") == "mindroom_calculator_a1b2c3d4"
+        assert agent_username_localpart("calculator", runtime_paths=runtime_paths) == "mindroom_calculator_a1b2c3d4"
         namespaced_id = MatrixID.parse(f"@mindroom_calculator_a1b2c3d4:{domain}")
-        assert namespaced_id.agent_name(self.config) == "calculator"
+        assert namespaced_id.agent_name(config, runtime_paths) == "calculator"
 
         legacy_id = MatrixID.parse(f"@mindroom_calculator:{domain}")
-        assert legacy_id.agent_name(self.config) is None
+        assert legacy_id.agent_name(config, runtime_paths) is None
 
 
 class TestThreadStateKey:
@@ -131,19 +159,23 @@ class TestHelperFunctions:
             models={"default": ModelConfig(provider="ollama", id="test-model")},
         )
 
-    def test_is_agent_id(self) -> None:
+    def test_is_agent_id(self, tmp_path: Path) -> None:
         """Test quick agent ID check."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
-        assert is_agent_id(f"@mindroom_calculator:{domain}", self.config) is True
-        assert is_agent_id(f"@mindroom_general:{domain}", self.config) is True
-        assert is_agent_id(f"@user:{domain}", self.config) is False
+        runtime_paths = runtime_paths_for(self.config)
+        assert is_agent_id(f"@mindroom_calculator:{domain}", self.config, runtime_paths) is True
+        assert is_agent_id(f"@mindroom_general:{domain}", self.config, runtime_paths) is True
+        assert is_agent_id(f"@user:{domain}", self.config, runtime_paths) is False
         # Note: is_agent_id expects valid Matrix IDs - invalid IDs should never reach this function
-        assert is_agent_id(f"@mindroom_unknown:{domain}", self.config) is False
+        assert is_agent_id(f"@mindroom_unknown:{domain}", self.config, runtime_paths) is False
 
-    def test_extract_agent_name(self) -> None:
+    def test_extract_agent_name(self, tmp_path: Path) -> None:
         """Test agent name extraction."""
+        self.config = _bind_runtime_paths(self.config, tmp_path)
         domain = self.config.domain
-        assert extract_agent_name(f"@mindroom_calculator:{domain}", self.config) == "calculator"
-        assert extract_agent_name(f"@mindroom_general:{domain}", self.config) == "general"
-        assert extract_agent_name(f"@user:{domain}", self.config) is None
-        assert extract_agent_name("invalid", self.config) is None
+        runtime_paths = runtime_paths_for(self.config)
+        assert extract_agent_name(f"@mindroom_calculator:{domain}", self.config, runtime_paths) == "calculator"
+        assert extract_agent_name(f"@mindroom_general:{domain}", self.config, runtime_paths) == "general"
+        assert extract_agent_name(f"@user:{domain}", self.config, runtime_paths) is None
+        assert extract_agent_name("invalid", self.config, runtime_paths) is None

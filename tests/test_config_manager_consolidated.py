@@ -5,20 +5,36 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+
+
+def _minimal_config_path(tmp_path: Path) -> Path:
+    """Write a minimal valid config file for ConfigManager tool tests."""
+    config_path = tmp_path / "config.yaml"
+    Config(models={"default": {"provider": "openai", "id": "gpt-4o"}}).save_to_yaml(config_path)
+    return config_path
+
+
+def _runtime_paths() -> RuntimePaths:
+    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
+
+
+def _config_manager(config_path: Path) -> ConfigManagerTools:
+    """Construct ConfigManagerTools with explicit RuntimePaths."""
+    return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
 
 
 class TestConsolidatedConfigManager:
     """Test the consolidated ConfigManager with only 3 tools."""
 
-    def test_init(self) -> None:
+    def test_init(self, tmp_path: Path) -> None:
         """Test ConfigManagerTools initialization."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
         # Should only have 3 tools now
@@ -27,8 +43,8 @@ class TestConsolidatedConfigManager:
         assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
         assert any(tool.__name__ == "manage_team" for tool in cm.tools)
 
-    def test_init_uses_active_runtime_config_path(self, tmp_path: Path) -> None:
-        """Default initialization should follow the active runtime config path."""
+    def test_init_uses_explicit_config_path(self) -> None:
+        """Initialization should preserve the explicitly provided config path."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
             config = Config(agents={})
@@ -41,9 +57,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-
-            cm = ConfigManagerTools()
+            cm = _config_manager(config_path)
 
             assert cm.config_path == config_path.resolve()
             assert "Test Agent" in cm.get_info(info_type="agents")
@@ -64,7 +78,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.get_info(info_type="agents")
             assert "Test Agent" in result
             assert "test" in result
@@ -86,7 +100,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.get_info(info_type="teams")
             assert "Test Team" in result
             assert "test_team" in result
@@ -95,15 +109,15 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_get_info_available_tools(self) -> None:
+    def test_get_info_available_tools(self, tmp_path: Path) -> None:
         """Test get_info with available_tools info type."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         result = cm.get_info(info_type="available_tools")
         assert "Available Tools by Category" in result
 
-    def test_get_info_tool_details(self) -> None:
+    def test_get_info_tool_details(self, tmp_path: Path) -> None:
         """Test get_info with tool_details info type."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         # Should require name parameter
         result = cm.get_info(info_type="tool_details")
         assert "Error" in result
@@ -113,16 +127,16 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="tool_details", name="googlesearch")
         assert "Tool: googlesearch" in result
 
-    def test_get_info_tool_details_for_openclaw_compat(self) -> None:
+    def test_get_info_tool_details_for_openclaw_compat(self, tmp_path: Path) -> None:
         """Tool details should describe openclaw_compat as a registered tool."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         result = cm.get_info(info_type="tool_details", name="openclaw_compat")
         assert "Tool: openclaw_compat" in result
         assert "OpenClaw Compat" in result
 
-    def test_get_info_invalid_type(self) -> None:
+    def test_get_info_invalid_type(self, tmp_path: Path) -> None:
         """Test get_info with invalid info type."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         result = cm.get_info(info_type="invalid_type")
         assert "Error: Unknown info_type" in result
         assert "Valid options" in result
@@ -135,7 +149,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
                 agent_name="test_agent",
@@ -162,7 +176,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
                 agent_name="test_agent",
@@ -197,7 +211,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(operation="validate", agent_name="test_agent")
             assert "Invalid tools" not in result
         finally:
@@ -216,7 +230,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
                 agent_name="test_agent",
@@ -244,7 +258,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
                 agent_name="test_agent",
@@ -271,7 +285,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="update",
                 agent_name="test_agent",
@@ -305,7 +319,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="update",
                 agent_name="test_agent",
@@ -336,7 +350,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="update",
                 agent_name="test_agent",
@@ -356,7 +370,7 @@ class TestConsolidatedConfigManager:
             Config(agents={}).save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             create_result = cm.manage_agent(
                 operation="create",
                 agent_name="learning_agent",
@@ -395,7 +409,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="validate",
                 agent_name="test_agent",
@@ -405,9 +419,9 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_manage_agent_invalid_operation(self) -> None:
+    def test_manage_agent_invalid_operation(self, tmp_path: Path) -> None:
         """Test manage_agent with invalid operation."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         result = cm.manage_agent(
             operation="invalid",
             agent_name="test",
@@ -422,7 +436,7 @@ class TestConsolidatedConfigManager:
             Config(agents={}).save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
 
             # Create accepts memory
             result = cm.manage_agent(
@@ -471,7 +485,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.manage_team(
                 team_name="test_team",
                 display_name="Test Team",
@@ -490,9 +504,9 @@ class TestConsolidatedConfigManager:
         finally:
             config_path.unlink(missing_ok=True)
 
-    def test_info_type_enum_values(self) -> None:
+    def test_info_type_enum_values(self, tmp_path: Path) -> None:
         """Test that all InfoType enum values work."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
 
         # Test each enum value
         for info_type in _InfoType:
@@ -505,9 +519,9 @@ class TestConsolidatedConfigManager:
                 # Should not error for valid types without name
                 assert "Error: Unknown info_type" not in result
 
-    def test_reduced_tool_count(self) -> None:
+    def test_reduced_tool_count(self, tmp_path: Path) -> None:
         """Verify we reduced from 15 tools to just 3."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
 
         # Should only have 3 tools registered
         assert len(cm.tools) == 3
@@ -538,9 +552,9 @@ class TestConsolidatedConfigManager:
         for old_tool in old_tools:
             assert old_tool not in tool_names
 
-    def test_agent_template_generation(self) -> None:
+    def test_agent_template_generation(self, tmp_path: Path) -> None:
         """Test agent template generation through get_info."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
 
         # Test valid template type
         result = cm.get_info(info_type="agent_template", name="researcher")
@@ -552,9 +566,9 @@ class TestConsolidatedConfigManager:
         assert "Unknown template type" in result
         assert "Available templates" in result
 
-    def test_config_schema_info(self) -> None:
+    def test_config_schema_info(self, tmp_path: Path) -> None:
         """Test config schema retrieval."""
-        cm = ConfigManagerTools()
+        cm = _config_manager(_minimal_config_path(tmp_path))
         result = cm.get_info(info_type="config_schema")
         assert "MindRoom Configuration Schema" in result
         assert "Agent Configuration Fields" in result
@@ -579,7 +593,7 @@ class TestConsolidatedConfigManager:
             config.save_to_yaml(config_path)
 
         try:
-            cm = ConfigManagerTools(config_path)
+            cm = _config_manager(config_path)
             result = cm.get_info(info_type="available_models")
             assert "Available Models" in result
             assert "default" in result
@@ -602,7 +616,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code", worker_tools=["python"]),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["python"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["python"]
 
     def test_worker_tools_fall_back_to_defaults(self) -> None:
         """When agent has no worker_tools, defaults should apply."""
@@ -612,7 +626,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["shell", "file"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "file"]
 
     def test_worker_tools_use_default_policy_when_unset(self) -> None:
         """When worker_tools are omitted everywhere, the built-in worker routing policy applies."""
@@ -625,7 +639,7 @@ class TestGetAgentWorkerTools:
                 ),
             },
         )
-        assert config.get_agent_worker_tools("code") == ["shell", "coding"]
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == ["shell", "coding"]
 
     def test_worker_tools_default_policy_returns_empty_list_for_primary_only_tools(self) -> None:
         """Tools without a worker default should stay local when worker_tools are omitted."""
@@ -638,7 +652,7 @@ class TestGetAgentWorkerTools:
                 ),
             },
         )
-        assert config.get_agent_worker_tools("code") == []
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
 
     def test_worker_tools_empty_list_disables_routing(self) -> None:
         """Empty worker_tools should explicitly disable worker routing for that agent."""
@@ -648,7 +662,7 @@ class TestGetAgentWorkerTools:
                 "research": AgentConfig(display_name="Research", worker_tools=[]),
             },
         )
-        assert config.get_agent_worker_tools("research") == []
+        assert config.get_agent_worker_tools("research", _runtime_paths()) == []
 
     def test_defaults_empty_list_disables_worker_routing(self) -> None:
         """Empty default worker_tools should disable worker routing for inheriting agents."""
@@ -658,7 +672,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == []
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == []
 
     def test_worker_tools_expand_implied_tools(self) -> None:
         """Worker tool resolution should preserve the normal preset expansion behavior."""
@@ -668,7 +682,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_tools("code") == [
+        assert config.get_agent_worker_tools("code", _runtime_paths()) == [
             "openclaw_compat",
             "python",
             "shell",

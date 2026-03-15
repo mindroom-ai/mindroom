@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,9 +19,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +35,11 @@ def _make_context(
     storage_path: Path | None = None,
     attachment_ids: tuple[str, ...] = (),
 ) -> ToolRuntimeContext:
-    config = Config(agents={"general": AgentConfig(display_name="General Agent")})
+    runtime_root = storage_path or Path(tempfile.mkdtemp())
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        test_runtime_paths(runtime_root),
+    )
     client = AsyncMock()
     client.room_send = AsyncMock()
     client.room_messages = AsyncMock()
@@ -48,6 +51,7 @@ def _make_context(
         requester_id="@user:localhost",
         client=client,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room=None,
         reply_to_event_id=reply_to_event_id,
         storage_path=storage_path,
@@ -57,8 +61,12 @@ def _make_context(
 
 def test_matrix_message_tool_registered_and_instantiates() -> None:
     """Matrix message tool should be available from metadata registry."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General Agent")}),
+        test_runtime_paths(Path(tempfile.mkdtemp())),
+    )
     assert "matrix_message" in TOOL_METADATA
-    assert isinstance(get_tool_by_name("matrix_message"), MatrixMessageTools)
+    assert isinstance(get_tool_by_name("matrix_message", runtime_paths_for(config)), MatrixMessageTools)
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class ToolRuntimeContext:
     requester_id: str
     client: nio.AsyncClient
     config: Config
+    runtime_paths: RuntimePaths
     room: nio.MatrixRoom | None = None
     reply_to_event_id: str | None = None
     storage_path: Path | None = None

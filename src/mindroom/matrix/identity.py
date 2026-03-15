@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar
 
-from mindroom.constants import MATRIX_SERVER_NAME, MINDROOM_NAMESPACE, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_server_name, runtime_mindroom_namespace
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -28,17 +28,14 @@ def _normalize_namespace(namespace: str | None) -> str | None:
     return normalized
 
 
-_ACTIVE_NAMESPACE = _normalize_namespace(MINDROOM_NAMESPACE)
+def mindroom_namespace(runtime_paths: RuntimePaths) -> str | None:
+    """Return the configured installation namespace for one explicit runtime context."""
+    return _normalize_namespace(runtime_mindroom_namespace(runtime_paths))
 
 
-def mindroom_namespace() -> str | None:
-    """Return the configured installation namespace, if any."""
-    return _ACTIVE_NAMESPACE
-
-
-def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
+def _strip_agent_namespace_suffix(agent_identifier: str, runtime_paths: RuntimePaths) -> str | None:
     """Return the agent name without namespace suffix, or None if namespace mismatches."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths)
     if not namespace:
         return agent_identifier
 
@@ -50,22 +47,25 @@ def _strip_agent_namespace_suffix(agent_identifier: str) -> str | None:
     return stripped or None
 
 
-def managed_room_alias_localpart(room_key: str) -> str:
+def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths)
     if not namespace:
         return room_key
     return f"{room_key}_{namespace}"
 
 
-def managed_space_alias_localpart() -> str:
+def managed_space_alias_localpart(runtime_paths: RuntimePaths) -> str:
     """Build the reserved alias localpart for the root MindRoom Space."""
-    return managed_room_alias_localpart("_mindroom_root_space")
+    return managed_room_alias_localpart("_mindroom_root_space", runtime_paths)
 
 
-def managed_room_key_from_alias_localpart(alias_localpart: str) -> str | None:
+def managed_room_key_from_alias_localpart(
+    alias_localpart: str,
+    runtime_paths: RuntimePaths,
+) -> str | None:
     """Extract the configured managed room key from an alias localpart."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths)
     if not namespace:
         return alias_localpart
 
@@ -91,9 +91,14 @@ class MatrixID:
         return _parse_matrix_id(matrix_id)
 
     @classmethod
-    def from_agent(cls, agent_name: str, domain: str) -> MatrixID:
+    def from_agent(
+        cls,
+        agent_name: str,
+        domain: str,
+        runtime_paths: RuntimePaths,
+    ) -> MatrixID:
         """Create a MatrixID for an agent."""
-        return cls(username=agent_username_localpart(agent_name), domain=domain)
+        return cls(username=agent_username_localpart(agent_name, runtime_paths), domain=domain)
 
     @classmethod
     def from_username(cls, username: str, domain: str) -> MatrixID:
@@ -105,19 +110,22 @@ class MatrixID:
         """Get the full Matrix ID like @mindroom_calculator:localhost."""
         return f"@{self.username}:{self.domain}"
 
-    def agent_name(self, config: Config) -> str | None:
+    def agent_name(self, config: Config, runtime_paths: RuntimePaths) -> str | None:
         """Extract agent name if this is a configured agent ID.
 
-        Only IDs whose domain matches ``config.domain`` are recognised.
+        Only IDs whose domain matches the explicit runtime domain are recognised.
         A cross-domain ID like ``@mindroom_assistant:evil.com`` is never
         treated as a local agent, even if the localpart matches.
         """
-        if self.domain != config.domain or not self.username.startswith(self.AGENT_PREFIX):
+        if self.domain != config.get_domain(runtime_paths) or not self.username.startswith(self.AGENT_PREFIX):
             return None
 
         # Remove prefix
         agent_identifier = self.username[len(self.AGENT_PREFIX) :]
-        name = _strip_agent_namespace_suffix(agent_identifier)
+        name = _strip_agent_namespace_suffix(
+            agent_identifier,
+            runtime_paths=runtime_paths,
+        )
         if name is None:
             return None
 
@@ -178,12 +186,12 @@ def _parse_matrix_id(matrix_id: str) -> MatrixID:
     return MatrixID(username=parts[0], domain=parts[1])
 
 
-def is_agent_id(matrix_id: str, config: Config) -> bool:
+def is_agent_id(matrix_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Quick check if a Matrix ID is an agent."""
-    return extract_agent_name(matrix_id, config) is not None
+    return extract_agent_name(matrix_id, config, runtime_paths) is not None
 
 
-def extract_agent_name(sender_id: str, config: Config) -> str | None:
+def extract_agent_name(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Extract agent name from Matrix user ID like @mindroom_calculator:localhost.
 
     Returns agent name (e.g., 'calculator') or None if not an agent.
@@ -191,12 +199,12 @@ def extract_agent_name(sender_id: str, config: Config) -> str | None:
     if not sender_id.startswith("@") or ":" not in sender_id:
         return None
     mid = MatrixID.parse(sender_id)
-    return mid.agent_name(config)
+    return mid.agent_name(config, runtime_paths)
 
 
-def agent_username_localpart(agent_name: str) -> str:
+def agent_username_localpart(agent_name: str, runtime_paths: RuntimePaths) -> str:
     """Build the Matrix username localpart for an agent-like entity."""
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths)
     if namespace:
         return f"{MatrixID.AGENT_PREFIX}{agent_name}_{namespace}"
     return f"{MatrixID.AGENT_PREFIX}{agent_name}"
@@ -209,7 +217,7 @@ def room_alias_localpart(room_alias: str) -> str | None:
     return room_alias[1:].split(":", 1)[0]
 
 
-def extract_server_name_from_homeserver(homeserver: str) -> str:
+def extract_server_name_from_homeserver(homeserver: str, runtime_paths: RuntimePaths) -> str:
     """Extract server name from a homeserver URL like "http://localhost:8008".
 
     If MATRIX_SERVER_NAME environment variable is set, use that instead.
@@ -217,8 +225,8 @@ def extract_server_name_from_homeserver(homeserver: str) -> str:
     from the actual Matrix server name.
     """
     # Check for explicit server name override (for federation/docker setups)
-    if MATRIX_SERVER_NAME:
-        return MATRIX_SERVER_NAME
+    if server_name := runtime_matrix_server_name(runtime_paths):
+        return server_name
 
     # Otherwise extract from homeserver URL
     # Remove protocol

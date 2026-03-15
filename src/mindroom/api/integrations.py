@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from typing import Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
@@ -16,9 +15,29 @@ from mindroom.api.credentials import (
     load_credentials_for_target,
     resolve_request_credentials_target,
 )
+from mindroom.constants import RuntimePaths
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
+
+
+class _IntegrationsApiState(Protocol):
+    """Typed subset of FastAPI app state used by integrations routes."""
+
+    runtime_paths: RuntimePaths
+
+
+def _request_runtime_paths(request: Request) -> RuntimePaths:
+    """Return the explicit runtime context for one API request."""
+    try:
+        runtime_paths = cast("_IntegrationsApiState", request.app.state).runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
+    if not isinstance(runtime_paths, RuntimePaths):
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg)
+    return runtime_paths
 
 
 def get_dashboard_url(request: Request) -> str:
@@ -28,7 +47,7 @@ def get_dashboard_url(request: Request) -> str:
 
 def _get_spotify_redirect_uri(request: Request) -> str:
     """Return the Spotify OAuth callback URL."""
-    configured = os.getenv("SPOTIFY_REDIRECT_URI")
+    configured = _request_runtime_paths(request).env_value("SPOTIFY_REDIRECT_URI")
     if configured:
         return configured
     return str(request.url_for("spotify_callback"))
@@ -59,9 +78,11 @@ class _SpotifyOAuthFactoryProtocol(Protocol):
     ) -> _SpotifyOAuthClientProtocol: ...
 
 
-def _ensure_spotify_packages() -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
+def _ensure_spotify_packages(
+    runtime_paths: RuntimePaths,
+) -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
-    ensure_tool_deps(["spotipy"], "spotify")
+    ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
     spotipy_module = importlib.import_module("spotipy")
 
     return (
@@ -106,7 +127,7 @@ async def get_spotify_status(
 
     status.connected = True
     try:
-        spotify_cls, _ = _ensure_spotify_packages()
+        spotify_cls, _ = _ensure_spotify_packages(_request_runtime_paths(request))
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
         status.details = {
@@ -125,8 +146,9 @@ async def get_spotify_status(
 @router.post("/spotify/connect")
 async def connect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Start Spotify OAuth flow."""
-    client_id = os.getenv("SPOTIFY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+    runtime_paths = _request_runtime_paths(request)
+    client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
+    client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         raise HTTPException(
@@ -136,7 +158,7 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
 
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     state = issue_pending_oauth_state(request, "spotify", agent_name)
-    _, spotify_oauth_cls = _ensure_spotify_packages()
+    _, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
@@ -161,14 +183,15 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "spotify", state)
     agent_name = pending.agent_name
 
-    client_id = os.getenv("SPOTIFY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+    runtime_paths = _request_runtime_paths(request)
+    client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
+    client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Spotify OAuth not configured")
 
     try:
-        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages()
+        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,

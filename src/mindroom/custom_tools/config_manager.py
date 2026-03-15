@@ -5,18 +5,20 @@ from __future__ import annotations
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 from agno.tools import Toolkit
 
-from mindroom import constants
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
+from mindroom.config.main import load_config
 from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.metadata import TOOL_METADATA, ToolCategory, ToolStatus
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -77,14 +79,15 @@ class ConfigManagerTools(Toolkit):
     number of tools to reduce cognitive load on AI models.
     """
 
-    def __init__(self, config_path: Path | None = None) -> None:
+    def __init__(self, runtime_paths: RuntimePaths) -> None:
         """Initialize the ConfigManager toolkit.
 
         Args:
-            config_path: Optional path to configuration file
+            runtime_paths: Explicit runtime context for config IO
 
         """
-        self.config_path = constants.runtime_config_path(config_path)
+        self.runtime_paths = runtime_paths
+        self.config_path = runtime_paths.config_path
         self._mindroom_docs: str | None = None
         self._help_text: str | None = None
 
@@ -273,7 +276,7 @@ class ConfigManagerTools(Toolkit):
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             output = ["# Available Models\n"]
 
@@ -382,7 +385,7 @@ class ConfigManagerTools(Toolkit):
     def _list_agents(self) -> str:
         """List all configured agents and their details."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
             agents_info = []
 
             for name, agent in config.agents.items():
@@ -405,7 +408,7 @@ class ConfigManagerTools(Toolkit):
     def _list_teams(self) -> str:
         """List all configured teams and their composition."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
             teams_info = []
 
             for name, team in config.teams.items():
@@ -504,7 +507,7 @@ class ConfigManagerTools(Toolkit):
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             if agent_name in config.agents:
                 return f"Error: Agent '{agent_name}' already exists. Use manage_agent with operation='update' to modify it."
@@ -568,7 +571,7 @@ class ConfigManagerTools(Toolkit):
     ) -> str:
         """Update an existing agent configuration."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
@@ -661,7 +664,7 @@ class ConfigManagerTools(Toolkit):
             return "Error: Team mode must be 'coordinate' or 'collaborate'"
 
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             if team_name in config.teams:
                 return f"Error: Team '{team_name}' already exists."
@@ -701,7 +704,7 @@ class ConfigManagerTools(Toolkit):
     def _validate_agent_config(self, agent_name: str) -> str:  # noqa: C901, PLR0912
         """Validate an agent's configuration."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found."
@@ -761,7 +764,7 @@ class ConfigManagerTools(Toolkit):
     def _get_agent_config(self, agent_name: str) -> str:
         """Get the full configuration for a specific agent."""
         try:
-            config = Config.from_yaml(self.config_path)
+            config = load_config(self.runtime_paths)
 
             if agent_name not in config.agents:
                 return f"Error: Agent '{agent_name}' not found."

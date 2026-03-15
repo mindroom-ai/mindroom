@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import (
     CronSchedule,
@@ -17,6 +19,10 @@ from mindroom.scheduling import (
 
 def _mid(name: str) -> MatrixID:
     return MatrixID(username=name, domain="localhost")
+
+
+def _runtime_paths() -> object:
+    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 @pytest.fixture
@@ -74,6 +80,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "If I get an email about 'urgent', call me",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("email_assistant"), _mid("phone_agent")],
         )
 
@@ -116,6 +123,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When Bitcoin drops below $40k, notify me",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("crypto_agent"), _mid("notification_agent")],
         )
 
@@ -151,6 +159,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "If server CPU goes above 80%, scale up",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("monitoring_agent"), _mid("ops_agent")],
         )
 
@@ -186,6 +195,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When the build fails, create a ticket",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("ci_agent"), _mid("ticket_agent")],
         )
 
@@ -221,6 +231,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "When someone mentions our product on Reddit, analyze it",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("reddit_agent"), _mid("analyst")],
         )
 
@@ -256,6 +267,7 @@ class TestEventDrivenScheduling:
         result = await _parse_workflow_schedule(
             "Whenever I get an email from my boss, notify me immediately",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("email_assistant"), _mid("notification_agent")],
         )
 
@@ -292,6 +304,7 @@ class TestEventDrivenScheduling:
         await _parse_workflow_schedule(
             "Test request",
             mock_config,
+            _runtime_paths(),
             available_agents=[_mid("test_agent")],
         )
 

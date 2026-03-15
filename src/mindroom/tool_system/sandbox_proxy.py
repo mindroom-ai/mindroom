@@ -6,25 +6,22 @@ import asyncio
 import functools
 import hmac
 import json
-import os
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom import constants
-from mindroom.constants import env_flag
-from mindroom.credentials import get_credentials_manager, load_scoped_credentials
+from mindroom.credentials import load_scoped_credentials
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
     resolve_worker_key,
-    shared_storage_root,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -37,6 +34,8 @@ if TYPE_CHECKING:
     from agno.tools.function import Function
     from agno.tools.toolkit import Toolkit
 
+    from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.workers.manager import WorkerManager
 
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
@@ -47,33 +46,48 @@ _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
 _MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 _LOCAL_ONLY_SANDBOX_TOOLS = frozenset(SHARED_ONLY_INTEGRATION_NAMES - {"google", "spotify"})
 
-_SANDBOX_RUNNER_MODE = env_flag("MINDROOM_SANDBOX_RUNNER_MODE")
+
+@dataclass(frozen=True)
+class SandboxProxyConfig:
+    """Resolved sandbox proxy settings for one explicit runtime context."""
+
+    runner_mode: bool
+    proxy_url: str | None
+    proxy_token: str | None
+    proxy_timeout_seconds: float
+    execution_mode: str | None
+    credential_lease_ttl_seconds: int
+    proxy_tools: set[str] | None
+    credential_policy: dict[str, tuple[str, ...]]
 
 
-def _read_proxy_url() -> str | None:
-    value = os.getenv("MINDROOM_SANDBOX_PROXY_URL", "").strip()
+def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
+    value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_URL", default="") or "").strip()
     if not value:
         return None
     return value.rstrip("/")
 
 
-def _read_proxy_token() -> str | None:
-    value = os.getenv("MINDROOM_SANDBOX_PROXY_TOKEN", "").strip()
+def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
+    value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN", default="") or "").strip()
     if not value:
         return None
     return value
 
 
-def _read_proxy_timeout() -> float:
-    raw = os.getenv("MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS", str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS))
+def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
+    raw = runtime_paths.env_value(
+        "MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS",
+        default=str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS),
+    )
     try:
-        return float(raw)
+        return float(raw or _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS)
     except ValueError:
         return _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
 
 
-def _read_execution_mode() -> str | None:
-    raw = os.getenv("MINDROOM_SANDBOX_EXECUTION_MODE")
+def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
+    raw = runtime_paths.env_value("MINDROOM_SANDBOX_EXECUTION_MODE")
     if raw is None:
         return None
     normalized = raw.strip().lower()
@@ -82,18 +96,21 @@ def _read_execution_mode() -> str | None:
     return normalized
 
 
-def _read_credential_lease_ttl() -> int:
-    raw = os.getenv("MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS", str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS))
+def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
+    raw = runtime_paths.env_value(
+        "MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS",
+        default=str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS),
+    )
     try:
-        ttl_seconds = int(raw)
+        ttl_seconds = int(raw or _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS)
     except ValueError:
         ttl_seconds = _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS
     return max(1, min(_MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
 
 
-def _read_proxy_tools(execution_mode: str | None) -> set[str] | None:
+def _read_proxy_tools(runtime_paths: RuntimePaths, execution_mode: str | None) -> set[str] | None:
     default = "" if execution_mode in {"selective", "sandbox_selective"} else "*"
-    raw_value = os.getenv("MINDROOM_SANDBOX_PROXY_TOOLS", default).strip()
+    raw_value = (runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOOLS", default=default) or default).strip()
     if raw_value == "*":
         return None
     if not raw_value:
@@ -101,37 +118,8 @@ def _read_proxy_tools(execution_mode: str | None) -> set[str] | None:
     return {part.strip() for part in raw_value.split(",") if part.strip()}
 
 
-# Parsed once at module load — these don't change at runtime.
-_PROXY_URL = _read_proxy_url()
-_PROXY_TOKEN = _read_proxy_token()
-_PROXY_TIMEOUT = _read_proxy_timeout()
-_EXECUTION_MODE = _read_execution_mode()
-_CREDENTIAL_LEASE_TTL = _read_credential_lease_ttl()
-_PROXY_TOOLS = _read_proxy_tools(_EXECUTION_MODE)
-
-
-def sandbox_proxy_token_matches(provided_token: str | None) -> bool:
-    """Validate a provided token against the configured shared token."""
-    if _PROXY_TOKEN is None or provided_token is None:
-        return False
-    return hmac.compare_digest(provided_token, _PROXY_TOKEN)
-
-
-def to_json_compatible(value: object) -> object:
-    """Convert arbitrary values into JSON-friendly structures."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): to_json_compatible(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [to_json_compatible(item) for item in value]
-    return str(value)
-
-
-def _read_credential_policy() -> dict[str, tuple[str, ...]]:
-    raw_policy = os.getenv("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", "").strip()
+def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
+    raw_policy = (runtime_paths.env_value("MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON", default="") or "").strip()
     if not raw_policy:
         return {}
 
@@ -156,11 +144,49 @@ def _read_credential_policy() -> dict[str, tuple[str, ...]]:
     return policy
 
 
-_CREDENTIAL_POLICY = _read_credential_policy()
+def sandbox_proxy_config(runtime_paths: RuntimePaths) -> SandboxProxyConfig:
+    """Return sandbox proxy settings for one explicit runtime context."""
+    execution_mode = _read_execution_mode(runtime_paths)
+    return SandboxProxyConfig(
+        runner_mode=runtime_paths.env_flag("MINDROOM_SANDBOX_RUNNER_MODE"),
+        proxy_url=_read_proxy_url(runtime_paths),
+        proxy_token=_read_proxy_token(runtime_paths),
+        proxy_timeout_seconds=_read_proxy_timeout(runtime_paths),
+        execution_mode=execution_mode,
+        credential_lease_ttl_seconds=_read_credential_lease_ttl(runtime_paths),
+        proxy_tools=_read_proxy_tools(runtime_paths, execution_mode),
+        credential_policy=_read_credential_policy(runtime_paths),
+    )
 
 
-def _credential_services_for_call(tool_name: str, function_name: str) -> list[str]:
-    policy = _CREDENTIAL_POLICY
+def sandbox_proxy_token_matches(provided_token: str | None, runtime_paths: RuntimePaths) -> bool:
+    """Validate a provided token against the configured shared token."""
+    proxy_token = sandbox_proxy_config(runtime_paths).proxy_token
+    if proxy_token is None or provided_token is None:
+        return False
+    return hmac.compare_digest(provided_token, proxy_token)
+
+
+def to_json_compatible(value: object) -> object:
+    """Convert arbitrary values into JSON-friendly structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): to_json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_json_compatible(item) for item in value]
+    return str(value)
+
+
+def _credential_services_for_call(
+    tool_name: str,
+    function_name: str,
+    *,
+    proxy_config: SandboxProxyConfig,
+) -> list[str]:
+    policy = proxy_config.credential_policy
     selectors = ("*", tool_name, f"{tool_name}.{function_name}")
     services: list[str] = []
     for selector in selectors:
@@ -178,14 +204,18 @@ def _collect_credential_overrides(
     tool_name: str,
     function_name: str,
     *,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+    credentials_manager: CredentialsManager | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
 ) -> dict[str, object]:
-    services = _credential_services_for_call(tool_name, function_name)
+    if credentials_manager is None:
+        return {}
+    services = _credential_services_for_call(tool_name, function_name, proxy_config=proxy_config)
     if not services:
         return {}
 
-    credentials_manager = get_credentials_manager()
     merged_overrides: dict[str, object] = {}
     for service in services:
         credentials = load_scoped_credentials(
@@ -193,6 +223,8 @@ def _collect_credential_overrides(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=credentials_manager,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))
@@ -202,8 +234,11 @@ def _collect_credential_overrides(
 def _create_credential_lease(
     client: httpx.Client,
     *,
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
     lease_url: str,
     headers: Mapping[str, str],
+    credentials_manager: CredentialsManager | None,
     tool_name: str,
     function_name: str,
     worker_scope: WorkerScope | None,
@@ -212,6 +247,9 @@ def _create_credential_lease(
     credential_overrides = _collect_credential_overrides(
         tool_name,
         function_name,
+        runtime_paths=runtime_paths,
+        proxy_config=proxy_config,
+        credentials_manager=credentials_manager,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
     )
@@ -222,7 +260,7 @@ def _create_credential_lease(
         "tool_name": tool_name,
         "function_name": function_name,
         "credential_overrides": to_json_compatible(credential_overrides),
-        "ttl_seconds": _CREDENTIAL_LEASE_TTL,
+        "ttl_seconds": proxy_config.credential_lease_ttl_seconds,
         "max_uses": 1,
     }
     response = client.post(lease_url, json=lease_payload, headers=headers)
@@ -236,13 +274,15 @@ def _create_credential_lease(
 
 def _build_worker_routing_payload(
     *,
+    runtime_paths: RuntimePaths,
     tool_name: str,
     function_name: str,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
+    proxy_config = sandbox_proxy_config(runtime_paths)
     if worker_scope is None:
-        if primary_worker_backend_name() != "kubernetes":
+        if primary_worker_backend_name(runtime_paths) != "kubernetes":
             return {}, None
 
         effective_agent_name = routing_agent_name
@@ -259,8 +299,10 @@ def _build_worker_routing_payload(
         worker_key = resolve_unscoped_worker_key(
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
-        worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
+        worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(WorkerSpec(worker_key))
         return (
             {
                 "routing_agent_name": routing_agent_name,
@@ -282,7 +324,7 @@ def _build_worker_routing_payload(
         )
         raise RuntimeError(msg)
 
-    worker_handle = _get_worker_manager().ensure_worker(WorkerSpec(worker_key))
+    worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(WorkerSpec(worker_key))
     return (
         {
             "worker_scope": worker_scope,
@@ -294,25 +336,36 @@ def _build_worker_routing_payload(
     )
 
 
-def _get_worker_manager() -> WorkerManager:
-    return get_primary_worker_manager(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN)
+def _get_worker_manager(
+    runtime_paths: RuntimePaths,
+    proxy_config: SandboxProxyConfig,
+) -> WorkerManager:
+    context = get_tool_runtime_context()
+    storage_root = context.storage_path if context is not None else None
+    return get_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=storage_root,
+    )
 
 
-def _request_headers_for_handle(worker_handle: WorkerHandle | None) -> dict[str, str]:
-    token = worker_handle.auth_token if worker_handle is not None else _PROXY_TOKEN
+def _request_headers_for_handle(
+    worker_handle: WorkerHandle | None,
+    *,
+    proxy_config: SandboxProxyConfig,
+) -> dict[str, str]:
+    token = worker_handle.auth_token if worker_handle is not None else proxy_config.proxy_token
     if token is None:
         msg = "MINDROOM_SANDBOX_PROXY_TOKEN must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
     return {_SANDBOX_PROXY_TOKEN_HEADER: token}
 
 
-def _current_shared_storage_root() -> Path:
-    return shared_storage_root(constants.get_runtime_paths().storage_root)
-
-
 def _portable_tool_init_overrides(
     tool_init_overrides: dict[str, object] | None,
     *,
+    shared_storage_root_path: Path | None,
     worker_key: str | None,
 ) -> dict[str, object] | None:
     """Rewrite storage-root absolute base_dir values only for worker-keyed requests."""
@@ -330,7 +383,10 @@ def _portable_tool_init_overrides(
     if not base_dir.is_absolute():
         return portable_overrides
 
-    shared_root = _current_shared_storage_root().resolve()
+    if shared_storage_root_path is None:
+        return portable_overrides
+
+    shared_root = shared_storage_root_path.resolve()
     with suppress(ValueError):
         portable_overrides["base_dir"] = base_dir.resolve().relative_to(shared_root).as_posix()
     return portable_overrides
@@ -339,6 +395,7 @@ def _portable_tool_init_overrides(
 def _sandbox_proxy_enabled_for_tool(
     tool_name: str,
     *,
+    runtime_paths: RuntimePaths,
     worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
 ) -> bool:
@@ -348,26 +405,31 @@ def _sandbox_proxy_enabled_for_tool(
     env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
     means "route nothing through the proxy for this agent".
     """
-    if _SANDBOX_RUNNER_MODE or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    if proxy_config.runner_mode or tool_name in _LOCAL_ONLY_SANDBOX_TOOLS:
         return False
 
     if worker_tools_override is not None:
         requested = tool_name in worker_tools_override
-    elif _EXECUTION_MODE in {"off", "local", "disabled"}:
+    elif proxy_config.execution_mode in {"off", "local", "disabled"}:
         requested = False
     else:
-        requested = _EXECUTION_MODE in {"all", "sandbox_all"}
+        requested = proxy_config.execution_mode in {"all", "sandbox_all"}
         if not requested:
-            requested = _PROXY_TOOLS is None or tool_name in _PROXY_TOOLS
+            requested = proxy_config.proxy_tools is None or tool_name in proxy_config.proxy_tools
 
     if not requested:
         return False
 
-    backend_name = primary_worker_backend_name()
-    if backend_name == "static_runner" and _PROXY_URL is None and worker_scope is None:
+    backend_name = primary_worker_backend_name(runtime_paths)
+    if backend_name == "static_runner" and proxy_config.proxy_url is None and worker_scope is None:
         return False
 
-    if primary_worker_backend_available(proxy_url=_PROXY_URL, proxy_token=_PROXY_TOKEN):
+    if primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+    ):
         return True
 
     # Dedicated-worker backends must fail closed when routing is intended but the
@@ -377,14 +439,18 @@ def _sandbox_proxy_enabled_for_tool(
 
 def _call_proxy_sync(
     *,
+    runtime_paths: RuntimePaths,
     tool_name: str,
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
 ) -> object:
+    proxy_config = sandbox_proxy_config(runtime_paths)
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -392,26 +458,28 @@ def _call_proxy_sync(
         "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
     }
     worker_payload, worker_handle = _build_worker_routing_payload(
+        runtime_paths=runtime_paths,
         tool_name=tool_name,
         function_name=function_name,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
     )
     payload.update(worker_payload)
-    if worker_handle is None and _PROXY_URL is None:
+    if worker_handle is None and proxy_config.proxy_url is None:
         msg = "MINDROOM_SANDBOX_PROXY_URL must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
 
     try:
-        headers = _request_headers_for_handle(worker_handle)
+        headers = _request_headers_for_handle(worker_handle, proxy_config=proxy_config)
         execute_url = (
             worker_api_endpoint(worker_handle, "execute")
             if worker_handle is not None
-            else (f"{_PROXY_URL}{_SANDBOX_PROXY_EXECUTE_PATH}")
+            else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_EXECUTE_PATH}")
         )
         worker_key = worker_payload.get("worker_key")
         portable_tool_init_overrides = _portable_tool_init_overrides(
             tool_init_overrides,
+            shared_storage_root_path=shared_storage_root_path,
             worker_key=worker_key if isinstance(worker_key, str) else None,
         )
         if portable_tool_init_overrides:
@@ -419,14 +487,17 @@ def _call_proxy_sync(
         lease_url = (
             worker_api_endpoint(worker_handle, "leases")
             if worker_handle is not None
-            else (f"{_PROXY_URL}{_SANDBOX_PROXY_LEASE_PATH}")
+            else (f"{proxy_config.proxy_url}{_SANDBOX_PROXY_LEASE_PATH}")
         )
 
-        with httpx.Client(timeout=_PROXY_TIMEOUT) as client:
+        with httpx.Client(timeout=proxy_config.proxy_timeout_seconds) as client:
             lease_id = _create_credential_lease(
                 client,
+                runtime_paths=runtime_paths,
+                proxy_config=proxy_config,
                 lease_url=lease_url,
                 headers=headers,
+                credentials_manager=credentials_manager,
                 tool_name=tool_name,
                 function_name=function_name,
                 worker_scope=worker_scope,
@@ -440,7 +511,7 @@ def _call_proxy_sync(
             data = response.json()
     except Exception as exc:
         if worker_handle is not None:
-            _get_worker_manager().record_failure(worker_handle.worker_key, str(exc))
+            _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(exc))
         raise
 
     if not isinstance(data, Mapping):
@@ -448,11 +519,11 @@ def _call_proxy_sync(
         raise TypeError(msg)
     if data.get("ok") is True:
         if worker_handle is not None:
-            _get_worker_manager().touch_worker(worker_handle.worker_key)
+            _get_worker_manager(runtime_paths, proxy_config).touch_worker(worker_handle.worker_key)
         return data.get("result")
     error = data.get("error") or "Sandbox execution failed."
     if worker_handle is not None:
-        _get_worker_manager().record_failure(worker_handle.worker_key, str(error))
+        _get_worker_manager(runtime_paths, proxy_config).record_failure(worker_handle.worker_key, str(error))
     raise RuntimeError(str(error))
 
 
@@ -461,6 +532,9 @@ def _wrap_sync_function(
     tool_name: str,
     function_name: str,
     *,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -471,10 +545,13 @@ def _wrap_sync_function(
     @functools.wraps(function.entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         return _call_proxy_sync(
+            runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -489,6 +566,9 @@ def _wrap_async_function(
     tool_name: str,
     function_name: str,
     *,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
@@ -500,10 +580,13 @@ def _wrap_async_function(
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         return await asyncio.to_thread(
             _call_proxy_sync,
+            runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
             args=args,
             kwargs=dict(kwargs),
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -517,6 +600,9 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager | None,
+    shared_storage_root_path: Path | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
@@ -529,6 +615,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     """
     if not _sandbox_proxy_enabled_for_tool(
         tool_name,
+        runtime_paths=runtime_paths,
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
     ):
@@ -539,6 +626,9 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
@@ -550,6 +640,9 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             function,
             tool_name,
             function_name,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            shared_storage_root_path=shared_storage_root_path,
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,

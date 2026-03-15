@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
     create_sentence_transformers_embedder,
@@ -15,6 +17,9 @@ from mindroom.embeddings import (
 
 if TYPE_CHECKING:
     import pytest
+
+
+TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
 
 def _mock_openai_client() -> MagicMock:
@@ -97,8 +102,8 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
-    def _ensure() -> None:
-        captured["installed"] = True
+    def _ensure(runtime_paths: object) -> None:
+        captured["installed"] = runtime_paths
 
     monkeypatch.setattr("mindroom.embeddings.ensure_sentence_transformers_dependencies", _ensure)
     monkeypatch.setattr(
@@ -107,11 +112,12 @@ def test_create_sentence_transformers_embedder_auto_installs_optional_runtime(
     )
 
     embedder = create_sentence_transformers_embedder(
+        TEST_RUNTIME_PATHS,
         "sentence-transformers/all-MiniLM-L6-v2",
         dimensions=384,
     )
 
-    assert captured["installed"] is True
+    assert captured["installed"] == TEST_RUNTIME_PATHS
     assert isinstance(embedder, DummyEmbedder)
     assert embedder.kwargs == {
         "id": "sentence-transformers/all-MiniLM-L6-v2",

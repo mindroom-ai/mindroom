@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 from types import MethodType, SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
 from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
+from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
 _TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
@@ -145,10 +153,12 @@ def _backend(
     idle_timeout_seconds: float = 60.0,
     worker_port: int = 8766,
     storage_subpath_prefix: str = "workers",
+    config_map_name: str | None = "mindroom-config",
     node_name: str | None = None,
     colocate_with_control_plane_node: bool = False,
     name_prefix: str = "mindroom-worker",
     owner_deployment_name: str | None = None,
+    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     config = _KubernetesWorkerBackendConfig(
         namespace="chat",
@@ -159,7 +169,7 @@ def _backend(
         storage_pvc_name="mindroom-storage",
         storage_mount_path="/app/worker",
         storage_subpath_prefix=storage_subpath_prefix,
-        config_map_name="mindroom-config",
+        config_map_name=config_map_name,
         config_key="config.yaml",
         config_path="/app/config.yaml",
         token_secret_name=_TEST_TOKEN_SECRET_NAME,
@@ -173,7 +183,16 @@ def _backend(
         extra_labels={"mindroom.ai/tenant": "test"},
         owner_deployment_name=owner_deployment_name,
     )
-    backend = KubernetesWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN)
+    resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=Path("mindroom-test-storage").resolve(),
+    )
+    backend = KubernetesWorkerBackend(
+        runtime_paths=resolved_runtime_paths,
+        config=config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_root=resolved_runtime_paths.storage_root,
+    )
     apps_api = _FakeAppsApi()
     core_api = _FakeCoreApi()
     backend._resources.apps_api = apps_api
@@ -218,6 +237,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY" in env_names
     assert "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT" in env_names
     assert "MINDROOM_STORAGE_PATH" in env_names
+    assert "MINDROOM_RUNTIME_PATHS_JSON" in env_names
     assert "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT" in env_names
     assert "VIRTUAL_ENV" in env_names
     assert "PATH" in env_names
@@ -226,6 +246,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert env_values["MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE"] == "subprocess"
     assert env_values["MINDROOM_SANDBOX_RUNNER_PORT"] == "8766"
     expected_dedicated_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
     assert env_values["MINDROOM_STORAGE_PATH"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == expected_dedicated_root
     assert env_values["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/worker"
@@ -233,6 +254,9 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
     assert env_values["VIRTUAL_ENV"] == f"{expected_dedicated_root}/venv"
     assert env_values["PATH"].startswith(f"{expected_dedicated_root}/venv/bin:")
     assert env_values["MINDROOM_SHARED_CREDENTIALS_PATH"] == f"{expected_dedicated_root}/.shared_credentials"
+    assert committed_runtime.storage_root == Path(expected_dedicated_root)
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY") == worker_key
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT") == expected_dedicated_root
     assert (
         deployment["spec"]["template"]["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == "mindroom-storage"
     )
@@ -277,6 +301,103 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
         "periodSeconds": 5,
         "failureThreshold": 60,
     }
+
+
+def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:
+    """Dedicated worker startup payloads should preserve non-secret runtime settings only."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_NAMESPACE=alpha1234\n"
+            "MATRIX_HOMESERVER=http://dotenv-hs\n"
+            "MATRIX_SERVER_NAME=alpha.example\n"
+            "GOOGLE_APPLICATION_CREDENTIALS=/var/run/secrets/google.json\n"
+            "GOOGLE_CLOUD_PROJECT=demo-project\n"
+            "GOOGLE_CLOUD_LOCATION=us-central1\n"
+            "ANTHROPIC_API_KEY=sk-secret\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
+        },
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+
+    assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+    assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == "/var/run/secrets/google.json"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
+    assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
+
+
+def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
+    """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
+    config_path = tmp_path / "workspace-config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, config_map_name=None)
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+    committed_runtime = deserialize_runtime_paths(json.loads(env_values["MINDROOM_RUNTIME_PATHS_JSON"]))
+
+    assert committed_runtime.config_path == config_path.resolve()
+
+
+def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
+    """Kubernetes backend availability should honor the explicit runtime context."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_SANDBOX_PROXY_TOKEN=test-token\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    assert primary_worker_backend_name(runtime_paths) == "kubernetes"
+    assert runtime_paths.env_value("MINDROOM_KUBERNETES_WORKER_IMAGE") == "test-image"
+    assert primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
+    )
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:
@@ -627,7 +748,7 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
 def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> None:
     """Long prefixes must still preserve the per-worker digest so names remain unique."""
     long_prefix = "mindroom-worker-prefix-that-is-intentionally-way-too-long-for-a-kubernetes-name"
-    backend, apps_api, _core_api = _backend(name_prefix=long_prefix)
+    backend, _apps_api, _core_api = _backend(name_prefix=long_prefix)
 
     first = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
     second = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_B), now=20.0)

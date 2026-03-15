@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -27,7 +26,6 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from mindroom import constants
 from mindroom.agents import create_agent
 from mindroom.ai import (
     AIStreamChunk,
@@ -36,8 +34,8 @@ from mindroom.ai import (
     get_model_instance,
     stream_agent_response,
 )
-from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.config.main import Config, load_config
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
 from mindroom.knowledge.utils import resolve_agent_knowledge
 from mindroom.logging_config import get_logger
@@ -74,14 +72,33 @@ class _ToolStreamState:
     tool_ids_by_call_id: dict[str, str] = field(default_factory=dict)
 
 
-def _load_config() -> tuple[Config, constants.RuntimePaths]:
+class _OpenAICompatState(Protocol):
+    """Typed subset of FastAPI app state used by the OpenAI-compatible routes."""
+
+    runtime_paths: RuntimePaths
+
+
+def _request_runtime_paths(request: Request) -> RuntimePaths:
+    """Return the explicit runtime context for one OpenAI-compatible request."""
+    try:
+        runtime_paths = cast("_OpenAICompatState", request.app.state).runtime_paths
+    except AttributeError as exc:
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg) from exc
+    if not isinstance(runtime_paths, RuntimePaths):
+        msg = "API runtime paths are not initialized"
+        raise TypeError(msg)
+    return runtime_paths
+
+
+def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
     """Load the current runtime config and return it with its path.
 
     Loads directly from Config.from_yaml rather than sharing with main.py's
     loader to avoid circular imports (main.py imports this router).
     """
-    runtime_paths = constants.get_runtime_paths()
-    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths
+    runtime_paths = _request_runtime_paths(request)
+    return load_config(runtime_paths), runtime_paths
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
@@ -299,14 +316,15 @@ def _error_response(
 
 def _authenticate_request(
     authorization: str | None,
+    runtime_paths: RuntimePaths,
 ) -> JSONResponse | None:
     """Authenticate one `/v1` request."""
-    keys_env = os.getenv("OPENAI_COMPAT_API_KEYS", "")
-    allow_unauthenticated = os.getenv("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    keys_env = runtime_paths.env_value("OPENAI_COMPAT_API_KEYS", default="") or ""
+    allow_unauthenticated = runtime_env_flag(
+        "OPENAI_COMPAT_ALLOW_UNAUTHENTICATED",
+        runtime_paths,
+        default=False,
+    )
     if not keys_env.strip():
         if allow_unauthenticated:
             return None
@@ -504,6 +522,7 @@ def _build_tool_execution_identity(
     *,
     agent_name: str,
     session_id: str,
+    runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity:
     """Build the execution identity used for worker-routed tool calls."""
     return ToolExecutionIdentity(
@@ -514,24 +533,25 @@ def _build_tool_execution_identity(
         thread_id=None,
         resolved_thread_id=None,
         session_id=session_id,
-        tenant_id=os.getenv("CUSTOMER_ID"),
-        account_id=os.getenv("ACCOUNT_ID"),
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
 
 
 def _parse_chat_request(
+    request: Request,
     body: bytes,
-) -> tuple[_ChatCompletionRequest, Config, str, list[dict[str, Any]] | None] | JSONResponse:
+) -> tuple[_ChatCompletionRequest, Config, RuntimePaths, str, list[dict[str, Any]] | None] | JSONResponse:
     """Parse and validate a chat completion request body.
 
-    Returns (request, config, prompt, thread_history) on success, or a JSONResponse error.
+    Returns (request, config, runtime_paths, prompt, thread_history) on success, or a JSONResponse error.
     """
     try:
         req = _ChatCompletionRequest(**json.loads(body))
     except (json.JSONDecodeError, ValidationError):
         return _error_response(400, "Invalid request body")
 
-    config, _ = _load_config()
+    config, runtime_paths = _load_config(request)
     validation_error = _validate_chat_request(req, config)
     if validation_error:
         return validation_error
@@ -540,12 +560,13 @@ def _parse_chat_request(
     if not prompt:
         return _error_response(400, "No user message content found in messages")
 
-    return req, config, prompt, thread_history
+    return req, config, runtime_paths, prompt, thread_history
 
 
 async def _resolve_auto_route(
     prompt: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
@@ -554,7 +575,7 @@ async def _resolve_auto_route(
     and no agents are available.
     """
     available = _openai_compatible_agent_names(config)
-    routed = await suggest_agent(prompt, available, config, thread_history)
+    routed = await suggest_agent(prompt, available, config, runtime_paths, thread_history)
     if routed is None:
         if not available:
             return _error_response(
@@ -569,7 +590,7 @@ async def _resolve_auto_route(
     return routed
 
 
-async def _ensure_knowledge_initialized(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePaths) -> None:
     """Initialize knowledge managers if needed.
 
     Safe to call multiple times — `initialize_knowledge_managers` is
@@ -609,14 +630,16 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
 
 @router.get("/models")
 async def list_models(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    auth_error = _authenticate_request(authorization)
+    _, runtime_paths = _load_config(request)
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
-    config, runtime_paths = _load_config()
+    config, runtime_paths = _load_config(request)
 
     # Use config file mtime as creation timestamp
     try:
@@ -674,16 +697,16 @@ async def chat_completions(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse | StreamingResponse:
     """Create a chat completion (non-streaming or streaming)."""
-    auth_error = _authenticate_request(authorization)
+    runtime_paths = _request_runtime_paths(request)
+    auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
 
     # Parse and validate request
-    parsed = _parse_chat_request(await request.body())
+    parsed = _parse_chat_request(request, await request.body())
     if isinstance(parsed, JSONResponse):
         return parsed
-    req, config, prompt, thread_history = parsed
-    runtime_paths = constants.get_runtime_paths()
+    req, config, runtime_paths, prompt, thread_history = parsed
 
     # Resolve auto-routing if model is "auto"
     agent_name = req.model
@@ -691,6 +714,7 @@ async def chat_completions(
         result = await _resolve_auto_route(
             prompt,
             config,
+            runtime_paths,
             thread_history,
         )
         if isinstance(result, JSONResponse):
@@ -719,6 +743,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            runtime_paths=runtime_paths,
         )
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
@@ -755,6 +780,7 @@ async def chat_completions(
         execution_identity = _build_tool_execution_identity(
             agent_name=agent_name,
             session_id=session_id,
+            runtime_paths=runtime_paths,
         )
         if req.stream:
             response = await _stream_completion(
@@ -794,7 +820,7 @@ async def _non_stream_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    runtime_paths: constants.RuntimePaths,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
@@ -971,7 +997,7 @@ async def _stream_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    runtime_paths: constants.RuntimePaths,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
@@ -1041,7 +1067,7 @@ async def _stream_completion(
 def _build_team(
     team_name: str,
     config: Config,
-    runtime_paths: constants.RuntimePaths,
+    runtime_paths: RuntimePaths,
 ) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
@@ -1051,7 +1077,7 @@ def _build_team(
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
     model_name = team_config.model or "default"
-    model = get_model_instance(config, model_name)
+    model = get_model_instance(config, runtime_paths, model_name)
 
     agents: list[Agent] = []
     for member_name in team_config.agents:
@@ -1063,7 +1089,7 @@ def _build_team(
                 create_agent(
                     member_name,
                     config,
-                    runtime_paths=runtime_paths,
+                    runtime_paths,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),
@@ -1097,7 +1123,7 @@ async def _non_stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    runtime_paths: constants.RuntimePaths,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
 ) -> JSONResponse:
@@ -1143,7 +1169,7 @@ async def _stream_team_completion(
     prompt: str,
     session_id: str,
     config: Config,
-    runtime_paths: constants.RuntimePaths,
+    runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,

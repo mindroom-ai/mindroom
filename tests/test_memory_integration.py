@@ -10,7 +10,9 @@ import pytest
 from agno.models.ollama import Ollama
 
 from mindroom.ai import ai_response
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 if TYPE_CHECKING:
@@ -19,6 +21,13 @@ if TYPE_CHECKING:
 
 class TestMemoryIntegration:
     """Test memory integration with AI responses."""
+
+    @staticmethod
+    def _config() -> Config:
+        return Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        )
 
     @pytest.fixture
     def mock_agent_run(self) -> AsyncMock:
@@ -40,8 +49,8 @@ class TestMemoryIntegration:
 
     @pytest.fixture
     def config(self) -> Config:
-        """Load config for testing."""
-        return Config.from_yaml()
+        """Build the minimal config needed for memory integration tests."""
+        return self._config()
 
     @staticmethod
     def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -57,16 +66,17 @@ class TestMemoryIntegration:
     ) -> None:
         """Test that AI response uses memory enhancement."""
         mock_build = mock_memory_functions
+        runtime_paths = self._runtime_paths(tmp_path)
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
             patch("mindroom.ai.get_model_instance", return_value=Ollama(id="test-model")),
         ):
             response = await ai_response(
-                agent_name="calculator",
+                agent_name="general",
                 prompt="What is 2+2?",
                 session_id="test_session",
-                runtime_paths=self._runtime_paths(tmp_path),
+                runtime_paths=runtime_paths,
                 config=config,
                 room_id="!test:room",
             )
@@ -75,7 +85,7 @@ class TestMemoryIntegration:
             assert response == "Test response"
 
             # Verify memory enhancement was applied
-            mock_build.assert_called_once_with("What is 2+2?", "calculator", tmp_path, config)
+            mock_build.assert_called_once_with("What is 2+2?", "general", tmp_path, config, runtime_paths)
 
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
@@ -94,6 +104,7 @@ class TestMemoryIntegration:
     ) -> None:
         """Test AI response without room context."""
         mock_build = mock_memory_functions
+        runtime_paths = self._runtime_paths(tmp_path)
 
         with (
             patch("mindroom.ai._cached_agent_run", mock_agent_run),
@@ -103,13 +114,13 @@ class TestMemoryIntegration:
                 agent_name="general",
                 prompt="Hello",
                 session_id="test_session",
-                runtime_paths=self._runtime_paths(tmp_path),
+                runtime_paths=runtime_paths,
                 config=config,
                 room_id=None,
             )
 
             # Verify memory enhancement remains agent-scoped
-            mock_build.assert_called_once_with("Hello", "general", tmp_path, config)
+            mock_build.assert_called_once_with("Hello", "general", tmp_path, config, runtime_paths)
 
             # Note: Memory storage now happens at the bot level, not in ai_response
 

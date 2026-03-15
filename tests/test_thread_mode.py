@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,37 +16,98 @@ from mindroom.commands.parsing import Command, CommandType
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.thread_utils import create_session_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for thread mode tests."""
+    if runtime_root is None:
+        runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(config, runtime_paths)
+
+
+def _entity_thread_mode(config: Config, entity_name: str, *, room_id: str | None = None) -> str:
+    """Resolve entity thread mode with the config's bound runtime context."""
+    return config.get_entity_thread_mode(entity_name, runtime_paths_for(config), room_id=room_id)
+
+
+def _agent_bot(
+    *,
+    config: Config,
+    agent_user: AgentMatrixUser,
+    storage_path: Path,
+    rooms: list[str] | None = None,
+) -> AgentBot:
+    """Construct an agent bot with the test config's bound runtime context."""
+    return AgentBot(
+        config=config,
+        agent_user=agent_user,
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        rooms=[] if rooms is None else rooms,
+    )
+
+
+def _streaming_response(
+    config: Config,
+    *,
+    room_id: str,
+    reply_to_event_id: str | None,
+    thread_id: str | None,
+    sender_domain: str,
+    room_mode: bool = False,
+    latest_thread_event_id: str | None = None,
+) -> StreamingResponse:
+    """Construct a streaming response with the explicit runtime bound to the test config."""
+    return StreamingResponse(
+        room_id=room_id,
+        reply_to_event_id=reply_to_event_id,
+        thread_id=thread_id,
+        sender_domain=sender_domain,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        room_mode=room_mode,
+        latest_thread_event_id=latest_thread_event_id,
+    )
 
 
 @pytest.fixture
 def room_mode_config() -> Config:
     """Config with one agent in room mode and one in default thread mode."""
-    return Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                rooms=["!room:localhost"],
-                thread_mode="room",
-            ),
-            "coder": AgentConfig(
-                display_name="Coder",
-                rooms=["!room:localhost"],
-            ),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    rooms=["!room:localhost"],
+                    thread_mode="room",
+                ),
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    rooms=["!room:localhost"],
+                ),
+            },
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
     )
 
 
@@ -113,156 +176,170 @@ class TestConfigThreadModeResolution:
 
     def test_agent_uses_room_override_for_matching_room(self) -> None:
         """Agent should honor room-specific thread mode overrides."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(
-                    display_name="Assistant",
-                    thread_mode="thread",
-                    room_thread_modes={"!room:localhost": "room"},
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        thread_mode="thread",
+                        room_thread_modes={"!room:localhost": "room"},
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode("assistant", room_id="!room:localhost") == "room"
-        assert config.get_entity_thread_mode("assistant", room_id="!other:localhost") == "thread"
+        assert _entity_thread_mode(config, "assistant", room_id="!room:localhost") == "room"
+        assert _entity_thread_mode(config, "assistant", room_id="!other:localhost") == "thread"
 
     def test_router_inherits_uniform_room_mode(self) -> None:
         """Router should use room mode when all configured agents use room mode."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
-                "coder": AgentConfig(display_name="Coder", thread_mode="room"),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                    "coder": AgentConfig(display_name="Coder", thread_mode="room"),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME) == "room"
+        assert _entity_thread_mode(config, ROUTER_AGENT_NAME) == "room"
 
     def test_team_uses_member_mode_when_uniform(self) -> None:
         """Team should inherit room mode when all member agents are room mode."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
-                "coder": AgentConfig(display_name="Coder", thread_mode="room"),
-            },
-            teams={
-                "ops": TeamConfig(
-                    display_name="Ops Team",
-                    role="Operations",
-                    agents=["assistant", "coder"],
-                ),
-            },
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                    "coder": AgentConfig(display_name="Coder", thread_mode="room"),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations",
+                        agents=["assistant", "coder"],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode("ops") == "room"
+        assert _entity_thread_mode(config, "ops") == "room"
 
     def test_team_defaults_to_thread_when_members_mixed(self) -> None:
         """Team should default to thread mode when member modes differ."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
-                "coder": AgentConfig(display_name="Coder", thread_mode="thread"),
-            },
-            teams={
-                "ops": TeamConfig(
-                    display_name="Ops Team",
-                    role="Operations",
-                    agents=["assistant", "coder"],
-                ),
-            },
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(display_name="Assistant", thread_mode="room"),
+                    "coder": AgentConfig(display_name="Coder", thread_mode="thread"),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations",
+                        agents=["assistant", "coder"],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode("ops") == "thread"
+        assert _entity_thread_mode(config, "ops") == "thread"
 
     def test_team_uses_room_specific_member_modes(self) -> None:
         """Team should resolve member modes with room-specific overrides."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(
-                    display_name="Assistant",
-                    thread_mode="thread",
-                    room_thread_modes={"!room:localhost": "room"},
-                ),
-                "coder": AgentConfig(
-                    display_name="Coder",
-                    thread_mode="thread",
-                    room_thread_modes={"!room:localhost": "room"},
-                ),
-            },
-            teams={
-                "ops": TeamConfig(
-                    display_name="Ops Team",
-                    role="Operations",
-                    agents=["assistant", "coder"],
-                ),
-            },
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        thread_mode="thread",
+                        room_thread_modes={"!room:localhost": "room"},
+                    ),
+                    "coder": AgentConfig(
+                        display_name="Coder",
+                        thread_mode="thread",
+                        room_thread_modes={"!room:localhost": "room"},
+                    ),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations",
+                        agents=["assistant", "coder"],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode("ops", room_id="!room:localhost") == "room"
-        assert config.get_entity_thread_mode("ops", room_id="!other:localhost") == "thread"
+        assert _entity_thread_mode(config, "ops", room_id="!room:localhost") == "room"
+        assert _entity_thread_mode(config, "ops", room_id="!other:localhost") == "thread"
 
     def test_router_uses_room_specific_modes_for_room_agents(self) -> None:
         """Router should resolve mode from agents configured for the active room."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(
-                    display_name="Assistant",
-                    rooms=["!room:localhost"],
-                    thread_mode="thread",
-                    room_thread_modes={"!room:localhost": "room"},
-                ),
-                "coder": AgentConfig(
-                    display_name="Coder",
-                    rooms=["!other:localhost"],
-                    thread_mode="thread",
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        rooms=["!room:localhost"],
+                        thread_mode="thread",
+                        room_thread_modes={"!room:localhost": "room"},
+                    ),
+                    "coder": AgentConfig(
+                        display_name="Coder",
+                        rooms=["!other:localhost"],
+                        thread_mode="thread",
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id="!room:localhost") == "room"
+        assert _entity_thread_mode(config, ROUTER_AGENT_NAME, room_id="!room:localhost") == "room"
 
     def test_router_uses_team_room_agents_for_room_mode_resolution(self) -> None:
         """Router should include agents brought into a room via team room mapping."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(
-                    display_name="Assistant",
-                    thread_mode="thread",
-                    room_thread_modes={"!team-room:localhost": "room"},
-                ),
-                "coder": AgentConfig(
-                    display_name="Coder",
-                    rooms=["!other:localhost"],
-                    thread_mode="thread",
-                ),
-            },
-            teams={
-                "ops": TeamConfig(
-                    display_name="Ops Team",
-                    role="Operations",
-                    agents=["assistant"],
-                    rooms=["!team-room:localhost"],
-                ),
-            },
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        thread_mode="thread",
+                        room_thread_modes={"!team-room:localhost": "room"},
+                    ),
+                    "coder": AgentConfig(
+                        display_name="Coder",
+                        rooms=["!other:localhost"],
+                        thread_mode="thread",
+                    ),
+                },
+                teams={
+                    "ops": TeamConfig(
+                        display_name="Ops Team",
+                        role="Operations",
+                        agents=["assistant"],
+                        rooms=["!team-room:localhost"],
+                    ),
+                },
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        assert config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id="!team-room:localhost") == "room"
+        assert _entity_thread_mode(config, ROUTER_AGENT_NAME, room_id="!team-room:localhost") == "room"
 
 
 class TestRouterHandoffThreadMode:
@@ -300,7 +377,7 @@ class TestRouterHandoffThreadMode:
         tmp_path: Path,
     ) -> None:
         """Router should send handoff in-room when the suggested agent is room-mode."""
-        bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         captured_content: dict[str, object] = {}
@@ -314,7 +391,7 @@ class TestRouterHandoffThreadMode:
         room.room_id = "!room:localhost"
 
         # Mixed agent modes keep the router itself in thread mode.
-        assert bot.config.get_entity_thread_mode(ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
+        assert _entity_thread_mode(bot.config, ROUTER_AGENT_NAME, room_id=room.room_id) == "thread"
 
         with (
             patch("mindroom.bot.suggest_agent_for_message", AsyncMock(return_value="assistant")),
@@ -338,7 +415,7 @@ class TestRouterHandoffThreadMode:
         tmp_path: Path,
     ) -> None:
         """Router should keep thread replies when the suggested agent is thread-mode."""
-        bot = AgentBot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
+        bot = _agent_bot(config=room_mode_config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         captured_content: dict[str, object] = {}
@@ -397,11 +474,7 @@ class TestExtractMessageContextRoomMode:
         tmp_path: Path,
     ) -> None:
         """In room mode, _extract_message_context should return empty thread context."""
-        bot = AgentBot(
-            config=room_mode_config,
-            agent_user=assistant_user,
-            storage_path=tmp_path,
-        )
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
 
         room = MagicMock(spec=nio.MatrixRoom)
@@ -432,21 +505,23 @@ class TestExtractMessageContextRoomMode:
         tmp_path: Path,
     ) -> None:
         """Room-specific mode overrides should only affect matching rooms."""
-        config = Config(
-            agents={
-                "assistant": AgentConfig(
-                    display_name="Assistant",
-                    rooms=["!room:localhost", "!other:localhost"],
-                    thread_mode="thread",
-                    room_thread_modes={"!room:localhost": "room"},
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "assistant": AgentConfig(
+                        display_name="Assistant",
+                        rooms=["!room:localhost", "!other:localhost"],
+                        thread_mode="thread",
+                        room_thread_modes={"!room:localhost": "room"},
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
         )
-        bot = AgentBot(config=config, agent_user=assistant_user, storage_path=tmp_path)
+        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = MagicMock()
         bot._derive_conversation_context = AsyncMock(return_value=(True, "$thread123", [{"event_id": "$thread123"}]))
 
@@ -492,11 +567,7 @@ class TestSendResponseRoomMode:
         tmp_path: Path,
     ) -> None:
         """In room mode, _send_response should not add thread relation metadata."""
-        bot = AgentBot(
-            config=room_mode_config,
-            agent_user=assistant_user,
-            storage_path=tmp_path,
-        )
+        bot = _agent_bot(config=room_mode_config, agent_user=assistant_user, storage_path=tmp_path)
         bot.client = AsyncMock()
 
         captured_content: dict = {}
@@ -526,34 +597,36 @@ class TestStreamingResponseRoomMode:
     @pytest.fixture
     def streaming_config(self) -> Config:
         """Minimal config for streaming tests."""
-        return Config(
-            agents={},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test")},
-            router=RouterConfig(model="default"),
+        return _runtime_bound_config(
+            Config(
+                agents={},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test")},
+                router=RouterConfig(model="default"),
+            ),
         )
 
     def test_room_mode_field_default(self, streaming_config: Config) -> None:
         """StreamingResponse should default room_mode to False."""
-        sr = StreamingResponse(
+        sr = _streaming_response(
+            streaming_config,
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
             sender_domain="localhost",
-            config=streaming_config,
         )
         assert sr.room_mode is False
 
     @pytest.mark.asyncio
     async def test_room_mode_no_relations(self, streaming_config: Config) -> None:
         """In room mode, _send_or_edit_message should emit no m.relates_to."""
-        sr = StreamingResponse(
+        sr = _streaming_response(
+            streaming_config,
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
             sender_domain="localhost",
-            config=streaming_config,
             room_mode=True,
             latest_thread_event_id="$latest",
         )
@@ -574,12 +647,12 @@ class TestStreamingResponseRoomMode:
     @pytest.mark.asyncio
     async def test_thread_mode_has_relations(self, streaming_config: Config) -> None:
         """In default thread mode, _send_or_edit_message should emit m.relates_to."""
-        sr = StreamingResponse(
+        sr = _streaming_response(
+            streaming_config,
             room_id="!room:localhost",
             reply_to_event_id="$event123",
             thread_id="$thread123",
             sender_domain="localhost",
-            config=streaming_config,
             room_mode=False,
             latest_thread_event_id="$latest",
         )
@@ -605,12 +678,14 @@ class TestSendStreamingResponseRoomMode:
     @pytest.mark.asyncio
     async def test_room_mode_skips_latest_thread_lookup(self) -> None:
         """In room mode, send_streaming_response should not call get_latest_thread_event_id_if_needed."""
-        config = Config(
-            agents={},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test")},
+                router=RouterConfig(model="default"),
+            ),
         )
 
         async def empty_stream() -> AsyncIterator[str]:
@@ -635,6 +710,7 @@ class TestSendStreamingResponseRoomMode:
                 "$thread123",
                 "localhost",
                 config,
+                runtime_paths_for(config),
                 empty_stream(),
                 room_mode=True,
             )
@@ -652,12 +728,15 @@ class TestCommandThreadContextRoomMode:
         tmp_path: Path,
     ) -> None:
         """Router command scheduling should persist room-level (not thread) context."""
-        config = Config(
-            agents={"assistant": AgentConfig(display_name="Assistant", thread_mode="room")},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={"assistant": AgentConfig(display_name="Assistant", thread_mode="room")},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -665,11 +744,7 @@ class TestCommandThreadContextRoomMode:
             display_name="Router",
             user_id="@mindroom_router:localhost",
         )
-        bot = AgentBot(
-            config=config,
-            agent_user=router_user,
-            storage_path=tmp_path,
-        )
+        bot = _agent_bot(config=config, agent_user=router_user, storage_path=tmp_path)
         bot.client = AsyncMock()
         bot.response_tracker = MagicMock()
         bot._send_response = AsyncMock(return_value="$reply")
