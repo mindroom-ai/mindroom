@@ -300,6 +300,31 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     assert main._app_config_data(fresh_app) == {}
 
 
+def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: Path) -> None:
+    """Swapping to the same config path under a different runtime should drop cached config."""
+    runtime_one = _runtime_paths(tmp_path, process_env={})
+    runtime_two = _runtime_paths(tmp_path, process_env={"MINDROOM_NAMESPACE": "ns12"})
+    runtime_one.config_path.write_text(
+        yaml.dump(
+            {
+                "models": {"default": {"provider": "openai", "id": "gpt-5.4"}},
+                "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
+                "defaults": {"markdown": True},
+            },
+        ),
+        encoding="utf-8",
+    )
+    fresh_app = FastAPI()
+
+    main.initialize_api_app(fresh_app, runtime_one)
+    main._load_config_from_file(runtime_one, fresh_app)
+    assert set(main._app_config_data(fresh_app)["agents"]) == {"first"}
+
+    main.initialize_api_app(fresh_app, runtime_two)
+
+    assert main._app_config_data(fresh_app) == {}
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

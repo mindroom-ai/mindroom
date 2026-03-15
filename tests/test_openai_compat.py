@@ -1067,6 +1067,24 @@ class TestAuthentication:
         assert response.status_code == 401
         assert response.json()["error"]["code"] == "invalid_api_key"
 
+    def test_missing_key_401_does_not_load_config_first(self) -> None:
+        """Missing auth should fail before config loading."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_API_KEYS": "test-key-1"})
+        initialize_api_app(app, runtime_paths)
+
+        with patch("mindroom.api.openai_compat._load_config", side_effect=RuntimeError("should not load config")):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "invalid_api_key"
+
     def test_no_auth_when_explicitly_allowed(self, app_client: TestClient) -> None:
         """Unauthenticated mode works when explicitly opted in."""
         response = app_client.get("/v1/models")

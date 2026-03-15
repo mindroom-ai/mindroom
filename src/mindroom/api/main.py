@@ -166,10 +166,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
     auth_state: _ApiAuthState | None = None
     if isinstance(previous_context, _ApiContext):
         config_lock = previous_context.config_lock
-        if previous_context.runtime_paths.config_path == runtime_paths.config_path:
-            config_data = previous_context.config_data
-        else:
-            config_data = {}
+        config_data = previous_context.config_data if previous_context.runtime_paths == runtime_paths else {}
         if previous_context.runtime_paths == runtime_paths:
             auth_state = previous_context.auth_state
     else:

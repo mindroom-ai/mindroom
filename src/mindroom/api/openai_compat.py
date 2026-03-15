@@ -617,7 +617,9 @@ async def list_models(
     authorization: Annotated[str | None, Header()] = None,
 ) -> JSONResponse:
     """List available models (agents) in OpenAI format."""
-    _, runtime_paths = _load_config(request)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
     auth_error = _authenticate_request(authorization, runtime_paths)
     if auth_error is not None:
         return auth_error
