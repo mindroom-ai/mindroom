@@ -125,11 +125,11 @@ def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config | None]:
     return runtime_paths, config
 
 
-def test_startup_runtime_payload_does_not_overlay_proxy_token(
+def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Startup runtime should be committed entirely by the serialized payload."""
+    """Startup auth token should stay separate from the committed runtime payload."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -138,14 +138,20 @@ def test_startup_runtime_payload_does_not_overlay_proxy_token(
     payload_runtime = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": "from-payload"},
+        process_env={"MINDROOM_NAMESPACE": "alpha1234"},
     )
     monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
 
     startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        sandbox_runner_app,
+        startup_runtime,
+        runner_token=sandbox_runner_module._startup_runner_token_from_env(),
+    )
 
-    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") == "from-payload"
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
 
 
 def test_subprocess_runtime_payload_preserves_parent_env_file_values(
@@ -199,6 +205,20 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+
+
+def test_worker_subprocess_env_preserves_parent_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker subprocesses should keep the parent PATH after prepending the worker venv."""
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
+
+    env = sandbox_runner_module._worker_subprocess_env(paths)
+
+    assert env["PATH"].startswith(f"{paths.venv_dir}/bin:")
+    assert env["PATH"].endswith("/usr/local/bin:/usr/bin:/bin")
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -779,19 +799,27 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     prepare_calls = 0
     original_prepare = sandbox_runner_module._prepare_worker
 
-    def _counting_prepare(worker_key: str, runtime_paths: object) -> object:
+    def _counting_prepare(
+        worker_key: str,
+        runtime_paths: object,
+        *,
+        runner_token: str | None = None,
+    ) -> object:
         nonlocal prepare_calls
         prepare_calls += 1
-        return original_prepare(worker_key, runtime_paths)
+        return original_prepare(worker_key, runtime_paths, runner_token=runner_token)
 
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
         prepared_worker: object | None = None,
+        *,
+        runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
         assert prepared_worker is not None
+        assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
 
     monkeypatch.setattr(sandbox_runner_module, "_prepare_worker", _counting_prepare)

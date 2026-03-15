@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
-from mindroom.constants import RuntimePaths, serialize_runtime_paths
+from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
@@ -524,7 +524,7 @@ class KubernetesResourceManager:
             {
                 "name": _STARTUP_RUNTIME_PATHS_ENV,
                 "value": json.dumps(
-                    serialize_runtime_paths(startup_runtime_paths),
+                    serialize_public_runtime_paths(startup_runtime_paths),
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
@@ -585,8 +585,6 @@ class KubernetesResourceManager:
             },
         )
         process_env.update(self.config.extra_env)
-        if self.auth_token is not None:
-            process_env[_TOKEN_ENV_NAME] = self.auth_token
         return RuntimePaths(
             config_path=config_path,
             config_dir=config_path.parent,

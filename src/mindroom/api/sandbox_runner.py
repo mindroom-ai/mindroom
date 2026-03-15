@@ -33,7 +33,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     sanitize_tool_init_overrides,
 )
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_token_matches, to_json_compatible
+from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -71,6 +71,7 @@ _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
+_RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
@@ -110,6 +111,11 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     return constants.deserialize_runtime_paths(payload)
 
 
+def _startup_runner_token_from_env() -> str | None:
+    raw_token = os.environ.get(_RUNNER_TOKEN_ENV, "").strip()
+    return raw_token or None
+
+
 def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config | None]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
@@ -118,9 +124,15 @@ def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config | None]:
     return runtime_paths, None
 
 
-def initialize_sandbox_runner_app(api_app: FastAPI, runtime_paths: RuntimePaths) -> None:
+def initialize_sandbox_runner_app(
+    api_app: FastAPI,
+    runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
+) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
     api_app.state.runtime_paths = runtime_paths
+    api_app.state.runner_token = runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token
 
 
 def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config | None) -> None:
@@ -253,6 +265,7 @@ class _WorkerRequestPreparationError(ValueError):
 
 class _SandboxRunnerState(Protocol):
     runtime_paths: RuntimePaths
+    runner_token: str | None
 
 
 def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
@@ -267,6 +280,16 @@ def _app_runtime_paths(app: FastAPI) -> RuntimePaths:
     return runtime_paths
 
 
+def _app_runner_token(app: FastAPI) -> str | None:
+    runner_token = cast("_SandboxRunnerState", app.state).runner_token
+    if runner_token is None:
+        return None
+    if not isinstance(runner_token, str):
+        msg = "Sandbox runner token is not initialized"
+        raise TypeError(msg)
+    return runner_token
+
+
 def sandbox_runner_runtime_paths(request: Request) -> RuntimePaths:
     """Return the committed runtime paths for one sandbox runner request."""
     return _app_runtime_paths(request.app)
@@ -276,11 +299,10 @@ async def _validate_runner_token(
     request: Request,
     x_mindroom_sandbox_token: Annotated[str | None, Header()] = None,
 ) -> None:
-    runtime_paths = sandbox_runner_runtime_paths(request)
-    proxy_token = sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token
+    proxy_token = _app_runner_token(request.app)
     if proxy_token is None:
         raise HTTPException(status_code=503, detail="Sandbox runner token is not configured.")
-    if not sandbox_proxy_token_matches(x_mindroom_sandbox_token, runtime_paths):
+    if not secrets.compare_digest(x_mindroom_sandbox_token or "", proxy_token):
         raise HTTPException(status_code=401, detail="Unauthorized sandbox runner request")
 
 
@@ -503,7 +525,7 @@ def _generic_subprocess_env() -> dict[str, str]:
 
 
 def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
-    env = _subprocess_passthrough_env()
+    env = _generic_subprocess_env()
     env["HOME"] = str(paths.root)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
@@ -541,7 +563,12 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     )
 
 
-def _prepare_worker(worker_key: str, runtime_paths: RuntimePaths) -> WorkerHandle:
+def _prepare_worker(
+    worker_key: str,
+    runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
+) -> WorkerHandle:
     dedicated_worker_key = _runner_dedicated_worker_key(runtime_paths)
     if dedicated_worker_key is not None:
         if worker_key != dedicated_worker_key:
@@ -562,7 +589,7 @@ def _prepare_worker(worker_key: str, runtime_paths: RuntimePaths) -> WorkerHandl
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint="/api/sandbox-runner/execute",
-            auth_token=sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
+            auth_token=runner_token or sandbox_proxy.sandbox_proxy_config(runtime_paths).proxy_token,
             status="ready",
             backend_name="dedicated_sandbox_runner",
             last_used_at=now,
@@ -633,6 +660,8 @@ def _ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dic
 def _prepare_worker_request(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    *,
+    runner_token: str | None = None,
 ) -> _PreparedWorkerRequest:
     """Prepare one worker-backed request for execution."""
     if request.worker_key is None:
@@ -640,7 +669,7 @@ def _prepare_worker_request(
         raise _WorkerRequestPreparationError(msg)
 
     try:
-        worker_handle = _prepare_worker(request.worker_key, runtime_paths)
+        worker_handle = _prepare_worker(request.worker_key, runtime_paths, runner_token=runner_token)
     except WorkerBackendError as exc:
         logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=request.worker_key)
         raise _WorkerRequestPreparationError(str(exc)) from exc
@@ -670,19 +699,28 @@ def _resolve_prepared_worker_request(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     prepared_worker: _PreparedWorkerRequest | None,
+    *,
+    runner_token: str | None = None,
 ) -> _PreparedWorkerRequest | None:
     if request.worker_key is None:
         return None
-    return prepared_worker or _prepare_worker_request(request, runtime_paths)
+    return prepared_worker or _prepare_worker_request(request, runtime_paths, runner_token=runner_token)
 
 
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     prepared_worker: _PreparedWorkerRequest | None = None,
+    *,
+    runner_token: str | None = None,
 ) -> SandboxRunnerExecuteResponse:
     try:
-        prepared = _resolve_prepared_worker_request(request, runtime_paths, prepared_worker)
+        prepared = _resolve_prepared_worker_request(
+            request,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
     except _WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
     runtime_overrides = _ready_runtime_overrides(prepared.runtime_overrides if prepared is not None else None)
@@ -783,9 +821,16 @@ def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     prepared_worker: _PreparedWorkerRequest | None = None,
+    *,
+    runner_token: str | None = None,
 ) -> SandboxRunnerExecuteResponse:
     try:
-        prepared = _resolve_prepared_worker_request(request, runtime_paths, prepared_worker)
+        prepared = _resolve_prepared_worker_request(
+            request,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
     except _WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
@@ -818,8 +863,16 @@ async def _execute_request_subprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     prepared_worker: _PreparedWorkerRequest | None = None,
+    *,
+    runner_token: str | None = None,
 ) -> SandboxRunnerExecuteResponse:
-    return await asyncio.to_thread(_execute_request_subprocess_sync, request, runtime_paths, prepared_worker)
+    return await asyncio.to_thread(
+        _execute_request_subprocess_sync,
+        request,
+        runtime_paths,
+        prepared_worker,
+        runner_token=runner_token,
+    )
 
 
 def _run_subprocess_worker() -> int:
@@ -914,6 +967,7 @@ async def execute_tool_call(
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
+    runner_token = _app_runner_token(request.app)
     payload = _normalize_request_worker_key(payload, runtime_paths)
     if payload.credential_overrides:
         raise HTTPException(status_code=400, detail="credential_overrides must be supplied via lease_id.")
@@ -936,17 +990,32 @@ async def execute_tool_call(
     prepared_worker: _PreparedWorkerRequest | None = None
     if payload.worker_key is not None:
         try:
-            prepared_worker = _prepare_worker_request(payload, runtime_paths)
+            prepared_worker = _prepare_worker_request(payload, runtime_paths, runner_token=runner_token)
         except _WorkerRequestPreparationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     if _runner_uses_subprocess(runtime_paths):
-        return await _execute_request_subprocess(payload, runtime_paths, prepared_worker)
+        return await _execute_request_subprocess(
+            payload,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
     # Worker-routed execution stays on the subprocess path so the per-worker
     # virtualenv and worker-specific process environment remain authoritative,
     # even when this pod is itself a dedicated worker runtime.
     if payload.worker_key is not None:
-        return await _execute_request_subprocess(payload, runtime_paths, prepared_worker)
-    return await _execute_request_inprocess(payload, runtime_paths, prepared_worker)
+        return await _execute_request_subprocess(
+            payload,
+            runtime_paths,
+            prepared_worker,
+            runner_token=runner_token,
+        )
+    return await _execute_request_inprocess(
+        payload,
+        runtime_paths,
+        prepared_worker,
+        runner_token=runner_token,
+    )
 
 
 if __name__ == "__main__":

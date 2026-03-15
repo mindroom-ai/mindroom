@@ -304,7 +304,7 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
 
 
 def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_path: Path) -> None:
-    """Dedicated worker startup payloads should preserve `.env`-backed runtime settings."""
+    """Dedicated worker startup payloads should preserve non-secret runtime settings only."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.yaml"
@@ -313,10 +313,21 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
         encoding="utf-8",
     )
     (config_dir / ".env").write_text(
-        ("MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\nMATRIX_SERVER_NAME=alpha.example\n"),
+        (
+            "MINDROOM_NAMESPACE=alpha1234\n"
+            "MATRIX_HOMESERVER=http://dotenv-hs\n"
+            "MATRIX_SERVER_NAME=alpha.example\n"
+            "ANTHROPIC_API_KEY=sk-secret\n"
+        ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
+        },
+    )
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
 
     backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
@@ -329,6 +340,9 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
 
 
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:

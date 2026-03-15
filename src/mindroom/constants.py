@@ -24,6 +24,32 @@ ROUTER_AGENT_NAME = "router"
 _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config.yaml"]
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH"})
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
+_RUNTIME_STARTUP_ENV_PREFIXES = ("MINDROOM_", "MATRIX_", "BROWSER_")
+_RUNTIME_STARTUP_ENV_EXTRA_KEYS = frozenset(
+    {
+        "ACCOUNT_ID",
+        "ANTHROPIC_VERTEX_BASE_URL",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+        "CUSTOMER_ID",
+        "OLLAMA_HOST",
+        "OPENAI_BASE_URL",
+        "POD_NAMESPACE",
+    },
+)
+_RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
+    {
+        "MINDROOM_LOCAL_CLIENT_ID",
+        "MINDROOM_SANDBOX_PROXY_TOKEN",
+    },
+)
+_RUNTIME_STARTUP_SECRET_SUFFIXES = (
+    "_API_KEY",
+    "_API_KEYS",
+    "_PASSWORD",
+    "_SECRET",
+    "_TOKEN",
+)
 
 
 @dataclass(frozen=True)
@@ -203,6 +229,30 @@ def serialize_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
         "storage_root": str(runtime_paths.storage_root),
         "process_env": dict(runtime_paths.process_env),
         "env_file_values": dict(runtime_paths.env_file_values),
+    }
+
+
+def _is_public_runtime_startup_env_name(name: str) -> bool:
+    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
+        return False
+    if not (name.startswith(_RUNTIME_STARTUP_ENV_PREFIXES) or name in _RUNTIME_STARTUP_ENV_EXTRA_KEYS):
+        return False
+    return not name.endswith(_RUNTIME_STARTUP_SECRET_SUFFIXES)
+
+
+def serialize_public_runtime_paths(runtime_paths: RuntimePaths) -> dict[str, object]:
+    """Return a JSON payload for pod-visible worker startup without secrets."""
+    process_env = {
+        key: value for key, value in runtime_paths.process_env.items() if _is_public_runtime_startup_env_name(key)
+    }
+    env_file_values = {
+        key: value for key, value in runtime_paths.env_file_values.items() if _is_public_runtime_startup_env_name(key)
+    }
+    return {
+        "config_path": str(runtime_paths.config_path),
+        "storage_root": str(runtime_paths.storage_root),
+        "process_env": process_env,
+        "env_file_values": env_file_values,
     }
 
 
