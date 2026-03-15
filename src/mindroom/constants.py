@@ -454,18 +454,6 @@ def set_runtime_storage_path(storage_path: Path, runtime_paths: RuntimePaths) ->
     return updated_runtime_paths.storage_root
 
 
-def set_runtime_paths(
-    *,
-    config_path: Path | None = None,
-    storage_path: Path | None = None,
-) -> RuntimePaths:
-    """Resolve one primary runtime context without mutating process-global state."""
-    return resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=storage_path,
-    )
-
-
 def env_flag(name: str, *, default: bool = False) -> bool:
     """Read a boolean environment flag."""
     value = os.getenv(name)

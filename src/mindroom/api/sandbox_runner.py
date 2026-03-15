@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.config.main import load_config
-from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, get_runtime_credentials_manager
+from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -72,7 +72,6 @@ _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
-_STARTUP_RUNTIME_PROXY_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
@@ -89,18 +88,6 @@ _SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
         "http_proxy",
         "https_proxy",
         "no_proxy",
-    },
-)
-_SUBPROCESS_RUNTIME_ENV_KEYS = frozenset(
-    {
-        "ACCOUNT_ID",
-        "CUSTOMER_ID",
-        "MINDROOM_SANDBOX_PROXY_TOKEN",
-        SHARED_CREDENTIALS_PATH_ENV,
-        _DEDICATED_WORKER_KEY_ENV,
-        _DEDICATED_WORKER_ROOT_ENV,
-        _SHARED_STORAGE_ROOT_ENV,
-        _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
     },
 )
 
@@ -121,11 +108,6 @@ def _startup_runtime_paths_from_env() -> RuntimePaths:
     if not isinstance(payload.get("process_env"), dict):
         msg = f"{_STARTUP_RUNTIME_PATHS_ENV} is missing process_env."
         raise TypeError(msg)
-    process_env = dict(payload["process_env"])
-    proxy_token = os.environ.get(_STARTUP_RUNTIME_PROXY_TOKEN_ENV)
-    if proxy_token is not None:
-        process_env[_STARTUP_RUNTIME_PROXY_TOKEN_ENV] = proxy_token
-    payload["process_env"] = process_env
     return constants.deserialize_runtime_paths(payload)
 
 
@@ -543,20 +525,6 @@ def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     return env
 
 
-def _subprocess_runtime_paths(runtime_paths: RuntimePaths) -> RuntimePaths:
-    process_env = {
-        key: value for key, value in runtime_paths.process_env.items() if key in _SUBPROCESS_RUNTIME_ENV_KEYS
-    }
-    return constants.RuntimePaths(
-        config_path=runtime_paths.config_path,
-        config_dir=runtime_paths.config_dir,
-        env_path=runtime_paths.env_path,
-        storage_root=runtime_paths.storage_root,
-        process_env=process_env,
-        env_file_values={},
-    )
-
-
 def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
     return SandboxWorkerResponse(
         worker_id=worker.worker_id,
@@ -826,7 +794,7 @@ def _execute_request_subprocess_sync(
     python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared)
     envelope = _SandboxSubprocessEnvelope(
         request=request,
-        runtime_paths=constants.serialize_runtime_paths(_subprocess_runtime_paths(runtime_paths)),
+        runtime_paths=constants.serialize_runtime_paths(runtime_paths),
     )
 
     try:

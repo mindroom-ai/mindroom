@@ -241,7 +241,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="MindRoom Dashboard API", lifespan=_lifespan)
 app.state.config_data = {}
 app.state.config_lock = threading.Lock()
-app.state.auth_state = None
+initialize_api_app(app, constants.resolve_primary_runtime_paths())
 
 # Configure CORS for the standalone frontend dev server.
 app.add_middleware(

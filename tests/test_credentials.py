@@ -595,8 +595,8 @@ class TestGlobalCredentialsManager:
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
 
-    def test_global_manager_rebuilds_when_runtime_storage_root_changes(self, tmp_path: Path) -> None:
-        """Changing the active runtime storage root should invalidate the cached manager."""
+    def test_global_manager_rebuilds_when_storage_root_changes(self, tmp_path: Path) -> None:
+        """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -605,10 +605,8 @@ class TestGlobalCredentialsManager:
         first_root = tmp_path / "one"
         second_root = tmp_path / "two"
 
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=first_root)
         manager_one = get_credentials_manager(storage_root=first_root)
 
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=second_root)
         manager_two = get_credentials_manager(storage_root=second_root)
 
         assert manager_one.base_path == first_root / "credentials"

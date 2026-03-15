@@ -20,7 +20,7 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_paths, serialize_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -122,6 +122,82 @@ def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config | None]:
     config = sandbox_runner_module.load_config(runtime_paths) if runtime_paths.config_path.exists() else None
     sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
     return runtime_paths, config
+
+
+def test_startup_runtime_payload_does_not_overlay_proxy_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Startup runtime should be committed entirely by the serialized payload."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    payload_runtime = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_PROXY_TOKEN": "from-payload"},
+    )
+    monkeypatch.setenv("MINDROOM_RUNTIME_PATHS_JSON", json.dumps(serialize_runtime_paths(payload_runtime)))
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "from-env")
+
+    startup_runtime = sandbox_runner_module._startup_runtime_paths_from_env()
+
+    assert startup_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") == "from-payload"
+
+
+def test_subprocess_runtime_payload_preserves_parent_env_file_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Subprocess execution should receive the exact runtime context the parent resolved."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        "MINDROOM_NAMESPACE=alpha1234\nMATRIX_HOMESERVER=http://dotenv-hs\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+    captured_payload: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        **run_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd
+        envelope = json.loads(str(run_kwargs["input"]))
+        captured_payload.update(envelope["runtime_paths"])
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="calculator",
+            function_name="add",
+            args=[1, 2],
+            kwargs={},
+        ),
+        runtime_paths,
+    )
+    child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_payload)
+
+    assert response.ok is True
+    assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
+    assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

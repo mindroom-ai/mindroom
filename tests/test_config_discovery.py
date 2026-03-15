@@ -368,7 +368,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        constants_mod.set_runtime_paths(config_path=active_config)
+        constants_mod.resolve_primary_runtime_paths(config_path=active_config)
 
         resolved = constants_mod.resolve_config_relative_path(
             "${MINDROOM_STORAGE_PATH}/kb",
@@ -397,7 +397,7 @@ class TestResolveConfigRelativePath:
 
         shared_storage = tmp_path / "shared-storage"
         monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
-        constants_mod.set_runtime_paths(config_path=active_config)
+        constants_mod.resolve_primary_runtime_paths(config_path=active_config)
 
         resolved_runtime = constants_mod.resolve_runtime_paths(config_path=other_config)
 
@@ -519,7 +519,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+        constants_mod.resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_path)
 
         config = Config.from_yaml(config_path)
         resolved_runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path)
@@ -527,8 +527,8 @@ class TestResolveConfigRelativePath:
         assert not hasattr(config, "runtime_paths")
         assert resolved_runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
-    def test_find_config_and_primary_runtime_ignore_set_runtime_paths(self, tmp_path: Path) -> None:
-        """Pure config discovery should ignore compatibility-synced runtime env."""
+    def test_find_config_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:
+        """Pure config discovery should ignore unrelated resolved runtime objects."""
         config_path = tmp_path / "cfg" / "config.yaml"
         storage_path = tmp_path / "custom-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -537,18 +537,21 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        runtime_paths = constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+        runtime_paths = constants_mod.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+        )
 
         assert constants_mod.find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
         assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
         assert runtime_paths.config_path == config_path.resolve()
         assert runtime_paths.storage_root == storage_path.resolve()
 
-    def test_set_runtime_paths_promotes_runtime_path_env_contract(
+    def test_resolve_primary_runtime_paths_promotes_runtime_path_env_contract(
         self,
         tmp_path: Path,
     ) -> None:
-        """set_runtime_paths should return a primary runtime carrying the path env contract."""
+        """resolve_primary_runtime_paths should return a primary runtime carrying the path env contract."""
         config_path = tmp_path / "custom" / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,7 +560,10 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        activated = constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+        activated = constants_mod.resolve_primary_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+        )
 
         assert activated.config_path == config_path.resolve()
         assert activated.storage_root == storage_path.resolve()
@@ -576,7 +582,7 @@ class TestResolveConfigRelativePath:
             encoding="utf-8",
         )
 
-        runtime_paths = constants_mod.set_runtime_paths(config_path=config_path)
+        runtime_paths = constants_mod.resolve_primary_runtime_paths(config_path=config_path)
 
         assert constants_mod.ensure_writable_config_path(runtime_paths=runtime_paths) is True
         assert config_path.read_text(encoding="utf-8") == "agents: {}\nmodels: {}\n"
@@ -594,7 +600,10 @@ class TestResolveAvatarPath:
         active_config = tmp_path / "runtime" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        runtime_paths = constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
+        runtime_paths = constants_mod.resolve_primary_runtime_paths(
+            config_path=active_config,
+            storage_path=storage_dir,
+        )
 
         resolved = constants_mod.avatars_dir(runtime_paths=runtime_paths)
 
@@ -610,7 +619,7 @@ class TestResolveAvatarPath:
         explicit_config = tmp_path / "workspace" / "config.yaml"
         storage_dir = tmp_path / "storage"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
+        constants_mod.resolve_primary_runtime_paths(config_path=active_config, storage_path=storage_dir)
 
         resolved = constants_mod.avatars_dir(constants_mod.resolve_runtime_paths(config_path=explicit_config))
 
@@ -673,7 +682,10 @@ class TestResolveAvatarPath:
         storage_dir = tmp_path / "storage"
         bundled_dir = tmp_path / "bundled"
         monkeypatch.setenv("DOCKER_CONTAINER", "1")
-        runtime_paths = constants_mod.set_runtime_paths(config_path=active_config, storage_path=storage_dir)
+        runtime_paths = constants_mod.resolve_primary_runtime_paths(
+            config_path=active_config,
+            storage_path=storage_dir,
+        )
         monkeypatch.setattr(constants_mod, "bundled_avatars_dir", lambda: bundled_dir)
 
         resolved = constants_mod.resolve_avatar_path("rooms", "nonexistent", runtime_paths)
@@ -731,7 +743,7 @@ class TestRuntimeContextConsumers:
             encoding="utf-8",
         )
 
-        first_runtime_paths = constants_mod.set_runtime_paths(config_path=first_config)
+        first_runtime_paths = constants_mod.resolve_primary_runtime_paths(config_path=first_config)
         assert (
             identity_mod.agent_username_localpart("general", runtime_paths=first_runtime_paths)
             == "mindroom_general_alpha1234"
@@ -744,7 +756,7 @@ class TestRuntimeContextConsumers:
             == "alpha.example"
         )
 
-        second_runtime_paths = constants_mod.set_runtime_paths(config_path=second_config)
+        second_runtime_paths = constants_mod.resolve_primary_runtime_paths(config_path=second_config)
         assert (
             identity_mod.agent_username_localpart("general", runtime_paths=second_runtime_paths)
             == "mindroom_general_beta1234"
@@ -768,14 +780,17 @@ class TestRuntimeContextConsumers:
         first_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
         second_config.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
 
-        first_runtime_paths = constants_mod.set_runtime_paths(config_path=first_config, storage_path=first_storage)
+        first_runtime_paths = constants_mod.resolve_primary_runtime_paths(
+            config_path=first_config,
+            storage_path=first_storage,
+        )
         tracker_a = ResponseTracker("general", base_path=first_storage / "tracking")
         MatrixState().save(runtime_paths=first_runtime_paths)
         assert tracker_a.base_path == first_storage / "tracking"
         assert tracker_a._responses_file == first_storage / "tracking" / "general_responded.json"
         assert constants_mod.matrix_state_file(runtime_paths=first_runtime_paths) == first_storage / "matrix_state.yaml"
 
-        second_runtime_paths = constants_mod.set_runtime_paths(
+        second_runtime_paths = constants_mod.resolve_primary_runtime_paths(
             config_path=second_config,
             storage_path=second_storage,
         )

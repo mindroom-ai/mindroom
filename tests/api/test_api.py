@@ -200,6 +200,11 @@ def test_api_lifespan_syncs_env_credentials_on_startup(
     assert watch_calls == ["watch"]
 
 
+def test_exported_api_app_has_initialized_runtime_paths() -> None:
+    """The exported module app should be runnable without separate initialization."""
+    assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

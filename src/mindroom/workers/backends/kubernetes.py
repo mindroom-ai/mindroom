@@ -17,6 +17,8 @@ from .kubernetes_config import _KubernetesWorkerBackendConfig, kubernetes_backen
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 __all__ = [
     "KubernetesWorkerBackend",
     "_KubernetesWorkerBackendConfig",
@@ -45,10 +47,16 @@ class KubernetesWorkerBackend:
         self._worker_locks_lock = threading.Lock()
 
     @classmethod
-    def from_env(cls, *, auth_token: str | None, storage_root: Path) -> KubernetesWorkerBackend:
-        """Construct a backend instance from environment-backed configuration."""
+    def from_runtime(
+        cls,
+        runtime_paths: RuntimePaths,
+        *,
+        auth_token: str | None,
+        storage_root: Path,
+    ) -> KubernetesWorkerBackend:
+        """Construct a backend instance from one explicit runtime context."""
         return cls(
-            config=_KubernetesWorkerBackendConfig.from_env(),
+            config=_KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
             storage_root=storage_root,
         )

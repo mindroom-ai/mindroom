@@ -273,7 +273,10 @@ async def test_handle_config_command_uses_explicit_runtime_paths(tmp_path: Path)
         ),
         encoding="utf-8",
     )
-    runtime_paths = constants_mod.set_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    runtime_paths = constants_mod.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+    )
 
     response, change_info = await handle_config_command(
         "get agents.test_agent.display_name",

@@ -50,7 +50,7 @@ def primary_worker_backend_available(
         if not proxy_token:
             return False
         try:
-            kubernetes_backend_config_signature(auth_token=proxy_token)
+            kubernetes_backend_config_signature(runtime_paths, auth_token=proxy_token)
         except WorkerBackendError:
             return False
         return True
@@ -80,7 +80,7 @@ def _primary_worker_backend_config_signature(
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
-        return kubernetes_backend_config_signature(auth_token=proxy_token, storage_root=storage_root)
+        return kubernetes_backend_config_signature(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
@@ -104,7 +104,13 @@ def _build_primary_worker_manager(
         if storage_root is None:
             msg = "Kubernetes worker backend requires an explicit runtime storage root."
             raise WorkerBackendError(msg)
-        return WorkerManager(KubernetesWorkerBackend.from_env(auth_token=proxy_token, storage_root=storage_root))
+        return WorkerManager(
+            KubernetesWorkerBackend.from_runtime(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_root=storage_root,
+            ),
+        )
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 

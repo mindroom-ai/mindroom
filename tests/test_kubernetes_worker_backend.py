@@ -8,10 +8,12 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
+from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 
 _TEST_TOKEN_SECRET_NAME = "mindroom-secrets"  # noqa: S105
 _TEST_TOKEN_SECRET_KEY = "sandbox_proxy_token"  # noqa: S105
@@ -282,6 +284,35 @@ def test_kubernetes_backend_ensures_worker_service_and_deployment() -> None:
         "periodSeconds": 5,
         "failureThreshold": 60,
     }
+
+
+def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
+    """Kubernetes backend availability should honor the explicit runtime context."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_WORKER_BACKEND=kubernetes\n"
+            "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
+            "MINDROOM_SANDBOX_PROXY_TOKEN=test-token\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path)
+
+    assert primary_worker_backend_name(runtime_paths) == "kubernetes"
+    assert runtime_paths.env_value("MINDROOM_KUBERNETES_WORKER_IMAGE") == "test-image"
+    assert primary_worker_backend_available(
+        runtime_paths,
+        proxy_url=None,
+        proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
+    )
 
 
 def test_kubernetes_backend_rejects_unknown_worker_keys_for_scoped_mounts() -> None:
