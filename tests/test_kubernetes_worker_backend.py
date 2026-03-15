@@ -317,6 +317,9 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
             "MINDROOM_NAMESPACE=alpha1234\n"
             "MATRIX_HOMESERVER=http://dotenv-hs\n"
             "MATRIX_SERVER_NAME=alpha.example\n"
+            "GOOGLE_APPLICATION_CREDENTIALS=/var/run/secrets/google.json\n"
+            "GOOGLE_CLOUD_PROJECT=demo-project\n"
+            "GOOGLE_CLOUD_LOCATION=us-central1\n"
             "ANTHROPIC_API_KEY=sk-secret\n"
         ),
         encoding="utf-8",
@@ -340,6 +343,9 @@ def test_kubernetes_backend_commits_parent_runtime_env_into_worker_payload(tmp_p
     assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
     assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == "/var/run/secrets/google.json"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
     assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
     assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
     assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None

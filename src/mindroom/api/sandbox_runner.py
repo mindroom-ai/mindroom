@@ -72,6 +72,13 @@ _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = "MINDROOM_KUBERNETES_WORKER_STORAGE_SUB
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _RUNNER_TOKEN_ENV = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
+_SUBPROCESS_RUNTIME_COMPAT_ENV_KEYS = frozenset(
+    {
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_CLOUD_PROJECT",
+    },
+)
 _SUBPROCESS_ENV_PASSTHROUGH_KEYS = frozenset(
     {
         "CURL_CA_BUNDLE",
@@ -515,17 +522,21 @@ def _subprocess_passthrough_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key in _SUBPROCESS_ENV_PASSTHROUGH_KEYS}
 
 
-def _generic_subprocess_env() -> dict[str, str]:
+def _generic_subprocess_env(runtime_paths: RuntimePaths) -> dict[str, str]:
     env = _subprocess_passthrough_env()
     for key in ("HOME", "PATH", "PYTHONPATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
         if value:
             env[key] = value
+    for key in _SUBPROCESS_RUNTIME_COMPAT_ENV_KEYS:
+        value = runtime_paths.env_value(key)
+        if value:
+            env[key] = value
     return env
 
 
-def _worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
-    env = _generic_subprocess_env()
+def _worker_subprocess_env(paths: LocalWorkerStatePaths, runtime_paths: RuntimePaths) -> dict[str, str]:
+    env = _generic_subprocess_env(runtime_paths)
     env["HOME"] = str(paths.root)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
@@ -779,14 +790,15 @@ def _subprocess_failure_response(
 
 def _resolve_subprocess_worker_context(
     prepared_worker: _PreparedWorkerRequest | None,
+    runtime_paths: RuntimePaths,
 ) -> tuple[str | None, dict[str, str] | None, str | None]:
     if prepared_worker is None:
-        return sys.executable, _generic_subprocess_env(), str(Path.cwd())
+        return sys.executable, _generic_subprocess_env(runtime_paths), str(Path.cwd())
 
     paths = prepared_worker.paths
     return (
         str(paths.venv_dir / "bin" / "python"),
-        _worker_subprocess_env(paths),
+        _worker_subprocess_env(paths, runtime_paths),
         str(paths.workspace),
     )
 
@@ -834,7 +846,7 @@ def _execute_request_subprocess_sync(
     except _WorkerRequestPreparationError as exc:
         return SandboxRunnerExecuteResponse(ok=False, error=str(exc))
 
-    python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared)
+    python_executable, subprocess_env, cwd = _resolve_subprocess_worker_context(prepared, runtime_paths)
     envelope = _SandboxSubprocessEnvelope(
         request=request,
         runtime_paths=constants.serialize_runtime_paths(runtime_paths),

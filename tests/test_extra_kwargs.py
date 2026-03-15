@@ -289,5 +289,59 @@ def test_vertexai_claude_provider() -> None:
     assert model.provider == "VertexAI"
 
 
+def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vertex Claude should translate runtime ADC paths into explicit client credentials."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4@20250514",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    runtime_root = Path(tempfile.mkdtemp())
+    credentials_path = runtime_root / "google-credentials.json"
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    config = Config(**config_data)
+    fake_google_credentials = object()
+
+    def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
+        assert path == str(credentials_path)
+        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+        return fake_google_credentials, "ignored-project"
+
+    monkeypatch.setattr("google.auth.load_credentials_from_file", fake_load_credentials_from_file)
+
+    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
+
+    assert isinstance(model, VertexAIClaude)
+    assert model.client_params is not None
+    assert model.client_params["credentials"] is fake_google_credentials
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

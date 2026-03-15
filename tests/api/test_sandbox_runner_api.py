@@ -213,12 +213,27 @@ def test_worker_subprocess_env_preserves_parent_path(
 ) -> None:
     """Worker subprocesses should keep the parent PATH after prepending the worker venv."""
     monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    credentials_path = tmp_path / "google-credentials.json"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=demo-project\n"
+        "GOOGLE_CLOUD_LOCATION=us-central1\n"
+        f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
 
-    env = sandbox_runner_module._worker_subprocess_env(paths)
+    env = sandbox_runner_module._worker_subprocess_env(paths, runtime_paths)
 
     assert env["PATH"].startswith(f"{paths.venv_dir}/bin:")
     assert env["PATH"].endswith("/usr/local/bin:/usr/bin:/bin")
+    assert env["GOOGLE_CLOUD_PROJECT"] == "demo-project"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "us-central1"
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == str(credentials_path)
 
 
 def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

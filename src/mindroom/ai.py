@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -534,6 +535,19 @@ def _create_model_for_provider(  # noqa: C901, PLR0912
             base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
             if base_url:
                 extra_kwargs["base_url"] = base_url
+        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
+        if "credentials" not in client_params and (
+            google_application_credentials := runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            google_auth = importlib.import_module("google.auth")
+            load_credentials_from_file = google_auth.load_credentials_from_file
+            credentials, _project_id = load_credentials_from_file(
+                google_application_credentials,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            client_params["credentials"] = credentials
+        if client_params:
+            extra_kwargs["client_params"] = client_params
 
     # Handle Ollama separately due to special host configuration
     if canonical_provider == "ollama":

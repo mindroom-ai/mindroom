@@ -85,8 +85,10 @@ def sanitize_tool_init_overrides(
 
 
 def _build_tool_config_init_kwargs(
+    tool_name: str,
     metadata: ToolMetadata,
     *,
+    runtime_paths: RuntimePaths,
     credentials: dict[str, object],
     tool_init_overrides: dict[str, object] | None,
     runtime_overrides: dict[str, object] | None,
@@ -97,6 +99,21 @@ def _build_tool_config_init_kwargs(
 
     config_field_names = {field.name for field in metadata.config_fields}
     init_kwargs = {field.name: credentials[field.name] for field in metadata.config_fields if field.name in credentials}
+    if tool_name == "google_bigquery":
+        if "project" not in init_kwargs and (project := runtime_paths.env_value("GOOGLE_CLOUD_PROJECT")):
+            init_kwargs["project"] = project
+        if "location" not in init_kwargs and (location := runtime_paths.env_value("GOOGLE_CLOUD_LOCATION")):
+            init_kwargs["location"] = location
+        if "credentials" not in init_kwargs and (
+            google_application_credentials := runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            google_auth = importlib.import_module("google.auth")
+            load_credentials_from_file = google_auth.load_credentials_from_file
+            credentials_obj, _project_id = load_credentials_from_file(
+                google_application_credentials,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            init_kwargs["credentials"] = credentials_obj
     if tool_init_overrides:
         init_kwargs.update(
             {
@@ -152,6 +169,7 @@ def _resolve_tool_credentials_manager(
 
     init_signature = inspect.signature(tool_class.__init__)
     metadata = TOOL_METADATA[tool_name]
+    has_config_fields = bool(metadata.config_fields)
     has_secret_config = any(field.type == "password" for field in metadata.config_fields or [])
     needs_persisted_credentials = (
         metadata.auth_provider is not None
@@ -159,10 +177,18 @@ def _resolve_tool_credentials_manager(
         or has_secret_config
         or "credentials_manager" in init_signature.parameters
     )
-    if not needs_persisted_credentials:
+    if needs_persisted_credentials:
+        return get_runtime_credentials_manager(runtime_paths)
+
+    if not has_config_fields:
         return None
 
-    return get_runtime_credentials_manager(runtime_paths)
+    shared_credentials_path = runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH")
+    if shared_credentials_path and Path(shared_credentials_path).expanduser().resolve().exists():
+        return get_runtime_credentials_manager(runtime_paths)
+    if (runtime_paths.storage_root / "credentials").exists():
+        return get_runtime_credentials_manager(runtime_paths)
+    return None
 
 
 def _build_tool_instance(
@@ -214,7 +240,9 @@ def _build_tool_instance(
     metadata = TOOL_METADATA[tool_name]
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
+        tool_name,
         metadata,
+        runtime_paths=runtime_paths,
         credentials=credentials,
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,

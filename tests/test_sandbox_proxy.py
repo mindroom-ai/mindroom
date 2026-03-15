@@ -14,6 +14,7 @@ import pytest
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers import runtime as workers_runtime_module
@@ -219,6 +220,86 @@ def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
     """base_dir overrides should be validated before toolkit construction."""
     with pytest.raises(ToolInitOverrideError, match="base_dir"):
         get_tool_by_name("coding", _TEST_RUNTIME_PATHS, tool_init_overrides={"base_dir": {"bad": "value"}})
+
+
+def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path) -> None:
+    """Persisted plain config should still hydrate SetupType.NONE tools during rebuilds."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "file",
+        {
+            "base_dir": str(workspace),
+            "enable_delete_file": True,
+        },
+        credentials_manager=credentials_manager,
+    )
+
+    tool = get_tool_by_name("file", runtime_paths)
+
+    assert tool.base_dir == workspace.resolve()
+    assert "delete_file" in tool.functions
+
+
+def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Google BigQuery should honor runtime-scoped env fallbacks without ambient env."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    credentials_path = tmp_path / "google-credentials.json"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=demo-project\n"
+        "GOOGLE_CLOUD_LOCATION=us-central1\n"
+        f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    save_scoped_credentials(
+        "google_bigquery",
+        {"dataset": "demo_dataset"},
+        credentials_manager=credentials_manager,
+    )
+    captured: dict[str, object] = {}
+    fake_google_credentials = object()
+
+    def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
+        captured["credentials_path"] = path
+        captured["scopes"] = scopes
+        return fake_google_credentials, "ignored-project"
+
+    class _FakeBigQueryClient:
+        def __init__(self, *, project: str, credentials: object) -> None:
+            captured["project"] = project
+            captured["credentials"] = credentials
+
+    monkeypatch.setattr("google.auth.load_credentials_from_file", fake_load_credentials_from_file)
+    monkeypatch.setattr("agno.tools.google_bigquery.bigquery.Client", _FakeBigQueryClient)
+
+    tool = get_tool_by_name("google_bigquery", runtime_paths)
+
+    assert tool.dataset == "demo_dataset"
+    assert tool.project == "demo-project"
+    assert tool.location == "us-central1"
+    assert captured["project"] == "demo-project"
+    assert captured["credentials"] is fake_google_credentials
+    assert captured["credentials_path"] == str(credentials_path)
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
