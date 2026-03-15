@@ -27,7 +27,7 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             placeholder="https://your-confluence-instance.atlassian.net",
-            description="Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
+            description="Confluence instance URL",
         ),
         ConfigField(
             name="username",
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="your-username",
-            description="Confluence username (can also be set via CONFLUENCE_USERNAME env var)",
+            description="Confluence username",
         ),
         ConfigField(
             name="password",
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="your-password",
-            description="Confluence password (can also be set via CONFLUENCE_PASSWORD env var)",
+            description="Confluence password",
         ),
         ConfigField(
             name="api_key",
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="your-api-key",
-            description="Confluence API key - alternative to password (can also be set via CONFLUENCE_API_KEY env var)",
+            description="Confluence API key, alternative to password",
         ),
         # Configuration options
         ConfigField(

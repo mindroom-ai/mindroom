@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="my-gcp-project",
-            description="Google Cloud project ID (falls back to GOOGLE_CLOUD_PROJECT env var)",
+            description="Google Cloud project ID",
         ),
         ConfigField(
             name="location",
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="US",
-            description="BigQuery location (falls back to GOOGLE_CLOUD_LOCATION env var)",
+            description="BigQuery location",
         ),
         ConfigField(
             name="credentials",

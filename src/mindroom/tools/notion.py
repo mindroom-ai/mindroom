@@ -26,7 +26,7 @@ if TYPE_CHECKING:
             type="password",
             required=True,
             placeholder="Notion integration token",
-            description="Internal integration token (falls back to NOTION_API_KEY env var)",
+            description="Internal integration token",
         ),
         ConfigField(
             name="database_id",
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="Notion database ID",
-            description="ID of the Notion database to work with (falls back to NOTION_DATABASE_ID env var)",
+            description="ID of the Notion database to work with",
         ),
         ConfigField(
             name="enable_create_page",

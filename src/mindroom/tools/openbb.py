@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=None,
-            description="OpenBB PAT for premium data providers (falls back to OPENBB_PAT env var). Optional - works without it using yfinance.",
+            description="OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
         ),
         ConfigField(
             name="provider",

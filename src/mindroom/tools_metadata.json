@@ -482,7 +482,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "WhatsApp Business API access token (can also be set via WHATSAPP_ACCESS_TOKEN env var)",
+          "description": "WhatsApp Business API access token",
           "label": "Access Token",
           "name": "access_token",
           "options": null,
@@ -493,7 +493,7 @@
         },
         {
           "default": null,
-          "description": "WhatsApp Business Account phone number ID (can also be set via WHATSAPP_PHONE_NUMBER_ID env var)",
+          "description": "WhatsApp Business Account phone number ID",
           "label": "Phone Number ID",
           "name": "phone_number_id",
           "options": null,
@@ -515,7 +515,7 @@
         },
         {
           "default": null,
-          "description": "Default recipient WhatsApp ID or phone number (optional, can also be set via WHATSAPP_RECIPIENT_WAID env var)",
+          "description": "Default recipient WhatsApp ID or phone number (optional)",
           "label": "Default Recipient WhatsApp ID",
           "name": "recipient_waid",
           "options": null,
@@ -617,7 +617,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Apify API token for authentication (can also be set via APIFY_API_TOKEN env var)",
+          "description": "Apify API token for authentication",
           "label": "API Token",
           "name": "apify_api_token",
           "options": null,
@@ -721,7 +721,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Bitbucket username (falls back to BITBUCKET_USERNAME env var)",
+          "description": "Bitbucket username",
           "label": "Username",
           "name": "username",
           "options": null,
@@ -732,7 +732,7 @@
         },
         {
           "default": null,
-          "description": "App password (falls back to BITBUCKET_PASSWORD env var). Use either this or token.",
+          "description": "App password. Use either this or token.",
           "label": "App Password",
           "name": "password",
           "options": null,
@@ -743,7 +743,7 @@
         },
         {
           "default": null,
-          "description": "Access token (falls back to BITBUCKET_TOKEN env var). Use either this or password.",
+          "description": "Access token. Use either this or password.",
           "label": "Token",
           "name": "token",
           "options": null,
@@ -1282,7 +1282,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Confluence instance URL (can also be set via CONFLUENCE_URL env var)",
+          "description": "Confluence instance URL",
           "label": "Confluence URL",
           "name": "url",
           "options": null,
@@ -1293,7 +1293,7 @@
         },
         {
           "default": null,
-          "description": "Confluence username (can also be set via CONFLUENCE_USERNAME env var)",
+          "description": "Confluence username",
           "label": "Username",
           "name": "username",
           "options": null,
@@ -1304,7 +1304,7 @@
         },
         {
           "default": null,
-          "description": "Confluence password (can also be set via CONFLUENCE_PASSWORD env var)",
+          "description": "Confluence password",
           "label": "Password",
           "name": "password",
           "options": null,
@@ -1315,7 +1315,7 @@
         },
         {
           "default": null,
-          "description": "Confluence API key - alternative to password (can also be set via CONFLUENCE_API_KEY env var)",
+          "description": "Confluence API key, alternative to password",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -1581,7 +1581,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Daytona API key (can also be set via DAYTONA_API_KEY env var)",
+          "description": "Daytona API key",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -1592,7 +1592,7 @@
         },
         {
           "default": null,
-          "description": "Daytona API URL (can also be set via DAYTONA_API_URL env var)",
+          "description": "Daytona API URL",
           "label": "API URL",
           "name": "api_url",
           "options": null,
@@ -1798,7 +1798,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "DesiVocal API key (falls back to DESI_VOCAL_API_KEY env var)",
+          "description": "DesiVocal API key",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -2644,7 +2644,7 @@
         },
         {
           "default": null,
-          "description": "Google Cloud project ID (falls back to GOOGLE_CLOUD_PROJECT env var)",
+          "description": "Google Cloud project ID",
           "label": "Project",
           "name": "project",
           "options": null,
@@ -2655,7 +2655,7 @@
         },
         {
           "default": null,
-          "description": "BigQuery location (falls back to GOOGLE_CLOUD_LOCATION env var)",
+          "description": "BigQuery location",
           "label": "Location",
           "name": "location",
           "options": null,
@@ -3231,7 +3231,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
+          "description": "The ModelsLab API key for authentication",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -3368,7 +3368,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Neo4j connection URI (falls back to NEO4J_URI env var)",
+          "description": "Neo4j connection URI",
           "label": "URI",
           "name": "uri",
           "options": null,
@@ -3379,7 +3379,7 @@
         },
         {
           "default": null,
-          "description": "Neo4j username (falls back to NEO4J_USERNAME env var)",
+          "description": "Neo4j username",
           "label": "Username",
           "name": "user",
           "options": null,
@@ -3390,7 +3390,7 @@
         },
         {
           "default": null,
-          "description": "Neo4j password (falls back to NEO4J_PASSWORD env var)",
+          "description": "Neo4j password",
           "label": "Password",
           "name": "password",
           "options": null,
@@ -4013,7 +4013,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Redshift cluster endpoint (falls back to REDSHIFT_HOST env var)",
+          "description": "Redshift cluster endpoint",
           "label": "Host",
           "name": "host",
           "options": null,
@@ -4035,7 +4035,7 @@
         },
         {
           "default": null,
-          "description": "Database name (falls back to REDSHIFT_DATABASE env var)",
+          "description": "Database name",
           "label": "Database",
           "name": "database",
           "options": null,
@@ -5113,7 +5113,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Composio API key (can also be set via COMPOSIO_API_KEY env var)",
+          "description": "Composio API key",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -5387,7 +5387,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "API key from ClickUp (falls back to CLICKUP_API_KEY env var)",
+          "description": "API key from ClickUp",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -5398,7 +5398,7 @@
         },
         {
           "default": null,
-          "description": "ID of the master space to work with (falls back to MASTER_SPACE_ID env var)",
+          "description": "ID of the master space to work with",
           "label": "Master Space ID",
           "name": "master_space_id",
           "options": null,
@@ -5836,7 +5836,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Internal integration token (falls back to NOTION_API_KEY env var)",
+          "description": "Internal integration token",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -5847,7 +5847,7 @@
         },
         {
           "default": null,
-          "description": "ID of the Notion database to work with (falls back to NOTION_DATABASE_ID env var)",
+          "description": "ID of the Notion database to work with",
           "label": "Database ID",
           "name": "database_id",
           "options": null,
@@ -5932,7 +5932,7 @@
         },
         {
           "default": null,
-          "description": "OpenBB PAT for premium data providers (falls back to OPENBB_PAT env var). Optional - works without it using yfinance.",
+          "description": "OpenBB PAT for premium data providers. Optional - works without it using yfinance.",
           "label": "Personal Access Token",
           "name": "openbb_pat",
           "options": null,
@@ -6707,7 +6707,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Brandfetch API key for Brand API (falls back to BRANDFETCH_API_KEY env var)",
+          "description": "Brandfetch API key for Brand API",
           "label": "API Key",
           "name": "api_key",
           "options": null,
@@ -6718,7 +6718,7 @@
         },
         {
           "default": null,
-          "description": "Brandfetch Client ID for Brand Search API (falls back to BRANDFETCH_CLIENT_ID env var)",
+          "description": "Brandfetch Client ID for Brand Search API",
           "label": "Client ID",
           "name": "client_id",
           "options": null,
@@ -8156,7 +8156,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Oxylabs dashboard username (can also be set via OXYLABS_USERNAME env var)",
+          "description": "Oxylabs dashboard username",
           "label": "Username",
           "name": "username",
           "options": null,
@@ -8167,7 +8167,7 @@
         },
         {
           "default": null,
-          "description": "Oxylabs dashboard password (can also be set via OXYLABS_PASSWORD env var)",
+          "description": "Oxylabs dashboard password",
           "label": "Password",
           "name": "password",
           "options": null,
@@ -9431,7 +9431,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Twitter API Bearer token (can also be set via X_BEARER_TOKEN env var)",
+          "description": "Twitter API Bearer token",
           "label": "Bearer Token",
           "name": "bearer_token",
           "options": null,
@@ -9442,7 +9442,7 @@
         },
         {
           "default": null,
-          "description": "Twitter API consumer key (can also be set via X_CONSUMER_KEY env var)",
+          "description": "Twitter API consumer key",
           "label": "Consumer Key",
           "name": "consumer_key",
           "options": null,
@@ -9453,7 +9453,7 @@
         },
         {
           "default": null,
-          "description": "Twitter API consumer secret (can also be set via X_CONSUMER_SECRET env var)",
+          "description": "Twitter API consumer secret",
           "label": "Consumer Secret",
           "name": "consumer_secret",
           "options": null,
@@ -9464,7 +9464,7 @@
         },
         {
           "default": null,
-          "description": "Twitter API access token (can also be set via X_ACCESS_TOKEN env var)",
+          "description": "Twitter API access token",
           "label": "Access Token",
           "name": "access_token",
           "options": null,
@@ -9475,7 +9475,7 @@
         },
         {
           "default": null,
-          "description": "Twitter API access token secret (can also be set via X_ACCESS_TOKEN_SECRET env var)",
+          "description": "Twitter API access token secret",
           "label": "Access Token Secret",
           "name": "access_token_secret",
           "options": null,
@@ -9527,7 +9527,7 @@
       "config_fields": [
         {
           "default": null,
-          "description": "Zoom account ID from Server-to-Server OAuth app (can also be set via ZOOM_ACCOUNT_ID env var)",
+          "description": "Zoom account ID from Server-to-Server OAuth app",
           "label": "Account ID",
           "name": "account_id",
           "options": null,
@@ -9538,7 +9538,7 @@
         },
         {
           "default": null,
-          "description": "Client ID from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_ID env var)",
+          "description": "Client ID from Server-to-Server OAuth app",
           "label": "Client ID",
           "name": "client_id",
           "options": null,
@@ -9549,7 +9549,7 @@
         },
         {
           "default": null,
-          "description": "Client secret from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_SECRET env var)",
+          "description": "Client secret from Server-to-Server OAuth app",
           "label": "Client Secret",
           "name": "client_secret",
           "options": null,

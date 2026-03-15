@@ -1,388 +1,95 @@
 agents:
-  agent_builder:
-    display_name: AgentBuilder
-    instructions:
-    - You are an expert on MindRoom agent architecture and configuration
-    - Interview users to understand their needs and suggest appropriate agent configurations
-    - Use the config_manager tool to create, update, and manage agents
-    - Always validate configurations before applying them
-    - Suggest appropriate tools based on the agent's intended purpose
-    - Generate templates for common agent types when helpful
-    - Provide clear explanations of MindRoom features and capabilities
-    - Test agent configurations when requested
-    - Help users understand how agents, teams, and tools work together
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Expert MindRoom agent builder that helps create and configure custom AI agents with deep knowledge of the system
+  coach:
+    context_files: []
+    delegate_to: []
+    display_name: Coach
+    include_default_tools: true
+    instructions: []
+    knowledge_bases: []
+    model: default
+    role: Personal coaching
+    room_thread_modes: {}
     rooms:
     - lobby
-    - dev
-    - help
-    skills:
-    - mindroom-docs
-    tools:
-    - config_manager
-  analyst:
-    display_name: AnalystAgent
-    instructions:
-    - Analyze information comprehensively.
-    - Provide structured insights.
-    - Consider multiple perspectives.
-    - Make evidence-based recommendations.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Provide analytical insights and recommendations.
-    rooms:
-    - lobby
-    - analysis
-    skills: []
-    tools: []
-  calculator:
-    display_name: CalculatorAgent
-    instructions:
-    - Use the calculator tools to solve mathematical problems accurately.
-    - Show your work step by step.
-    - Explain the mathematical concepts when helpful.
-    - Double-check calculations for accuracy.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Solve mathematical problems.
-    rooms:
-    - lobby
-    - science
-    - analysis
-    skills: []
-    tools:
-    - calculator
-  callagent:
-    display_name: CallAgent
-    instructions:
-    - Make and receive phone calls using Twilio services
-    - Send SMS text messages to specified phone numbers
-    - Always confirm the phone number before making calls or sending texts
-    - Provide clear status updates after each action
-    - Handle phone numbers in international format when possible
-    - Be concise and clear in SMS messages due to character limits
-    - For calls, prepare a brief script of what will be communicated
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Manage phone calls and SMS messages through Twilio integration.
-    rooms:
-    - lobby
-    - communication
-    skills: []
-    tools:
-    - twilio
-  code:
-    display_name: CodeAgent
-    instructions:
-    - Write clean, well-documented code following best practices
-    - Use appropriate error handling
-    - Consider security implications
-    - Test code before finalizing
-    - Be careful with shell commands - explain what they do
-    - Always read files before modifying them
-    - Follow the project's existing style and conventions
-    learning: true
-    learning_mode: always
-    model: opus
-    role: Generate code, manage files, and execute shell commands.
-    rooms:
-    - lobby
-    - dev
-    - automation
-    skills: []
-    tools:
-    - file
-    - shell
-  data_analyst:
-    display_name: DataAnalystAgent
-    instructions:
-    - Analyze data thoroughly and accurately.
-    - Create clear visualizations when helpful.
-    - Explain your analysis methodology.
-    - Identify patterns and trends in data.
-    - Provide actionable insights and recommendations.
-    - Handle missing or inconsistent data appropriately.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Analyze data, create visualizations, and provide insights.
-    rooms:
-    - lobby
-    - analysis
-    - science
-    - finance
-    - business
-    skills: []
-    tools:
-    - csv
-    - calculator
-  email:
-    display_name: EmailAssistant
-    instructions:
-    - Search and retrieve emails based on user queries
-    - Provide concise summaries of important unread emails
-    - Draft professional and contextually appropriate email responses
-    - Help organize and manage the inbox efficiently
-    - Extract key information, action items, and deadlines from emails
-    - Identify urgent or high-priority messages
-    - Never send emails without explicit user confirmation
-    - Respect privacy - only access emails when specifically requested
-    - When summarizing, focus on sender, subject, and key points
-    - For email drafts, maintain appropriate tone and formality based on context
-    learning: true
-    learning_mode: always
-    model: gpt5mini
-    role: Manage and respond to emails efficiently using Gmail with Claude Sonnet's intelligence
-    rooms:
-    - lobby
-    - communication
-    - productivity
-    skills: []
-    tools:
-    - gmail
-    - file
-  finance:
-    display_name: FinanceAgent
-    instructions:
-    - Provide accurate financial data and analysis.
-    - Use yfinance for real-time stock and market data.
-    - Perform financial calculations accurately.
-    - Explain financial concepts clearly.
-    - Include relevant disclaimers about investment advice.
-    - Present data in a clear, organized format.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Analyze financial data, stock information, and perform calculations.
-    rooms:
-    - lobby
-    - finance
-    - analysis
-    - business
-    skills: []
-    tools:
-    - yfinance
-    - calculator
-  general:
-    display_name: GeneralAgent
-    instructions:
-    - Always provide a clear, helpful response to the user after any reasoning.
-    - Remember context from the conversation.
-    - Be conversational and friendly.
-    - Ask clarifying questions when needed.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: A general-purpose assistant that provides helpful, conversational responses to users.
-    rooms:
-    - lobby
-    - help
-    skills: []
-    tools: []
-  home:
-    display_name: HomeAssistant
-    instructions:
-    - You are a helpful home automation assistant
-    - You can control lights, switches, climate devices, and other smart home devices
-    - Always confirm with the user before making significant changes, but go ahead with minor adjustments like turning lights
-      on/off
-    - Provide helpful suggestions for automations and energy savings
-    - Be proactive in suggesting improvements to the home setup
-    - List available devices when asked about what you can control
-    - Provide clear status updates after performing actions
-    - Group related actions together for efficiency
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Control and monitor smart home devices through Home Assistant
-    rooms:
-    - lobby
-    - automation
-    - home
-    skills: []
-    tools:
-    - homeassistant
-  news:
-    display_name: NewsAgent
-    instructions:
-    - Search for recent news and current events.
-    - Provide balanced coverage from multiple sources.
-    - Summarize articles clearly and objectively.
-    - Include publication dates and sources.
-    - Distinguish between news and opinion pieces.
-    - Highlight key developments and their significance.
-    learning: true
-    learning_mode: always
-    model: gpt_oss_120b
-    role: Gather and summarize news and current events.
-    rooms:
-    - lobby
-    - news
-    - research
-    - business
-    skills: []
-    tools:
-    - duckduckgo
-    - newspaper
-  openclaw:
-    display_name: OpenClawAgent
-    instructions:
-    - You wake up fresh each session with no memory of previous conversations. Your context files (SOUL.md, USER.md, MEMORY.md,
-      etc.) are already loaded into your system prompt. Do not re-read them unless you need to verify specific details.
-    - Important long-term context is persisted by the configured MindRoom memory backend. If something must be preserved exactly,
-      write/update the relevant file directly.
-    - 'IMPORTANT: You have no persistent memory between sessions. If you want to remember something, you MUST write it to
-      a file. Mental notes do not survive. When someone says "remember this", when you learn something important, or when
-      you make a decision worth tracking, write it to ./openclaw_data/memory/YYYY-MM-DD.md using today''s date. Append, never
-      overwrite.'
-    - 'MEMORY.md is your curated long-term memory: distilled insights, not raw logs. Periodically review recent daily files
-      and update MEMORY.md with what is worth keeping long-term. Remove outdated information.'
-    - Ask before external/public actions (sending emails, posting, messaging others). Ask before destructive operations (rm,
-      overwriting files). Read files and explore freely without asking.
-    - Before answering questions about prior conversations, decisions, people, or preferences, use search_knowledge_base to
-      search memory files. Do not guess from incomplete context; search first.
-    include_default_tools: false
-    learning: false
-    context_files:
-    - ./openclaw_data/SOUL.md
-    - ./openclaw_data/AGENTS.md
-    - ./openclaw_data/USER.md
-    - ./openclaw_data/IDENTITY.md
-    - ./openclaw_data/MEMORY.md
-    - ./openclaw_data/TOOLS.md
-    - ./openclaw_data/HEARTBEAT.md
-    knowledge_bases:
-    - openclaw_memory
-    model: opus
-    role: OpenClaw-style personal assistant with persistent file-based identity and memory.
-    rooms:
     - personal
-    skills:
-    - transcribe
-    tools:
-    - file
-    - shell
-    - scheduler
-    - duckduckgo
-    - website
-    - openclaw_compat
-    - python
-    - calculator
-  research:
-    display_name: ResearchAgent
-    instructions:
-    - Search for accurate, up-to-date information from reliable sources.
-    - Cross-reference multiple sources when possible.
-    - Clearly cite your sources.
-    - Distinguish between facts and opinions.
-    - Provide balanced viewpoints on controversial topics.
-    - Summarize findings in a clear, organized manner.
-    learning: true
-    learning_mode: always
-    model: gpt5mini
-    role: Conduct research using web sources, Wikipedia, and academic papers.
-    rooms:
-    - lobby
-    - research
-    - science
-    - news
     skills: []
-    tools:
-    - duckduckgo
-    - wikipedia
-    - arxiv
-  security:
-    display_name: SecurityAgent
-    instructions:
-    - Analyze security implications thoroughly.
-    - Provide security best practices.
-    - Identify potential vulnerabilities.
-    - Suggest mitigation strategies.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Analyze security aspects and provide recommendations.
-    rooms:
-    - lobby
-    - dev
-    skills: []
+    thread_mode: thread
     tools: []
-  shell:
-    display_name: ShellAgent
-    instructions:
-    - Execute shell commands to help users with system tasks.
-    - Always explain what a command does before running it.
-    - Be cautious with potentially destructive commands.
-    - Provide clear output and error messages.
-    - Suggest safer alternatives when appropriate.
-    - Remember the user's working directory context.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Execute shell commands and manage system operations.
+  general:
+    context_files: []
+    delegate_to: []
+    display_name: GeneralAgent
+    include_default_tools: true
+    instructions: []
+    knowledge_bases: []
+    model: default
+    role: General assistant
+    room_thread_modes: {}
     rooms:
     - lobby
-    - dev
-    - automation
-    - ops
     skills: []
-    tools:
-    - shell
-  summary:
-    display_name: SummaryAgent
-    instructions:
-    - Provide clear, concise summaries of long texts.
-    - Extract and highlight key points and main ideas.
-    - Maintain the original meaning and context.
-    - Use bullet points for clarity when appropriate.
-    - Indicate the level of detail in your summary.
-    - Preserve important quotes or specific data points.
-    learning: true
-    learning_mode: always
-    model: sonnet
-    role: Summarize long texts and extract key information.
-    rooms:
-    - lobby
-    - research
-    - docs
-    skills: []
+    thread_mode: thread
     tools: []
 authorization:
+  agent_reply_permissions: {}
+  aliases: {}
   default_room_access: false
-  global_users:
-  - '@test:m-test-4.mindroom.chat'
+  global_users: []
   room_permissions: {}
 bot_accounts: []
-mindroom_user:
-  display_name: MindRoomUser
-  username: mindroom_user
+cultures: {}
 defaults:
+  allow_self_config: false
+  compress_tool_results: true
+  enable_session_summaries: false
   enable_streaming: true
   learning: true
   learning_mode: always
   markdown: true
+  max_preload_chars: 50000
   show_stop_button: true
-knowledge_bases:
-  openclaw_memory:
-    path: ./openclaw_data/memory
-    watch: true
+  show_tool_calls: true
+  tools:
+  - scheduler
+knowledge_bases: {}
+matrix_room_access:
+  invite_only_rooms: []
+  mode: single_user_private
+  multi_user_join_rule: public
+  publish_to_room_directory: false
+  reconcile_existing_rooms: false
+matrix_space:
+  enabled: true
+  name: MindRoom
 memory:
+  auto_flush:
+    batch:
+      max_sessions_per_agent_per_cycle: 3
+      max_sessions_per_cycle: 10
+    enabled: false
+    extractor:
+      include_memory_context:
+        memory_snippets: 5
+        snippet_max_chars: 400
+      max_chars_per_flush: 12000
+      max_extraction_seconds: 30
+      max_messages_per_flush: 20
+      no_reply_token: NO_REPLY
+    flush_interval_seconds: 1800
+    idle_seconds: 120
+    max_cross_session_reprioritize: 5
+    max_dirty_age_seconds: 600
+    max_retry_cooldown_seconds: 300
+    retry_cooldown_seconds: 30
+    stale_ttl_seconds: 86400
+  backend: mem0
   embedder:
     provider: openai
     config:
       model: text-embedding-3-small
-  llm:
-    provider: openai
-    config:
-      model: gpt-5-nano-2025-08-07
-      temperature: 0.1
-      top_p: 1
+  file:
+    max_entrypoint_lines: 200
+  team_reads_member_memory: false
 models:
   default:
     provider: openrouter
@@ -418,37 +125,16 @@ models:
     provider: openrouter
     id: google/gemini-2.5-flash
 plugins: []
-room_models:
-  research: haiku
+room_models: {}
 router:
   model: gpt5nano
-teams:
-  code_team:
-    agents:
-    - shell
-    display_name: Code Team
-    mode: coordinate
-    model: default
-    role: New team description
-    rooms: []
-  super_team:
-    agents:
-    - code
-    - shell
-    - research
-    - finance
-    display_name: Super Team
-    mode: collaborate
-    model: sonnet
-    role: A team with all the great agents.
-    rooms:
-    - research
-    - lobby
-timezone: America/Los_Angeles
+teams: {}
+timezone: UTC
 voice:
-  enabled: true
+  enabled: false
   intelligence:
-    model: sonnet
+    model: default
   stt:
     model: whisper-1
     provider: openai
+  visible_router_echo: false
