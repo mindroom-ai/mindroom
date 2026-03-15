@@ -1106,11 +1106,14 @@ class TestWorkerToolsOverride:
     def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Unscoped proxied calls must keep absolute canonical paths unchanged."""
         captured: dict[str, Any] = {}
+        storage_root = tmp_path / "mindroom_data"
+        base_dir = storage_root / "agents" / "general" / "workspace" / "mind_data"
 
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", "/mindroom_data")
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
         runtime_paths = _configure_proxy_runtime(
             monkeypatch,
             proxy_url="http://sandbox:8765",
@@ -1126,7 +1129,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "coding",
             runtime_paths,
-            tool_init_overrides={"base_dir": "/mindroom_data/agents/general/workspace/mind_data"},
+            tool_init_overrides={"base_dir": str(base_dir)},
             worker_tools_override=["coding"],
         )
         entrypoint = tool.functions["ls"].entrypoint
@@ -1137,7 +1140,7 @@ class TestWorkerToolsOverride:
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
         assert captured["json"]["tool_init_overrides"] == {
-            "base_dir": "/mindroom_data/agents/general/workspace/mind_data",
+            "base_dir": str(base_dir),
         }
 
     def test_proxy_preserves_unrelated_absolute_base_dir_for_worker_key(

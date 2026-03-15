@@ -146,30 +146,16 @@ def _resolve_tool_credentials_manager(
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
 ) -> CredentialsManager | None:
-    """Return the credential manager a tool rebuild should use, if any."""
+    """Return the explicit runtime credential manager for tools that persist config."""
     if credentials_manager is not None:
         return credentials_manager
 
-    init_signature = inspect.signature(tool_class.__init__)
     metadata = TOOL_METADATA[tool_name]
-    has_config_fields = bool(metadata.config_fields)
-    has_secret_config = any(field.type == "password" for field in metadata.config_fields or [])
-    needs_persisted_credentials = (
-        metadata.auth_provider is not None
-        or metadata.setup_type != SetupType.NONE
-        or has_secret_config
-        or "credentials_manager" in init_signature.parameters
-    )
-    if needs_persisted_credentials:
+    if metadata.config_fields:
         return get_runtime_credentials_manager(runtime_paths)
 
-    if not has_config_fields:
-        return None
-
-    shared_credentials_path = runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH")
-    if shared_credentials_path and Path(shared_credentials_path).expanduser().resolve().exists():
-        return get_runtime_credentials_manager(runtime_paths)
-    if (runtime_paths.storage_root / "credentials").exists():
+    init_signature = inspect.signature(tool_class.__init__)
+    if "credentials_manager" in init_signature.parameters:
         return get_runtime_credentials_manager(runtime_paths)
     return None
 
