@@ -6,16 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import mindroom.authorization
 from mindroom import constants
-from mindroom.authorization import (
-    get_effective_sender_id_for_reply_permissions,
-    is_authorized_sender,
-    is_sender_allowed_for_agent_reply,
-)
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.state import MatrixRoom, MatrixState
+
+_BOUND_RUNTIME_PATHS: dict[int, constants.RuntimePaths] = {}
 
 
 def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
@@ -27,8 +25,59 @@ def _bind_runtime_paths(config: Config, path: Path | None = None) -> Config:
             "MINDROOM_NAMESPACE": "",
         },
     )
-    config._runtime_paths = runtime_paths
-    return config
+    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
+    bound.__dict__["ids"] = bound.get_ids(runtime_paths)
+    return bound
+
+
+def _runtime_paths_for(config: Config) -> constants.RuntimePaths:
+    runtime_paths = _BOUND_RUNTIME_PATHS.get(id(config))
+    if runtime_paths is None:
+        msg = "Test config is missing bound RuntimePaths"
+        raise KeyError(msg)
+    return runtime_paths
+
+
+def is_authorized_sender(
+    sender_id: str,
+    config: Config,
+    room_id: str,
+    *,
+    room_alias: str | None = None,
+) -> bool:
+    """Run sender authorization with the test config's bound runtime context."""
+    return mindroom.authorization.is_authorized_sender(
+        sender_id,
+        config,
+        room_id,
+        _runtime_paths_for(config),
+        room_alias=room_alias,
+    )
+
+
+def is_sender_allowed_for_agent_reply(sender_id: str, agent_name: str, config: Config) -> bool:
+    """Run reply-permission checks with the test config's bound runtime context."""
+    return mindroom.authorization.is_sender_allowed_for_agent_reply(
+        sender_id,
+        agent_name,
+        config,
+        _runtime_paths_for(config),
+    )
+
+
+def get_effective_sender_id_for_reply_permissions(
+    sender_id: str,
+    event_source: dict[str, object] | None,
+    config: Config,
+) -> str:
+    """Resolve effective sender IDs with the test config's bound runtime context."""
+    return mindroom.authorization.get_effective_sender_id_for_reply_permissions(
+        sender_id,
+        event_source,
+        config,
+        _runtime_paths_for(config),
+    )
 
 
 def _config(**kwargs: object) -> Config:
@@ -113,7 +162,7 @@ def test_no_restrictions_only_allows_internal_user(
 
     # Internal system user should always be allowed
     assert is_authorized_sender(
-        mock_config_no_restrictions.get_mindroom_user_id(),
+        mock_config_no_restrictions.get_mindroom_user_id(_runtime_paths_for(mock_config_no_restrictions)),
         mock_config_no_restrictions,
         "!test:server",
     )
@@ -174,25 +223,26 @@ def test_router_always_allowed(mock_config_with_restrictions: Config) -> None:
 
 def test_internal_system_user_always_allowed(
     mock_config_with_restrictions: Config,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that configured internal user on the current domain is always allowed."""
-    # Mock the domain property
-    monkeypatch.setattr(mock_config_with_restrictions.__class__, "domain", property(lambda _: "example.com"))
+    runtime_paths = _runtime_paths_for(mock_config_with_restrictions)
+    internal_user_id = mock_config_with_restrictions.get_mindroom_user_id(runtime_paths)
+    assert internal_user_id is not None
 
     # Internal system user should always be allowed, even with restrictions
     assert is_authorized_sender(
-        mock_config_with_restrictions.get_mindroom_user_id(),
+        internal_user_id,
         mock_config_with_restrictions,
         "!test:server",
     )
 
     # Same username from a different domain should NOT be allowed
-    wrong_domain_id = mock_config_with_restrictions.get_mindroom_user_id().replace(":example.com", ":different.com")
+    current_domain = mock_config_with_restrictions.get_domain(runtime_paths)
+    wrong_domain_id = internal_user_id.replace(f":{current_domain}", ":different.com")
     assert not is_authorized_sender(wrong_domain_id, mock_config_with_restrictions, "!test:server")
 
 
-def test_custom_internal_system_user_always_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_internal_system_user_always_allowed() -> None:
     """Test that custom configured internal user is always allowed."""
     config = _config(
         agents={
@@ -212,9 +262,10 @@ def test_custom_internal_system_user_always_allowed(monkeypatch: pytest.MonkeyPa
             "default_room_access": False,
         },
     )
-    monkeypatch.setattr(config.__class__, "domain", property(lambda _: "example.com"))
-
-    assert is_authorized_sender("@alice_internal:example.com", config, "!test:server")
+    runtime_paths = _runtime_paths_for(config)
+    internal_user_id = config.get_mindroom_user_id(runtime_paths)
+    assert internal_user_id is not None
+    assert is_authorized_sender(internal_user_id, config, "!test:server")
     assert not is_authorized_sender("@mindroom_user:example.com", config, "!test:server")
 
 
@@ -275,10 +326,8 @@ def mock_config_with_room_permissions() -> Config:
     )
 
 
-def test_room_specific_permissions(mock_config_with_room_permissions: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_room_specific_permissions(mock_config_with_room_permissions: Config) -> None:
     """Test room-specific permission system."""
-    monkeypatch.setattr(mock_config_with_room_permissions.__class__, "domain", property(lambda _: "example.com"))
-
     # Alice has global access - allowed everywhere
     assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions, "!room1:example.com")
     assert is_authorized_sender("@alice:example.com", mock_config_with_room_permissions, "!room2:example.com")
@@ -369,7 +418,7 @@ def test_room_specific_permissions_support_managed_room_key(
     assert not is_authorized_sender("@eve:example.com", config, "!lobby:example.com")
 
 
-def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_room_access() -> None:
     """Test default_room_access setting."""
     config_allow_default = _config(
         agents={
@@ -387,8 +436,6 @@ def test_default_room_access(monkeypatch: pytest.MonkeyPatch) -> None:
             "default_room_access": True,  # Allow by default
         },
     )
-
-    monkeypatch.setattr(config_allow_default.__class__, "domain", property(lambda _: "example.com"))
 
     # Alice has global access
     assert is_authorized_sender("@alice:example.com", config_allow_default, "!room1:example.com")
