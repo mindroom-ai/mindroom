@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot, _create_task_wrapper
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -29,6 +30,11 @@ async def test_callback_error_is_logged_not_raised(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 

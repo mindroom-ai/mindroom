@@ -9,8 +9,11 @@ main() entry
        │
        ▼
 ┌──────────────────┐
-│ Sync Credentials │
-│ (.env → vault)   │
+│ Sync Provider    │
+│ Credentials      │
+│ (.env/bootstrap  │
+│ env → shared     │
+│ credentials)     │
 └────────┬─────────┘
          │
          ▼

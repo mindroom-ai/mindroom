@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 
@@ -40,8 +41,7 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
     # Create a minimal mock config
     config = Mock()
     config.agents = {"test_agent": Mock()}
-    config.domain = "example.com"
-    config.ids = {}
+    config.get_ids.return_value = {}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.authorization.agent_reply_permissions = {}
 
@@ -50,6 +50,11 @@ async def test_bot_handles_redelivered_edit_after_restart(tmp_path: Path) -> Non
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 
@@ -145,8 +150,7 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
     # Create a minimal mock config
     config = Mock()
     config.agents = {"test_agent": Mock()}
-    config.domain = "example.com"
-    config.ids = {}
+    config.get_ids.return_value = {}
     config.get_mindroom_user_id.return_value = "@mindroom:example.com"
     config.authorization.agent_reply_permissions = {}
 
@@ -155,6 +159,11 @@ async def test_bot_skips_duplicate_regular_message_after_restart(tmp_path: Path)
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 

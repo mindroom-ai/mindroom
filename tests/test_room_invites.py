@@ -20,36 +20,39 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from nio.responses import Response
 
 
 @pytest.fixture
-def mock_config() -> Config:
+def mock_config(tmp_path: Path) -> Config:
     """Create a mock config with agents and teams."""
-    return Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["room1", "room2"],
-            ),
-            "agent2": AgentConfig(
-                display_name="Agent 2",
-                role="Another test agent",
-                rooms=["room1"],
-            ),
-        },
-        teams={
-            "team1": TeamConfig(
-                display_name="Team 1",
-                role="Test team",
-                agents=["agent1", "agent2"],
-                rooms=["room2"],
-            ),
-        },
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1", "room2"],
+                ),
+                "agent2": AgentConfig(
+                    display_name="Agent 2",
+                    role="Another test agent",
+                    rooms=["room1"],
+                ),
+            },
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Test team",
+                    agents=["agent1", "agent2"],
+                    rooms=["room2"],
+                ),
+            },
+        ),
+        tmp_path,
     )
 
 
@@ -65,12 +68,13 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
     )
 
     # Create the agent bot with configured rooms
-    config = Config(router=RouterConfig(model="default"))
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
     )
 
@@ -88,7 +92,12 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -112,11 +121,12 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
         display_name="Agent 1",
         password=TEST_PASSWORD,
     )
-    config = Config(router=RouterConfig(model="default"))
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
     )
 
@@ -146,12 +156,13 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
     )
 
     # Create the agent bot with only room1 configured
-    config = Config(router=RouterConfig(model="default"))
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],  # Only configured for room1
     )
 
@@ -196,11 +207,12 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
         display_name="Router",
         password=TEST_PASSWORD,
     )
-    config = Config(router=RouterConfig(model="default"))
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
     )
 
@@ -217,7 +229,10 @@ async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
         AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!room2:localhost"]),
     )
     monkeypatch.setattr("mindroom.bot.leave_non_dm_rooms", mock_leave_non_dm_rooms)
-    monkeypatch.setattr("mindroom.bot.MatrixState.load", lambda: MatrixState(space_room_id="!space:localhost"))
+    monkeypatch.setattr(
+        "mindroom.bot.MatrixState.load",
+        lambda **_kwargs: MatrixState(space_room_id="!space:localhost"),
+    )
 
     await bot.leave_unconfigured_rooms()
 
@@ -237,12 +252,13 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
     )
 
     # Start with agent configured for room1 only
-    config = Config(router=RouterConfig(model="default"))
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],
     )
 
@@ -268,7 +284,12 @@ async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPa
     mock_client.room_leave = mock_room_leave
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

@@ -26,6 +26,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.media_inputs import MediaInputs
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -39,13 +40,21 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> Runtim
     )
 
 
+def _config() -> Config:
+    return Config(
+        agents={"general": AgentConfig(display_name="General")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+
+
 class TestUserIdPassthrough:
     """Test that user_id reaches agent.arun() in both streaming and non-streaming paths."""
 
     @pytest.mark.asyncio
     async def test_non_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond passes user_id through to ai_response."""
-        config = Config.from_yaml()
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -54,6 +63,7 @@ class TestUserIdPassthrough:
         bot.agent_name = "general"
         bot.storage_path = tmp_path
         bot.config = config
+        bot.runtime_paths = runtime_paths
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._send_response = AsyncMock(return_value="$response_id")
         bot._build_tool_runtime_context = MagicMock(
@@ -65,6 +75,7 @@ class TestUserIdPassthrough:
                 requester_id="@alice:localhost",
                 client=bot.client,
                 config=config,
+                runtime_paths=runtime_paths,
                 storage_path=tmp_path,
             ),
         )
@@ -99,7 +110,8 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_streaming_passes_user_id(self, tmp_path: Path) -> None:
         """Test that _process_and_respond_streaming passes user_id through to stream_agent_response."""
-        config = Config.from_yaml()
+        runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(_config(), runtime_paths)
         bot = MagicMock(spec=AgentBot)
         bot.logger = MagicMock()
         bot.stop_manager = MagicMock()
@@ -110,6 +122,7 @@ class TestUserIdPassthrough:
         bot.matrix_id.domain = "localhost"
         bot.config = config
         bot.storage_path = tmp_path
+        bot.runtime_paths = runtime_paths
         bot._knowledge_for_agent = MagicMock(return_value=None)
         bot._handle_interactive_question = AsyncMock()
         bot._build_tool_runtime_context = MagicMock(
@@ -121,6 +134,7 @@ class TestUserIdPassthrough:
                 requester_id="@bob:localhost",
                 client=bot.client,
                 config=config,
+                runtime_paths=runtime_paths,
                 storage_path=tmp_path,
             ),
         )
@@ -183,7 +197,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
                 user_id="@user:localhost",
             )
 
@@ -193,7 +207,7 @@ class TestUserIdPassthrough:
     @pytest.mark.asyncio
     async def test_prepare_agent_and_prompt_threads_config_path_to_create_agent(self, tmp_path: Path) -> None:
         """The shared agent-build helper should preserve an explicit orchestrator config path."""
-        config = Config.from_yaml()
+        config = _config()
         config_path = tmp_path / "custom-config.yaml"
         mock_agent = MagicMock()
 
@@ -213,7 +227,7 @@ class TestUserIdPassthrough:
         assert agent is mock_agent
         assert full_prompt == "enhanced"
         assert unseen_event_ids == []
-        assert mock_create_agent.call_args.kwargs["runtime_paths"].config_path == config_path
+        assert "runtime_paths" not in mock_create_agent.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_ai_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -235,7 +249,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
-                config=Config.from_yaml(),
+                config=_config(),
             )
 
         assert mock_prepare.call_args.args[2].config_path == config_path
@@ -265,7 +279,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path, config_path=config_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                 )
             ]
 
@@ -299,7 +313,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                     user_id="@user:localhost",
                 )
             ]
@@ -333,7 +347,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
                 media=MediaInputs(files=[pdf_file, zip_file]),
             )
 
@@ -369,7 +383,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                     media=MediaInputs(files=[pdf_file, zip_file]),
                 )
             ]
@@ -417,7 +431,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
                 media=MediaInputs(files=[document_file]),
             )
 
@@ -470,7 +484,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                     media=MediaInputs(files=[document_file]),
                 )
             ]
@@ -538,7 +552,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
                 media=MediaInputs(files=[document_file]),
             )
 
@@ -590,7 +604,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                     media=MediaInputs(files=[document_file]),
                 )
             ]
@@ -629,7 +643,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
             )
 
             mock_agent.arun.assert_called_once()
@@ -663,7 +677,7 @@ class TestUserIdPassthrough:
                     prompt="test",
                     session_id="session1",
                     runtime_paths=_runtime_paths(tmp_path),
-                    config=Config.from_yaml(),
+                    config=_config(),
                     show_tool_calls=False,
                 )
             ]
@@ -702,7 +716,7 @@ class TestUserIdPassthrough:
                 prompt="test",
                 session_id="session1",
                 runtime_paths=_runtime_paths(tmp_path),
-                config=Config.from_yaml(),
+                config=_config(),
                 show_tool_calls=False,
                 tool_trace_collector=tool_trace,
             )

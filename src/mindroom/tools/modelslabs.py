@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             placeholder="your-modelslabs-api-key",
-            description="The ModelsLab API key for authentication (can also be set via MODELS_LAB_API_KEY env var)",
+            description="The ModelsLab API key for authentication",
         ),
         # Media generation parameters
         ConfigField(

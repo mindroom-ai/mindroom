@@ -12,6 +12,10 @@ import sys
 import tomllib
 from functools import cache
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
@@ -69,9 +73,10 @@ def check_deps_installed(dependencies: list[str]) -> bool:
     return True
 
 
-def auto_install_enabled() -> bool:
+def auto_install_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether automatic tool dependency installation is enabled."""
-    return os.environ.get("MINDROOM_NO_AUTO_INSTALL_TOOLS", "").lower() not in {"1", "true", "yes"}
+    raw = runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS", default="") or ""
+    return raw.lower() not in {"1", "true", "yes"}
 
 
 def _has_lockfile() -> bool:
@@ -206,9 +211,9 @@ def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
     return _install_in_environment(extras, quiet=quiet)
 
 
-def auto_install_optional_extra(extra_name: str) -> bool:
+def auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install an optional extra when supported and enabled."""
-    if not auto_install_enabled():
+    if not auto_install_enabled(runtime_paths):
         return False
     resolved_extra_name = _resolve_optional_extra_name(extra_name)
     if resolved_extra_name is None:
@@ -216,23 +221,23 @@ def auto_install_optional_extra(extra_name: str) -> bool:
     return _install_optional_extras([resolved_extra_name], quiet=True)
 
 
-def auto_install_tool_extra(tool_name: str) -> bool:
+def auto_install_tool_extra(tool_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install a tool extra when supported and enabled."""
-    return auto_install_optional_extra(tool_name)
+    return auto_install_optional_extra(tool_name, runtime_paths)
 
 
-def ensure_optional_deps(dependencies: list[str], extra_name: str) -> None:
+def ensure_optional_deps(dependencies: list[str], extra_name: str, runtime_paths: RuntimePaths) -> None:
     """Ensure dependencies are installed, auto-installing via optional extra if needed."""
     if check_deps_installed(dependencies):
         return
-    if not auto_install_optional_extra(extra_name):
+    if not auto_install_optional_extra(extra_name, runtime_paths):
         missing = ", ".join(dependencies)
         msg = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
         raise ImportError(msg)
     importlib.invalidate_caches()
 
 
-def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:
+def ensure_tool_deps(dependencies: list[str], tool_extra: str, runtime_paths: RuntimePaths) -> None:
     """Ensure dependencies are installed, auto-installing via tool extra if needed.
 
     Uses find_spec to check availability (no side effects), then auto-installs
@@ -240,4 +245,4 @@ def ensure_tool_deps(dependencies: list[str], tool_extra: str) -> None:
 
     Raises ImportError if dependencies cannot be satisfied.
     """
-    ensure_optional_deps(dependencies, tool_extra)
+    ensure_optional_deps(dependencies, tool_extra, runtime_paths)

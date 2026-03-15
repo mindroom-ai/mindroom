@@ -9,7 +9,7 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 
 
@@ -33,6 +33,11 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 
@@ -146,6 +151,11 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 
@@ -229,6 +239,11 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
         agent_user=agent_user,
         storage_path=tmp_path,
         config=MagicMock(),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
+            process_env={},
+        ),
         rooms=["!test:example.com"],
     )
 

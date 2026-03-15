@@ -33,7 +33,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="EAAxxxxxxx...",
-            description="WhatsApp Business API access token (can also be set via WHATSAPP_ACCESS_TOKEN env var)",
+            description="WhatsApp Business API access token",
         ),
         ConfigField(
             name="phone_number_id",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="1234567890123456",
-            description="WhatsApp Business Account phone number ID (can also be set via WHATSAPP_PHONE_NUMBER_ID env var)",
+            description="WhatsApp Business Account phone number ID",
         ),
         ConfigField(
             name="version",
@@ -59,7 +59,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             placeholder="+1234567890",
-            description="Default recipient WhatsApp ID or phone number (optional, can also be set via WHATSAPP_RECIPIENT_WAID env var)",
+            description="Default recipient WhatsApp ID or phone number (optional)",
         ),
         # Feature flags/boolean parameters
         ConfigField(

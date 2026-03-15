@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
+    from mindroom.constants import RuntimePaths
+
 _OPENAI_EMBEDDING_DIMENSIONS = {
     "text-embedding-3-large": 3072,
     "text-embedding-3-small": 1536,
@@ -74,18 +76,19 @@ def effective_mem0_embedder_signature(
     )
 
 
-def ensure_sentence_transformers_dependencies() -> None:
+def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> None:
     """Install the optional local sentence-transformers runtime when needed."""
-    ensure_optional_deps(_SENTENCE_TRANSFORMERS_DEPENDENCIES, _SENTENCE_TRANSFORMERS_EXTRA)
+    ensure_optional_deps(_SENTENCE_TRANSFORMERS_DEPENDENCIES, _SENTENCE_TRANSFORMERS_EXTRA, runtime_paths)
 
 
 def create_sentence_transformers_embedder(
+    runtime_paths: RuntimePaths,
     model: str = DEFAULT_SENTENCE_TRANSFORMERS_MODEL,
     *,
     dimensions: int | None = None,
 ) -> Embedder:
     """Create a local sentence-transformers embedder after ensuring its optional extra exists."""
-    ensure_sentence_transformers_dependencies()
+    ensure_sentence_transformers_dependencies(runtime_paths)
     module = importlib.import_module("agno.knowledge.embedder.sentence_transformer")
     embedder_class = cast("Any", module.SentenceTransformerEmbedder)
     if dimensions is None:

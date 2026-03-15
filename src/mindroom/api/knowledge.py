@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import unquote
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
@@ -28,23 +28,19 @@ def _ensure_base_exists(config: Config, base_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{base_id}' not found")
 
 
-def _load_runtime_config() -> tuple[Config, constants.RuntimePaths]:
-    runtime_paths = constants.get_runtime_paths()
-    return Config.from_yaml(runtime_paths=runtime_paths), runtime_paths
+def _load_runtime_config(runtime_paths: constants.RuntimePaths) -> tuple[Config, constants.RuntimePaths]:
+    return load_config(runtime_paths), runtime_paths
 
 
 def _knowledge_root(
     config: Config,
     base_id: str,
-    config_path: Path,
+    runtime_paths: constants.RuntimePaths,
     *,
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = constants.resolve_config_relative_path(
-        config.knowledge_bases[base_id].path,
-        config_path=config_path,
-    )
+    root = constants.resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
@@ -153,14 +149,16 @@ async def _stream_upload_to_destination(upload: UploadFile, destination: Path, f
 
 
 @router.get("/bases")
-async def list_knowledge_bases() -> dict[str, Any]:
+async def list_knowledge_bases(request: Request) -> dict[str, Any]:
     """List all configured knowledge bases with status summaries."""
-    config, runtime_paths = _load_runtime_config()
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
     manager_map = await _ensure_managers(config, runtime_paths)
 
     bases: list[dict[str, Any]] = []
     for base_id in sorted(config.knowledge_bases):
-        root = _knowledge_root(config, base_id, runtime_paths.config_path)
+        root = _knowledge_root(config, base_id, runtime_paths)
         manager = manager_map.get(base_id)
         if manager is None:
             file_count = len(_list_file_info(root)[0])
@@ -187,10 +185,12 @@ async def list_knowledge_bases() -> dict[str, Any]:
 
 
 @router.get("/bases/{base_id}/files")
-async def list_knowledge_files(base_id: str) -> dict[str, Any]:
+async def list_knowledge_files(base_id: str, request: Request) -> dict[str, Any]:
     """List all managed files currently present in one knowledge base folder."""
-    config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
+    root = _knowledge_root(config, base_id, runtime_paths)
     manager = await _ensure_manager(config, base_id, runtime_paths)
     files, total_size = _list_file_info(root, manager.list_files() if manager is not None else None)
 
@@ -203,10 +203,16 @@ async def list_knowledge_files(base_id: str) -> dict[str, Any]:
 
 
 @router.post("/bases/{base_id}/upload")
-async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile], File(...)]) -> dict[str, Any]:
+async def upload_knowledge_files(
+    base_id: str,
+    request: Request,
+    files: Annotated[list[UploadFile], File(...)],
+) -> dict[str, Any]:
     """Upload one or more files into a knowledge base folder."""
-    config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path, create=True)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
+    root = _knowledge_root(config, base_id, runtime_paths, create=True)
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -245,10 +251,12 @@ async def upload_knowledge_files(base_id: str, files: Annotated[list[UploadFile]
 
 
 @router.delete("/bases/{base_id}/files/{path:path}")
-async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
+async def delete_knowledge_file(base_id: str, path: str, request: Request) -> dict[str, Any]:
     """Delete one knowledge file from disk and from the vector index."""
-    config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
+    root = _knowledge_root(config, base_id, runtime_paths)
     decoded_path = unquote(path)
     target = _resolve_within_root(root, decoded_path)
 
@@ -270,10 +278,12 @@ async def delete_knowledge_file(base_id: str, path: str) -> dict[str, Any]:
 
 
 @router.get("/bases/{base_id}/status")
-async def knowledge_status(base_id: str) -> dict[str, Any]:
+async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     """Return current indexing status for one knowledge base."""
-    config, runtime_paths = _load_runtime_config()
-    root = _knowledge_root(config, base_id, runtime_paths.config_path)
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
+    root = _knowledge_root(config, base_id, runtime_paths)
     manager = await _ensure_manager(config, base_id, runtime_paths)
 
     if manager is not None:
@@ -294,9 +304,11 @@ async def knowledge_status(base_id: str) -> dict[str, Any]:
 
 
 @router.post("/bases/{base_id}/reindex")
-async def reindex_knowledge(base_id: str) -> dict[str, Any]:
+async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     """Force reindexing of all files in one knowledge base folder."""
-    config, runtime_paths = _load_runtime_config()
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
     _ensure_base_exists(config, base_id)
 
     manager = await _ensure_manager(config, base_id, runtime_paths)

@@ -21,11 +21,16 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.reply_chain import _merge_thread_and_chain_history
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
+    """Return a runtime-bound config for threading tests."""
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
 class TestThreadingBehavior:
@@ -41,12 +46,15 @@ class TestThreadingBehavior:
             agent_name="general",
         )
 
-        config = Config(
-            agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(
@@ -55,6 +63,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,  # Disable streaming for simpler testing
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Mock the orchestrator
@@ -1121,12 +1130,15 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(
-            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(
@@ -1135,6 +1147,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
         # Mock the orchestrator
@@ -1221,12 +1234,15 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(
-            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(
@@ -1235,6 +1251,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         # Mock the orchestrator
         mock_orchestrator = MagicMock()
@@ -1324,12 +1341,15 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(
-            agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={"router": AgentConfig(display_name="Router", rooms=["!test:localhost"])},
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(
@@ -1338,6 +1358,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config
@@ -1412,14 +1433,17 @@ class TestThreadingBehavior:
             agent_name="router",
         )
 
-        config = Config(
-            agents={
-                "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         bot = AgentBot(
@@ -1428,6 +1452,7 @@ class TestThreadingBehavior:
             rooms=["!test:localhost"],
             enable_streaming=False,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
         mock_orchestrator = MagicMock()
         mock_orchestrator.current_config = config

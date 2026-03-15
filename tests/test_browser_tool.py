@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
     BrowserTools,
     _BrowserTabState,
     _clean_str,
 )
+
+TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
 
 @pytest.mark.parametrize(
@@ -74,7 +78,7 @@ def test_resolve_max_chars_behavior() -> None:
 @pytest.mark.asyncio
 async def test_browser_unknown_action_raises() -> None:
     """Unknown browser actions are rejected."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="Unknown action: nope"):
         await tool.browser(action="nope")
@@ -83,7 +87,7 @@ async def test_browser_unknown_action_raises() -> None:
 @pytest.mark.asyncio
 async def test_browser_open_requires_target_url() -> None:
     """Open action requires targetUrl."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="targetUrl required for action=open"):
         await tool.browser(action="open")
@@ -92,7 +96,7 @@ async def test_browser_open_requires_target_url() -> None:
 @pytest.mark.asyncio
 async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPatch) -> None:
     """Open action routes to _open_tab with normalized profile and url."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
     open_tab = AsyncMock(
         return_value={
             "action": "open",
@@ -117,7 +121,7 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
 @pytest.mark.asyncio
 async def test_browser_rejects_non_host_targets() -> None:
     """MindRoom browser currently supports host only."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="host target only"):
         await tool.browser(action="status", target="sandbox")
@@ -132,7 +136,7 @@ async def test_browser_rejects_non_host_targets() -> None:
 @pytest.mark.asyncio
 async def test_act_unknown_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unknown act kind is rejected."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
     mock_state = object()
     tab = _BrowserTabState(target_id="tab-1", page=SimpleNamespace())
 
@@ -150,7 +154,7 @@ async def test_act_unknown_kind_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch) -> None:
     """Click act resolves refs and forwards click kwargs to Playwright."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
     mock_state = object()
 
     click = AsyncMock()
@@ -190,7 +194,7 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.asyncio
 async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill act fails when no field resolves to a usable selector."""
-    tool = BrowserTools()
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
     mock_state = object()
     page: Any = SimpleNamespace(locator=MagicMock())
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={})
@@ -204,3 +208,52 @@ async def test_act_fill_requires_at_least_one_valid_field(monkeypatch: pytest.Mo
             request={"kind": "fill", "fields": [{"value": "hello"}]},
             fallback_target_id=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_uses_runtime_browser_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Browser startup should honor the executable configured in the explicit runtime."""
+
+    class _FakePage:
+        def is_closed(self) -> bool:
+            return False
+
+        def on(self, _event: str, _callback: object) -> None:
+            return None
+
+    class _FakeContext:
+        async def new_page(self) -> _FakePage:
+            return _FakePage()
+
+    class _FakeBrowser:
+        async def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+    launch_kwargs: dict[str, object] = {}
+
+    class _FakeChromium:
+        async def launch(self, **kwargs: object) -> _FakeBrowser:
+            launch_kwargs.update(kwargs)
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+    class _FakePlaywrightStarter:
+        async def start(self) -> _FakePlaywright:
+            return _FakePlaywright()
+
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": "/opt/custom-browser"},
+    )
+    tool = BrowserTools(runtime_paths)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
+
+    await tool._ensure_profile("openclaw")
+
+    assert launch_kwargs["executable_path"] == "/opt/custom-browser"

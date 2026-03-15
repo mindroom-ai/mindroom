@@ -12,13 +12,15 @@ These tests ensure no regressions in the core response logic.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import create_mock_room
+from tests.conftest import bind_runtime_paths, create_mock_room, runtime_paths_for, test_runtime_paths
 
 
 class TestAgentResponseLogic:
@@ -26,19 +28,25 @@ class TestAgentResponseLogic:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
-                "agent1": AgentConfig(display_name="Agent1", rooms=["#test:example.org"]),
-                "research": AgentConfig(display_name="Research", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        self.config = bind_runtime_paths(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="General", rooms=["!room:localhost"]),
+                    "agent1": AgentConfig(display_name="Agent1", rooms=["!room:localhost"]),
+                    "research": AgentConfig(display_name="Research", rooms=["!room:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+            runtime_paths,
         )
+        self.config.authorization.default_room_access = True
+        self.runtime_paths = runtime_paths_for(self.config)
         # Helper for generating agent IDs with correct domain
-        self.domain = self.config.domain
+        self.domain = self.config.get_domain(self.runtime_paths)
         self.sender = f"@user:{self.domain}"
 
     def agent_id(self, agent_name: str) -> str:
@@ -54,6 +62,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True
@@ -70,6 +79,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=f"@bob:{self.domain}",
         )
         assert should_respond is False
@@ -89,6 +99,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=alias_user,
         )
         assert should_respond is True
@@ -105,6 +116,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=f"@bob:{self.domain}",
         )
         assert should_respond is True
@@ -124,6 +136,7 @@ class TestAgentResponseLogic:
             room=room,
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=f"@alice:{self.domain}",
         )
         should_respond_general = should_agent_respond(
@@ -133,6 +146,7 @@ class TestAgentResponseLogic:
             room=room,
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=f"@alice:{self.domain}",
         )
 
@@ -153,6 +167,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True
@@ -172,6 +187,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -186,6 +202,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
@@ -202,6 +219,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True
@@ -219,6 +237,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -233,6 +252,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
@@ -246,6 +266,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
@@ -258,6 +279,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],  # No one has spoken
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True  # Can respond when mentioned even if not configured
@@ -271,6 +293,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False  # Router decides when multiple agents available
@@ -290,6 +313,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -313,6 +337,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=f"@alice:{self.domain}",
         )
         assert should_respond is True
@@ -326,6 +351,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -339,6 +365,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -352,6 +379,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True
@@ -377,6 +405,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -391,6 +420,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -407,6 +437,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -420,6 +451,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -434,6 +466,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -457,6 +490,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is False
@@ -471,6 +505,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         # Agent1 should not respond and should NOT use router
@@ -484,6 +519,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
             # No agents mentioned
         )
@@ -498,6 +534,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
             thread_history=[],
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         # Agent1 SHOULD respond and should NOT use router
@@ -513,6 +550,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator in room
             thread_history=[],  # Empty thread
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True  # Single agent takes ownership
@@ -529,6 +567,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator"], self.config),  # Only calculator
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
         assert should_respond is True  # Single agent takes ownership when only users have spoken
@@ -550,6 +589,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=multi_human_thread,
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_id=self.sender,
             )
             is False
@@ -564,6 +604,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=multi_human_thread,
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_id=self.sender,
             )
             is True
@@ -581,6 +622,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=single_human_thread,
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_id=self.sender,
             )
             is True
@@ -601,6 +643,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=owned_thread_history,
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_id=self.sender,
             )
             is False
@@ -618,6 +661,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=[],
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 has_non_agent_mentions=True,
                 sender_id=self.sender,
             )
@@ -638,6 +682,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=[],
                 config=self.config,
+                runtime_paths=self.runtime_paths,
                 sender_id=self.sender,
             )
             is True
@@ -647,11 +692,14 @@ class TestAgentResponseLogic:
         """A bot_account posting in a thread should not count as a second human."""
         config = Config(
             agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                "calculator": AgentConfig(display_name="Calculator", rooms=["!room:localhost"]),
             },
             models={"default": ModelConfig(provider="ollama", id="test-model")},
             bot_accounts=["@telegram:localhost"],
         )
+        config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+        runtime_paths = runtime_paths_for(config)
+        config.authorization.default_room_access = True
         room = create_mock_room("!room:localhost", ["calculator"], config)
 
         thread_with_bot = [
@@ -667,6 +715,7 @@ class TestAgentResponseLogic:
                 room=room,
                 thread_history=thread_with_bot,
                 config=config,
+                runtime_paths=runtime_paths,
                 sender_id="@alice:localhost",
             )
             is True
@@ -693,7 +742,10 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
-            mentioned_agents=[self.config.ids["research"]],  # ResearchAgent is mentioned
+            runtime_paths=self.runtime_paths,
+            mentioned_agents=[
+                self.config.get_ids(runtime_paths_for(self.config))["research"],
+            ],  # ResearchAgent is mentioned
             sender_id=self.sender,
         )
         assert should_respond is False  # Should NOT respond when another agent is mentioned
@@ -706,6 +758,7 @@ class TestAgentResponseLogic:
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
             config=self.config,
+            runtime_paths=self.runtime_paths,
             mentioned_agents=[],  # No agents mentioned
             sender_id=self.sender,
         )

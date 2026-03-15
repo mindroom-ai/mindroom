@@ -11,6 +11,18 @@ from agno.models.vertexai.claude import Claude as VertexAIClaude
 from mindroom.ai import get_model_instance
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+
+
+def _config_with_runtime_paths(config_data: dict[str, object]) -> tuple[Config, RuntimePaths]:
+    runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config(**config_data)
+    return config, runtime_paths
 
 
 def test_model_config_with_extra_kwargs() -> None:
@@ -131,20 +143,18 @@ def test_get_model_instance_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Get the model instance
-    model = get_model_instance(config, "test_model")
+    model = get_model_instance(config, runtime_paths, "test_model")
 
     # Check that the model has the correct parameters
     assert model.id == "openai/gpt-4"
-    assert hasattr(model, "request_params")
     assert model.request_params is not None
     assert model.request_params["provider"]["order"] == ["Cerebras"]
     assert model.request_params["provider"]["allow_fallbacks"] is False
 
     # Check that temperature was also passed
-    assert hasattr(model, "temperature")
     assert model.temperature == 0.8
 
 
@@ -190,16 +200,16 @@ def test_different_providers_with_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Test OpenAI model
-    openai_model = get_model_instance(config, "openai_model")
+    openai_model = get_model_instance(config, runtime_paths, "openai_model")
     assert openai_model.temperature == 0.5
     assert openai_model.top_p == 0.9
     assert openai_model.frequency_penalty == 0.3
 
     # Test Anthropic model
-    anthropic_model = get_model_instance(config, "anthropic_model")
+    anthropic_model = get_model_instance(config, runtime_paths, "anthropic_model")
     assert anthropic_model.temperature == 0.2
     assert anthropic_model.max_tokens == 2048
 
@@ -233,10 +243,10 @@ def test_model_without_extra_kwargs() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
+    config, runtime_paths = _config_with_runtime_paths(config_data)
 
     # Should work without any issues
-    model = get_model_instance(config, "simple_model")
+    model = get_model_instance(config, runtime_paths, "simple_model")
     assert model.id == "gpt-3.5-turbo"
     assert model.provider == "OpenAI"
 
@@ -271,12 +281,66 @@ def test_vertexai_claude_provider() -> None:
         "agents": {},
     }
 
-    config = Config(**config_data)
-    model = get_model_instance(config, "vertex_claude_model")
+    config, runtime_paths = _config_with_runtime_paths(config_data)
+    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
 
     assert isinstance(model, VertexAIClaude)
     assert model.id == "claude-sonnet-4@20250514"
     assert model.provider == "VertexAI"
+
+
+def test_vertexai_claude_loads_runtime_google_application_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Vertex Claude should translate runtime ADC paths into explicit client credentials."""
+    config_data = {
+        "models": {
+            "vertex_claude_model": {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-4@20250514",
+                "extra_kwargs": {
+                    "project_id": "demo-project",
+                    "region": "us-central1",
+                },
+            },
+        },
+        "defaults": {
+            "markdown": True,
+        },
+        "router": {
+            "model": "vertex_claude_model",
+        },
+        "memory": {
+            "embedder": {
+                "provider": "openai",
+                "config": {
+                    "model": "text-embedding-3-small",
+                },
+            },
+        },
+        "agents": {},
+    }
+
+    runtime_root = Path(tempfile.mkdtemp())
+    credentials_path = runtime_root / "google-credentials.json"
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials_path)},
+    )
+    config = Config(**config_data)
+    fake_google_credentials = object()
+
+    def fake_load_credentials_from_file(path: str, *, scopes: list[str]) -> tuple[object, str]:
+        assert path == str(credentials_path)
+        assert scopes == ["https://www.googleapis.com/auth/cloud-platform"]
+        return fake_google_credentials, "ignored-project"
+
+    monkeypatch.setattr("google.auth.load_credentials_from_file", fake_load_credentials_from_file)
+
+    model = get_model_instance(config, runtime_paths, "vertex_claude_model")
+
+    assert isinstance(model, VertexAIClaude)
+    assert model.client_params is not None
+    assert model.client_params["credentials"] is fake_google_credentials
 
 
 if __name__ == "__main__":

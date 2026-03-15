@@ -33,7 +33,9 @@ def test_python_tools_preserve_both_install_entrypoints() -> None:
 @pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
 def test_python_tools_respect_include_tools_for_installers(installer_name: str) -> None:
     """Toolkit include filters should still expose whichever installer was requested."""
-    tool = python_tools_module.python_tools()(include_tools=[installer_name])
+    tool = python_tools_module.python_tools()(
+        include_tools=[installer_name],
+    )
 
     assert sorted(tool.functions) == [installer_name]
 

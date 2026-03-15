@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import subagents as subagents_module
 from mindroom.custom_tools.subagents import SubAgentsTools
 from mindroom.thread_utils import create_session_id
@@ -47,6 +48,7 @@ def _make_context(
     thread_id: str | None = "$ctx-thread:localhost",
     requester_id: str = "@alice:localhost",
 ) -> ToolRuntimeContext:
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id=room_id,
@@ -55,6 +57,7 @@ def _make_context(
         requester_id=requester_id,
         client=MagicMock(),
         config=config or _make_config(),
+        runtime_paths=runtime_paths,
         room=None,
         reply_to_event_id=None,
         storage_path=tmp_path,
@@ -64,7 +67,7 @@ def _make_context(
 def test_subagents_tool_registered_and_instantiates() -> None:
     """Subagents should be present in metadata and constructible from the registry."""
     assert "subagents" in TOOL_METADATA
-    assert isinstance(get_tool_by_name("subagents"), SubAgentsTools)
+    assert isinstance(get_tool_by_name("subagents", resolve_runtime_paths()), SubAgentsTools)
 
 
 def test_subagents_tool_name_contract() -> None:
@@ -199,7 +202,7 @@ async def test_sessions_send_checks_target_room_thread_mode(
     monkeypatch.setattr(subagents_module, "_send_matrix_text", send_mock)
     config = _make_config()
     config.get_entity_thread_mode.side_effect = (
-        lambda _agent_name, room_id=None: "room" if room_id == "!target:localhost" else "thread"
+        lambda _agent_name, _runtime_paths, room_id=None: "room" if room_id == "!target:localhost" else "thread"
     )
     ctx = _make_context(tmp_path, config=config)
     target_session = create_session_id("!target:localhost", "$worker-thread:localhost")
@@ -217,7 +220,11 @@ async def test_sessions_send_checks_target_room_thread_mode(
     assert payload["tool"] == "sessions_send"
     assert "thread_mode=room" in payload["message"]
     send_mock.assert_not_awaited()
-    config.get_entity_thread_mode.assert_called_with("openclaw", room_id="!target:localhost")
+    config.get_entity_thread_mode.assert_called_with(
+        "openclaw",
+        ctx.runtime_paths,
+        room_id="!target:localhost",
+    )
 
 
 @pytest.mark.asyncio

@@ -107,7 +107,7 @@ For Google image work, use the official product name from the docs even if older
 | `cli/connect.py` | `mindroom connect` pairing helpers and owner placeholder replacement |
 | `cli/doctor.py` | Doctor command implementation |
 | `cli/local_stack.py` | Local stack setup command |
-| `credentials_sync.py` | `.env` to credentials vault sync |
+| `credentials_sync.py` | Shared provider/bootstrap env to credentials sync |
 | `logging_config.py` | Structured logging setup |
 | `response_tracker.py` | Duplicate response prevention |
 | `knowledge/utils.py` | Multi-knowledge-base vector DB utilities |
@@ -267,6 +267,8 @@ Teams (`src/mindroom/teams.py`) let multiple agents work together:
 - **Documentation Line Style**: In Markdown docs, write one sentence per line, and never split a single sentence across multiple lines.
 - Do not wrap things in try-excepts unless it's necessary. Avoid wrapping things that should not fail.
 - NEVER put imports in the function, unless it is to avoid circular imports. Imports should be at the top of the file.
+- Do not use `getattr()` or `hasattr()` to weaken a typed interface or probe for fields that the declared type should guarantee.
+- If mocks or tests break, fix them to use proper typed objects or stricter mocks instead of adding dynamic attribute fallbacks in production code.
 - **Merge and forget**: Code you touch should be polished enough to never revisit. Fix rough edges in code you're already changing.
 
 ### Refactor Policy
@@ -565,7 +567,7 @@ mindroom connect --pair-code ABCD-EFGH
 mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
 
 # Update credentials
-# Edit .env and restart; sync step mirrors keys to credentials vault
+# Edit .env for provider/bootstrap keys and restart; configure tool credentials through the dashboard or persisted tool config
 
 # Discover commands
 # Send !help from any bridged room

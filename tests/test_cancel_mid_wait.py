@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow, _run_cron_task
 
 
@@ -16,6 +17,7 @@ async def test_cancel_mid_wait_cron_task() -> None:
     """Test that cancellation during wait periods propagates correctly."""
     client = AsyncMock()
     config = AsyncMock()
+    runtime_paths = resolve_runtime_paths()
 
     workflow = ScheduledWorkflow(
         schedule_type="cron",
@@ -42,7 +44,7 @@ async def test_cancel_mid_wait_cron_task() -> None:
         patch("mindroom.scheduling.croniter", return_value=DummyCron()),
         patch("mindroom.scheduling.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
     ):
-        task = asyncio.create_task(_run_cron_task(client, "tid", workflow, {}, config))
+        task = asyncio.create_task(_run_cron_task(client, "tid", workflow, {}, config, runtime_paths))
         await asyncio.sleep(0)  # let it start and hit sleep
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

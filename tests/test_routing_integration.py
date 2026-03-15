@@ -17,7 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -64,15 +64,18 @@ class TestRoutingIntegration:
         )
 
         # Set up bots
-        config = Config(
-            agents={
-                "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
-                "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            router=RouterConfig(model="default"),
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "research": AgentConfig(display_name="MindRoomResearch", rooms=["!research:localhost"]),
+                    "news": AgentConfig(display_name="MindRoomNews", rooms=["!research:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            test_runtime_paths(tmp_path),
         )
 
         research_bot = AgentBot(
@@ -81,9 +84,17 @@ class TestRoutingIntegration:
             rooms=["!research:localhost"],
             enable_streaming=True,
             config=config,
+            runtime_paths=runtime_paths_for(config),
         )
 
-        news_bot = AgentBot(news_agent, tmp_path, config, rooms=["!research:localhost"], enable_streaming=True)
+        news_bot = AgentBot(
+            news_agent,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=["!research:localhost"],
+            enable_streaming=True,
+        )
 
         # Mock clients
         for bot in [research_bot, news_bot]:

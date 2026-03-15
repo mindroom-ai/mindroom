@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path  # noqa: TC003
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import mindroom.routing
+import mindroom.thread_utils
 from mindroom.agents import describe_agent
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
@@ -14,14 +17,89 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.routing import _AgentSuggestion, suggest_agent_for_message
-from mindroom.thread_utils import (
-    _has_any_agent_mentions_in_thread,
-    check_agent_mentioned,
-    extract_agent_name,
-    has_multiple_non_agent_users_in_thread,
-)
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from mindroom.routing import _AgentSuggestion
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for routing tests."""
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root or Path(tempfile.mkdtemp())))
+
+
+async def suggest_agent_for_message(
+    message: str,
+    agents: list[MatrixID],
+    config: Config,
+    thread_history: list[dict[str, str]] | None = None,
+) -> str | None:
+    """Run routing with the test config's bound runtime context."""
+    return await mindroom.routing.suggest_agent_for_message(
+        message,
+        agents,
+        config,
+        runtime_paths_for(config),
+        thread_history,
+    )
+
+
+def check_agent_mentioned(
+    event_source: dict,
+    agent_id: MatrixID | None,
+    config: Config,
+) -> tuple[list[MatrixID], bool, bool]:
+    """Check mentions with the test config's bound runtime context."""
+    return mindroom.thread_utils.check_agent_mentioned(event_source, agent_id, config, runtime_paths_for(config))
+
+
+def _has_any_agent_mentions_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+    """Check thread mentions with the test config's bound runtime context."""
+    return mindroom.thread_utils._has_any_agent_mentions_in_thread(thread_history, config, runtime_paths_for(config))
+
+
+def has_multiple_non_agent_users_in_thread(thread_history: list[dict[str, str]], config: Config) -> bool:
+    """Check multi-human thread participation with the test config's bound runtime context."""
+    return mindroom.thread_utils.has_multiple_non_agent_users_in_thread(
+        thread_history,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+def extract_agent_name(sender_id: str, config: Config) -> str | None:
+    """Extract configured agent names with the test config's bound runtime context."""
+    return mindroom.thread_utils.extract_agent_name(sender_id, config, runtime_paths_for(config))
+
+
+def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    config = kwargs["config"]
+    assert isinstance(config, Config)
+    kwargs["runtime_paths"] = runtime_paths_for(config)
+    return AgentBot(*args, **kwargs)
+
+
+def _agent_description_config() -> Config:
+    """Build a deterministic config for agent description tests."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Solve mathematical problems",
+                    tools=["calculator"],
+                    instructions=["Use the calculator tools"],
+                    rooms=[],
+                ),
+                "general": AgentConfig(
+                    display_name="General",
+                    role="general-purpose assistant",
+                    instructions=["Always provide a clear and helpful answer."],
+                    rooms=[],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+    )
 
 
 class TestAIRouting:
@@ -31,12 +109,14 @@ class TestAIRouting:
     async def test_suggest_agent_for_message_basic(self) -> None:
         """Test basic agent suggestion functionality."""
         # Create config with the agents we're testing
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
-                "general": AgentConfig(display_name="General", rooms=[]),
-            },
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                    "general": AgentConfig(display_name="General", rooms=[]),
+                },
+                router=RouterConfig(model="default"),
+            ),
         )
 
         with patch("mindroom.routing.get_model_instance"):
@@ -65,13 +145,15 @@ class TestAIRouting:
     async def test_suggest_agent_with_thread_context(self) -> None:
         """Test agent suggestion with thread history."""
         # Create config with the agents we're testing
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
-                "finance": AgentConfig(display_name="Finance", rooms=[]),
-                "general": AgentConfig(display_name="General", rooms=[]),
-            },
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                    "finance": AgentConfig(display_name="Finance", rooms=[]),
+                    "general": AgentConfig(display_name="General", rooms=[]),
+                },
+                router=RouterConfig(model="default"),
+            ),
         )
         thread_context = [
             {"sender": "@user:localhost", "body": "I need help with my taxes"},
@@ -108,12 +190,14 @@ class TestAIRouting:
     async def test_suggest_agent_unavailable_returns_none(self) -> None:
         """Test that suggesting unavailable agent returns None."""
         # Create config with the agents we're testing
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=[]),
-                "general": AgentConfig(display_name="General", rooms=[]),
-            },
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=[]),
+                    "general": AgentConfig(display_name="General", rooms=[]),
+                },
+                router=RouterConfig(model="default"),
+            ),
         )
 
         with patch("mindroom.routing.get_model_instance"):
@@ -144,11 +228,13 @@ class TestAIRouting:
     async def test_suggest_agent_error_handling(self) -> None:
         """Test error handling in agent suggestion."""
         # Create config with the agents we're testing
-        config = Config(
-            agents={
-                "general": AgentConfig(display_name="General", rooms=[]),
-            },
-            router=RouterConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(display_name="General", rooms=[]),
+                },
+                router=RouterConfig(model="default"),
+            ),
         )
 
         with patch("mindroom.routing.get_model_instance") as mock_model:
@@ -171,9 +257,9 @@ class TestAIRouting:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = AgentBot(agent, tmp_path, config=config)
+        bot = _agent_bot(agent, tmp_path, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()
@@ -200,15 +286,17 @@ class TestThreadUtils:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            ),
         )
 
     def test_has_any_agent_mentions_in_thread_with_mentions(self) -> None:
@@ -266,7 +354,7 @@ class TestThreadUtils:
         assert extract_agent_name("@mindroom_calculator:localhost", self.config) == "calculator"
 
         # Regular users should still be rejected
-        assert extract_agent_name(self.config.get_mindroom_user_id(), self.config) is None
+        assert extract_agent_name(self.config.get_mindroom_user_id(runtime_paths_for(self.config)), self.config) is None
         assert extract_agent_name("@regular_user:localhost", self.config) is None
 
     def test_has_multiple_non_agent_users_in_thread_true(self) -> None:
@@ -320,13 +408,15 @@ class TestThreadUtils:
 
     def test_bot_accounts_excluded_from_multi_human_detection(self) -> None:
         """Bot accounts listed in config should not count as non-agent users."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            bot_accounts=["@telegram:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                bot_accounts=["@telegram:localhost"],
+            ),
         )
         history = [
             {"sender": "@alice:localhost", "body": "hello"},
@@ -344,12 +434,14 @@ class TestThreadUtils:
 
     def test_check_agent_mentioned_bot_account_not_flagged_as_non_agent(self) -> None:
         """Mentioning a bot_account should not set has_non_agent_mentions."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            bot_accounts=["@telegram:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                bot_accounts=["@telegram:localhost"],
+            ),
         )
         event_source = {
             "content": {
@@ -362,12 +454,14 @@ class TestThreadUtils:
 
     def test_check_agent_mentioned_mixed_bot_and_human_mentions(self) -> None:
         """Mentioning both a bot_account and a human should still flag non-agent."""
-        config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
-            bot_accounts=["@telegram:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                bot_accounts=["@telegram:localhost"],
+            ),
         )
         event_source = {
             "content": {
@@ -384,12 +478,14 @@ class TestBridgeMentionFallback:
 
     @pytest.fixture(autouse=True)
     def _setup(self) -> None:
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
-            },
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     def test_html_pill_agent_mention(self) -> None:
@@ -493,7 +589,7 @@ class TestAgentDescription:
 
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         description = describe_agent("calculator", config)
 
         assert "calculator" in description
@@ -503,7 +599,7 @@ class TestAgentDescription:
 
     def test_describe_agent_without_tools(self) -> None:
         """Test describing an agent without tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = []
         description = describe_agent("general", config)
 
@@ -514,7 +610,7 @@ class TestAgentDescription:
 
     def test_describe_agent_includes_default_tools(self) -> None:
         """Agent descriptions include defaults.tools when agent has no local tools."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
 
@@ -524,7 +620,7 @@ class TestAgentDescription:
 
     def test_describe_agent_can_opt_out_of_default_tools(self) -> None:
         """Agent descriptions omit defaults.tools when include_default_tools is false."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
@@ -535,7 +631,7 @@ class TestAgentDescription:
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
-        config = Config.from_yaml()
+        config = _agent_description_config()
         description = describe_agent("nonexistent", config)
 
         assert description == "nonexistent: Unknown agent or team"
