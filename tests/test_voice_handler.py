@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -15,9 +16,64 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, _VoiceLLMConfig, _VoiceSTTConfig
 from mindroom.constants import ATTACHMENT_IDS_KEY
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+def _runtime_bound_config(config: Config) -> Config:
+    """Return a runtime-bound config for voice handler tests."""
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
+
+
+async def _handle_voice_message(
+    client: nio.AsyncClient,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    audio: Audio | None = None,
+) -> str | None:
+    """Run voice handling with the explicit runtime bound to the test config."""
+    return await voice_handler._handle_voice_message(
+        client,
+        room,
+        event,
+        config,
+        runtime_paths_for(config),
+        audio=audio,
+    )
+
+
+async def _process_transcription(transcription: str, config: Config, **kwargs: object) -> str:
+    """Run transcription processing with the explicit runtime bound to the test config."""
+    return await voice_handler._process_transcription(
+        transcription,
+        config,
+        runtime_paths_for(config),
+        **kwargs,
+    )
+
+
+async def _prepare_voice_message(
+    client: nio.AsyncClient,
+    storage_path: Path,
+    room: nio.MatrixRoom,
+    event: nio.RoomMessageAudio | nio.RoomEncryptedAudio,
+    config: Config,
+    *,
+    sender_domain: str,
+    thread_id: str | None,
+) -> voice_handler._PreparedVoiceMessage | None:
+    """Prepare one voice message with the explicit runtime bound to the test config."""
+    return await voice_handler.prepare_voice_message(
+        client,
+        storage_path,
+        room,
+        event,
+        config,
+        runtime_paths=runtime_paths_for(config),
+        sender_domain=sender_domain,
+        thread_id=thread_id,
+    )
 
 
 class TestVoiceHandler:
@@ -30,11 +86,13 @@ class TestVoiceHandler:
 
     def test_voice_handler_enabled_with_config(self) -> None:
         """Test that voice handler is enabled when configured."""
-        config = Config(
-            voice=VoiceConfig(
-                enabled=True,
-                stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
-                intelligence=_VoiceLLMConfig(model="default"),
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(
+                    enabled=True,
+                    stt=_VoiceSTTConfig(provider="openai", model="whisper-1"),
+                    intelligence=_VoiceLLMConfig(model="default"),
+                ),
             ),
         )
         assert config.voice.enabled
@@ -45,7 +103,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_voice_handler_ignores_when_disabled(self) -> None:
         """Test that voice handler does nothing when disabled."""
-        config = Config()
+        config = _runtime_bound_config(Config())
 
         # Mock objects
         client = AsyncMock()
@@ -53,7 +111,7 @@ class TestVoiceHandler:
         event = MagicMock()
 
         # Should return immediately without processing
-        await voice_handler._handle_voice_message(client, room, event, config)
+        await _handle_voice_message(client, room, event, config)
 
         # Verify no processing occurred
         client.download.assert_not_called()
@@ -63,44 +121,48 @@ class TestVoiceHandler:
         """Test basic transcription processing."""
         from mindroom.config.agent import AgentConfig, TeamConfig  # noqa: PLC0415
 
-        config = Config(
-            voice=VoiceConfig(enabled=True),
-            agents={
-                "research": AgentConfig(display_name="ResearchAgent", role="Research agent"),
-                "code": AgentConfig(display_name="CodeAgent", role="Code agent"),
-            },
-            teams={
-                "dev_team": TeamConfig(
-                    display_name="Development Team",
-                    role="Dev team",
-                    agents=["code"],
-                ),
-            },
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(enabled=True),
+                agents={
+                    "research": AgentConfig(display_name="ResearchAgent", role="Research agent"),
+                    "code": AgentConfig(display_name="CodeAgent", role="Code agent"),
+                },
+                teams={
+                    "dev_team": TeamConfig(
+                        display_name="Development Team",
+                        role="Dev team",
+                        agents=["code"],
+                    ),
+                },
+            ),
         )
 
         # Mock the AI model
         with patch("mindroom.voice_handler._process_transcription") as mock_process:
             mock_process.return_value = "@research help me with this"
 
-            result = await voice_handler._process_transcription("research help me with this", config)
+            result = await _process_transcription("research help me with this", config)
             assert "@research" in result
 
     @pytest.mark.asyncio
     async def test_voice_handler_uses_room_scoped_entities_for_transcription(self) -> None:
         """Test voice transcription prompt is scoped to entities present in the room."""
-        config = Config(
-            voice=VoiceConfig(enabled=True),
-            agents={
-                "openclaw": AgentConfig(display_name="OpenClaw Agent", role="OpenClaw role"),
-                "code": AgentConfig(display_name="Code Agent", role="Coding role"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                voice=VoiceConfig(enabled=True),
+                agents={
+                    "openclaw": AgentConfig(display_name="OpenClaw Agent", role="OpenClaw role"),
+                    "code": AgentConfig(display_name="Code Agent", role="Coding role"),
+                },
+            ),
         )
 
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.users = {
-            f"@mindroom_openclaw:{config.domain}": MagicMock(),
-            f"@mindroom_router:{config.domain}": MagicMock(),
+            f"@mindroom_openclaw:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
+            f"@mindroom_router:{config.get_domain(runtime_paths_for(config))}": MagicMock(),
             "@alice:example.com": MagicMock(),
         }
         event = MagicMock(spec=nio.RoomMessageAudio)
@@ -115,7 +177,7 @@ class TestVoiceHandler:
             patch("mindroom.voice_handler._process_transcription", new_callable=AsyncMock) as mock_process,
         ):
             mock_process.return_value = "@openclaw help me"
-            result = await voice_handler._handle_voice_message(client, room, event, config)
+            result = await _handle_voice_message(client, room, event, config)
 
         assert result == "🎤 @openclaw help me"
         assert mock_process.await_count == 1
@@ -125,7 +187,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_download_audio_unencrypted(self) -> None:
         """Test downloading unencrypted audio messages."""
-        Config(voice=VoiceConfig(enabled=True))  # Just to verify it works, not used in test
+        _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
 
         # Mock client and event
         client = AsyncMock()
@@ -148,7 +210,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_download_audio_encrypted(self) -> None:
         """Test downloading and decrypting encrypted audio messages."""
-        Config(voice=VoiceConfig(enabled=True))  # Just to verify it works, not used in test
+        _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))  # Just to verify it works, not used in test
 
         # Mock client and encrypted event
         client = AsyncMock()
@@ -171,7 +233,7 @@ class TestVoiceHandler:
     @pytest.mark.asyncio
     async def test_prepare_voice_message_clears_inflight_task_after_failed_download(self, tmp_path: Path) -> None:
         """Failed normalization should not leave stale in-flight task entries behind."""
-        config = Config(authorization={"default_room_access": True})
+        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"
@@ -187,7 +249,7 @@ class TestVoiceHandler:
         cache_key = voice_handler._voice_cache_key(tmp_path, room.room_id, event.event_id, None)
 
         with patch("mindroom.voice_handler._download_audio", new=AsyncMock(return_value=None)):
-            prepared = await voice_handler.prepare_voice_message(
+            prepared = await _prepare_voice_message(
                 client,
                 tmp_path,
                 room,
@@ -207,7 +269,7 @@ class TestVoiceHandler:
         tmp_path: Path,
     ) -> None:
         """Canceling one waiter should not cancel the shared normalization task for others."""
-        config = Config(authorization={"default_room_access": True})
+        config = _runtime_bound_config(Config(authorization={"default_room_access": True}))
         client = AsyncMock()
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:server"
@@ -240,7 +302,7 @@ class TestVoiceHandler:
 
         with patch("mindroom.voice_handler._compute_normalized_voice_message", side_effect=fake_compute):
             first_waiter = asyncio.create_task(
-                voice_handler.prepare_voice_message(
+                _prepare_voice_message(
                     client,
                     tmp_path,
                     room,
@@ -253,7 +315,7 @@ class TestVoiceHandler:
             await started.wait()
 
             second_waiter = asyncio.create_task(
-                voice_handler.prepare_voice_message(
+                _prepare_voice_message(
                     client,
                     tmp_path,
                     room,

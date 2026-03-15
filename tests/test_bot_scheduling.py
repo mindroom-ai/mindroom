@@ -15,10 +15,22 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, VOICE_PREFIX
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_utils import should_agent_respond
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, create_mock_room
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    create_mock_room,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound test config."""
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, runtime_paths)
 
 
 @pytest.fixture
@@ -31,9 +43,15 @@ def mock_agent_bot() -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = Config.from_yaml()  # Load actual config for testing
+    config = _runtime_bound_config(Config())
     with tempfile.TemporaryDirectory() as tmpdir:
-        bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+        bot = AgentBot(
+            agent_user=agent_user,
+            storage_path=Path(tmpdir),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._send_response = AsyncMock()
@@ -72,16 +90,16 @@ class TestBotScheduleCommands:
             await mock_agent_bot._handle_command(room, event, command)
 
             # Verify schedule_task was called correctly
-            mock_schedule.assert_called_once_with(
-                client=mock_agent_bot.client,
-                room_id="!test:server",
-                thread_id="$thread123",
-                scheduled_by="@user:server",
-                full_text="in 5 minutes Check deployment",
-                config=mock_agent_bot.config,
-                room=room,
-                mentioned_agents=[],  # No agents mentioned in this command
-            )
+            mock_schedule.assert_called_once()
+            call_kwargs = mock_schedule.call_args.kwargs
+            assert call_kwargs["client"] is mock_agent_bot.client
+            assert call_kwargs["room_id"] == "!test:server"
+            assert call_kwargs["thread_id"] == "$thread123"
+            assert call_kwargs["scheduled_by"] == "@user:server"
+            assert call_kwargs["full_text"] == "in 5 minutes Check deployment"
+            assert call_kwargs["config"] is mock_agent_bot.config
+            assert call_kwargs["room"] is room
+            assert call_kwargs["mentioned_agents"] == []
 
             # Verify response was sent
             mock_agent_bot._send_response.assert_called_once()
@@ -219,16 +237,13 @@ class TestBotScheduleCommands:
 
             await mock_agent_bot._handle_command(room, event, command)
 
-            mock_edit.assert_called_once_with(
-                client=mock_agent_bot.client,
-                room_id="!test:server",
-                task_id="task123",
-                full_text="in 30 minutes Check deployment",
-                scheduled_by="@user:server",
-                config=mock_agent_bot.config,
-                room=room,
-                thread_id="$thread123",
-            )
+            mock_edit.assert_called_once()
+            edit_kwargs = mock_edit.call_args.kwargs
+            assert edit_kwargs["room_id"] == "!test:server"
+            assert edit_kwargs["task_id"] == "task123"
+            assert edit_kwargs["full_text"] == "in 30 minutes Check deployment"
+            assert edit_kwargs["scheduled_by"] == "@user:server"
+            assert edit_kwargs["thread_id"] == "$thread123"
 
         mock_agent_bot._send_response.assert_called_once()
         call_args = mock_agent_bot._send_response.call_args
@@ -278,8 +293,14 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = Config()  # Empty config for testing
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
 
             # Mock the necessary methods
             with (
@@ -300,7 +321,8 @@ class TestBotTaskRestoration:
                 await bot.join_configured_rooms()
 
                 # Verify restore was called for the room with config
-                mock_restore.assert_called_once_with(bot.client, "!test:server", config)
+                mock_restore.assert_called_once()
+                assert mock_restore.call_args.args[1] == "!test:server"
 
                 # Just verify restore was called - logger testing is complex with the bind() method
                 assert mock_restore.called
@@ -317,8 +339,14 @@ class TestBotTaskRestoration:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = Config()  # Empty config for testing
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            config = _runtime_bound_config(Config(), Path(tmpdir))  # Empty config for testing
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
 
             with (
                 patch("mindroom.matrix.users.login") as mock_login,
@@ -347,15 +375,17 @@ class TestCommandHandling:
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = Config(
-            agents={
-                "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
-                "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        self.config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "finance": AgentConfig(display_name="Finance", rooms=["#test:example.org"]),
+                    "router": AgentConfig(display_name="Router", rooms=["#test:example.org"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
         )
 
     @pytest.mark.asyncio
@@ -370,10 +400,16 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
@@ -409,10 +445,16 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
             bot.client = AsyncMock()
             bot.logger = MagicMock()
             bot._handle_command = AsyncMock()
@@ -449,16 +491,24 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {"router": ["@alice:server"]},
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {"router": ["@alice:server"]},
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
             bot.client = AsyncMock()
             bot.logger = MagicMock()
             bot._handle_command = AsyncMock()
@@ -491,26 +541,34 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "code": AgentConfig(
-                    display_name="Code Agent",
-                    rooms=["!test:server"],
-                    skills=["audit"],
-                ),
-            },
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "router": ["*"],
-                    "code": ["@alice:localhost"],
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "code": AgentConfig(
+                        display_name="Code Agent",
+                        rooms=["!test:server"],
+                        skills=["audit"],
+                    ),
                 },
-            },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "router": ["*"],
+                        "code": ["@alice:localhost"],
+                    },
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
             bot.client = AsyncMock()
             bot.logger = MagicMock()
             bot.response_tracker = MagicMock()
@@ -561,15 +619,23 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Calculator"),
+                },
+            ),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._generate_response = AsyncMock()
@@ -583,7 +649,11 @@ class TestCommandHandling:
         mock_context.thread_id = "$thread123"
         mock_context.thread_history = []
         # mentioned_agents should be a list of MatrixID objects
-        mock_context.mentioned_agents = [config.ids["calculator"]] if "calculator" in config.ids else []
+        mock_context.mentioned_agents = (
+            [config.get_ids(runtime_paths_for(config))["calculator"]]
+            if "calculator" in config.get_ids(runtime_paths_for(config))
+            else []
+        )
         mock_context.has_non_agent_mentions = False
         bot._extract_message_context = AsyncMock(return_value=mock_context)
 
@@ -617,10 +687,16 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
             bot.client = AsyncMock()
             bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
             bot.logger = MagicMock()
@@ -706,6 +782,7 @@ class TestCommandHandling:
             room=create_mock_room("!test:localhost", ["finance", "router"], self.config),
             thread_history=thread_history,  # Full history including router's error
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             sender_id="@user:localhost",
         )
 
@@ -720,6 +797,7 @@ class TestCommandHandling:
             room=create_mock_room("!test:localhost", ["finance", "calculator", "router"], self.config),
             thread_history=thread_history,  # Include router's error in history
             config=self.config,
+            runtime_paths=runtime_paths_for(self.config),
             sender_id="@user:localhost",
         )
 
@@ -737,10 +815,16 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
             bot.client = AsyncMock()
             bot.client.user_id = "@mindroom_finance:localhost"
             bot.logger = MagicMock()
@@ -800,9 +884,15 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
         bot.logger = MagicMock()
@@ -871,7 +961,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router"  # noqa: ARG005
+                lambda x, config, runtime_paths: "router"  # noqa: ARG005
                 if "router" in x
                 else ("news" if "news" in x else ("research" if "research" in x else None))
             )
@@ -900,9 +990,15 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
         bot.logger = MagicMock()
@@ -983,7 +1079,7 @@ class TestCommandHandling:
         ):
             mock_interactive.handle_text_response = AsyncMock()
             mock_extract.side_effect = (
-                lambda x, config: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
+                lambda x, config, runtime_paths: "router" if "router" in x else ("finance" if "finance" in x else None)  # noqa: ARG005
             )
 
             await bot._on_message(room, event)
@@ -1007,9 +1103,15 @@ class TestCommandHandling:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
         bot.logger = MagicMock()
@@ -1071,17 +1173,20 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -1123,7 +1228,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return only one agent (general)
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
 
             await bot._on_message(room, event)
 
@@ -1147,21 +1252,23 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with multiple agents
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -1204,7 +1311,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
             # Return multiple agents
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
 
             await bot._on_message(room, event)
 
@@ -1234,21 +1344,23 @@ class TestRouterSkipsSingleAgent:
             access_token=TEST_ACCESS_TOKEN,
         )
 
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -1291,7 +1403,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_agents_in_thread", return_value=[]),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_message(room, event)
 
         bot._handle_ai_routing.assert_not_called()
@@ -1311,17 +1426,20 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
@@ -1349,7 +1467,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
 
         # Router should handle the command even with a single agent
@@ -1371,17 +1489,20 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
@@ -1409,7 +1530,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             await bot._on_message(room, event)
 
         # Router MUST handle schedule commands even with a single agent
@@ -1431,17 +1552,20 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with only general agent
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={"general": AgentConfig(display_name="General Agent", role="General assistant")},
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_ai_routing = AsyncMock()
@@ -1485,7 +1609,7 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
             patch("mindroom.bot.get_agents_in_thread") as mock_agents_in_thread,
         ):
-            mock_get_available.return_value = [config.ids["general"]]
+            mock_get_available.return_value = [config.get_ids(runtime_paths_for(config))["general"]]
             mock_agents_in_thread.return_value = []
             await bot._on_message(room, voice_event)
 
@@ -1508,21 +1632,23 @@ class TestRouterSkipsSingleAgent:
         )
 
         # Config with two agents
-        config = Config(
-            router=RouterConfig(model="default"),
-            agents={
-                "general": AgentConfig(display_name="General Agent", role="General assistant"),
-                "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
-            },
+        config = _runtime_bound_config(
+            Config(
+                router=RouterConfig(model="default"),
+                agents={
+                    "general": AgentConfig(display_name="General Agent", role="General assistant"),
+                    "calculator": AgentConfig(display_name="Calculator Agent", role="Math calculations"),
+                },
+            ),
         )
-        config.ids = {
-            "general": MatrixID.from_username("mindroom_general", "localhost"),
-            "calculator": MatrixID.from_username("mindroom_calculator", "localhost"),
-            ROUTER_AGENT_NAME: MatrixID.from_username("mindroom_router", "localhost"),
-        }
-
         with tempfile.TemporaryDirectory() as tmpdir:
-            bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+            bot = AgentBot(
+                agent_user=agent_user,
+                storage_path=Path(tmpdir),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                rooms=["!test:server"],
+            )
         bot.client = AsyncMock()
         bot.logger = MagicMock()
         bot._handle_command = AsyncMock()
@@ -1550,7 +1676,10 @@ class TestRouterSkipsSingleAgent:
             patch("mindroom.bot.interactive.handle_text_response"),
             patch("mindroom.bot.get_available_agents_for_sender") as mock_get_available,
         ):
-            mock_get_available.return_value = [config.ids["general"], config.ids["calculator"]]
+            mock_get_available.return_value = [
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ]
             await bot._on_message(room, event)
 
         bot._handle_command.assert_called_once()

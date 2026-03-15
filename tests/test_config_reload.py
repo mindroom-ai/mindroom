@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path  # noqa: TC003
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,7 +17,19 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import _get_changed_agents
 from mindroom.orchestrator import MultiAgentOrchestrator
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
+    """Return a runtime-bound config for reload tests."""
+    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
@@ -26,29 +39,33 @@ def setup_test_bot(bot: AgentBot, mock_client: AsyncMock) -> None:
 
 def test_get_changed_agents_detects_culture_config_updates() -> None:
     """Agent restarts should trigger when their culture mode/assignment changes."""
-    old_config = Config(
-        agents={
-            "agent1": AgentConfig(display_name="Agent 1"),
-        },
-        cultures={
-            "engineering": CultureConfig(
-                description="Engineering standards",
-                agents=["agent1"],
-                mode="automatic",
-            ),
-        },
+    old_config = _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1"),
+            },
+            cultures={
+                "engineering": CultureConfig(
+                    description="Engineering standards",
+                    agents=["agent1"],
+                    mode="automatic",
+                ),
+            },
+        ),
     )
-    new_config = Config(
-        agents={
-            "agent1": AgentConfig(display_name="Agent 1"),
-        },
-        cultures={
-            "engineering": CultureConfig(
-                description="Engineering standards",
-                agents=["agent1"],
-                mode="agentic",
-            ),
-        },
+    new_config = _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1"),
+            },
+            cultures={
+                "engineering": CultureConfig(
+                    description="Engineering standards",
+                    agents=["agent1"],
+                    mode="agentic",
+                ),
+            },
+        ),
     )
 
     changed = _get_changed_agents(old_config, new_config, agent_bots={"agent1": AsyncMock()})
@@ -58,73 +75,77 @@ def test_get_changed_agents_detects_culture_config_updates() -> None:
 @pytest.fixture
 def initial_config() -> Config:
     """Initial configuration with some agents and rooms."""
-    return Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["room1", "room2"],
-            ),
-            "agent2": AgentConfig(
-                display_name="Agent 2",
-                role="Another test agent",
-                rooms=["room1"],
-            ),
-        },
-        teams={
-            "team1": TeamConfig(
-                display_name="Team 1",
-                role="Test team",
-                agents=["agent1", "agent2"],
-                rooms=["room3"],
-            ),
-        },
-        models={
-            "default": ModelConfig(
-                provider="ollama",
-                id="llama3.2",
-                host="http://localhost:11434",
-            ),
-        },
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1", "room2"],
+                ),
+                "agent2": AgentConfig(
+                    display_name="Agent 2",
+                    role="Another test agent",
+                    rooms=["room1"],
+                ),
+            },
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Test team",
+                    agents=["agent1", "agent2"],
+                    rooms=["room3"],
+                ),
+            },
+            models={
+                "default": ModelConfig(
+                    provider="ollama",
+                    id="llama3.2",
+                    host="http://localhost:11434",
+                ),
+            },
+        ),
     )
 
 
 @pytest.fixture
 def updated_config() -> Config:
     """Updated configuration with changed room assignments."""
-    return Config(
-        agents={
-            "agent1": AgentConfig(
-                display_name="Agent 1",
-                role="Test agent",
-                rooms=["room1", "room4"],  # Changed: removed room2, added room4
-            ),
-            "agent2": AgentConfig(
-                display_name="Agent 2",
-                role="Another test agent",
-                rooms=["room2", "room3"],  # Changed: removed room1, added room2 and room3
-            ),
-            "agent3": AgentConfig(  # New agent
-                display_name="Agent 3",
-                role="New agent",
-                rooms=["room5"],
-            ),
-        },
-        teams={
-            "team1": TeamConfig(
-                display_name="Team 1",
-                role="Test team",
-                agents=["agent1", "agent2", "agent3"],  # Added agent3
-                rooms=["room3", "room6"],  # Added room6
-            ),
-        },
-        models={
-            "default": ModelConfig(
-                provider="ollama",
-                id="llama3.2",
-                host="http://localhost:11434",
-            ),
-        },
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "agent1": AgentConfig(
+                    display_name="Agent 1",
+                    role="Test agent",
+                    rooms=["room1", "room4"],  # Changed: removed room2, added room4
+                ),
+                "agent2": AgentConfig(
+                    display_name="Agent 2",
+                    role="Another test agent",
+                    rooms=["room2", "room3"],  # Changed: removed room1, added room2 and room3
+                ),
+                "agent3": AgentConfig(  # New agent
+                    display_name="Agent 3",
+                    role="New agent",
+                    rooms=["room5"],
+                ),
+            },
+            teams={
+                "team1": TeamConfig(
+                    display_name="Team 1",
+                    role="Test team",
+                    agents=["agent1", "agent2", "agent3"],  # Added agent3
+                    rooms=["room3", "room6"],  # Added room6
+                ),
+            },
+            models={
+                "default": ModelConfig(
+                    provider="ollama",
+                    id="llama3.2",
+                    host="http://localhost:11434",
+                ),
+            },
+        ),
     )
 
 
@@ -196,7 +217,12 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -223,11 +249,12 @@ async def test_agent_joins_new_rooms_on_config_reload(  # noqa: C901
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent1 bot with initial config
-    config = Config(router=RouterConfig(model="default"))
+    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent1_bot = AgentBot(
         agent_user=mock_agent_users["agent1"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room1", "room2"],  # Initial rooms
     )
     mock_client = AsyncMock()
@@ -272,7 +299,12 @@ async def test_router_updates_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -299,11 +331,12 @@ async def test_router_updates_rooms_on_config_reload(
     assert updated_router_rooms == {"room1", "room2", "room3", "room4", "room5", "room6"}
 
     # Create router bot with updated config
-    config = Config(router=RouterConfig(model="default"))
+    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     router_bot = AgentBot(
         agent_user=mock_agent_users[ROUTER_AGENT_NAME],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=list(updated_router_rooms),
     )
     mock_client = AsyncMock()
@@ -350,7 +383,12 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.join_room", mock_join_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -368,11 +406,12 @@ async def test_new_agent_joins_rooms_on_config_reload(
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create agent3 bot (new agent in updated config)
-    config = Config(router=RouterConfig(model="default"))
+    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     agent3_bot = AgentBot(
         agent_user=mock_agent_users["agent3"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room5"],
     )
     mock_client = AsyncMock()
@@ -417,7 +456,12 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -438,11 +482,12 @@ async def test_team_room_changes_on_config_reload(
     monkeypatch.setattr("mindroom.bot.get_joined_rooms", mock_get_joined_rooms)
 
     # Create team1 bot with updated config
-    config = Config(router=RouterConfig(model="default"))
+    config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
     team1_bot = AgentBot(
         agent_user=mock_agent_users["team1"],
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["room3", "room6"],
     )
     mock_client = AsyncMock()
@@ -514,7 +559,7 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestrator.MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
-    orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+    orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
 
     # Initialize with initial config
     await orchestrator.initialize()
@@ -619,7 +664,12 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
     monkeypatch.setattr("mindroom.matrix.rooms.leave_room", mock_leave_room)
 
     # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(_client: AsyncMock, _room_id: str, _config: Config) -> int:
+    async def mock_restore_scheduled_tasks(
+        _client: AsyncMock,
+        _room_id: str,
+        _config: Config,
+        _runtime_paths: object,
+    ) -> int:
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -670,12 +720,13 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         else:
             agent_user = mock_agent_users[ROUTER_AGENT_NAME]
 
-        config = Config(router=RouterConfig(model="default"))
+        config = _runtime_bound_config(Config(router=RouterConfig(model="default")), tmp_path)
 
         bot = AgentBot(
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=bot_config["new"],
         )
         setup_test_bot(bot, mock_client)

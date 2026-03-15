@@ -15,8 +15,8 @@ from tests.memory_test_support import MockTeamConfig
 
 @pytest.fixture
 def config() -> Config:
-    """Load the default config for policy tests."""
-    return Config.from_yaml()
+    """Build the minimal config needed for policy tests."""
+    return Config()
 
 
 def test_get_team_ids_for_agent(config: Config) -> None:

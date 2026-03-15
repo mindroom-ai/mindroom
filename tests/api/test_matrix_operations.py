@@ -11,8 +11,9 @@ from mindroom.api import main
 
 def _add_test_team_to_runtime_config() -> None:
     """Add a configured team to the API runtime config for one test."""
-    with main.config_lock:
-        main.config["teams"] = {
+    context = main._app_context(main.app)
+    with context.config_lock:
+        context.config_data["teams"] = {
             "test_team": {
                 "display_name": "Test Team",
                 "role": "A test team",

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.metadata import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolStatus,
@@ -25,15 +24,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="Settings",
     icon_color="text-purple-500",
-    config_fields=[
-        ConfigField(
-            name="config_path",
-            label="Configuration Path",
-            type="text",
-            required=False,
-            description="Path to the configuration file (uses default if not specified)",
-        ),
-    ],
+    config_fields=[],
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
 )

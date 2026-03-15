@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
 
@@ -241,6 +242,7 @@ async def _select_team_mode(
     message: str,
     agent_names: list[str],
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> TeamMode:
     """Use AI to determine optimal team collaboration mode.
 
@@ -248,6 +250,7 @@ async def _select_team_mode(
         message: The user's message/task
         agent_names: List of agents that will form the team
         config: Application configuration for model access
+        runtime_paths: Explicit runtime context for model and Matrix identity resolution
 
     Returns:
         TeamMode.COORDINATE or TeamMode.COLLABORATE
@@ -277,7 +280,7 @@ Examples:
 
 Return the mode and a one-sentence reason why."""
 
-    model = get_model_instance(config, "default")
+    model = get_model_instance(config, runtime_paths, "default")
     agent = Agent(
         name="TeamModeDecider",
         role="Determine team mode",
@@ -305,6 +308,7 @@ async def decide_team_formation(
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     room: nio.MatrixRoom,
+    runtime_paths: RuntimePaths,
     message: str | None = None,
     config: Config | None = None,
     use_ai_decision: bool = True,
@@ -320,6 +324,7 @@ async def decide_team_formation(
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
         room: The Matrix room object (for checking available agents)
+        runtime_paths: Explicit runtime context for permissions and identity resolution
         message: The user's message (for AI decision context)
         config: Application configuration (for AI model access)
         use_ai_decision: Whether to use AI for mode selection
@@ -354,7 +359,7 @@ async def decide_team_formation(
     elif is_dm_room and not is_thread and not tagged_agents and room and config:
         available_agents = available_agents_in_room
         if available_agents is None:
-            available_agents = get_available_agents_in_room(room, config)
+            available_agents = get_available_agents_in_room(room, config, runtime_paths)
         if len(available_agents) > 1:
             logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
             team_agents = available_agents
@@ -369,8 +374,8 @@ async def decide_team_formation(
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
     # Only do this AI call for the first agent to avoid duplication
     if use_ai_decision and message and config and is_first_agent:
-        agent_names = [mid.agent_name(config) or mid.username for mid in team_agents]
-        mode = await _select_team_mode(message, agent_names, config)
+        agent_names = [mid.agent_name(config, runtime_paths) or mid.username for mid in team_agents]
+        mode = await _select_team_mode(message, agent_names, config, runtime_paths)
     else:
         # Fallback to hardcoded logic when AI decision is disabled or unavailable
         # Use COORDINATE when agents are explicitly tagged (they likely have different roles)
@@ -474,7 +479,7 @@ def _create_team_instance(
 
     """
     assert orchestrator.config is not None
-    model = get_model_instance(orchestrator.config, model_name or "default")
+    model = get_model_instance(orchestrator.config, orchestrator.runtime_paths, model_name or "default")
 
     return Team(
         members=agents,  # type: ignore[arg-type]
@@ -487,7 +492,12 @@ def _create_team_instance(
     )
 
 
-def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
+def select_model_for_team(
+    team_name: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str:
     """Get the appropriate model for a team in a specific room.
 
     Priority:
@@ -499,12 +509,13 @@ def select_model_for_team(team_name: str, room_id: str, config: Config) -> str:
         team_name: Name of the team
         room_id: Matrix room ID
         config: Application configuration
+        runtime_paths: Explicit runtime context for room alias resolution
 
     Returns:
         Model name to use
 
     """
-    room_alias = get_room_alias_from_id(room_id)
+    room_alias = get_room_alias_from_id(room_id, runtime_paths)
 
     if room_alias and room_alias in config.room_models:
         model = config.room_models[room_alias]
@@ -612,7 +623,7 @@ async def _team_response_stream_raw(
     single TeamRunOutput for non-streaming providers.
     """
     assert orchestrator.config is not None
-    agent_names = [mid.agent_name(orchestrator.config) or mid.username for mid in agent_ids]
+    agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
     agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
@@ -673,7 +684,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     display_names: list[str] = []
 
     for mid in agent_ids:
-        agent_name = mid.agent_name(orchestrator.config)
+        agent_name = mid.agent_name(orchestrator.config, orchestrator.runtime_paths)
         assert agent_name is not None
         agent_names.append(agent_name)
 

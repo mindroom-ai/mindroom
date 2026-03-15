@@ -33,7 +33,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="your_oxylabs_username",
-            description="Oxylabs dashboard username (can also be set via OXYLABS_USERNAME env var)",
+            description="Oxylabs dashboard username",
         ),
         ConfigField(
             name="password",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="your_oxylabs_password",
-            description="Oxylabs dashboard password (can also be set via OXYLABS_PASSWORD env var)",
+            description="Oxylabs dashboard password",
         ),
     ],
     dependencies=["oxylabs"],

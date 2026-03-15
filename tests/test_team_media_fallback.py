@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,16 +16,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
 def _build_test_config() -> Config:
-    return Config(
-        agents={
-            "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
-        },
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
     )
 
 
@@ -33,6 +40,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
 
     media_validation_error = "Error code: 500 - audio input is not supported"
     mock_team = MagicMock()
@@ -71,6 +79,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
@@ -83,7 +92,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
         raw_stream = await _team_response_stream_raw(
-            agent_ids=[config.ids["general"]],
+            agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             orchestrator=orchestrator,
@@ -103,6 +112,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
@@ -120,7 +130,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
         chunks = [
             chunk
             async for chunk in team_response_stream(
-                agent_ids=[config.ids["general"]],
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
                 orchestrator=orchestrator,
@@ -145,6 +155,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     config = _build_test_config()
     orchestrator = MagicMock()
     orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
@@ -165,7 +176,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
         chunks = [
             chunk
             async for chunk in team_response_stream(
-                agent_ids=[config.ids["general"]],
+                agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
                 mode=TeamMode.COORDINATE,
                 message="Analyze this.",
                 orchestrator=orchestrator,

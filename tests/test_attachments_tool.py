@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.attachments import register_local_attachment
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools, send_context_attachments
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> ToolRuntimeContext:
     client = MagicMock()
     client.rooms = {"!room:localhost": MagicMock()}
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     return ToolRuntimeContext(
         agent_name="openclaw",
         room_id="!room:localhost",
@@ -33,6 +35,7 @@ def _tool_context(tmp_path: Path, *, attachment_ids: tuple[str, ...] = ()) -> To
         requester_id="@user:localhost",
         client=client,
         config=MagicMock(),
+        runtime_paths=runtime_paths,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
     )

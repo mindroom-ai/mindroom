@@ -34,6 +34,7 @@ from mindroom.thread_utils import get_agents_in_thread
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -206,6 +207,7 @@ def _start_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Start the asyncio task for a scheduled workflow and track it globally."""
     existing_task = _running_tasks.get(task_id)
@@ -218,11 +220,11 @@ def _start_scheduled_task(
 
     if workflow.schedule_type == "once":
         task = asyncio.create_task(
-            _run_once_task(client, task_id, workflow, config),
+            _run_once_task(client, task_id, workflow, config, runtime_paths),
         )
     else:
         task = asyncio.create_task(
-            _run_cron_task(client, task_id, workflow, _running_tasks, config),
+            _run_cron_task(client, task_id, workflow, _running_tasks, config, runtime_paths),
         )
     _running_tasks[task_id] = task
     return True
@@ -341,6 +343,7 @@ async def _save_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
+    runtime_paths: RuntimePaths,
     status: str = "pending",
     created_at: datetime | str | None = None,
     restart_task: bool = True,
@@ -370,7 +373,7 @@ async def _save_scheduled_task(
     )
 
     if restart_task and status == "pending":
-        _start_scheduled_task(client, task_id, workflow, config)
+        _start_scheduled_task(client, task_id, workflow, config, runtime_paths)
 
 
 async def save_edited_scheduled_task(
@@ -379,6 +382,7 @@ async def save_edited_scheduled_task(
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
+    runtime_paths: RuntimePaths,
     existing_task: ScheduledTaskRecord,
     restart_task: bool = False,
 ) -> ScheduledTaskRecord:
@@ -396,6 +400,7 @@ async def save_edited_scheduled_task(
         task_id=task_id,
         workflow=workflow,
         config=config,
+        runtime_paths=runtime_paths,
         status="pending",
         created_at=existing_task.created_at,
         restart_task=restart_task,
@@ -413,6 +418,7 @@ async def save_edited_scheduled_task(
 async def _parse_workflow_schedule(
     request: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     available_agents: typing.Sequence[MatrixID],
     current_time: datetime | None = None,
 ) -> ScheduledWorkflow | _WorkflowParseError:
@@ -456,7 +462,7 @@ Examples of event/condition phrasing to include in the message (do not include t
 - @reddit_agent Check for new mentions of our product. If found, @analyst analyze the sentiment and key points.
 """
 
-    model = get_model_instance(config, "default")
+    model = get_model_instance(config, runtime_paths, "default")
 
     agent = Agent(
         name="WorkflowParser",
@@ -497,6 +503,7 @@ async def _execute_scheduled_workflow(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Execute a scheduled workflow by posting its message to the thread."""
     if not workflow.room_id:
@@ -514,8 +521,9 @@ async def _execute_scheduled_workflow(
         )
         content = format_message_with_mentions(
             config,
+            runtime_paths,
             automated_message,
-            sender_domain=config.domain,
+            sender_domain=config.get_domain(runtime_paths),
             thread_event_id=workflow.thread_id,
             latest_thread_event_id=latest_thread_event_id,
         )
@@ -541,6 +549,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     workflow: ScheduledWorkflow,
     running_tasks: dict[str, asyncio.Task],
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Run a recurring task based on cron schedule."""
     if not workflow.room_id:
@@ -611,7 +620,7 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 workflow = latest_workflow
                 continue
 
-            await _execute_scheduled_workflow(client, workflow, config)
+            await _execute_scheduled_workflow(client, workflow, config, runtime_paths)
             if task_id not in running_tasks:
                 logger.info(f"Task {task_id} no longer in running tasks, stopping")
                 return
@@ -637,6 +646,7 @@ async def _run_once_task(  # noqa: C901
     task_id: str,
     workflow: ScheduledWorkflow,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Run a one-time scheduled task."""
     if not workflow.room_id:
@@ -677,7 +687,7 @@ async def _run_once_task(  # noqa: C901
             logger.error("No execution time provided for one-time task", task_id=task_id)
             return
 
-        await _execute_scheduled_workflow(client, latest_workflow, config)
+        await _execute_scheduled_workflow(client, latest_workflow, config, runtime_paths)
     except asyncio.CancelledError:
         logger.info(f"One-time task {task_id} was cancelled")
         raise
@@ -699,6 +709,7 @@ async def _validate_agent_mentions(
     message: str,
     room: nio.MatrixRoom,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> _AgentValidationResult:
     """Validate that all mentioned agents are accessible.
 
@@ -706,19 +717,20 @@ async def _validate_agent_mentions(
         message: The message that may contain @agent mentions
         room: The Matrix room object
         config: Application configuration
+        runtime_paths: Explicit runtime context for mention resolution
 
     Returns:
         _AgentValidationResult with validation status and agent lists
 
     """
-    mentioned_agents = _extract_mentioned_agents_from_text(message, config)
+    mentioned_agents = _extract_mentioned_agents_from_text(message, config, runtime_paths)
     if not mentioned_agents:
         return _AgentValidationResult(all_valid=True, valid_agents=[], invalid_agents=[])
 
     valid_agents: list[MatrixID] = []
     invalid_agents: list[MatrixID] = []
 
-    room_agents = get_available_agents_in_room(room, config)
+    room_agents = get_available_agents_in_room(room, config, runtime_paths)
     for mid in mentioned_agents:
         if mid in room_agents:
             valid_agents.append(mid)
@@ -756,14 +768,23 @@ def _format_scheduled_time(dt: datetime, timezone_str: str) -> str:
     return f"{time_str} ({relative_str})"
 
 
-def _extract_mentioned_agents_from_text(full_text: str, config: Config) -> list[MatrixID]:
+def _extract_mentioned_agents_from_text(
+    full_text: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
-    _, mentioned_user_ids, _ = parse_mentions_in_text(full_text, config.domain, config)
+    _, mentioned_user_ids, _ = parse_mentions_in_text(
+        full_text,
+        config.get_domain(runtime_paths),
+        config,
+        runtime_paths,
+    )
     mentioned_agents: list[MatrixID] = []
 
     for user_id in mentioned_user_ids:
         matrix_id = MatrixID.parse(user_id)
-        if matrix_id.agent_name(config) and matrix_id not in mentioned_agents:
+        if matrix_id.agent_name(config, runtime_paths) and matrix_id not in mentioned_agents:
             mentioned_agents.append(matrix_id)
 
     return mentioned_agents
@@ -776,6 +797,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     scheduled_by: str,
     full_text: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     room: nio.MatrixRoom,
     mentioned_agents: list[MatrixID] | None = None,
     task_id: str | None = None,
@@ -789,14 +811,14 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     """
     if mentioned_agents is None:
-        mentioned_agents = _extract_mentioned_agents_from_text(full_text, config)
+        mentioned_agents = _extract_mentioned_agents_from_text(full_text, config, runtime_paths)
 
     # Get agents that are available in the thread
     available_agents: list[MatrixID] = []
     if thread_id:
         # Get agents already participating in the thread
         thread_history = await fetch_thread_history(client, room_id, thread_id)
-        available_agents = get_agents_in_thread(thread_history, config)
+        available_agents = get_agents_in_thread(thread_history, config, runtime_paths)
 
     # Add any agents mentioned in the command itself
     if mentioned_agents:
@@ -806,10 +828,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
     # If no agents found in thread or mentions, fall back to agents in the room
     if not available_agents:
-        available_agents = get_available_agents_in_room(room, config)
+        available_agents = get_available_agents_in_room(room, config, runtime_paths)
 
     # Parse the workflow request with available agents
-    workflow_result = await _parse_workflow_schedule(full_text, config, available_agents)
+    workflow_result = await _parse_workflow_schedule(full_text, config, runtime_paths, available_agents)
 
     if isinstance(workflow_result, _WorkflowParseError):
         error_msg = f"❌ {workflow_result.error}"
@@ -825,7 +847,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         return (None, "❌ Failed to schedule: Recurring task missing cron schedule")
 
     # Validate that all mentioned agents are accessible
-    validation_result = await _validate_agent_mentions(workflow_result.message, room, config)
+    validation_result = await _validate_agent_mentions(workflow_result.message, room, config, runtime_paths)
 
     if not validation_result.all_valid:
         error_msg = "❌ Failed to schedule: The following agents are not available in this "
@@ -838,7 +860,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         # Provide helpful suggestions
         suggestions: list[str] = []
         for agent in validation_result.invalid_agents:
-            agent_name = agent.agent_name(config)
+            agent_name = agent.agent_name(config, runtime_paths)
             if agent_name:
                 # Agent exists but not available in this room/thread
                 suggestions.append(f"{agent.full_id} is not available in this {'thread' if thread_id else 'room'}")
@@ -874,6 +896,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
+                runtime_paths=runtime_paths,
                 existing_task=existing_task,
                 restart_task=restart_task,
             )
@@ -884,6 +907,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
+                runtime_paths=runtime_paths,
                 status="pending",
                 created_at=datetime.now(UTC).isoformat(),
                 restart_task=restart_task,
@@ -919,6 +943,7 @@ async def edit_scheduled_task(
     full_text: str,
     scheduled_by: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     room: nio.MatrixRoom,
     thread_id: str | None = None,
 ) -> str:
@@ -939,6 +964,7 @@ async def edit_scheduled_task(
         scheduled_by=scheduled_by,
         full_text=full_text,
         config=config,
+        runtime_paths=runtime_paths,
         room=room,
         task_id=task_id,
         existing_task=existing_task,
@@ -1087,7 +1113,12 @@ async def cancel_all_scheduled_tasks(
     return result
 
 
-async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config: Config) -> int:  # noqa: C901, PLR0912
+async def restore_scheduled_tasks(  # noqa: C901, PLR0912
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> int:
     """Restore scheduled tasks from Matrix state after bot restart.
 
     Returns:
@@ -1132,7 +1163,7 @@ async def restore_scheduled_tasks(client: nio.AsyncClient, room_id: str, config:
                 continue
 
             # Start the appropriate task
-            if _start_scheduled_task(client, task_id, workflow, config):
+            if _start_scheduled_task(client, task_id, workflow, config, runtime_paths):
                 restored_count += 1
 
         except (KeyError, ValueError, json.JSONDecodeError):

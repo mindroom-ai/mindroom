@@ -92,7 +92,7 @@ class DelegateTools(Toolkit):
             agent = create_agent(
                 agent_name,
                 self._config,
-                runtime_paths=self._runtime_paths,
+                self._runtime_paths,
                 knowledge=knowledge,
                 include_interactive_questions=False,
                 delegation_depth=self._delegation_depth + 1,

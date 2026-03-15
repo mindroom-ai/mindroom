@@ -47,3 +47,21 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
+
+
+def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
+    """Tool metadata should describe explicit config, not resurrect env fallback docs."""
+    forbidden_phrases = (
+        "falls back to",
+        "can also be set via",
+    )
+
+    for tool_name, metadata in TOOL_METADATA.items():
+        text_snippets = [metadata.description, metadata.helper_text]
+        text_snippets.extend(field.description for field in metadata.config_fields or [])
+
+        for text in filter(None, text_snippets):
+            lowered = text.lower()
+            assert not any(phrase in lowered for phrase in forbidden_phrases), (
+                f"Tool metadata for {tool_name} still advertises env fallback: {text}"
+            )

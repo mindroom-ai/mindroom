@@ -10,7 +10,6 @@ import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
-from mindroom.constants import CREDENTIALS_DIR
 from mindroom.credentials import (
     _DEDICATED_WORKER_KEY_ENV,
     _DEDICATED_WORKER_ROOT_ENV,
@@ -18,6 +17,7 @@ from mindroom.credentials import (
     CredentialsManager,
     _sync_env_credentials_to_worker,
     get_credentials_manager,
+    get_runtime_credentials_manager,
     load_scoped_credentials,
     merge_scoped_credentials,
     save_scoped_credentials,
@@ -43,10 +43,13 @@ def credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
 class TestCredentialsManager:
     """Test suite for CredentialsManager."""
 
-    def test_initialization_default_path(self) -> None:
-        """Test that default path is created correctly."""
-        manager = CredentialsManager()
-        assert manager.base_path == CREDENTIALS_DIR
+    def test_initialization_explicit_runtime_path(self, tmp_path: Path) -> None:
+        """Test that credentials managers use an explicitly resolved runtime root."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
+        manager = CredentialsManager(constants_mod.credentials_dir(runtime_paths=runtime_paths))
+        assert manager.base_path == tmp_path / "credentials"
         assert manager.base_path.exists()
 
     def test_initialization_custom_path(self, temp_credentials_dir: Path) -> None:
@@ -558,21 +561,20 @@ class TestGlobalCredentialsManager:
         mindroom.credentials._credentials_manager = None
         mindroom.credentials._credentials_manager_signature = None
 
-    def test_get_credentials_manager_singleton(self) -> None:
+    def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
         """Test that get_credentials_manager returns the same instance."""
-        manager1 = get_credentials_manager()
-        manager2 = get_credentials_manager()
+        manager1 = get_credentials_manager(storage_root=tmp_path)
+        manager2 = get_credentials_manager(storage_root=tmp_path)
         assert manager1 is manager2
 
-    def test_global_manager_default_path(self) -> None:
-        """Test that global manager uses the default path."""
-        manager = get_credentials_manager()
-        assert manager.base_path == CREDENTIALS_DIR
+    def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
+        """Test that global manager uses the provided storage root."""
+        manager = get_credentials_manager(storage_root=tmp_path)
+        assert manager.base_path == tmp_path / "credentials"
 
     def test_global_manager_uses_explicit_shared_credentials_path(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers should be able to configure a distinct shared credential mirror path."""
         config_path = tmp_path / "config.yaml"
@@ -582,17 +584,19 @@ class TestGlobalCredentialsManager:
         )
         storage_path = (tmp_path / "worker-root").resolve()
         shared_path = storage_path / ".shared_credentials"
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_path))
-        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(shared_path))
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str(shared_path)},
+        )
 
-        manager = get_credentials_manager()
+        manager = get_runtime_credentials_manager(runtime_paths)
 
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
 
-    def test_global_manager_rebuilds_when_runtime_storage_root_changes(self, tmp_path: Path) -> None:
-        """Changing the active runtime storage root should invalidate the cached manager."""
+    def test_global_manager_rebuilds_when_storage_root_changes(self, tmp_path: Path) -> None:
+        """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
@@ -601,11 +605,9 @@ class TestGlobalCredentialsManager:
         first_root = tmp_path / "one"
         second_root = tmp_path / "two"
 
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=first_root)
-        manager_one = get_credentials_manager()
+        manager_one = get_credentials_manager(storage_root=first_root)
 
-        constants_mod.set_runtime_paths(config_path=config_path, storage_path=second_root)
-        manager_two = get_credentials_manager()
+        manager_two = get_credentials_manager(storage_root=second_root)
 
         assert manager_one.base_path == first_root / "credentials"
         assert manager_two.base_path == second_root / "credentials"
@@ -614,11 +616,15 @@ class TestGlobalCredentialsManager:
     def test_dedicated_worker_manager_reads_mirrored_shared_credentials(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated worker processes should load mirrored shared credentials through the global manager."""
         root = (tmp_path / "shared-storage").resolve()
         base_manager = CredentialsManager(root / "credentials")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
@@ -635,11 +641,18 @@ class TestGlobalCredentialsManager:
         sync_shared_credentials_to_worker(worker_key, credentials_manager=base_manager)
         worker_root = base_manager.for_worker(worker_key).storage_root
 
-        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
-        monkeypatch.setenv(SHARED_CREDENTIALS_PATH_ENV, str(worker_root / ".shared_credentials"))
         mindroom.credentials._credentials_manager = None
 
-        manager = get_credentials_manager()
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=worker_root,
+            process_env={
+                SHARED_CREDENTIALS_PATH_ENV: str(worker_root / ".shared_credentials"),
+                _DEDICATED_WORKER_KEY_ENV: worker_key,
+                _DEDICATED_WORKER_ROOT_ENV: str(worker_root),
+            },
+        )
+        manager = get_runtime_credentials_manager(runtime_paths)
         loaded_credentials = load_scoped_credentials(
             "google",
             worker_scope="shared",
@@ -704,13 +717,14 @@ class TestSharedIntegrationCredentialTagging:
     def test_dedicated_worker_manager_uses_current_worker_root_for_shared_scope(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers mounted at arbitrary paths should read and write shared-scope credentials in the mounted root."""
         worker_root = (tmp_path / "app-worker").resolve()
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
+            current_worker_key="v1:tenant-123:shared:general",
+            current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -723,11 +737,7 @@ class TestSharedIntegrationCredentialTagging:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:shared:general"
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
-
-        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",
@@ -754,13 +764,14 @@ class TestSharedIntegrationCredentialTagging:
     def test_dedicated_worker_manager_uses_current_worker_root_for_isolating_scope(
         self,
         tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Dedicated workers mounted at arbitrary paths should not nest isolating-scope credentials under another workers/ tree."""
         worker_root = (tmp_path / "app-worker").resolve()
         worker_manager = CredentialsManager(
             base_path=worker_root / "credentials",
             shared_base_path=worker_root / ".shared_credentials",
+            current_worker_key="v1:tenant-123:user:@alice:example.org",
+            current_worker_root=worker_root,
         )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -773,12 +784,8 @@ class TestSharedIntegrationCredentialTagging:
             tenant_id="tenant-123",
             account_id="account-456",
         )
-        worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager.shared_manager().save_credentials("google", {"api_key": "env-key", "_source": "env"})
         worker_manager.save_credentials("google", {"token": "ui-token", "_source": "ui"})
-
-        monkeypatch.setenv(_DEDICATED_WORKER_KEY_ENV, worker_key)
-        monkeypatch.setenv(_DEDICATED_WORKER_ROOT_ENV, str(worker_root))
 
         loaded_credentials = load_scoped_credentials(
             "google",

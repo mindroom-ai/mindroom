@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -149,17 +148,17 @@ def resolve_unscoped_worker_key(
     *,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> str:
     """Derive a stable backend worker key for unscoped sandbox execution."""
     identity = execution_identity or get_tool_execution_identity()
     tenant_key = _normalize_worker_key_part(
-        identity.tenant_id
-        if identity is not None and identity.tenant_id is not None
-        else (
-            identity.account_id
-            if identity is not None and identity.account_id is not None
-            else os.getenv("CUSTOMER_ID") or os.getenv("ACCOUNT_ID") or "default"
-        ),
+        tenant_id
+        or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
+        or account_id
+        or (identity.account_id if identity is not None and identity.account_id is not None else None)
+        or "default",
     )
     effective_agent_name = _normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
@@ -204,6 +203,8 @@ def resolve_execution_identity_for_worker_scope(
     *,
     agent_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> ToolExecutionIdentity | None:
     """Resolve the execution identity used for worker scope decisions.
 
@@ -229,8 +230,8 @@ def resolve_execution_identity_for_worker_scope(
         thread_id=None,
         resolved_thread_id=None,
         session_id=None,
-        tenant_id=os.getenv("CUSTOMER_ID"),
-        account_id=os.getenv("ACCOUNT_ID"),
+        tenant_id=tenant_id,
+        account_id=account_id,
     )
 
 

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import importlib
-import os
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -18,6 +17,9 @@ from mindroom.api.credentials import (
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps
 
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
@@ -28,7 +30,9 @@ def get_dashboard_url(request: Request) -> str:
 
 def _get_spotify_redirect_uri(request: Request) -> str:
     """Return the Spotify OAuth callback URL."""
-    configured = os.getenv("SPOTIFY_REDIRECT_URI")
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    configured = api_runtime_paths(request).env_value("SPOTIFY_REDIRECT_URI")
     if configured:
         return configured
     return str(request.url_for("spotify_callback"))
@@ -59,9 +63,11 @@ class _SpotifyOAuthFactoryProtocol(Protocol):
     ) -> _SpotifyOAuthClientProtocol: ...
 
 
-def _ensure_spotify_packages() -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
+def _ensure_spotify_packages(
+    runtime_paths: RuntimePaths,
+) -> tuple[_SpotifyClientFactoryProtocol, _SpotifyOAuthFactoryProtocol]:
     """Lazily import Spotify packages, auto-installing if needed."""
-    ensure_tool_deps(["spotipy"], "spotify")
+    ensure_tool_deps(["spotipy"], "spotify", runtime_paths)
     spotipy_module = importlib.import_module("spotipy")
 
     return (
@@ -99,6 +105,8 @@ async def get_spotify_status(
     agent_name: str | None = None,
 ) -> SpotifyStatus:
     """Get Spotify connection status."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     status = SpotifyStatus(connected=False)
     creds = _get_spotify_credentials(request, agent_name)
     if not creds or "access_token" not in creds:
@@ -106,7 +114,7 @@ async def get_spotify_status(
 
     status.connected = True
     try:
-        spotify_cls, _ = _ensure_spotify_packages()
+        spotify_cls, _ = _ensure_spotify_packages(api_runtime_paths(request))
         sp = spotify_cls(auth=creds["access_token"])
         user = sp.current_user()
         status.details = {
@@ -125,8 +133,11 @@ async def get_spotify_status(
 @router.post("/spotify/connect")
 async def connect_spotify(request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Start Spotify OAuth flow."""
-    client_id = os.getenv("SPOTIFY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
+    client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
+    client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         raise HTTPException(
@@ -136,7 +147,7 @@ async def connect_spotify(request: Request, agent_name: str | None = None) -> di
 
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
     state = issue_pending_oauth_state(request, "spotify", agent_name)
-    _, spotify_oauth_cls = _ensure_spotify_packages()
+    _, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
     sp_oauth = spotify_oauth_cls(
         client_id=client_id,
         client_secret=client_secret,
@@ -161,14 +172,17 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
     pending = consume_pending_oauth_request(request, "spotify", state)
     agent_name = pending.agent_name
 
-    client_id = os.getenv("SPOTIFY_CLIENT_ID")
-    client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = api_runtime_paths(request)
+    client_id = runtime_paths.env_value("SPOTIFY_CLIENT_ID")
+    client_secret = runtime_paths.env_value("SPOTIFY_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="Spotify OAuth not configured")
 
     try:
-        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages()
+        spotify_cls, spotify_oauth_cls = _ensure_spotify_packages(runtime_paths)
         sp_oauth = spotify_oauth_cls(
             client_id=client_id,
             client_secret=client_secret,

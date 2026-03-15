@@ -10,15 +10,22 @@ import pytest_asyncio
 from aioresponses import aioresponses
 
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 
 __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
     "FakeCredentialsManager",
     "aioresponse",
+    "bind_runtime_paths",
     "bypass_authorization",
     "create_mock_room",
+    "orchestrator_runtime_paths",
+    "runtime_paths_for",
+    "test_runtime_paths",
 ]
+
+_TEST_RUNTIME_PATHS_BY_CONFIG_ID: dict[int, RuntimePaths] = {}
 
 
 class FakeCredentialsManager:
@@ -30,12 +37,16 @@ class FakeCredentialsManager:
         worker_managers: dict[str, "FakeCredentialsManager"] | None = None,
         *,
         storage_root: Path | None = None,
+        current_worker_key: str | None = None,
+        current_worker_root: Path | None = None,
     ) -> None:
         self._credentials_by_service = credentials_by_service
         self._worker_managers = worker_managers or {}
         self.storage_root = storage_root or Path("/var/empty/mindroom-fake-storage")
         self.base_path = self.storage_root / "credentials"
         self.shared_base_path = self.base_path
+        self.current_worker_key = current_worker_key
+        self.current_worker_root = current_worker_root
 
     def load_credentials(self, service: str) -> dict[str, object]:
         """Return stored credentials for *service*, or empty dict."""
@@ -48,6 +59,8 @@ class FakeCredentialsManager:
             FakeCredentialsManager(
                 {},
                 storage_root=self.storage_root / "workers" / worker_key,
+                current_worker_key=worker_key,
+                current_worker_root=self.storage_root / "workers" / worker_key,
             ),
         )
 
@@ -73,6 +86,65 @@ TEST_PASSWORD = "mock_test_password"  # noqa: S105
 TEST_ACCESS_TOKEN = "mock_test_token"  # noqa: S105
 
 
+def test_runtime_paths(tmp_root: Path) -> RuntimePaths:
+    """Create an isolated runtime context for one test config."""
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_root / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_root / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
+test_runtime_paths.__test__ = False
+
+
+def orchestrator_runtime_paths(
+    storage_path: Path,
+    *,
+    config_path: Path | None = None,
+) -> RuntimePaths:
+    """Build an explicit runtime context for orchestrator tests.
+
+    Default the config path to an isolated file under the provided test root so
+    callers never fall back to the tracked repo-root config.yaml.
+    """
+    if config_path is None:
+        config_path = storage_path / "config.yaml"
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+
+
+def bind_runtime_paths(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Config:
+    """Return a runtime-bound copy of a test config."""
+    bound = Config.validate_with_runtime(config.model_dump(exclude_none=True), runtime_paths)
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
+    return bound
+
+
+def runtime_paths_for(config: Config) -> RuntimePaths:
+    """Return the explicit runtime context previously bound to a test config."""
+    runtime_paths = _TEST_RUNTIME_PATHS_BY_CONFIG_ID.get(id(config))
+    if runtime_paths is None:
+        msg = "Test config is missing bound RuntimePaths"
+        raise KeyError(msg)
+    return runtime_paths
+
+
 def create_mock_room(
     room_id: str = "!test:localhost",
     agents: list[str] | None = None,
@@ -82,7 +154,7 @@ def create_mock_room(
     room = MagicMock()
     room.room_id = room_id
     if agents:
-        domain = config.domain if config else "localhost"
+        domain = config.get_domain(runtime_paths_for(config)) if config is not None else "localhost"
         room.users = {f"@mindroom_{agent}:{domain}": None for agent in agents}
     else:
         room.users = {}
@@ -99,26 +171,28 @@ async def aioresponse() -> AsyncGenerator[aioresponses, None]:
 
 @pytest.fixture(autouse=True)
 def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure config.domain defaults to 'localhost' for tests.
+    """Keep test runtime defaults isolated from shell-level runtime overrides.
 
-    Tests use ':localhost' Matrix IDs.  Without this, an env-level
-    MATRIX_HOMESERVER (e.g. pointing at a staging server) would cause
-    agent_name() domain checks to fail.
+    Tests use ':localhost' Matrix IDs and non-namespaced localparts unless they
+    explicitly opt into a different runtime context.
     """
     monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
+    monkeypatch.delenv("MATRIX_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
+    monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_paths() -> Generator[None, None, None]:
-    """Restore the process-wide runtime path context after each test."""
-    from mindroom import constants  # noqa: PLC0415
-
-    original = constants.get_runtime_paths()
+    """Restore process env and bound test runtime mappings after each test."""
     original_env = os.environ.copy()
+    original_bound_configs = dict(_TEST_RUNTIME_PATHS_BY_CONFIG_ID)
     yield
-    constants._set_active_runtime_paths(original)
     os.environ.clear()
     os.environ.update(original_env)
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
+    _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
 
 
 @pytest.fixture(autouse=True)

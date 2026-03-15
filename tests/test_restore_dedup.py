@@ -9,6 +9,7 @@ import nio
 import pytest
 
 from mindroom import scheduling
+from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import ScheduledWorkflow, restore_scheduled_tasks
 
 
@@ -76,7 +77,7 @@ async def test_restore_skips_past_once_and_does_not_duplicate_cron() -> None:
     )
     client.room_get_state = AsyncMock(return_value=response)
 
-    restored = await restore_scheduled_tasks(client, "!r:server", config)
+    restored = await restore_scheduled_tasks(client, "!r:server", config, resolve_runtime_paths(process_env={}))
     # All should be skipped: 0 restored
     assert restored == 0
 
@@ -116,7 +117,7 @@ async def test_restore_skips_tasks_that_are_already_running(monkeypatch: pytest.
     create_task = MagicMock()
     monkeypatch.setattr(scheduling.asyncio, "create_task", create_task)
 
-    restored = await restore_scheduled_tasks(client, "!r:server", config)
+    restored = await restore_scheduled_tasks(client, "!r:server", config, resolve_runtime_paths(process_env={}))
 
     assert restored == 0
     create_task.assert_not_called()

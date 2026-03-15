@@ -25,7 +25,7 @@ if TYPE_CHECKING:
             label="API Key",
             type="password",
             required=True,
-            description="DesiVocal API key (falls back to DESI_VOCAL_API_KEY env var)",
+            description="DesiVocal API key",
         ),
         ConfigField(
             name="voice_id",

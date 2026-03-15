@@ -33,7 +33,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="AAA...",
-            description="Twitter API Bearer token (can also be set via X_BEARER_TOKEN env var)",
+            description="Twitter API Bearer token",
         ),
         ConfigField(
             name="consumer_key",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="consumer_key...",
-            description="Twitter API consumer key (can also be set via X_CONSUMER_KEY env var)",
+            description="Twitter API consumer key",
         ),
         ConfigField(
             name="consumer_secret",
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="consumer_secret...",
-            description="Twitter API consumer secret (can also be set via X_CONSUMER_SECRET env var)",
+            description="Twitter API consumer secret",
         ),
         ConfigField(
             name="access_token",
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="access_token...",
-            description="Twitter API access token (can also be set via X_ACCESS_TOKEN env var)",
+            description="Twitter API access token",
         ),
         ConfigField(
             name="access_token_secret",
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="access_token_secret...",
-            description="Twitter API access token secret (can also be set via X_ACCESS_TOKEN_SECRET env var)",
+            description="Twitter API access token secret",
         ),
         # Feature flags/boolean parameters grouped by functionality
         # Search and content features

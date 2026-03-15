@@ -12,6 +12,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,26 +21,36 @@ if TYPE_CHECKING:
 class TestScheduledTaskRestoration:
     """Test scheduled task restoration behavior after bot restart."""
 
+    @staticmethod
+    def _bind_runtime(config: Config, tmp_path: Path) -> Config:
+        return bind_runtime_paths(
+            config,
+            orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"),
+        )
+
     @pytest.mark.asyncio
     async def test_only_router_restores_tasks(self, tmp_path: Path) -> None:
         """Test that only the router agent restores scheduled tasks."""
         # Create a mock config with multiple agents
-        config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                    "email_assistant": {
+                        "display_name": "EmailAssistant",
+                        "role": "Email assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-                "email_assistant": {
-                    "display_name": "EmailAssistant",
-                    "role": "Email assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
 
         # Test with RouterAgent
@@ -53,6 +64,7 @@ class TestScheduledTaskRestoration:
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
 
@@ -75,21 +87,29 @@ class TestScheduledTaskRestoration:
 
             # Verify router agent called restore_scheduled_tasks
             mock_join.assert_awaited_once_with(router_bot.client, "lobby")
-            mock_restore.assert_awaited_once_with(router_bot.client, "lobby", config)
+            mock_restore.assert_awaited_once_with(
+                router_bot.client,
+                "lobby",
+                config,
+                runtime_paths_for(config),
+            )
 
     @pytest.mark.asyncio
     async def test_non_router_agents_dont_restore_tasks(self, tmp_path: Path) -> None:
         """Test that non-router agents don't restore scheduled tasks."""
-        config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
 
         # Test with regular agent (not router)
@@ -103,6 +123,7 @@ class TestScheduledTaskRestoration:
             agent_user=regular_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
 
@@ -124,7 +145,7 @@ class TestScheduledTaskRestoration:
     @pytest.mark.asyncio
     async def test_router_restores_tasks_without_rejoining_existing_room(self, tmp_path: Path) -> None:
         """Router restart setup should run even when the room is already joined."""
-        config = Config(models={"default": {"provider": "test", "id": "test-model"}})
+        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -136,6 +157,7 @@ class TestScheduledTaskRestoration:
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
         router_bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -158,14 +180,19 @@ class TestScheduledTaskRestoration:
             await router_bot.join_configured_rooms()
 
         mock_join.assert_not_awaited()
-        mock_restore.assert_awaited_once_with(router_bot.client, "lobby", config)
+        mock_restore.assert_awaited_once_with(
+            router_bot.client,
+            "lobby",
+            config,
+            runtime_paths_for(config),
+        )
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
 
     @pytest.mark.asyncio
     async def test_router_stop_cancels_running_scheduled_tasks(self, tmp_path: Path) -> None:
         """Stopping the router should clear in-memory scheduled tasks before restart."""
-        config = Config(models={"default": {"provider": "test", "id": "test-model"}})
+        config = self._bind_runtime(Config(models={"default": {"provider": "test", "id": "test-model"}}), tmp_path)
 
         router_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -177,6 +204,7 @@ class TestScheduledTaskRestoration:
             agent_user=router_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["lobby"],
         )
         router_bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -198,22 +226,25 @@ class TestScheduledTaskRestoration:
     @pytest.mark.asyncio
     async def test_multiple_agents_only_router_restores(self, tmp_path: Path) -> None:
         """Test that when multiple agents join a room, only router restores tasks."""
-        config = Config(
-            agents={
-                "general": {
-                    "display_name": "GeneralAgent",
-                    "role": "General assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
+        config = self._bind_runtime(
+            Config(
+                agents={
+                    "general": {
+                        "display_name": "GeneralAgent",
+                        "role": "General assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
+                    "email_assistant": {
+                        "display_name": "EmailAssistant",
+                        "role": "Email assistant",
+                        "model": "default",
+                        "rooms": ["lobby"],
+                    },
                 },
-                "email_assistant": {
-                    "display_name": "EmailAssistant",
-                    "role": "Email assistant",
-                    "model": "default",
-                    "rooms": ["lobby"],
-                },
-            },
-            models={"default": {"provider": "test", "id": "test-model"}},
+                models={"default": {"provider": "test", "id": "test-model"}},
+            ),
+            tmp_path,
         )
 
         agents_to_test = [
@@ -235,6 +266,7 @@ class TestScheduledTaskRestoration:
                 agent_user=user,
                 storage_path=tmp_path / agent_name,
                 config=config,
+                runtime_paths=runtime_paths_for(config),
                 rooms=["lobby"],
             )
             bot.client = AsyncMock(spec=nio.AsyncClient)

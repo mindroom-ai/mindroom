@@ -15,7 +15,7 @@ from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -28,13 +28,16 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIter
 
 
 def _make_bot(tmp_path: Path) -> AgentBot:
-    config = Config(
-        agents={
-            "general": AgentConfig(display_name="General Agent", rooms=["!team:localhost"]),
-            "research": AgentConfig(display_name="Research Agent", rooms=["!team:localhost"]),
-        },
-        models={"default": ModelConfig(provider="ollama", id="test-model")},
-        router=RouterConfig(model="default"),
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General Agent", rooms=["!team:localhost"]),
+                "research": AgentConfig(display_name="Research Agent", rooms=["!team:localhost"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
+        test_runtime_paths(tmp_path),
     )
     agent_user = AgentMatrixUser(
         agent_name="general",
@@ -43,7 +46,13 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    bot = AgentBot(agent_user=agent_user, storage_path=tmp_path, config=config, rooms=["!team:localhost"])
+    bot = AgentBot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!team:localhost"],
+    )
     bot.client = AsyncMock()
     bot.client.user_id = agent_user.user_id
     bot.client.rooms = {"!team:localhost": MagicMock(room_id="!team:localhost")}
@@ -58,8 +67,16 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain),
-        MatrixID.from_agent("research", bot.config.domain),
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -94,8 +111,16 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
     team_agents = [
-        MatrixID.from_agent("general", bot.config.domain),
-        MatrixID.from_agent("research", bot.config.domain),
+        MatrixID.from_agent(
+            "general",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
+        MatrixID.from_agent(
+            "research",
+            bot.config.get_domain(runtime_paths_for(bot.config)),
+            runtime_paths_for(bot.config),
+        ),
     ]
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
@@ -103,7 +128,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
         await response_function(None)
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> tuple[str, str]:
-        response_stream = args[6]
+        response_stream = args[7]
         chunks = [str(chunk) async for chunk in response_stream]
         return "$stream_event", "".join(chunks)
 

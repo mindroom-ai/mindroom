@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 from mindroom.matrix.client import get_latest_thread_event_id_if_needed
 
@@ -101,6 +102,7 @@ class StreamingResponse:
     thread_id: str | None
     sender_domain: str
     config: Config
+    runtime_paths: RuntimePaths
     accumulated_text: str = ""
     event_id: str | None = None  # None until first message sent
     last_update: float = 0.0
@@ -243,6 +245,7 @@ class StreamingResponse:
 
         content = format_message_with_mentions(
             config=self.config,
+            runtime_paths=self.runtime_paths,
             text=display_text,
             sender_domain=self.sender_domain,
             thread_event_id=effective_thread_id,
@@ -379,6 +382,7 @@ async def send_streaming_response(
     thread_id: str | None,
     sender_domain: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[_StreamInputChunk],
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     header: str | None = None,
@@ -396,6 +400,7 @@ async def send_streaming_response(
         thread_id: Thread root if already in a thread
         sender_domain: Sender's homeserver domain for mention formatting
         config: App config for mention formatting
+        runtime_paths: Explicit runtime context for mention formatting
         response_stream: Async iterator yielding text chunks or response events
         streaming_cls: StreamingResponse class to use (default: StreamingResponse, alternative: ReplacementStreamingResponse)
         header: Optional text prefix to send before chunks
@@ -425,6 +430,7 @@ async def send_streaming_response(
         thread_id=thread_id,
         sender_domain=sender_domain,
         config=config,
+        runtime_paths=runtime_paths,
         latest_thread_event_id=latest_thread_event_id,
         room_mode=room_mode,
         show_tool_calls=show_tool_calls,

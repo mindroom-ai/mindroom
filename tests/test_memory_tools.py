@@ -8,11 +8,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory.functions import search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import agent_state_root_path
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,14 +30,35 @@ class TestMemoryTools:
         return tmp_path
 
     @pytest.fixture
-    def config(self) -> Config:
-        """Load config for testing."""
-        return Config.from_yaml()
+    def config(self, storage_path: Path) -> Config:
+        """Load a self-contained runtime-bound config for testing."""
+        runtime_paths = resolve_runtime_paths(
+            config_path=storage_path / "config.yaml",
+            storage_path=storage_path,
+            process_env={
+                "MATRIX_HOMESERVER": "http://localhost:8008",
+                "MINDROOM_NAMESPACE": "",
+            },
+        )
+        return bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(display_name="Test Agent"),
+                    "general": AgentConfig(display_name="General"),
+                },
+            ),
+            runtime_paths,
+        )
 
     @pytest.fixture
     def tools(self, storage_path: Path, config: Config) -> MemoryTools:
         """Create a MemoryTools instance for testing."""
-        return MemoryTools(agent_name="test_agent", storage_path=storage_path, config=config)
+        return MemoryTools(
+            agent_name="test_agent",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
 
     @pytest.mark.asyncio
     async def test_add_memory(self, tools: MemoryTools) -> None:
@@ -47,6 +71,7 @@ class TestMemoryTools:
                 "test_agent",
                 tools._storage_path,
                 tools._config,
+                tools._runtime_paths,
                 metadata={"source": "explicit_tool"},
             )
             assert "Memorized" in result
@@ -76,10 +101,22 @@ class TestMemoryTools:
         config.memory.file.path = str(storage_path / "shared-memory")
         config.agents["general"].memory_backend = "file"
 
-        tools = MemoryTools(agent_name="general", storage_path=storage_path, config=config)
+        tools = MemoryTools(
+            agent_name="general",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
 
         result = await tools.add_memory("Tool memory stays canonical")
-        memories = await search_agent_memories("Tool memory", "general", storage_path, config, limit=5)
+        memories = await search_agent_memories(
+            "Tool memory",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=5,
+        )
 
         assert result == "Memorized: Tool memory stays canonical"
         assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
@@ -108,6 +145,7 @@ class TestMemoryTools:
                 "test_agent",
                 tools._storage_path,
                 tools._config,
+                tools._runtime_paths,
                 limit=3,
             )
             assert "Found 2 memory(ies)" in result
@@ -175,6 +213,7 @@ class TestMemoryTools:
                 "test_agent",
                 tools._storage_path,
                 tools._config,
+                tools._runtime_paths,
                 limit=10,
             )
             assert "All memories (3)" in result
@@ -222,7 +261,13 @@ class TestMemoryTools:
         ) as mock_get:
             result = await tools.get_memory("abc-123")
 
-            mock_get.assert_called_once_with("abc-123", "test_agent", tools._storage_path, tools._config)
+            mock_get.assert_called_once_with(
+                "abc-123",
+                "test_agent",
+                tools._storage_path,
+                tools._config,
+                tools._runtime_paths,
+            )
             assert "[id=abc-123]" in result
             assert "User likes Python" in result
 
@@ -266,6 +311,7 @@ class TestMemoryTools:
                 "test_agent",
                 tools._storage_path,
                 tools._config,
+                tools._runtime_paths,
             )
             assert "Updated memory" in result
             assert "[id=abc-123]" in result
@@ -293,7 +339,13 @@ class TestMemoryTools:
         ) as mock_delete:
             result = await tools.delete_memory("abc-123")
 
-            mock_delete.assert_called_once_with("abc-123", "test_agent", tools._storage_path, tools._config)
+            mock_delete.assert_called_once_with(
+                "abc-123",
+                "test_agent",
+                tools._storage_path,
+                tools._config,
+                tools._runtime_paths,
+            )
             assert "Deleted memory" in result
             assert "[id=abc-123]" in result
 
