@@ -119,11 +119,7 @@ def _resolve_runtime_paths_for_config_load(
         return resolve_primary_runtime_paths(process_env=process_env)
 
     resolved_config_path = Path(config_path).expanduser().resolve()
-    filtered_process_env = {key: value for key, value in process_env.items() if key != "MINDROOM_CONFIG_PATH"}
-    return resolve_runtime_paths(
-        config_path=resolved_config_path,
-        process_env=filtered_process_env,
-    )
+    return resolve_runtime_paths(config_path=resolved_config_path)
 
 
 def _normalize_optional_config_sections(data: dict[str, object]) -> None:

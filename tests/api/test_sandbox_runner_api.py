@@ -14,9 +14,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.credentials as credentials_module
+import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.tool_system.metadata import ensure_tool_registry_loaded
+from mindroom.credentials import CredentialsManager
+from mindroom.tool_system.metadata import (
+    TOOL_METADATA,
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolMetadata,
+    ToolStatus,
+    ensure_tool_registry_loaded,
+)
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -107,6 +118,59 @@ def test_sandbox_runner_applies_tool_init_overrides(
     data = response.json()
     assert data["ok"] is True
     assert "USER.md" in data["result"]
+
+
+def test_resolve_entrypoint_loads_persisted_tool_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox toolkit rebuilds should load persisted credentials from runner storage."""
+
+    class DummyTool:
+        def __init__(self, token: str | None = None) -> None:
+            self.name = "dummy"
+            self.token = token
+            self.functions = {"run": type("F", (), {"entrypoint": lambda _unused: None})()}
+            self.async_functions = {}
+            self.requires_connect = False
+
+    tool_name = "dummy_cred_tool"
+    stored_value = "value123"
+    original_registry = metadata_module._TOOL_REGISTRY.copy()
+    original_metadata = TOOL_METADATA.copy()
+    original_manager = credentials_module._credentials_manager
+    original_signature = credentials_module._credentials_manager_signature
+    shared_storage = tmp_path / "shared-storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
+    metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
+    TOOL_METADATA[tool_name] = ToolMetadata(
+        name=tool_name,
+        display_name="Dummy",
+        description="Dummy",
+        category=ToolCategory.DEVELOPMENT,
+        status=ToolStatus.REQUIRES_CONFIG,
+        setup_type=SetupType.API_KEY,
+        config_fields=[ConfigField(name="token", label="Token", type="password", required=False)],
+    )
+
+    try:
+        CredentialsManager(base_path=shared_storage / "credentials").save_credentials(
+            tool_name,
+            {"token": stored_value},
+        )
+        credentials_module._credentials_manager = None
+        credentials_module._credentials_manager_signature = None
+
+        toolkit, _ = sandbox_runner_module._resolve_entrypoint(tool_name=tool_name, function_name="run")
+
+        assert toolkit.token == stored_value
+    finally:
+        metadata_module._TOOL_REGISTRY.clear()
+        metadata_module._TOOL_REGISTRY.update(original_registry)
+        TOOL_METADATA.clear()
+        TOOL_METADATA.update(original_metadata)
+        credentials_module._credentials_manager = original_manager
+        credentials_module._credentials_manager_signature = original_signature
 
 
 def test_resolve_worker_base_dir_does_not_create_directories_during_validation(tmp_path: Path) -> None:

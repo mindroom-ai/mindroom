@@ -79,7 +79,7 @@ def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, st
     exported_env: dict[str, str] = {}
     for key, value in os.environ.items():
         synced_value = _RUNTIME_SYNCED_ENV_VALUES.get(key)
-        if synced_value is not None and synced_value == value:
+        if synced_value is not None and synced_value == value and key not in _RUNTIME_PATH_ENV_KEYS:
             continue
         exported_env[key] = value
     return exported_env
@@ -131,6 +131,13 @@ def _storage_root_from_env_path(env_path: Path) -> Path | None:
     return _storage_root_from_env_values(_runtime_env_file_values_for_path(env_path))
 
 
+def _active_runtime_path_env() -> tuple[Path | None, str | None]:
+    """Return the currently synced compatibility config/storage path env values."""
+    config_value = _RUNTIME_SYNCED_ENV_VALUES.get("MINDROOM_CONFIG_PATH")
+    config_path = Path(config_value).expanduser().resolve() if config_value else None
+    return config_path, _RUNTIME_SYNCED_ENV_VALUES.get("MINDROOM_STORAGE_PATH")
+
+
 def resolve_runtime_paths(
     *,
     config_path: Path | None = None,
@@ -142,6 +149,19 @@ def resolve_runtime_paths(
     This is a pure resolver. It does not mutate `os.environ` or any module globals.
     """
     resolved_process_env = _copy_process_env(process_env)
+    active_config_path, active_storage_value = _active_runtime_path_env()
+    if (
+        process_env is None
+        and config_path is not None
+        and storage_path is None
+        and active_storage_value is not None
+        and resolved_process_env.get("MINDROOM_STORAGE_PATH") == active_storage_value
+        and Path(config_path).expanduser().resolve() != active_config_path
+    ):
+        # Activated runtime remains the compatibility default only for the
+        # currently active config. Alternate config loads must resolve against
+        # their own sibling `.env` or explicit shell-exported overrides.
+        resolved_process_env.pop("MINDROOM_STORAGE_PATH", None)
     resolved_config_path = Path(config_path or find_config(process_env=resolved_process_env)).expanduser().resolve()
     config_dir = resolved_config_path.parent
     env_path = config_dir / ".env"
@@ -276,7 +296,7 @@ def runtime_config_path(
 
 
 def exported_process_env() -> dict[str, str]:
-    """Return the currently exported env snapshot, excluding runtime-synced injections."""
+    """Return the current env snapshot, excluding only non-path runtime-synced injections."""
     return _copy_process_env()
 
 

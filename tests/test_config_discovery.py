@@ -484,8 +484,8 @@ class TestResolveConfigRelativePath:
         with pytest.raises(ValueError, match="either runtime_paths or config_path"):
             Config.from_yaml(config_path, runtime_paths=runtime_paths)
 
-    def test_config_from_yaml_explicit_path_does_not_inherit_activated_runtime_storage(self, tmp_path: Path) -> None:
-        """Explicit path loads should stay local unless the caller passes runtime_paths."""
+    def test_config_from_yaml_explicit_path_inherits_activated_runtime_storage(self, tmp_path: Path) -> None:
+        """Explicit path reloads should preserve the activated runtime storage context."""
         config_path = tmp_path / "config.yaml"
         storage_path = tmp_path / "override-storage"
         config_path.write_text(
@@ -498,7 +498,24 @@ class TestResolveConfigRelativePath:
         config = Config.from_yaml(config_path)
 
         assert config.runtime_paths is not None
-        assert config.runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
+        assert config.runtime_paths.storage_root == storage_path.resolve()
+
+    def test_no_arg_config_load_and_find_config_follow_activated_runtime(self, tmp_path: Path) -> None:
+        """Activated runtime should remain the default compatibility context."""
+        config_path = tmp_path / "cfg" / "config.yaml"
+        storage_path = tmp_path / "custom-storage"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+
+        runtime_paths = constants_mod.set_runtime_paths(config_path=config_path, storage_path=storage_path)
+        loaded_default = Config.from_yaml()
+
+        assert constants_mod.find_config() == config_path
+        assert loaded_default.require_runtime_paths().config_path == config_path.resolve()
+        assert loaded_default.require_runtime_paths().storage_root == runtime_paths.storage_root
 
     def test_activate_runtime_paths_promotes_runtime_path_env_contract(
         self,

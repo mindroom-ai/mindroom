@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 import mindroom.tool_system.sandbox_proxy as _sandbox_proxy
 from mindroom import constants
+from mindroom.credentials import CredentialsManager, get_credentials_manager
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ToolInitOverrideError,
@@ -91,6 +92,11 @@ def ensure_registry_loaded_with_config() -> None:
     """
     config, config_path = _load_config_from_env()
     ensure_tool_registry_loaded(config, config_path=config_path)
+
+
+def _runner_credentials_manager() -> CredentialsManager:
+    """Return the sandbox runner's persisted credential manager."""
+    return get_credentials_manager(storage_root=_runner_storage_root())
 
 
 @dataclass
@@ -236,6 +242,7 @@ def _resolve_entrypoint(
             tool_name,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
+            credentials_manager=_runner_credentials_manager(),
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
             worker_scope=worker_scope,
