@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -300,6 +301,38 @@ def test_get_tool_by_name_applies_runtime_google_bigquery_fallbacks(
     assert captured["project"] == "demo-project"
     assert captured["credentials"] is fake_google_credentials
     assert captured["credentials_path"] == str(credentials_path)
+
+
+def test_get_tool_by_name_exposes_runtime_env_to_python_execution(tmp_path: Path) -> None:
+    """Direct tool execution should see runtime-scoped env values through os.environ."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "OPENAI_BASE_URL": "http://example.invalid/v1",
+            "MINDROOM_NAMESPACE": "alpha1234",
+        },
+    )
+
+    tool = get_tool_by_name("python", runtime_paths)
+    entrypoint = tool.functions["run_python_code"].entrypoint
+    assert entrypoint is not None
+
+    result = entrypoint(
+        'import os\nresult = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), "namespace": os.environ.get("MINDROOM_NAMESPACE"), "storage": os.environ.get("MINDROOM_STORAGE_PATH")}',
+        "result",
+    )
+
+    assert ast.literal_eval(result) == {
+        "openai_base_url": "http://example.invalid/v1",
+        "namespace": "alpha1234",
+        "storage": str((tmp_path / "storage").resolve()),
+    }
 
 
 def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:

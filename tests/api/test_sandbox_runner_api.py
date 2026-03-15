@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -20,7 +21,12 @@ import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_paths, serialize_runtime_paths
+from mindroom.constants import (
+    resolve_primary_runtime_paths,
+    resolve_runtime_paths,
+    serialize_public_runtime_paths,
+    serialize_runtime_paths,
+)
 from mindroom.credentials import CredentialsManager
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -154,6 +160,28 @@ def test_startup_runtime_keeps_runner_token_outside_runtime_paths(
     assert sandbox_runner_module._app_runner_token(sandbox_runner_app) == "from-env"
 
 
+def test_public_startup_runtime_payload_excludes_runner_token(tmp_path: Path) -> None:
+    """Public startup runtime payloads should not serialize the runner auth token."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "secret-token",
+            "MINDROOM_NAMESPACE": "alpha1234",
+        },
+    )
+
+    payload = serialize_public_runtime_paths(runtime_paths)
+
+    assert payload["process_env"] == {
+        "MINDROOM_CONFIG_PATH": str(config_path.resolve()),
+        "MINDROOM_NAMESPACE": "alpha1234",
+        "MINDROOM_STORAGE_PATH": str((tmp_path / "storage").resolve()),
+    }
+
+
 def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -205,6 +233,49 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
     assert child_runtime.env_file_values["MINDROOM_NAMESPACE"] == "alpha1234"
     assert child_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
     assert child_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+
+
+def test_sandbox_runner_subprocess_python_sees_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox subprocess execution should expose runtime-scoped env values to the child tool."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "subprocess")
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    (config_dir / ".env").write_text("MINDROOM_NAMESPACE=alpha1234\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"OPENAI_BASE_URL": "http://example.invalid/v1"},
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="python",
+            function_name="run_python_code",
+            args=[
+                'import os\nresult = {"openai_base_url": os.environ.get("OPENAI_BASE_URL"), "namespace": os.environ.get("MINDROOM_NAMESPACE"), "storage": os.environ.get("MINDROOM_STORAGE_PATH")}',
+                "result",
+            ],
+            kwargs={},
+        ),
+        runtime_paths,
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert ast.literal_eval(str(response.result)) == {
+        "openai_base_url": "http://example.invalid/v1",
+        "namespace": "alpha1234",
+        "storage": str((tmp_path / "storage").resolve()),
+    }
 
 
 def test_worker_subprocess_env_preserves_parent_path(

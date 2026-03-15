@@ -9,10 +9,10 @@ if [[ -z "${MINDROOM_RUNTIME_PATHS_JSON:-}" ]]; then
 import json
 import os
 
-from mindroom.constants import resolve_primary_runtime_paths, serialize_runtime_paths
+from mindroom.constants import resolve_primary_runtime_paths, serialize_public_runtime_paths
 
 runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-print(json.dumps(serialize_runtime_paths(runtime_paths), separators=(",", ":"), sort_keys=True))
+print(json.dumps(serialize_public_runtime_paths(runtime_paths), separators=(",", ":"), sort_keys=True))
 PY
   )"
 fi

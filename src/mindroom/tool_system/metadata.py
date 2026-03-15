@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import functools
 import importlib
 import inspect
 import os
+import threading
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -25,9 +30,10 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncGenerator, Callable, Generator
 
     from agno.tools import Toolkit
+    from agno.tools.function import Function
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -36,10 +42,143 @@ if TYPE_CHECKING:
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
+_TOOL_RUNTIME_ENV_LOCK = threading.Lock()
+_ACTIVE_TOOL_RUNTIME_ENV: ContextVar[dict[str, str] | None] = ContextVar(
+    "mindroom_active_tool_runtime_env",
+    default=None,
+)
 
 
 class ToolInitOverrideError(ValueError):
     """Raised when a caller supplies unsupported tool init overrides."""
+
+
+def _tool_runtime_env(runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Build the runtime env visible to one direct tool execution."""
+    env = dict(runtime_paths.env_file_values)
+    env.update(runtime_paths.process_env)
+    env.setdefault("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+    env.setdefault("MINDROOM_STORAGE_PATH", str(runtime_paths.storage_root))
+    return env
+
+
+@contextmanager
+def _tool_runtime_env_overlay(runtime_paths: RuntimePaths) -> Generator[None, None, None]:
+    """Temporarily expose one runtime's env values to direct tool code."""
+    env_values = _tool_runtime_env(runtime_paths)
+    active_runtime_env = _ACTIVE_TOOL_RUNTIME_ENV.get()
+    if active_runtime_env == env_values:
+        yield
+        return
+    if active_runtime_env is not None:
+        msg = "Nested tool runtime env overlays must use the same runtime."
+        raise RuntimeError(msg)
+
+    _TOOL_RUNTIME_ENV_LOCK.acquire()
+    previous_env = {name: os.environ.get(name) for name in env_values}
+    os.environ.update(env_values)
+    token = _ACTIVE_TOOL_RUNTIME_ENV.set(env_values)
+    try:
+        yield
+    finally:
+        for name, previous_value in previous_env.items():
+            if previous_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous_value
+        _ACTIVE_TOOL_RUNTIME_ENV.reset(token)
+        _TOOL_RUNTIME_ENV_LOCK.release()
+
+
+@asynccontextmanager
+async def _tool_runtime_env_overlay_async(runtime_paths: RuntimePaths) -> AsyncGenerator[None, None]:
+    """Async variant of the direct tool runtime env overlay."""
+    env_values = _tool_runtime_env(runtime_paths)
+    active_runtime_env = _ACTIVE_TOOL_RUNTIME_ENV.get()
+    if active_runtime_env == env_values:
+        yield
+        return
+    if active_runtime_env is not None:
+        msg = "Nested tool runtime env overlays must use the same runtime."
+        raise RuntimeError(msg)
+
+    await asyncio.to_thread(_TOOL_RUNTIME_ENV_LOCK.acquire)
+    previous_env = {name: os.environ.get(name) for name in env_values}
+    os.environ.update(env_values)
+    token = _ACTIVE_TOOL_RUNTIME_ENV.set(env_values)
+    try:
+        yield
+    finally:
+        for name, previous_value in previous_env.items():
+            if previous_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous_value
+        _ACTIVE_TOOL_RUNTIME_ENV.reset(token)
+        _TOOL_RUNTIME_ENV_LOCK.release()
+
+
+def _wrap_sync_function_with_runtime_env(function: Function, runtime_paths: RuntimePaths) -> Function:
+    """Wrap one sync tool function so it executes under the runtime env overlay."""
+    wrapped = function.model_copy(deep=False) if hasattr(function, "model_copy") else copy.copy(function)
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
+
+    @functools.wraps(entrypoint)
+    def runtime_entrypoint(*args: object, **kwargs: object) -> object:
+        with _tool_runtime_env_overlay(runtime_paths):
+            return entrypoint(*args, **kwargs)
+
+    wrapped.entrypoint = runtime_entrypoint
+    return wrapped
+
+
+def _wrap_async_function_with_runtime_env(function: Function, runtime_paths: RuntimePaths) -> Function:
+    """Wrap one async tool function so it executes under the runtime env overlay."""
+    wrapped = function.model_copy(deep=False) if hasattr(function, "model_copy") else copy.copy(function)
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
+
+    @functools.wraps(entrypoint)
+    async def runtime_entrypoint(*args: object, **kwargs: object) -> object:
+        async with _tool_runtime_env_overlay_async(runtime_paths):
+            return await entrypoint(*args, **kwargs)
+
+    wrapped.entrypoint = runtime_entrypoint
+    return wrapped
+
+
+def _wrap_toolkit_method_with_runtime_env(toolkit: Toolkit, method_name: str, runtime_paths: RuntimePaths) -> None:
+    """Wrap one toolkit lifecycle method with the runtime env overlay."""
+    method = getattr(toolkit, method_name, None)
+    if not callable(method):
+        return
+
+    if inspect.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def runtime_method(*args: object, **kwargs: object) -> object:
+            async with _tool_runtime_env_overlay_async(runtime_paths):
+                return await method(*args, **kwargs)
+
+    else:
+
+        @functools.wraps(method)
+        def runtime_method(*args: object, **kwargs: object) -> object:
+            with _tool_runtime_env_overlay(runtime_paths):
+                return method(*args, **kwargs)
+
+    setattr(toolkit, method_name, runtime_method)
+
+
+def _wrap_toolkit_lifecycle_with_runtime_env(toolkit: Toolkit, runtime_paths: RuntimePaths) -> None:
+    """Expose runtime env while a toolkit connects, executes, and closes."""
+    for function_name, function in list(toolkit.functions.items()):
+        toolkit.functions[function_name] = _wrap_sync_function_with_runtime_env(function, runtime_paths)
+    for function_name, function in list(toolkit.async_functions.items()):
+        toolkit.async_functions[function_name] = _wrap_async_function_with_runtime_env(function, runtime_paths)
+    _wrap_toolkit_method_with_runtime_env(toolkit, "connect", runtime_paths)
+    _wrap_toolkit_method_with_runtime_env(toolkit, "close", runtime_paths)
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -258,6 +397,7 @@ def _build_tool_instance(
     )
 
     toolkit = cast("Any", tool_class)(**init_kwargs)
+    _wrap_toolkit_lifecycle_with_runtime_env(toolkit, runtime_paths)
     if disable_sandbox_proxy:
         return toolkit
     shared_storage_root_path = None
