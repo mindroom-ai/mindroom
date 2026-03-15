@@ -412,7 +412,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
                 },
                 router=RouterConfig(model="default"),
             ),
-            tmp_path,
+            orchestrator_runtime_paths(tmp_path),
         )
 
         bot = AgentBot(
