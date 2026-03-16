@@ -5,11 +5,11 @@ icon: lucide/book-open
 # Knowledge Bases
 
 Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
-Point a knowledge base at a file or folder, and agents can search the indexed content when answering questions.
+Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
 
 ## How It Works
 
-1. You configure a knowledge base pointing to a file or folder of documents
+1. You configure a knowledge base pointing to a folder of documents
 2. MindRoom indexes the files into a vector database (ChromaDB) using an embedder
 3. Agents assigned to that knowledge base get a search tool that queries the indexed documents
 4. When the agent uses the tool, relevant document chunks are included in its context
@@ -61,8 +61,7 @@ When `watch: true`, new or modified files are re-indexed in real time.
 ```yaml
 knowledge_bases:
   my_docs:
-    path: ./knowledge_docs/my_docs   # File or folder containing documents
-    kind: auto                       # Optional: auto, file, or directory
+    path: ./knowledge_docs/my_docs   # Folder containing documents
     watch: true                       # Auto-reindex on file changes
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
@@ -70,16 +69,14 @@ knowledge_bases:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | `./knowledge_docs` | File or folder path (relative to the config file directory or absolute) |
-| `kind` | string | `auto` | How to treat `path`: `auto`, `file`, or `directory`. Use `file` or `directory` for ambiguous missing paths like `LICENSE` or `docs.v1` |
-| `watch` | bool | `true` | Watch for filesystem changes and reindex automatically. Single-file targets watch the parent directory |
+| `path` | string | `./knowledge_docs` | Folder path (relative to the config file directory or absolute) |
+| `watch` | bool | `true` | Watch for filesystem changes and reindex automatically |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for text-like files (minimum: `128`) |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent chunks (must be `< chunk_size`) |
 | `git` | object | `null` | Optional Git repository sync settings |
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 If chunking is too large, indexing retries will fail with embedder 500 errors.
-When the path is missing and its type is ambiguous, set `kind` explicitly so MindRoom knows whether to treat it as a file or a directory.
 
 ### Multiple Knowledge Bases
 

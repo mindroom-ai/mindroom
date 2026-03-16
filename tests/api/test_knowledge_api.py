@@ -16,13 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 
 
-def _knowledge_config(
-    path: Path,
-    *,
-    base_id: str = "research",
-    with_git: bool = False,
-    kind: str = "auto",
-) -> Config:
+def _knowledge_config(path: Path, *, base_id: str = "research", with_git: bool = False) -> Config:
     git_config = (
         KnowledgeGitConfig(
             repo_url="https://github.com/example/private-repo.git",
@@ -38,7 +32,6 @@ def _knowledge_config(
         knowledge_bases={
             base_id: KnowledgeBaseConfig(
                 path=str(path),
-                kind=kind,
                 watch=False,
                 git=git_config,
             ),
@@ -146,39 +139,6 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
     assert init_managers.await_args.kwargs["reindex_on_create"] is True
 
 
-def test_knowledge_files_list_supports_single_file_base(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """File-backed knowledge bases should still list their single managed file."""
-    target = tmp_path / "notes.md"
-    target.write_text("guide", encoding="utf-8")
-    config = _knowledge_config(target)
-    manager = MagicMock()
-    manager.list_files.return_value = [target]
-    runtime_paths = main._app_runtime_paths(test_client.app)
-
-    with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
-        patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
-        ),
-    ):
-        response = test_client.get("/api/knowledge/bases/research/files")
-
-    assert response.status_code == 200
-    assert response.json()["files"] == [
-        {
-            "name": "notes.md",
-            "path": "notes.md",
-            "size": target.stat().st_size,
-            "modified": response.json()["files"][0]["modified"],
-            "type": "md",
-        },
-    ]
-
-
 def test_knowledge_upload_rolls_back_on_oversized_file(
     test_client: TestClient,
     tmp_path: Path,
@@ -231,56 +191,6 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     manager.index_file.assert_awaited_once_with("note.txt", upsert=True)
 
 
-def test_knowledge_upload_supports_single_file_base(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Uploading to a single-file base should write to the configured file path."""
-    target = tmp_path / "notes.md"
-    config = _knowledge_config(target)
-    manager = MagicMock()
-    manager.index_file = AsyncMock(return_value=True)
-    runtime_paths = main._app_runtime_paths(test_client.app)
-
-    with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
-        patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
-        ),
-    ):
-        response = test_client.post(
-            "/api/knowledge/bases/research/upload",
-            files=[("files", ("uploaded.md", b"hello", "text/plain"))],
-        )
-
-    assert response.status_code == 200
-    assert target.read_text(encoding="utf-8") == "hello"
-    assert response.json()["uploaded"] == ["notes.md"]
-    manager.index_file.assert_awaited_once_with("notes.md", upsert=True)
-
-
-def test_knowledge_upload_rejects_multiple_files_for_single_file_base(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Single-file bases should reject multi-file uploads."""
-    config = _knowledge_config(tmp_path / "notes.md")
-    runtime_paths = main._app_runtime_paths(test_client.app)
-
-    with patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)):
-        response = test_client.post(
-            "/api/knowledge/bases/research/upload",
-            files=[
-                ("files", ("one.md", b"1", "text/plain")),
-                ("files", ("two.md", b"2", "text/plain")),
-            ],
-        )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Single-file knowledge bases accept only one uploaded file"
-
-
 def test_knowledge_delete_initializes_manager_with_full_reindex(
     test_client: TestClient,
     tmp_path: Path,
@@ -307,32 +217,6 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     init_managers.assert_awaited_once()
     assert init_managers.await_args.kwargs["reindex_on_create"] is True
     manager.remove_file.assert_awaited_once_with("a.txt")
-
-
-def test_knowledge_delete_supports_single_file_base(
-    test_client: TestClient,
-    tmp_path: Path,
-) -> None:
-    """Deleting a single-file base should target the configured file name."""
-    target = tmp_path / "notes.md"
-    target.write_text("hello", encoding="utf-8")
-    config = _knowledge_config(target)
-    manager = MagicMock()
-    manager.remove_file = AsyncMock(return_value=True)
-    runtime_paths = main._app_runtime_paths(test_client.app)
-
-    with (
-        patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
-        patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
-            new=AsyncMock(return_value={"research": manager}),
-        ),
-    ):
-        response = test_client.delete("/api/knowledge/bases/research/files/notes.md")
-
-    assert response.status_code == 200
-    assert not target.exists()
-    manager.remove_file.assert_awaited_once_with("notes.md")
 
 
 def test_knowledge_delete_rejects_path_traversal(test_client: TestClient, tmp_path: Path) -> None:
