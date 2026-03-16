@@ -1,4 +1,5 @@
-# ruff: noqa: D100
+"""Helpers for API config loading, writing, and file-watcher lifecycle."""
+
 from __future__ import annotations
 
 from copy import deepcopy
