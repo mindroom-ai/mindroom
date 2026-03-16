@@ -1039,6 +1039,56 @@ class TestAgentBot:
         assert "reply_to_event_id: $event456" in model_prompt
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_resolves_knowledge_once(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming should resolve knowledge only inside the request-scoped context."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_stream_agent_response.return_value = mock_streaming_response()
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            event_id = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Hello",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        bot._knowledge_for_agent.assert_called_once_with("calculator")
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
         self,
         mock_agent_user: AgentMatrixUser,

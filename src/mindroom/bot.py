@@ -2339,7 +2339,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
