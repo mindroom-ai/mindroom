@@ -897,12 +897,12 @@ def test_sandbox_runner_rejects_worker_base_dir_outside_worker_root(
     assert "worker root" in response.json()["detail"]
 
 
-def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_agent_root(
+def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_state_root(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Scoped workers should reject base_dir overrides outside their visible agent roots."""
+    """Scoped workers should reject base_dir overrides outside their visible state roots."""
     _set_sandbox_token(monkeypatch)
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
 
@@ -920,7 +920,7 @@ def test_sandbox_runner_rejects_scoped_worker_base_dir_outside_visible_agent_roo
     )
 
     assert response.status_code == 400
-    assert "allowed agent roots" in response.json()["detail"]
+    assert "allowed state roots" in response.json()["detail"]
 
 
 def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_paths(
@@ -1008,7 +1008,7 @@ def test_sandbox_runner_rejects_unknown_worker_key_base_dir(
     )
 
     assert response.status_code == 400
-    assert "visible agent roots" in response.json()["detail"]
+    assert "visible state roots" in response.json()["detail"]
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

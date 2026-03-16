@@ -2182,6 +2182,7 @@ class AgentBot:
             self.config,
             agent_name=agent_name,
             active_session_id=session_id,
+            execution_identity=execution_identity,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
@@ -2246,6 +2247,7 @@ class AgentBot:
                 self.config,
                 agent_name=agent_name,
                 session_id=session_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
@@ -2469,6 +2471,7 @@ class AgentBot:
             self.config,
             agent_name=self.agent_name,
             active_session_id=session_id,
+            execution_identity=execution_identity,
         )
 
         # Dynamically determine whether to use streaming based on user presence
@@ -2529,6 +2532,7 @@ class AgentBot:
                 self.config,
                 agent_name=self.agent_name,
                 session_id=session_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(

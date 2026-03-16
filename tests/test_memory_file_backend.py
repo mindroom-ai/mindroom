@@ -16,9 +16,9 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
+    private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
-    worker_root_path,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
@@ -400,9 +400,78 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
 
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
-    alice_memory_file = worker_root_path(storage_path, alice_worker_key) / "mind_data" / "MEMORY.md"
+    alice_memory_file = (
+        private_instance_state_root_path(
+            storage_path,
+            worker_key=alice_worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+        / "MEMORY.md"
+    )
     assert alice_memory_file.exists()
     assert "Alice workspace memory" in alice_memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_private_file_memory_crud_uses_canonical_private_instance_root(
+    storage_path: Path,
+    config: Config,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    template_dir = build_private_template_dir(
+        files={
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with tool_execution_identity(identity):
+        await add_agent_memory("Private CRUD memory", "general", storage_path, config)
+        memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
+
+        loaded = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert loaded is not None
+        assert loaded["memory"] == "Private CRUD memory"
+
+        await update_agent_memory(memory_id, "Updated private CRUD memory", "general", storage_path, config)
+        updated = await get_agent_memory(memory_id, "general", storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated private CRUD memory"
+
+        await delete_agent_memory(memory_id, "general", storage_path, config)
+        assert await get_agent_memory(memory_id, "general", storage_path, config) is None
+
+    worker_key = resolve_worker_key("user", identity)
+    assert worker_key is not None
+    memory_file = (
+        private_instance_state_root_path(
+            storage_path,
+            worker_key=worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+        / "MEMORY.md"
+    )
+    assert memory_file.exists()
+    assert "Updated private CRUD memory" not in memory_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

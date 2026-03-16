@@ -104,7 +104,7 @@ class AgentPrivateConfig(BaseModel):
     )
     root: str | None = Field(
         default=None,
-        description="Private root path relative to the active worker state root; defaults to <agent_name>_data",
+        description="Private root path relative to the canonical private-instance state root; defaults to <agent_name>_data",
     )
     template_dir: str | None = Field(
         default=None,

@@ -25,7 +25,7 @@ Users should think of this as:
 Users should not need to think in terms of:
 
 - workspace-relative path wiring
-- manually linking context files to worker roots
+- manually linking context files to runtime-owned storage paths
 - manually linking knowledge bases to agent workspaces
 - deployment-specific hacks
 
@@ -107,7 +107,7 @@ The current low-level workspace machinery can remain as internal implementation 
 
 If a reader finishes the final config and thinks:
 
-"This shared agent will create a private per-user runtime copy of its state."
+"This shared agent will create a canonical private per-user instance of its state."
 
 then the config design is on the right track.
 

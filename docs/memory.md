@@ -113,7 +113,7 @@ agents:
       template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root inside the worker-owned state for that requester.
+In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage.
 When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root instead of `<storage_path>/memory_files/agent_<name>/`.
 If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester.
 MindRoom does not invent `MEMORY.md` or `memory/` for private agents.

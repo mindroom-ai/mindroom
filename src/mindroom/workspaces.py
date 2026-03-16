@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
+    private_instance_state_root_path,
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
     resolve_worker_key,
-    worker_root_path,
 )
 
 if TYPE_CHECKING:
@@ -135,7 +135,7 @@ def resolve_agent_private_state_storage_path(
     base_storage_path: Path,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
-    """Return the requester-scoped state root for one private agent instance."""
+    """Return the canonical durable state root for one private agent instance."""
     agent_config = config.agents.get(agent_name)
     if agent_config is None or agent_config.private is None:
         return resolve_agent_state_storage_path(
@@ -160,7 +160,11 @@ def resolve_agent_private_state_storage_path(
     if worker_key is None:
         msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{agent_config.private.per}'"
         raise ValueError(msg)
-    return worker_root_path(base_storage_path, worker_key).resolve()
+    return private_instance_state_root_path(
+        base_storage_path,
+        worker_key=worker_key,
+        agent_name=agent_name,
+    ).resolve()
 
 
 def _resolve_workspace(

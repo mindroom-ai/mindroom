@@ -26,13 +26,15 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
+    private_instance_state_root_path,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     shared_storage_root,
     tool_execution_identity,
-    visible_agent_state_roots_for_worker_key,
+    visible_state_roots_for_worker_key,
     worker_root_path,
 )
 
@@ -846,8 +848,27 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_agent_state_roots_for_worker_key(tmp_path, worker_key) == (
-        agent_state_root_path(tmp_path, "general"),
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (agent_state_root_path(tmp_path, "general"),)
+
+
+def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
+    """User workers should see shared agent roots plus their own private-instance namespace."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+
+    worker_key = resolve_worker_key("user", identity)
+
+    assert worker_key is not None
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
+        shared_storage_root(tmp_path) / "agents",
+        private_instance_scope_root_path(tmp_path, worker_key),
     )
 
 
@@ -1213,7 +1234,14 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         )
         alice_worker_key = resolve_worker_key("user", alice_identity)
         assert alice_worker_key is not None
-        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
+        alice_workspace = (
+            private_instance_state_root_path(
+                tmp_path,
+                worker_key=alice_worker_key,
+                agent_name="general",
+            )
+            / "mind_data"
+        )
         assert (alice_workspace / "USER.md").exists()
         assert (alice_workspace / "MEMORY.md").exists()
         (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
@@ -1231,12 +1259,20 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         )
         bob_worker_key = resolve_worker_key("user", bob_identity)
         assert bob_worker_key is not None
-        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+        bob_workspace = (
+            private_instance_state_root_path(
+                tmp_path,
+                worker_key=bob_worker_key,
+                agent_name="general",
+            )
+            / "mind_data"
+        )
 
     assert alice_workspace != bob_workspace
     assert "Alice private root context." in alice_agent.role
     assert (bob_workspace / "USER.md").exists()
     assert "Alice private root context." not in bob_agent.role
+    assert alice_workspace.parent == private_instance_scope_root_path(tmp_path, alice_worker_key) / "general"
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -1543,7 +1579,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
     ],
 )
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
-    """Private roots must stay out of the worker root and runtime-managed directories."""
+    """Private roots must stay out of runtime-managed directories and the private-instance root itself."""
     with pytest.raises(ValidationError, match=re.escape(expected_message)):
         Config(
             agents={

@@ -120,7 +120,7 @@ async def _find_mem0_anchor_memory_result(
     *,
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
         memory = await create_memory(target_storage_path, config)
         if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
             return result
@@ -274,7 +274,7 @@ async def get_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
     """Return one mem0 memory visible to the caller."""
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path):
+    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
         memory = await create_memory(target_storage_path, config)
         result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
         if result is not None:
@@ -366,7 +366,7 @@ async def store_mem0_conversation_memory(
     create_memory: _MemoryFactory,
 ) -> None:
     """Persist conversation messages to mem0-backed memory scopes."""
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path)
+    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
 
     if isinstance(agent_name, list):
         scope_user_id = build_team_user_id(agent_name)

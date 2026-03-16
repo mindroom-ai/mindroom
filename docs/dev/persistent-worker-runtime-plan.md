@@ -14,15 +14,17 @@ Worker runtimes remain non-authoritative execution environments for caches, temp
 
 Implement persistent worker-scoped execution environments for MindRoom tools.
 Keep the visible agent as the shared product abstraction users talk to.
-Each agent has one canonical state root.
-That root is the source of truth for the agent's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state.
-All worker scopes read and write that same agent state root.
+Each non-private agent has one canonical state root.
+Agents that materialize requester-private instances have one canonical state root per realized private instance.
+That canonical root is the source of truth for the instance's context files, workspace files, file-backed memory, mem0-backed state, session and history state, and learning state.
+Workers mount that same canonical root.
 `worker_scope` controls execution isolation and reuse, not state ownership.
 Support requester-isolated and shared runtime execution without building one full MindRoom runtime per user.
 
 ## Non-Negotiable Invariants
 
-- Each agent has one canonical state root.
+- Each non-private agent has one canonical state root.
+- Each realized private instance has one canonical state root.
 - The files under that root are the real files, not copies, seeds, mirrors, or alternate authoritative locations.
 - `context_files` and `memory_file_path` must resolve inside the agent's canonical workspace.
 - `worker_scope` does not change which files are authoritative.
@@ -84,9 +86,10 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 - A user can create files in one turn and read them in a later turn.
 - A shared public agent can still exist in a public room.
 - Two users talking to the same agent can land in different runtimes when the scope requires isolation.
-- Those different runtimes still read and write the same canonical agent state root for that agent.
-- A file edit made through one runtime is visible from every other runtime that executes the same agent.
-- Context files, workspace files, file-backed memory, mem0-backed state, sessions, and learning stay consistent because they all come from the same canonical agent state root.
+- For non-private agents, those different runtimes still read and write the same canonical agent state root for that agent.
+- For private-instance agents, all runtimes for the same realized private instance read and write that same canonical private-instance state root.
+- A file edit made through one runtime is visible from every other runtime that executes against the same canonical state root.
+- Context files, workspace files, file-backed memory, mem0-backed state, sessions, and learning stay consistent because they all come from the same canonical state root.
 
 ## Non-Goals
 
@@ -99,9 +102,9 @@ The `/v1` API remains intentionally restricted to unscoped agents and agents wit
 ## Scope Semantics
 
 - `shared` means one runtime may be reused by many callers for the same agent, and all of them use that agent's canonical state root.
-- `user` means one persistent runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents it executes.
-- `user_agent` means runtimes are isolated per requester and agent, but every runtime for that agent still reads and writes the same canonical agent state root.
-- Unscoped dedicated execution still uses the same canonical agent state root for the addressed agent.
+- `user` means one persistent runtime may be reused per requester across multiple agents, and that runtime still reads and writes the canonical state roots of the agents or private instances it executes.
+- `user_agent` means runtimes are isolated per requester and agent, but every runtime for the same addressed state root still reads and writes that same canonical state root.
+- Unscoped dedicated execution still uses the same canonical state root for the addressed agent.
 - `shared`, `user`, `user_agent`, and unscoped dedicated execution differ in runtime isolation and reuse.
 - They do not change which files are authoritative for the agent.
 - `shared`, `user_agent`, and unscoped dedicated execution for agent A must only expose agent A's canonical state root plus the runtime's own worker root.
@@ -211,16 +214,24 @@ The minimum useful worker handle should contain these fields.
 
 ## Agent And Worker Storage Layout
 
-Authoritative agent state and worker runtime state are different things.
-Every agent gets one canonical agent state root.
+Authoritative state and worker runtime state are different things.
+Every non-private agent gets one canonical agent state root.
+Every realized private instance gets one canonical private-instance state root.
 Every runtime gets its own worker runtime root.
-Only the agent state root is authoritative for agent files and durable agent state.
+Only canonical state roots are authoritative for durable files and state.
 
 The recommended layout is:
 
 ```text
 <base_storage>/
   agents/<agent_name>/
+    workspace/
+    context/
+    memory/
+    mem0/
+    sessions/
+    learning/
+  private_instances/<scope_key>/<agent_name>/
     workspace/
     context/
     memory/
@@ -235,7 +246,7 @@ The recommended layout is:
 ```
 
 Concrete providers may realize the same contract through mounts, path overrides, bind propagation, or other provider-specific mechanisms.
-If a runtime needs direct filesystem access to agent state, it must mount or otherwise resolve the same canonical agent state root used by every other runtime for that agent.
+If a runtime needs direct filesystem access to durable state, it must mount or otherwise resolve the same canonical state root used by every other runtime for that agent or private instance.
 Worker-local copies of agent files are not authoritative.
 The worker runtime root should remain the home for caches, virtualenvs, scratch files, and provider metadata.
 Non-secret tool init overrides such as `base_dir` are allowed only as a narrow transport mechanism for pointing tools at the canonical agent workspace.
@@ -246,21 +257,21 @@ For `user`, the runtime may intentionally see more than one agent root, but only
 
 ## Memory Design
 
-All agent memory backends must resolve through the canonical agent state root.
+All agent memory backends must resolve through the canonical state root for the addressed agent or private instance.
 File-backed memory, mem0-backed state, and any future worker-editable memory backends must not fork by worker scope.
 Prompt assembly and tool execution must read the same memory view across `shared`, `user`, `user_agent`, and unscoped dedicated execution.
-Logical scoping inside the memory data model may still exist, but storage authority remains the canonical agent state root.
+Logical scoping inside the memory data model may still exist, but storage authority remains the canonical state root.
 
 ## Sessions And Learning
 
-Sessions, history databases, and learning databases are agent-owned durable state.
-They should resolve from the canonical agent state root rather than from worker runtime roots.
-Workers may cache handles or derived in-memory context, but the authoritative on-disk state is per-agent and shared across scopes.
+Sessions, history databases, and learning databases are canonical durable state.
+They should resolve from the canonical agent or private-instance state root rather than from worker runtime roots.
+Workers may cache handles or derived in-memory context, but the authoritative on-disk state is shared by every runtime that executes against that same canonical state root.
 If requester-, room-, or thread-level distinctions are needed, they should be encoded in record keys or table contents rather than in filesystem ownership.
 
 ## Concurrency And Consistency
 
-Multiple runtimes may access the same canonical agent state root concurrently.
+Multiple runtimes may access the same canonical state root concurrently.
 This is expected for `user` and `user_agent` scopes.
 The design must make concurrent writes explicit rather than treating them as an edge case.
 Simple workspace files may use last-write-wins semantics when that is acceptable.
@@ -317,7 +328,7 @@ A future external provider or controller can still consume the same contract wit
 ## Local Provider
 
 The local provider should preserve the current behavior of one primary MindRoom runtime plus a shared sandbox-runner that realizes logical workers from worker keys.
-The local provider may realize many logical workers inside one runtime process as long as runtime caches remain isolated by worker key and the canonical agent state root remains shared per agent.
+The local provider may realize many logical workers inside one runtime process as long as runtime caches remain isolated by worker key and canonical state roots remain shared only by the agents or private instances that own them.
 The local provider should support introspection of active workers and cleanup of idle workers for debugging.
 
 ## Kubernetes Provider
@@ -329,7 +340,7 @@ For `shared`, `user_agent`, and unscoped dedicated execution, the Kubernetes bac
 `user` intentionally remains broader and mounts the shared `agents/` tree as a multi-agent workstation mode.
 Idle cleanup currently scales workers to zero while preserving state and deletes the per-worker Service.
 The long-term architecture may still move this behavior behind an external controller, but that is no longer a prerequisite for shipping the current provider model.
-Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical agent state roots it executes against, as well as an authenticated internal endpoint.
+Each Kubernetes worker still needs durable runtime storage for caches plus access to the canonical state roots it executes against, as well as an authenticated internal endpoint.
 
 ## Provider Interface Contract
 
@@ -371,12 +382,13 @@ If background execution is later supported, worker metadata should track process
 
 ## State Initialization Policy
 
-Adopting worker scope must not create a new authoritative copy of agent state.
-The system should preserve one canonical agent state root regardless of which runtime scope executes the tools.
+Adopting worker scope must not create a new authoritative copy of state.
+The system should preserve one canonical state root for the addressed agent or realized private instance regardless of which runtime scope executes the tools.
 
 The initialization rules are:
 
-- Switching an agent between `shared`, `user`, `user_agent`, and unscoped dedicated execution keeps the same canonical agent state root.
+- Switching a non-private agent between `shared`, `user`, `user_agent`, and unscoped dedicated execution keeps the same canonical agent state root.
+- Switching runtimes for a realized private instance keeps the same canonical private-instance state root.
 - Agent-owned files must be addressed directly inside the canonical agent workspace, with no bootstrap copies or alternate authoritative locations.
 - Worker runtime roots may always be recreated from scratch.
 - Existing shared agent storage should be the migration target whenever a scoped implementation previously forked state by worker key.
@@ -500,7 +512,7 @@ Phase 2 remains the correctness phase.
 Phase 2 already delivered:
 
 - Canonical agent-state resolution that is independent of worker scope.
-- Routing `context_files`, workspace files, file-backed memory, mem0-backed state, sessions, and learning through that canonical agent state root.
+- Routing `context_files`, workspace files, file-backed memory, mem0-backed state, sessions, and learning through the canonical state root for the addressed agent or private instance.
 - Separation of canonical agent state from worker runtime caches, virtualenvs, scratch files, and provider metadata.
 
 Phase 2 remaining work is:

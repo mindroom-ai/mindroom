@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
+from mindroom.tool_system.worker_routing import visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -721,19 +721,22 @@ class KubernetesResourceManager:
         return self._owner_reference
 
     def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
-        storage_root = Path(self.config.storage_mount_path)
-        visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
-        if not visible_agent_roots:
+        mounted_storage_root = Path(self.config.storage_mount_path)
+        visible_state_roots = visible_state_roots_for_worker_key(mounted_storage_root, worker_key)
+        local_visible_state_roots = visible_state_roots_for_worker_key(self.storage_root, worker_key)
+        if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
             msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
             raise WorkerBackendError(msg)
+        for local_state_root in local_visible_state_roots:
+            local_state_root.mkdir(parents=True, exist_ok=True)
 
         mounts: list[dict[str, object]] = [
             {
                 "name": "worker-storage",
-                "mountPath": str(agent_root),
-                "subPath": str(agent_root.relative_to(storage_root)),
+                "mountPath": str(state_root),
+                "subPath": str(state_root.relative_to(mounted_storage_root)),
             }
-            for agent_root in visible_agent_roots
+            for state_root in visible_state_roots
         ]
         mounts.append(
             {

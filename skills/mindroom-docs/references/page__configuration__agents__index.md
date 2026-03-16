@@ -175,7 +175,7 @@ Use `user_agent` if you need per-agent filesystem isolation.
 
 ### Where Agent Data Lives
 
-Each agent stores all its data in one directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated — it does **not** change where the agent's data lives. All runtimes for the same agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access.
+Agents without `private` store all their data in one canonical directory: `agents/<name>/` (context files, workspace, memory, sessions, learning). Changing `worker_scope` changes how tool runtimes are isolated. It does **not** change where that non-private agent's data lives. All runtimes for the same non-private agent read and write the same storage directory. If multiple runtimes run concurrently, files and databases in that directory must tolerate concurrent access. Agents that use `private` are different. They materialize one canonical state root per requester-scoped private instance under `private_instances/<scope-key>/<agent>/`. Workers mount those canonical private-instance roots. They do not own them.
 
 The dashboard credential UI only works for unscoped agents and agents with `worker_scope=shared`. Agents using `user` or `user_agent` manage credentials through their worker runtime instead.
 
@@ -231,22 +231,22 @@ mind_template/
 └── memory/
 ```
 
-In the example above, each requester gets their own effective `mind_data/` root under the worker-owned state root for that request. That private root is not created next to `config.yaml`. It lives inside the runtime state owned by the effective `private.per` worker boundary. For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
+In the example above, each requester gets their own effective `mind_data/` root under a canonical private-instance state root in shared storage. That private root is not created next to `config.yaml`. It is not stored under `workers/<worker>/`. Workers mount the same canonical private-instance root when they execute that requester scope. For a `mind` agent with `private.per: user`, different users get different private `mind_data/` trees even though the agent definition is shared.
 
 ### Private Fields
 
 | Field                   | Type                                   | Default             | Description                                                                                                                                                                                                                                 |
 | ----------------------- | -------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `private.per`           | `user`, `user_agent`, or `room_thread` | *required*          | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope                                                                                                                                |
-| `private.root`          | string                                 | `<agent_name>_data` | Private root name under the effective worker-owned state root. Must be a relative path and cannot escape with `..`                                                                                                                          |
+| `private.root`          | string                                 | `<agent_name>_data` | Private root name under the canonical private-instance state root. Must be a relative path and cannot escape with `..`                                                                                                                      |
 | `private.template_dir`  | string                                 | `null`              | Optional local directory copied recursively into each private root on first use. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error on first use if the directory does not exist |
 | `private.context_files` | list                                   | `null`              | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it                                                                                                        |
 | `private.knowledge`     | object                                 | `null`              | Optional requester-local knowledge indexed from inside the private root. See [Knowledge Bases](https://docs.mindroom.chat/knowledge/#private-agent-knowledge)                                                                               |
 
 ### Runtime Behavior
 
-1. MindRoom resolves the worker-owned state root from `private.per`.
-1. MindRoom creates the effective private root inside that worker-owned state root.
+1. MindRoom resolves the canonical private-instance state root from `private.per`.
+1. MindRoom creates the effective private root inside that canonical private-instance state root.
 1. If `private.template_dir` is set, MindRoom copies the template directory into the private root without overwriting files that already exist there.
 1. MindRoom loads any `private.context_files` from that private root when the agent is created or reloaded.
 1. If `memory_backend: file` is enabled, MindRoom uses that same private root as the file-memory root for that requester.

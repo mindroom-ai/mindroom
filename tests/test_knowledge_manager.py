@@ -24,7 +24,11 @@ from mindroom.knowledge.manager import (
     shutdown_knowledge_managers,
 )
 from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    private_instance_state_root_path,
+    resolve_worker_key,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -741,12 +745,12 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
 
 
 @pytest.mark.asyncio
-async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots(
+async def test_private_knowledge_managers_copy_template_and_isolate_private_instance_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Private knowledge should copy the configured template into requester-scoped roots."""
+    """Private knowledge should copy the configured template into canonical requester-scoped roots."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -819,8 +823,22 @@ async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots
         assert alice_worker_key is not None
         assert bob_worker_key is not None
 
-        alice_workspace = worker_root_path(tmp_path, alice_worker_key) / "mind_data"
-        bob_workspace = worker_root_path(tmp_path, bob_worker_key) / "mind_data"
+        alice_workspace = (
+            private_instance_state_root_path(
+                tmp_path,
+                worker_key=alice_worker_key,
+                agent_name="mind",
+            )
+            / "mind_data"
+        )
+        bob_workspace = (
+            private_instance_state_root_path(
+                tmp_path,
+                worker_key=bob_worker_key,
+                agent_name="mind",
+            )
+            / "mind_data"
+        )
         assert alice_manager.knowledge_path == (alice_workspace / "memory").resolve()
         assert bob_manager.knowledge_path == (bob_workspace / "memory").resolve()
         assert (alice_workspace / "SOUL.md").exists()
@@ -887,7 +905,15 @@ async def test_private_knowledge_single_file_target_indexes_without_creating_dir
 
         worker_key = resolve_worker_key("user", identity)
         assert worker_key is not None
-        knowledge_file = worker_root_path(tmp_path, worker_key) / "mind_data" / "USER.md"
+        knowledge_file = (
+            private_instance_state_root_path(
+                tmp_path,
+                worker_key=worker_key,
+                agent_name="mind",
+            )
+            / "mind_data"
+            / "USER.md"
+        )
 
         assert manager.knowledge_path == knowledge_file.resolve()
         assert knowledge_file.is_file()

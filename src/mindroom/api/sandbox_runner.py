@@ -39,7 +39,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
     tool_execution_identity,
-    visible_agent_state_roots_for_worker_key,
+    visible_state_roots_for_worker_key,
     worker_dir_name,
 )
 from mindroom.workers.backend import WorkerBackendError
@@ -686,19 +686,19 @@ def _resolve_worker_base_dir(
         msg = "base_dir must be a string path."
         raise TypeError(msg)
 
-    visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
+    visible_state_roots = visible_state_roots_for_worker_key(storage_root, worker_key)
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
         candidate = raw_path.resolve()
-    elif visible_agent_roots:
+    elif visible_state_roots:
         candidate = (shared_root / raw_path).resolve()
     else:
-        msg = f"base_dir requires a resolved worker key with visible agent roots: {worker_key}"
+        msg = f"base_dir requires a resolved worker key with visible state roots: {worker_key}"
         raise ValueError(msg)
 
-    allowed_roots = (paths.root.resolve(), *visible_agent_roots)
+    allowed_roots = (paths.root.resolve(), *visible_state_roots)
     if not any(candidate.is_relative_to(root) for root in allowed_roots):
-        msg = f"base_dir must stay inside the allowed agent roots or worker root: {requested_base_dir}"
+        msg = f"base_dir must stay inside the allowed state roots or worker root: {requested_base_dir}"
         raise ValueError(msg)
 
     return candidate

@@ -19,6 +19,7 @@ _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _AGENT_WORKSPACE_DIRNAME = "workspace"
+_PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "google",
@@ -252,7 +253,7 @@ def worker_dir_name(worker_key: str) -> str:
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
-    """Return the persistent state root path for a worker key."""
+    """Return the persistent runtime root path for a worker key."""
     resolved_base_path = shared_storage_root(base_storage_path)
     if _is_resolved_worker_root(resolved_base_path, worker_key):
         return resolved_base_path
@@ -281,9 +282,34 @@ def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
     return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
 
 
+def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -> Path:
+    """Return the canonical shared root for one worker-scoped private-instance namespace."""
+    resolved_base_path = shared_storage_root(base_storage_path)
+    if _is_resolved_private_instance_scope_root(resolved_base_path, worker_key):
+        return resolved_base_path
+    return resolved_base_path / _PRIVATE_INSTANCE_ROOT_DIRNAME / worker_dir_name(worker_key)
+
+
+def private_instance_state_root_path(
+    base_storage_path: Path,
+    *,
+    worker_key: str,
+    agent_name: str,
+) -> Path:
+    """Return the canonical durable state root for one private agent instance."""
+    return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
+
+
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
     resolved_path = path.expanduser().resolve()
     return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
+
+
+def _is_resolved_private_instance_scope_root(path: Path, worker_key: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == _PRIVATE_INSTANCE_ROOT_DIRNAME and resolved_path.name == worker_dir_name(
+        worker_key,
+    )
 
 
 def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
@@ -291,25 +317,32 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def visible_agent_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
-    """Return the canonical agent-state roots a worker key is allowed to see by default.
+def visible_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
+    """Return the canonical durable state roots a worker key is allowed to see by default.
 
-    `shared`, `user_agent`, `room_thread`, and unscoped dedicated workers are
-    agent-isolated and
-    therefore only see the addressed agent root.
-    `user` is intentionally broader and sees the shared `agents/` tree because it
-    acts as a per-requester multi-agent workstation.
+    Shared agent roots remain canonical for normal agents.
+    Private-instance roots live under a separate shared-storage namespace keyed by
+    worker scope so they are durable without becoming worker-owned state.
+    `user` intentionally sees the shared `agents/` tree plus its own
+    private-instance namespace because it acts as a per-requester multi-agent
+    workstation.
     """
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
         return ()
     if scope == "user":
-        return (shared_storage_root(base_storage_path) / "agents",)
+        return (
+            shared_storage_root(base_storage_path) / "agents",
+            private_instance_scope_root_path(base_storage_path, worker_key),
+        )
 
     agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
-    return (agent_state_root_path(base_storage_path, agent_name),)
+    visible_roots = [agent_state_root_path(base_storage_path, agent_name)]
+    if scope in {"user_agent", "room_thread"}:
+        visible_roots.append(private_instance_scope_root_path(base_storage_path, worker_key))
+    return tuple(visible_roots)
 
 
 def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:

@@ -560,7 +560,7 @@ def test_kubernetes_backend_keeps_shared_storage_root_for_custom_worker_prefix()
 
 
 def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
-    """User-scope dedicated workers intentionally keep broad agent visibility."""
+    """User-scope workers should see shared agents plus their own private-instance namespace."""
     backend, apps_api, _core_api = _backend()
     worker_key = "v1:tenant-123:user:@alice:example.org"
 
@@ -570,8 +570,10 @@ def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key)}"
+    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
 
     assert mount_paths["/app/worker/agents"] == "agents"
+    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key)}"
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/credentials" not in mount_paths
     assert "/app/worker/.shared_credentials" not in mount_paths
