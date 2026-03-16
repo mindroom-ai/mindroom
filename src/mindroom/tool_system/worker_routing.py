@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-WorkerScope = Literal["shared", "user", "user_agent", "room_thread"]
-ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "room_thread", "unscoped"]
+WorkerScope = Literal["shared", "user", "user_agent"]
+ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
@@ -138,10 +138,6 @@ def resolve_worker_key(
         if requester_key is None:
             return None
         worker_key = f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
-    elif worker_scope == "room_thread":
-        room_key = _normalize_worker_key_part(identity.room_id or "default")
-        thread_key = _normalize_worker_key_part(identity.resolved_thread_id or identity.thread_id or "main")
-        worker_key = f"v1:{tenant_key}:room_thread:{room_key}:{thread_key}:{effective_agent_name}"
     else:
         msg = f"Unknown worker scope: {worker_scope}"
         raise ValueError(msg)
@@ -181,7 +177,7 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     if len(parts) < 4 or parts[0] != "v1":
         return None
     scope = parts[2]
-    if scope not in {"shared", "user", "user_agent", "room_thread", "unscoped"}:
+    if scope not in {"shared", "user", "user_agent", "unscoped"}:
         return None
     return cast("ResolvedWorkerKeyScope", scope)
 
@@ -197,7 +193,6 @@ def worker_key_agent_name(worker_key: str) -> str | None:
         "shared": 4,
         "unscoped": 4,
         "user_agent": 5,
-        "room_thread": 6,
     }
     min_parts = min_parts_by_scope.get(scope)
     if min_parts is None or len(parts) < min_parts:
@@ -344,7 +339,7 @@ def visible_state_roots_for_worker_key(
     agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
-    if scope in {"user_agent", "room_thread"} and agent_name in private_agent_names:
+    if scope == "user_agent" and agent_name in private_agent_names:
         return (private_instance_scope_root_path(base_storage_path, worker_key),)
     return (agent_state_root_path(base_storage_path, agent_name),)
 

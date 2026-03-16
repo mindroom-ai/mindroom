@@ -110,7 +110,7 @@ Requester-local knowledge is enabled only when you explicitly configure `private
 `private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`.
 `private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself.
 MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
-For isolating scopes such as `user`, `user_agent`, and `room_thread`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
+For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
 This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
 

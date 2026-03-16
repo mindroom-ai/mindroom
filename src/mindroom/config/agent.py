@@ -13,7 +13,7 @@ from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
-PrivateWorkerScope = Literal["user", "user_agent", "room_thread"]
+PrivateWorkerScope = Literal["user", "user_agent"]
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db"})
 
 

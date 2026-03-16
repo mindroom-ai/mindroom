@@ -446,7 +446,7 @@ class KnowledgeManager:
         self.storage_path = self.storage_path.resolve()
         self.knowledge_path = self.knowledge_path.resolve()
         _ensure_knowledge_directory_ready(self.knowledge_path)
-        self._refresh_settings(self.config, self.storage_path, self.knowledge_path)
+        self._set_settings(self.config, self.runtime_paths, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
             self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
         ).resolve()
@@ -461,8 +461,15 @@ class KnowledgeManager:
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
-    def _refresh_settings(self, config: Config, storage_path: Path, knowledge_path: Path) -> None:
+    def _set_settings(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        storage_path: Path,
+        knowledge_path: Path,
+    ) -> None:
         self.config = config
+        self.runtime_paths = runtime_paths
         self.storage_path = storage_path
         self.knowledge_path = knowledge_path.resolve()
         self._settings = _settings_key(config, storage_path, self.base_id, self.knowledge_path)
@@ -472,6 +479,17 @@ class KnowledgeManager:
             self.base_id,
             self.knowledge_path,
         )
+
+    def _refresh_settings(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        storage_path: Path,
+        knowledge_path: Path,
+    ) -> None:
+        self._set_settings(config, runtime_paths, storage_path, knowledge_path)
+        if isinstance(self._knowledge.vector_db, ChromaDb):
+            self._knowledge.vector_db.embedder = _create_embedder(config, runtime_paths)
 
     def _knowledge_source_path(self) -> Path:
         knowledge_path = self.knowledge_path
@@ -1138,6 +1156,7 @@ class KnowledgeManager:
 _knowledge_managers: dict[KnowledgeManagerKey, KnowledgeManager] = {}
 _static_knowledge_manager_keys: dict[str, KnowledgeManagerKey] = {}
 _scoped_private_manager_lru: OrderedDict[KnowledgeManagerKey, None] = OrderedDict()
+_knowledge_manager_init_locks: dict[KnowledgeManagerKey, asyncio.Lock] = {}
 _SCOPED_PRIVATE_MANAGER_CACHE_LIMIT = 128
 
 
@@ -1153,6 +1172,10 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
     if manager._git_config() is not None:
         return await manager.sync_git_repository()
     return await manager.sync_indexed_files()
+
+
+def _knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
+    return _knowledge_manager_init_locks.setdefault(key, asyncio.Lock())
 
 
 async def _touch_scoped_private_manager_key(
@@ -1184,61 +1207,62 @@ async def _ensure_knowledge_manager(
     incremental_sync_on_access: bool,
     reindex_on_create: bool,
 ) -> KnowledgeManager:
-    existing = _knowledge_managers.get(key)
-    if existing is not None and existing.matches(config, storage_path, knowledge_path):
-        existing._refresh_settings(config, storage_path, knowledge_path)
-        if incremental_sync_on_access:
-            await _sync_manager_without_full_reindex(existing)
-        if start_background_watchers:
-            await existing.start_watcher()
-        await _touch_scoped_private_manager_key(key, config, base_id)
-        return existing
+    async with _knowledge_manager_init_lock(key):
+        existing = _knowledge_managers.get(key)
+        if existing is not None and existing.matches(config, storage_path, knowledge_path):
+            existing._refresh_settings(config, runtime_paths, storage_path, knowledge_path)
+            if incremental_sync_on_access:
+                await _sync_manager_without_full_reindex(existing)
+            if start_background_watchers:
+                await existing.start_watcher()
+            await _touch_scoped_private_manager_key(key, config, base_id)
+            return existing
 
-    full_reindex_required = (
-        existing.needs_full_reindex(config, storage_path, knowledge_path) if existing is not None else False
-    )
-    if existing is not None:
-        await existing.stop_watcher()
+        full_reindex_required = (
+            existing.needs_full_reindex(config, storage_path, knowledge_path) if existing is not None else False
+        )
+        if existing is not None:
+            await existing.stop_watcher()
 
-    manager = KnowledgeManager(
-        base_id=base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=storage_path,
-        knowledge_path=knowledge_path,
-    )
-    if reindex_on_create or full_reindex_required:
-        await manager.initialize()
-    else:
-        sync_result = await _sync_manager_without_full_reindex(manager)
-        sync_log_context: dict[str, object] = {
-            "base_id": base_id,
-            "path": str(manager.knowledge_path),
-        }
-        if manager._git_config() is not None:
-            sync_log_context.update(
-                {
-                    "updated": sync_result["updated"],
-                    "changed_count": sync_result["changed_count"],
-                    "removed_count": sync_result["removed_count"],
-                },
-            )
+        manager = KnowledgeManager(
+            base_id=base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=storage_path,
+            knowledge_path=knowledge_path,
+        )
+        if reindex_on_create or full_reindex_required:
+            await manager.initialize()
         else:
-            sync_log_context.update(
-                {
-                    "loaded_count": sync_result["loaded_count"],
-                    "indexed_count": sync_result["indexed_count"],
-                    "removed_count": sync_result["removed_count"],
-                },
-            )
-        logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
+            sync_result = await _sync_manager_without_full_reindex(manager)
+            sync_log_context: dict[str, object] = {
+                "base_id": base_id,
+                "path": str(manager.knowledge_path),
+            }
+            if manager._git_config() is not None:
+                sync_log_context.update(
+                    {
+                        "updated": sync_result["updated"],
+                        "changed_count": sync_result["changed_count"],
+                        "removed_count": sync_result["removed_count"],
+                    },
+                )
+            else:
+                sync_log_context.update(
+                    {
+                        "loaded_count": sync_result["loaded_count"],
+                        "indexed_count": sync_result["indexed_count"],
+                        "removed_count": sync_result["removed_count"],
+                    },
+                )
+            logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
 
-    if start_background_watchers:
-        await manager.start_watcher()
+        if start_background_watchers:
+            await manager.start_watcher()
 
-    _knowledge_managers[key] = manager
-    await _touch_scoped_private_manager_key(key, config, base_id)
-    return manager
+        _knowledge_managers[key] = manager
+        await _touch_scoped_private_manager_key(key, config, base_id)
+        return manager
 
 
 async def ensure_agent_knowledge_managers(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -37,7 +38,7 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
-from mindroom.workspaces import resolve_agent_workspace
+from mindroom.workspaces import copy_workspace_template, resolve_agent_workspace
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -436,6 +437,57 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_
     assert workspace is not None
     assert workspace.root == expected_workspace
     assert not (runtime_paths.config_dir / "mind_data").exists()
+
+
+def test_private_workspace_template_preserves_metadata_and_initializes_only_once(tmp_path: Path) -> None:
+    """Private templates should preserve file metadata and avoid repeated rescaffolding."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    script_path = template_dir / "bootstrap.sh"
+    script_path.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    script_path.chmod(0o755)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with patch("mindroom.workspaces.copy_workspace_template", wraps=copy_workspace_template) as copy_template:
+        first_workspace = resolve_agent_workspace(
+            "general",
+            bound_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            create=True,
+        )
+        second_workspace = resolve_agent_workspace(
+            "general",
+            bound_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            create=True,
+        )
+
+    assert first_workspace is not None
+    assert second_workspace is not None
+    assert first_workspace.root == second_workspace.root
+    assert copy_template.call_count == 1
+    copied_script = first_workspace.root / "bootstrap.sh"
+    assert copied_script.exists()
+    assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -968,10 +1020,8 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
     )
 
 
-@pytest.mark.parametrize("worker_scope", ["user_agent", "room_thread"])
-def test_visible_state_roots_for_private_scoped_workers_hide_shared_agent_root(
+def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(
     tmp_path: Path,
-    worker_scope: WorkerScope,
 ) -> None:
     """Private requester-scoped workers should only see their private-instance namespace."""
     identity = ToolExecutionIdentity(
@@ -984,7 +1034,7 @@ def test_visible_state_roots_for_private_scoped_workers_hide_shared_agent_root(
         session_id="session-1",
     )
 
-    worker_key = resolve_worker_key(worker_scope, identity, agent_name="mind")
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="mind")
 
     assert worker_key is not None
     assert visible_state_roots_for_worker_key(
@@ -1711,6 +1761,32 @@ def test_config_rejects_invalid_private_root_values(root: str, expected_message:
                         per="user",
                         root=root,
                     ),
+                ),
+            },
+        )
+
+
+def test_config_rejects_removed_room_thread_private_scope() -> None:
+    """Private requester scopes should no longer accept room-thread isolation."""
+    with pytest.raises(ValidationError, match="Input should be 'user' or 'user_agent'"):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=cast("AgentPrivateConfig", {"per": "room_thread"}),
+                ),
+            },
+        )
+
+
+def test_config_rejects_removed_room_thread_worker_scope() -> None:
+    """Worker scope should no longer accept room-thread reuse."""
+    with pytest.raises(ValidationError, match="Input should be 'shared', 'user' or 'user_agent'"):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    worker_scope=cast("WorkerScope", "room_thread"),
                 ),
             },
         )

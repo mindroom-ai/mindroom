@@ -62,7 +62,7 @@ def copy_workspace_template(
         if destination_path.exists() and not force:
             continue
         destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_path, destination_path)
+        shutil.copy2(source_path, destination_path)
 
 
 def ensure_workspace_template(
@@ -207,10 +207,13 @@ def _resolve_workspace(
         raise ValueError(msg)
 
     root = (state_storage_path / workspace.root_path).resolve()
+    template_dir = workspace.template_dir
+    should_initialize_template = template_dir is not None and (not root.exists() or not any(root.iterdir()))
     if create:
         root.mkdir(parents=True, exist_ok=True)
-        if workspace.template_dir is not None:
-            copy_workspace_template(root, template_dir=workspace.template_dir)
+        if should_initialize_template:
+            assert template_dir is not None
+            copy_workspace_template(root, template_dir=template_dir)
 
     context_files = tuple((root / relative_path).resolve() for relative_path in workspace.context_files)
     file_memory_path = (root / workspace.file_memory_path).resolve() if workspace.file_memory_path is not None else None

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
@@ -385,12 +385,7 @@ async def _run_skill_command_tool(
     effective_runtime_paths = (
         runtime_paths
         if storage_path is None or storage_path == runtime_paths.storage_root
-        else RuntimePaths(
-            config_path=runtime_paths.config_path,
-            config_dir=runtime_paths.config_dir,
-            env_path=runtime_paths.env_path,
-            storage_root=storage_path,
-        )
+        else replace(runtime_paths, storage_root=storage_path)
     )
 
     try:

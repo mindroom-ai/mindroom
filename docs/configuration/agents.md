@@ -144,7 +144,7 @@ agents:
 | `max_tool_calls_from_history` | int | `null` | Limit tool call messages replayed from history (`null` = no limit) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages. Inherits from `defaults.show_tool_calls` (default: `true`). When `false`, inline markers and `io.mindroom.tool_trace` are omitted from sent Matrix message content. Note: this flag is not currently enforced by the OpenAI-compatible `/v1/chat/completions` path. |
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
-| `worker_scope` | string | `null` | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. `room_thread`: one per room thread. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` becomes the worker scope for that agent |
+| `worker_scope` | string | `null` | How sandbox runtimes are shared. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` becomes the worker scope for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
 | `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
 
@@ -272,7 +272,7 @@ For a `mind` agent with `private.per: user`, different users get different priva
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `private.per` | `user`, `user_agent`, or `room_thread` | *required* | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope |
+| `private.per` | `user` or `user_agent` | *required* | Which requester boundary gets its own private instance. This also becomes the agent's effective worker scope |
 | `private.root` | string | `<agent_name>_data` | Private root name under the canonical private-instance state root. Must be a relative path and cannot escape with `..` |
 | `private.template_dir` | string | `null` | Optional local directory copied recursively into each private root on first use. Relative paths are resolved from `config.yaml`, and absolute paths are also allowed. MindRoom raises an error on first use if the directory does not exist |
 | `private.context_files` | list | `null` | Optional files loaded into role context from inside the private root. Each path is relative to the private root and cannot escape it |

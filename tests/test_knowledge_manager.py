@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from pydantic import ValidationError
@@ -1140,6 +1140,127 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
 
 
 @pytest.mark.asyncio
+async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused managers should adopt the latest runtime paths on config/runtime refresh."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config_a = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "cfg-a" / "config.yaml", tmp_path / "storage"),
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "cfg-b" / "config.yaml", tmp_path / "storage"),
+    )
+
+    try:
+        managers_a = await initialize_knowledge_managers(
+            config_a,
+            runtime_paths_for(config_a),
+            reindex_on_create=False,
+        )
+        managers_b = await initialize_knowledge_managers(
+            config_b,
+            runtime_paths_for(config_b),
+            reindex_on_create=False,
+        )
+
+        assert managers_a["docs"] is managers_b["docs"]
+        assert managers_b["docs"].runtime_paths.env_path == runtime_paths_for(config_b).env_path
+        assert managers_b["docs"].runtime_paths.config_path == runtime_paths_for(config_b).config_path
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_ensure_agent_knowledge_managers_initializes_private_scope_once_under_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Concurrent first use should not initialize the same scoped private manager twice."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = Config(
+        agents={
+            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
+        },
+        models={},
+    )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    initialize_calls = 0
+
+    async def fake_initialize(_self: KnowledgeManager) -> None:
+        nonlocal initialize_calls
+        initialize_calls += 1
+        started.set()
+        await release.wait()
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+
+    try:
+        with patch.object(KnowledgeManager, "initialize", new=fake_initialize):
+            first = asyncio.create_task(
+                ensure_agent_knowledge_managers(
+                    "mind",
+                    config,
+                    runtime_paths_for(config),
+                    execution_identity=identity,
+                    reindex_on_create=True,
+                ),
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                ensure_agent_knowledge_managers(
+                    "mind",
+                    config,
+                    runtime_paths_for(config),
+                    execution_identity=identity,
+                    reindex_on_create=True,
+                ),
+            )
+            await asyncio.sleep(0)
+            release.set()
+            first_result, second_result = await asyncio.gather(first, second)
+
+        assert initialize_calls == 1
+        assert first_result[private_base_id] is second_result[private_base_id]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_knowledge_managers_removes_private_scoped_managers_when_private_knowledge_is_removed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1237,7 +1358,7 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
                 display_name="Mind",
                 memory_backend="file",
                 private=AgentPrivateConfig(
-                    per="room_thread",
+                    per="user_agent",
                     root="mind_data",
                     template_dir=str(template_dir),
                     context_files=["SOUL.md"],
@@ -1255,13 +1376,13 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
         ToolExecutionIdentity(
             channel="matrix",
             agent_name="mind",
-            requester_id="@alice:example.org",
+            requester_id=requester_id,
             room_id="!room:example.org",
-            thread_id=thread_id,
-            resolved_thread_id=thread_id,
-            session_id=f"session-{thread_id}",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id=f"session-{requester_id}",
         )
-        for thread_id in ("thread-1", "thread-2", "thread-3")
+        for requester_id in ("@alice:example.org", "@bob:example.org", "@carol:example.org")
     ]
 
     try:
@@ -1323,7 +1444,7 @@ async def test_request_bound_private_manager_survives_cache_eviction(
                 display_name="Mind",
                 memory_backend="file",
                 private=AgentPrivateConfig(
-                    per="room_thread",
+                    per="user_agent",
                     root="mind_data",
                     template_dir=str(template_dir),
                     context_files=["SOUL.md"],
@@ -1342,8 +1463,8 @@ async def test_request_bound_private_manager_survives_cache_eviction(
         agent_name="mind",
         requester_id="@alice:example.org",
         room_id="!room:example.org",
-        thread_id="thread-alice",
-        resolved_thread_id="thread-alice",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
         session_id="session-alice",
     )
     bob_identity = ToolExecutionIdentity(
@@ -1351,8 +1472,8 @@ async def test_request_bound_private_manager_survives_cache_eviction(
         agent_name="mind",
         requester_id="@bob:example.org",
         room_id="!room:example.org",
-        thread_id="thread-bob",
-        resolved_thread_id="thread-bob",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
         session_id="session-bob",
     )
 

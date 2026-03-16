@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.tools import Toolkit
@@ -475,6 +476,61 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
         "coding": {"base_dir": str(expected_workspace.root)},
         "shell": {"base_dir": str(expected_workspace.root)},
     }
+
+
+@pytest.mark.asyncio
+async def test_skill_command_tool_dispatch_preserves_runtime_env_when_storage_root_changes(
+    tmp_path: Path,
+) -> None:
+    """Skill dispatch should keep runtime env values when rebinding only the storage root."""
+
+    class DemoTools(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="demo_tools", tools=[self.demo])
+
+        def demo(self, command: str, commandName: str, skillName: str) -> str:  # noqa: N803
+            return f"{commandName}:{skillName}:{command}"
+
+    captured_runtime_paths: list[RuntimePaths] = []
+
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: RuntimePaths, **_kwargs: object) -> DemoTools:
+        assert tool_name == "demo_toolkit"
+        captured_runtime_paths.append(runtime_paths)
+        return DemoTools()
+
+    config = _base_config(["dispatch"])
+    config.agents["code"].tools = ["demo_toolkit"]
+    config.agents["code"].include_default_tools = False
+    config.defaults.tools = []
+    original_runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config" / "config.yaml",
+        config_dir=tmp_path / "config",
+        env_path=tmp_path / "config" / ".env",
+        storage_root=tmp_path / "primary-storage",
+        process_env={"CUSTOMER_ID": "tenant-123", "ACCOUNT_ID": "account-456"},
+        env_file_values={"OPENAI_API_KEY": "sk-test"},
+    )
+
+    with patch("mindroom.agents.get_tool_by_name", side_effect=fake_get_tool_by_name):
+        result = await _run_skill_command_tool(
+            config=config,
+            runtime_paths=original_runtime_paths,
+            agent_name="code",
+            storage_path=tmp_path / "alternate-storage",
+            command_tool="demo",
+            skill_name="dispatch",
+            args_text="hello",
+            requester_user_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+        )
+
+    assert result == "skill:dispatch:hello"
+    assert len(captured_runtime_paths) == 1
+    assert captured_runtime_paths[0].storage_root == tmp_path / "alternate-storage"
+    assert captured_runtime_paths[0].env_value("CUSTOMER_ID") == "tenant-123"
+    assert captured_runtime_paths[0].env_value("ACCOUNT_ID") == "account-456"
+    assert captured_runtime_paths[0].env_value("OPENAI_API_KEY") == "sk-test"
 
 
 def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_workspace(
