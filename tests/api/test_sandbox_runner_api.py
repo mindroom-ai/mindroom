@@ -1746,6 +1746,32 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
     assert worker_file.read_text(encoding="utf-8") == "hello from inferred worker"
 
 
+def test_dedicated_worker_mode_does_not_treat_empty_worker_key_as_missing(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker mode should not rewrite explicit empty worker keys."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "dedicated-worker"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "read_file",
+            "args": ["note.txt"],
+            "kwargs": {},
+            "worker_key": "",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
+
+
 def test_dedicated_worker_mode_rejects_mismatched_worker_key(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

@@ -174,7 +174,9 @@ def normalize_request_worker_key(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Fill in the pinned worker key for dedicated worker pods when omitted."""
-    return worker_key or sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    if worker_key is not None:
+        return worker_key
+    return sandbox_exec.runner_dedicated_worker_key(runtime_paths)
 
 
 def resolve_worker_base_dir(
