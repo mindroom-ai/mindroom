@@ -101,16 +101,6 @@ def _session_key(agent_name: str, session_id: str, worker_key: str | None = None
     return f"{agent_name}:{worker_key}:{session_id}"
 
 
-def _entry_agent_scope_key(entry: _FlushSessionEntry) -> str | None:
-    agent_name = entry.get("agent_name")
-    if not isinstance(agent_name, str):
-        return None
-    worker_key = entry.get("worker_key")
-    if isinstance(worker_key, str):
-        return f"{agent_name}:{worker_key}"
-    return agent_name
-
-
 def _serialize_execution_identity(identity: ToolExecutionIdentity) -> _SerializedExecutionIdentity:
     return {
         "channel": identity.channel,
@@ -658,10 +648,7 @@ class MemoryAutoFlushWorker:
             if not isinstance(agent_name, str) or not isinstance(session_id, str):
                 continue
 
-            agent_scope_key = _entry_agent_scope_key(entry)
-            if agent_scope_key is None:
-                continue
-            if per_agent_count.get(agent_scope_key, 0) >= max_per_agent:
+            if per_agent_count.get(agent_name, 0) >= max_per_agent:
                 continue
             entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
 
@@ -695,7 +682,7 @@ class MemoryAutoFlushWorker:
                 continue
 
             selected_keys.append(key)
-            per_agent_count[agent_scope_key] = per_agent_count.get(agent_scope_key, 0) + 1
+            per_agent_count[agent_name] = per_agent_count.get(agent_name, 0) + 1
             with _STATE_LOCK:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)

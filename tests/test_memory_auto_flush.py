@@ -597,14 +597,47 @@ def test_mark_dirty_separates_private_agent_sessions_by_requester_scope(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_worker_batch_limits_are_scoped_per_private_requester(
+async def test_worker_batch_limits_still_cap_private_agents_per_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Different private requester scopes should not compete for one per-agent batch slot."""
-    config = _private_auto_flush_config(tmp_path)
+    """One private agent must not monopolize a whole auto-flush cycle across requesters."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    role="Persistent private assistant",
+                    rooms=[],
+                    memory_backend="file",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+                "general": AgentConfig(
+                    display_name="General",
+                    role="General assistant",
+                    rooms=[],
+                    memory_backend="file",
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    config.memory.backend = "file"
+    config.memory.auto_flush.enabled = True
+    config.memory.auto_flush.flush_interval_seconds = 1
+    config.memory.auto_flush.idle_seconds = 0
     config.memory.auto_flush.batch.max_sessions_per_cycle = 2
     config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 1
+    config.memory.auto_flush.extractor.max_messages_per_flush = 5
+    config.memory.auto_flush.extractor.max_chars_per_flush = 1000
     alice_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -642,6 +675,12 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
         session_id="session-bob",
         execution_identity=bob_identity,
     )
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="general",
+        session_id="session-general",
+    )
 
     monkeypatch.setattr(
         "mindroom.memory.auto_flush._load_agent_session",
@@ -673,10 +712,15 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     await worker._run_cycle(config)
 
     assert len(writes) == 2
-    assert set(writes) == {
-        ("mind", "@alice:example.org"),
-        ("mind", "@bob:example.org"),
-    }
+    assert ("general", None) in writes
+    assert len([write for write in writes if write[0] == "mind"]) == 1
+    assert set(writes).issubset(
+        {
+            ("general", None),
+            ("mind", "@alice:example.org"),
+            ("mind", "@bob:example.org"),
+        },
+    )
 
 
 def test_load_agent_session_passes_execution_identity_for_private_agents(
