@@ -384,7 +384,6 @@ def build_agent_toolkit(
     """
     agent_config = config.get_agent(agent_name)
     storage_path = runtime_paths.storage_root
-    config_path = runtime_paths.config_path
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
 
@@ -436,13 +435,7 @@ def build_agent_toolkit(
             tool_name,
             workspace_path=tool_init_context.workspace_path,
         ),
-        runtime_overrides={
-            "config_path": config_path,
-            "runtime_paths": runtime_paths,
-            "credentials_manager": credentials_manager,
-            "output_dir": storage_path / "browser",
-            "shared_storage_root": shared_storage_path,
-        },
+        shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         worker_scope=tool_init_context.worker_scope,
         routing_agent_name=agent_name,
