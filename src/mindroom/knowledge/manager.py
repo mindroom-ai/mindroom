@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -84,31 +84,10 @@ def _match_paths(
     return storage_path, knowledge_path
 
 
-def _knowledge_path_kind(
-    configured_path: str,
-    knowledge_path: Path,
-    *,
-    git_enabled: bool,
-) -> Literal["file", "directory", "unknown"]:
-    if knowledge_path.exists():
-        return "file" if knowledge_path.is_file() else "directory"
-    if git_enabled:
-        return "directory"
-    configured_path_obj = Path(configured_path)
-    if configured_path_obj == Path() or configured_path_obj.suffix == "":
-        return "directory"
-    return "unknown"
-
-
-def _ensure_knowledge_path_ready(
-    configured_path: str,
-    knowledge_path: Path,
-    *,
-    git_enabled: bool,
-) -> None:
-    if _knowledge_path_kind(configured_path, knowledge_path, git_enabled=git_enabled) != "directory":
-        knowledge_path.parent.mkdir(parents=True, exist_ok=True)
-        return
+def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
+    if knowledge_path.exists() and not knowledge_path.is_dir():
+        msg = f"Knowledge path {knowledge_path} must be a directory"
+        raise ValueError(msg)
     knowledge_path.mkdir(parents=True, exist_ok=True)
 
 
@@ -386,11 +365,7 @@ def _resolve_effective_knowledge_path(
     if effective_agent_name is None:
         knowledge_path = _resolve_knowledge_path(base_config.path, runtime_paths).resolve()
         if create:
-            _ensure_knowledge_path_ready(
-                base_config.path,
-                knowledge_path,
-                git_enabled=base_config.git is not None,
-            )
+            _ensure_knowledge_directory_ready(knowledge_path)
         return resolved_storage_path, knowledge_path
 
     workspace = resolve_agent_workspace(
@@ -406,11 +381,7 @@ def _resolve_effective_knowledge_path(
 
     knowledge_path = (workspace.root / base_config.path).resolve()
     if create:
-        _ensure_knowledge_path_ready(
-            base_config.path,
-            knowledge_path,
-            git_enabled=base_config.git is not None,
-        )
+        _ensure_knowledge_directory_ready(knowledge_path)
     return resolved_storage_path, knowledge_path
 
 
@@ -474,14 +445,7 @@ class KnowledgeManager:
             raise ValueError(msg)
         self.storage_path = self.storage_path.resolve()
         self.knowledge_path = self.knowledge_path.resolve()
-        _ensure_knowledge_path_ready(
-            base_config.path,
-            self.knowledge_path,
-            git_enabled=base_config.git is not None,
-        )
-        if self._git_config() is not None and self._knowledge_source_is_file():
-            msg = f"Knowledge base '{self.base_id}' uses Git sync and must point to a directory, not a file"
-            raise ValueError(msg)
+        _ensure_knowledge_directory_ready(self.knowledge_path)
         self._refresh_settings(self.config, self.storage_path, self.knowledge_path)
         self._base_storage_path = (
             self.storage_path / "knowledge_db" / _base_storage_key(self.base_id, self.knowledge_path)
@@ -515,29 +479,6 @@ class KnowledgeManager:
             msg = f"Knowledge path for base '{self.base_id}' is not initialized"
             raise RuntimeError(msg)
         return knowledge_path
-
-    def _knowledge_source_kind(self) -> Literal["file", "directory", "unknown"]:
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        return _knowledge_path_kind(
-            base_config.path,
-            self._knowledge_source_path(),
-            git_enabled=base_config.git is not None,
-        )
-
-    def _knowledge_source_is_file(self) -> bool:
-        return self._knowledge_source_kind() == "file"
-
-    def _knowledge_root(self) -> Path:
-        knowledge_path = self._knowledge_source_path()
-        if self._knowledge_source_is_file():
-            return knowledge_path.parent
-        return knowledge_path
-
-    def _knowledge_watch_path(self) -> Path:
-        knowledge_source = self._knowledge_source_path()
-        if self._knowledge_source_kind() == "directory" and knowledge_source.exists():
-            return knowledge_source
-        return knowledge_source.parent
 
     def matches(
         self,
@@ -589,11 +530,8 @@ class KnowledgeManager:
         return any(part.startswith(".") for part in relative_path.parts)
 
     def _include_file(self, file_path: Path) -> bool:
-        if self._knowledge_source_is_file():
-            return file_path.resolve() == self._knowledge_source_path() and file_path.is_file()
-        knowledge_root = self._knowledge_root()
         try:
-            relative_path = file_path.relative_to(knowledge_root)
+            relative_path = file_path.relative_to(self._knowledge_source_path())
         except ValueError:
             return False
         return file_path.is_file() and self._include_relative_path(relative_path.as_posix())
@@ -617,11 +555,10 @@ class KnowledgeManager:
         return not any(_matches_root_glob(relative_path, pattern) for pattern in git_config.exclude_patterns)
 
     async def _run_git(self, args: list[str], *, cwd: Path | None = None) -> str:
-        knowledge_root = self._knowledge_root()
         process = await asyncio.create_subprocess_exec(
             "git",
             *args,
-            cwd=str(cwd or knowledge_root),
+            cwd=str(cwd or self._knowledge_source_path()),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -659,8 +596,8 @@ class KnowledgeManager:
         return {path for path in raw_paths if self._include_relative_path(path)}
 
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
-        knowledge_root = self._knowledge_root()
         runtime_paths = self.runtime_paths
+        knowledge_root = self._knowledge_source_path()
         git_dir = knowledge_root / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
@@ -735,28 +672,18 @@ class KnowledgeManager:
 
     def list_files(self) -> list[Path]:
         """List all files currently present in the knowledge folder."""
-        knowledge_source = self._knowledge_source_path()
-        if not knowledge_source.exists():
+        knowledge_root = self._knowledge_source_path()
+        if not knowledge_root.exists():
             return []
-        if self._knowledge_source_is_file():
-            return [knowledge_source] if self._include_file(knowledge_source) else []
-        knowledge_root = self._knowledge_root()
         return sorted(path for path in knowledge_root.rglob("*") if self._include_file(path))
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
-        knowledge_source = self._knowledge_source_path()
-        knowledge_root = self._knowledge_root()
+        knowledge_root = self._knowledge_source_path()
         candidate = Path(file_path)
         resolved = (
             candidate.expanduser().resolve() if candidate.is_absolute() else (knowledge_root / candidate).resolve()
         )
-
-        if self._knowledge_source_is_file():
-            if resolved != knowledge_source:
-                msg = f"Path {resolved} is outside knowledge target {knowledge_source}"
-                raise ValueError(msg)
-            return resolved
 
         try:
             resolved.relative_to(knowledge_root)
@@ -767,7 +694,7 @@ class KnowledgeManager:
         return resolved
 
     def _relative_path(self, file_path: Path) -> str:
-        return file_path.relative_to(self._knowledge_root()).as_posix()
+        return file_path.relative_to(self._knowledge_source_path()).as_posix()
 
     def _file_signature(self, file_path: Path) -> tuple[int, int]:
         stat = file_path.stat()
@@ -1185,7 +1112,7 @@ class KnowledgeManager:
 
     async def _watch_loop(self) -> None:
         """Watch the knowledge folder for file changes."""
-        async for changes in awatch(self._knowledge_watch_path(), stop_event=self._watch_stop_event):
+        async for changes in awatch(self._knowledge_source_path(), stop_event=self._watch_stop_event):
             if not changes:
                 continue
 

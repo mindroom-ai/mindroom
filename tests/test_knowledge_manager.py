@@ -850,86 +850,6 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
 
 
 @pytest.mark.asyncio
-async def test_private_knowledge_single_file_target_indexes_without_creating_directory(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_private_template_dir: Callable[..., Path],
-) -> None:
-    """Private knowledge paths may point to a single file inside the private root."""
-    _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
-
-    template_dir = build_private_template_dir(
-        files={
-            "USER.md": "Private user profile.\n",
-            "MEMORY.md": "# Memory\n",
-        },
-    )
-    config = Config(
-        agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                private=AgentPrivateConfig(
-                    per="user",
-                    root="mind_data",
-                    template_dir=str(template_dir),
-                    knowledge=AgentPrivateKnowledgeConfig(path="USER.md", watch=False),
-                ),
-            ),
-        },
-        models={},
-    )
-    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
-    assert private_base_id is not None
-
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-
-    try:
-        managers = await ensure_agent_knowledge_managers(
-            "mind",
-            config,
-            runtime_paths_for(config),
-            execution_identity=identity,
-        )
-        manager = managers[private_base_id]
-
-        worker_key = resolve_worker_key("user", identity)
-        assert worker_key is not None
-        knowledge_file = (
-            private_instance_state_root_path(
-                tmp_path,
-                worker_key=worker_key,
-                agent_name="mind",
-            )
-            / "mind_data"
-            / "USER.md"
-        )
-
-        assert manager.knowledge_path == knowledge_file.resolve()
-        assert knowledge_file.is_file()
-        assert manager.list_files() == [knowledge_file.resolve()]
-        assert _DummyChromaDb.metadatas == [
-            {
-                "source_path": "USER.md",
-                "source_mtime_ns": knowledge_file.stat().st_mtime_ns,
-                "source_size": knowledge_file.stat().st_size,
-            },
-        ]
-    finally:
-        await shutdown_knowledge_managers()
-
-
-@pytest.mark.asyncio
 async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassified_as_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -959,10 +879,10 @@ async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassifi
         manager = managers["docs"]
 
         assert docs_path.parent.is_dir()
-        assert not docs_path.exists()
+        assert manager.knowledge_path == docs_path.resolve()
+        assert docs_path.is_dir()
         assert manager.list_files() == []
 
-        docs_path.mkdir(parents=True, exist_ok=True)
         guide_path = docs_path / "guide.md"
         guide_path.write_text("Shared docs.\n", encoding="utf-8")
 

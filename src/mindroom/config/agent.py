@@ -57,9 +57,9 @@ class AgentPrivateKnowledgeConfig(BaseModel):
     )
     path: str | None = Field(
         default=None,
-        description="Path to private knowledge documents relative to the private root",
+        description="Path to a private knowledge directory relative to the private root",
     )
-    watch: bool = Field(default=True, description="Watch the private knowledge path for changes")
+    watch: bool = Field(default=True, description="Watch the private knowledge directory for changes")
     chunk_size: int = Field(
         default=5000,
         ge=128,
