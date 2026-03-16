@@ -1250,7 +1250,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
-            runtime_overrides={"shared_storage_root": Path("/srv/mindroom")},
+            shared_storage_root_path=Path("/srv/mindroom"),
             worker_tools_override=["coding"],
             worker_scope="shared",
             routing_agent_name="general",

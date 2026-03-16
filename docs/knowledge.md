@@ -4,7 +4,8 @@ icon: lucide/book-open
 
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation). Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
+Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
 
 ## How It Works
 
@@ -50,7 +51,8 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time.
+Place files in `./knowledge_docs/` and they'll be indexed automatically on startup.
+When `watch: true`, new or modified files are re-indexed in real time.
 
 ## Configuration
 

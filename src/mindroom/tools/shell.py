@@ -11,6 +11,7 @@ from mindroom.tool_system.metadata import (
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
+    ToolManagedInitArg,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -81,6 +82,7 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
             default=False,
         ),
     ],
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=[],
     docs_url="https://docs.agno.com/tools/toolkits/local/shell",
 )

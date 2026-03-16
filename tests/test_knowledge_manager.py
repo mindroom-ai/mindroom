@@ -180,6 +180,7 @@ def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Confi
 def _make_git_config(
     path: Path,
     *,
+    repo_url: str = "https://github.com/example/knowledge.git",
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> Config:
@@ -191,7 +192,7 @@ def _make_git_config(
                 path=str(path),
                 watch=False,
                 git=KnowledgeGitConfig(
-                    repo_url="https://github.com/example/knowledge.git",
+                    repo_url=repo_url,
                     branch="main",
                     poll_interval_seconds=30,
                     skip_hidden=True,
@@ -254,6 +255,48 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     )
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing dotted path should still work once it becomes a directory."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    knowledge_path = tmp_path / "docs.v1"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(knowledge_path), watch=False),
+        },
+    )
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    assert manager.knowledge_path == knowledge_path.resolve()
+    assert manager.knowledge_path.is_dir() is True
+
+    file_path = manager.knowledge_path / "guide.md"
+    file_path.write_text("versioned docs", encoding="utf-8")
+
+    assert manager.list_files() == [file_path.resolve()]
+
+    indexed = await manager.index_file(file_path, upsert=True)
+
+    assert indexed is True
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    metadata = knowledge.insert_calls[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["source_path"] == "guide.md"
 
 
 def test_knowledge_manager_reindexes_when_embedding_dimensions_change(

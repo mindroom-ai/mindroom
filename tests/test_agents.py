@@ -281,6 +281,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
+        shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
@@ -290,6 +291,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             credentials_manager,
             tool_init_overrides,
             runtime_overrides,
+            shared_storage_root_path,
             worker_tools_override,
             worker_scope,
             routing_agent_name,
@@ -314,6 +316,54 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     assert "openclaw_compat" in tool_names
     assert "shell" in tool_names
     assert "matrix_message" in tool_names
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+) -> None:
+    """Unknown or stale tool names should still be warned about and skipped."""
+
+    def _lookup_tool(
+        name: str,
+        _runtime_paths: object = None,
+        *,
+        credentials_manager: object | None = None,
+        tool_init_overrides: dict[str, object] | None = None,
+        runtime_overrides: dict[str, object] | None = None,
+        shared_storage_root_path: object | None = None,
+        worker_tools_override: list[str] | None = None,
+        worker_scope: WorkerScope | None = None,
+        routing_agent_name: str | None = None,
+    ) -> MagicMock:
+        del (
+            _runtime_paths,
+            credentials_manager,
+            tool_init_overrides,
+            runtime_overrides,
+            shared_storage_root_path,
+            worker_tools_override,
+            worker_scope,
+            routing_agent_name,
+        )
+        if name == "stale_tool":
+            msg = "Unknown tool: stale_tool"
+            raise ValueError(msg)
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    mock_get_tool_by_name.side_effect = _lookup_tool
+
+    config = _test_config()
+    config.agents["general"].tools = ["stale_tool", "shell"]
+    config.agents["general"].include_default_tools = False
+
+    agent = _create_agent_for_test("general", config=config)
+
+    assert [tool.name for tool in agent.tools] == ["shell"]
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -364,6 +414,29 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
+    mock_storage: MagicMock,  # noqa: ARG001
+    mock_get_tool_by_name: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Agent construction should not special-case browser artifact paths anymore."""
+    mock_get_tool_by_name.return_value = MagicMock()
+
+    config = _test_config()
+    config.agents["general"].tools = ["browser", "visualization"]
+    config.agents["general"].include_default_tools = False
+
+    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+
+    runtime_overrides_by_tool = {
+        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    }
+    assert runtime_overrides_by_tool["browser"] is None
+    assert runtime_overrides_by_tool["visualization"] is None
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -755,11 +828,12 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
+        shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del _runtime_paths, tool_init_overrides, runtime_overrides, worker_tools_override
+        del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,

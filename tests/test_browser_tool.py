@@ -17,6 +17,7 @@ from mindroom.custom_tools.browser import (
     _BrowserTabState,
     _clean_str,
 )
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 
@@ -73,6 +74,49 @@ def test_resolve_max_chars_behavior() -> None:
     assert BrowserTools._resolve_max_chars(max_chars=0, mode=None) is None
     assert BrowserTools._resolve_max_chars(max_chars=None, mode="efficient") is None
     assert BrowserTools._resolve_max_chars(max_chars=None, mode=None) == _DEFAULT_AI_SNAPSHOT_MAX_CHARS
+
+
+def test_resolve_output_dir_defaults_to_runtime_storage_root(tmp_path: Path) -> None:
+    """Browser artifacts should default under the committed runtime storage root."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+
+    output_dir = tool._resolve_output_dir()
+
+    assert output_dir == (runtime_paths.storage_root / "browser").resolve()
+    assert output_dir.is_dir()
+
+
+def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: Path) -> None:
+    """Live tool context should override the runtime-root default for browser artifacts."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    tool = BrowserTools(runtime_paths)
+    context_storage_path = tmp_path / "context-storage"
+    context = ToolRuntimeContext(
+        agent_name="general",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        requester_id="@alice:example.org",
+        client=MagicMock(),
+        config=MagicMock(),
+        runtime_paths=runtime_paths,
+        storage_path=context_storage_path,
+    )
+
+    with tool_runtime_context(context):
+        output_dir = tool._resolve_output_dir()
+
+    assert output_dir == (context_storage_path / "browser").resolve()
+    assert output_dir.is_dir()
 
 
 @pytest.mark.asyncio
