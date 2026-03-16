@@ -40,6 +40,21 @@ class _EffectiveAgentWorkspace:
     file_memory_path: str | None
 
 
+def resolve_workspace_relative_path(
+    root: Path,
+    relative_path: str | Path,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve one workspace-relative path and reject symlink escapes."""
+    resolved_root = root.expanduser().resolve()
+    candidate = (resolved_root / relative_path).resolve()
+    if not candidate.is_relative_to(resolved_root):
+        msg = f"{field_name} must stay within the workspace root: {resolved_root}"
+        raise ValueError(msg)
+    return candidate
+
+
 def copy_workspace_template(
     workspace_path: Path,
     *,
@@ -206,7 +221,11 @@ def _resolve_workspace(
         msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
         raise ValueError(msg)
 
-    root = (state_storage_path / workspace.root_path).resolve()
+    root = resolve_workspace_relative_path(
+        state_storage_path,
+        workspace.root_path,
+        field_name="private.root",
+    )
     template_dir = workspace.template_dir
     should_initialize_template = template_dir is not None and (not root.exists() or not any(root.iterdir()))
     if create:
@@ -215,8 +234,23 @@ def _resolve_workspace(
             assert template_dir is not None
             copy_workspace_template(root, template_dir=template_dir)
 
-    context_files = tuple((root / relative_path).resolve() for relative_path in workspace.context_files)
-    file_memory_path = (root / workspace.file_memory_path).resolve() if workspace.file_memory_path is not None else None
+    context_files = tuple(
+        resolve_workspace_relative_path(
+            root,
+            relative_path,
+            field_name="private.context_files",
+        )
+        for relative_path in workspace.context_files
+    )
+    file_memory_path = (
+        resolve_workspace_relative_path(
+            root,
+            workspace.file_memory_path,
+            field_name="private file memory path",
+        )
+        if workspace.file_memory_path is not None
+        else None
+    )
     if create and file_memory_path is not None:
         file_memory_path.mkdir(parents=True, exist_ok=True)
 

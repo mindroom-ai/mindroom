@@ -35,7 +35,11 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
-from mindroom.workspaces import resolve_agent_private_state_storage_path, resolve_agent_workspace
+from mindroom.workspaces import (
+    resolve_agent_private_state_storage_path,
+    resolve_agent_workspace,
+    resolve_workspace_relative_path,
+)
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -380,7 +384,11 @@ def _resolve_effective_knowledge_path(
         msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
         raise ValueError(msg)
 
-    knowledge_path = (workspace.root / base_config.path).resolve()
+    knowledge_path = resolve_workspace_relative_path(
+        workspace.root,
+        base_config.path,
+        field_name=f"knowledge base '{base_id}' path",
+    )
     if create:
         _ensure_knowledge_directory_ready(knowledge_path)
     return resolved_storage_path, knowledge_path

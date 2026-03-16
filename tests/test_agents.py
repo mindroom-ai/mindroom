@@ -38,7 +38,11 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
-from mindroom.workspaces import copy_workspace_template, resolve_agent_workspace
+from mindroom.workspaces import (
+    copy_workspace_template,
+    resolve_agent_private_state_storage_path,
+    resolve_agent_workspace,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -437,6 +441,82 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_
     assert workspace is not None
     assert workspace.root == expected_workspace
     assert not (runtime_paths.config_dir / "mind_data").exists()
+
+
+def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:
+    """Private roots must not resolve outside the canonical private-instance state root."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    state_root = resolve_agent_private_state_storage_path(
+        "general",
+        bound_config,
+        base_storage_path=runtime_paths.storage_root,
+        execution_identity=identity,
+    )
+    state_root.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    (state_root / "mind_data").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="private.root must stay within the workspace root"):
+        resolve_agent_workspace(
+            "general",
+            bound_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path: Path) -> None:
+    """Private context files must not resolve outside the private workspace root."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        context_files=["notes/SOUL.md"],
+    )
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    workspace = resolve_agent_workspace(
+        "general",
+        bound_config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    assert workspace is not None
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    notes_link = workspace.root / "notes"
+    notes_link.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="private.context_files must stay within the workspace root"):
+        resolve_agent_workspace(
+            "general",
+            bound_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
 
 
 def test_private_workspace_template_preserves_metadata_and_initializes_only_once(tmp_path: Path) -> None:
