@@ -1191,6 +1191,151 @@ async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
 
 
 @pytest.mark.asyncio
+async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Request-time shared knowledge ensures should discard superseded keys after path changes."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_a = tmp_path / "docs-a"
+    docs_b = tmp_path / "docs-b"
+    docs_a.mkdir(parents=True, exist_ok=True)
+    docs_b.mkdir(parents=True, exist_ok=True)
+    (docs_a / "guide.md").write_text("Docs A.\n", encoding="utf-8")
+    (docs_b / "guide.md").write_text("Docs B.\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
+    config_a = bind_runtime_paths(
+        Config(
+            agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
+        ),
+        runtime_paths,
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
+        ),
+        runtime_paths,
+    )
+
+    try:
+        first = await ensure_agent_knowledge_managers("researcher", config_a, runtime_paths_for(config_a))
+        second = await ensure_agent_knowledge_managers("researcher", config_b, runtime_paths_for(config_b))
+
+        assert get_knowledge_manager("docs", config=config_a, runtime_paths=runtime_paths_for(config_a)) is None
+        assert (
+            get_knowledge_manager("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is second["docs"]
+        )
+        assert first["docs"] is not second["docs"]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_ensure_agent_knowledge_managers_removes_stale_private_key_for_same_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Request-time private ensures should discard superseded keys for the same requester root."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
+    config_a = bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user_agent",
+                        root="mind_data",
+                        template_dir=str(template_dir),
+                        context_files=["SOUL.md"],
+                        knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user_agent",
+                        root="mind_data",
+                        template_dir=str(template_dir),
+                        context_files=["SOUL.md"],
+                        knowledge=AgentPrivateKnowledgeConfig(path="memory-next", watch=False),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    private_base_id = config_a.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+
+    try:
+        first = await ensure_agent_knowledge_managers(
+            "mind",
+            config_a,
+            runtime_paths_for(config_a),
+            execution_identity=identity,
+        )
+        second = await ensure_agent_knowledge_managers(
+            "mind",
+            config_b,
+            runtime_paths_for(config_b),
+            execution_identity=identity,
+        )
+
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_a,
+                runtime_paths=runtime_paths_for(config_a),
+                execution_identity=identity,
+            )
+            is None
+        )
+        assert (
+            get_knowledge_manager(
+                private_base_id,
+                config=config_b,
+                runtime_paths=runtime_paths_for(config_b),
+                execution_identity=identity,
+            )
+            is second[private_base_id]
+        )
+        assert first[private_base_id] is not second[private_base_id]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_ensure_agent_knowledge_managers_initializes_private_scope_once_under_concurrency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

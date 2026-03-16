@@ -1310,6 +1310,8 @@ async def ensure_agent_knowledge_managers(
             execution_identity,
             True,
         )
+        for other_key in _stale_request_manager_keys(config, base_id, key):
+            await _stop_and_remove_manager(other_key)
         managers[base_id] = await _ensure_knowledge_manager(
             key=key,
             base_id=base_id,
@@ -1326,6 +1328,21 @@ async def ensure_agent_knowledge_managers(
             reindex_on_create=reindex_on_create,
         )
     return managers
+
+
+def _stale_request_manager_keys(
+    config: Config,
+    base_id: str,
+    key: KnowledgeManagerKey,
+) -> list[KnowledgeManagerKey]:
+    """Return stale request-time manager keys superseded by the current effective key."""
+    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+        return [candidate for candidate in _knowledge_managers if candidate.base_id == base_id and candidate != key]
+    return [
+        candidate
+        for candidate in _knowledge_managers
+        if candidate.base_id == base_id and candidate.storage_path == key.storage_path and candidate != key
+    ]
 
 
 async def initialize_knowledge_managers(
