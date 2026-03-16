@@ -294,6 +294,32 @@ async def test_team_response_uses_ambient_execution_identity_for_private_agents(
 
 
 @pytest.mark.asyncio
+async def test_team_response_ignores_router_in_direct_team_member_list() -> None:
+    """Direct team helpers should skip router entries before request-scoped setup."""
+    config = _build_test_config()
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    general_bot = MagicMock()
+    general_bot.agent = MagicMock()
+    general_bot.agent.name = "GeneralAgent"
+    general_bot.agent.instructions = []
+    orchestrator.agent_bots = {"general": general_bot}
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="General response"))
+
+    with patch("mindroom.teams._create_team_instance", return_value=mock_team):
+        response = await team_response(
+            agent_names=["router", "general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+        )
+
+    assert "General response" in response
+
+
+@pytest.mark.asyncio
 async def test_team_response_binds_private_knowledge_for_direct_team_helpers() -> None:
     """Direct team helpers should bind request-scoped private knowledge during agent materialization."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
@@ -319,6 +345,7 @@ async def test_team_response_binds_private_knowledge_for_direct_team_helpers() -
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
     private_base_id = config.get_agent_private_knowledge_base_id("general")
     assert private_base_id is not None
     bound_manager = MagicMock()

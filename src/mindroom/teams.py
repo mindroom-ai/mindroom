@@ -424,26 +424,9 @@ def _get_agents_from_orchestrator(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
 ) -> list[Agent]:
-    """Get Agent instances from orchestrator for the given agent names.
-
-    Args:
-        agent_names: List of agent names to get
-        orchestrator: The orchestrator containing agent bots
-
-    Returns:
-        List of Agent instances (excluding router and missing agents)
-
-    """
-    assert orchestrator.config is not None
+    """Get Agent instances from orchestrator for the given agent names."""
     agents: list[Agent] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-
+    for name in _available_team_agent_names(agent_names, orchestrator):
         agent_bot = orchestrator.agent_bots[name]
         agent = agent_bot.agent
 
@@ -462,26 +445,45 @@ def _get_agents_from_orchestrator(
     return agents
 
 
+def _available_team_agent_names(
+    agent_names: list[str],
+    orchestrator: MultiAgentOrchestrator,
+) -> list[str]:
+    """Return team member names that can be materialized from the orchestrator."""
+    available_agent_names: list[str] = []
+    for name in agent_names:
+        if name == ROUTER_AGENT_NAME:
+            continue
+        if name not in orchestrator.agent_bots:
+            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
+            continue
+        available_agent_names.append(name)
+    return available_agent_names
+
+
 async def _get_request_scoped_team_agents(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
 ) -> list[Agent]:
     """Materialize team members with the current request's knowledge bindings."""
     assert orchestrator.config is not None
+    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
+    if not available_agent_names:
+        return []
     execution_identity = get_tool_execution_identity()
     if execution_identity is None:
-        for agent_name in agent_names:
+        for agent_name in available_agent_names:
             if orchestrator.config.agents[agent_name].private is not None:
                 msg = f"Private team agent '{agent_name}' requires an active execution identity"
                 raise ValueError(msg)
     request_knowledge_managers = await ensure_request_knowledge_managers(
-        agent_names,
+        available_agent_names,
         config=orchestrator.config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
     )
     with bound_knowledge_managers(request_knowledge_managers):
-        return _get_agents_from_orchestrator(agent_names, orchestrator)
+        return _get_agents_from_orchestrator(available_agent_names, orchestrator)
 
 
 def _create_team_instance(
