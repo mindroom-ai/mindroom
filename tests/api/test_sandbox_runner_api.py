@@ -17,7 +17,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import mindroom.api.sandbox_exec as sandbox_exec_module
+import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
@@ -282,7 +285,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
             args=[],
             returncode=0,
             stdout="",
-            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+            stderr=sandbox_protocol_module.RESPONSE_MARKER + response.model_dump_json(),
         )
 
     monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
@@ -432,11 +435,9 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
         process_env=dict(os.environ),
     )
 
-    execution_env = sandbox_runner_module._request_execution_env(
-        sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="shell",
-            function_name="run_shell_command",
-        ),
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
         runtime_paths,
     )
 
@@ -467,7 +468,7 @@ def test_worker_subprocess_env_preserves_parent_path(
     )
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
 
-    env = sandbox_runner_module._worker_subprocess_env(paths)
+    env = sandbox_exec_module.worker_subprocess_env(paths)
 
     assert env["PATH"].startswith(f"{paths.venv_dir}/bin:")
     assert env["PATH"].endswith("/usr/local/bin:/usr/bin:/bin")
@@ -642,7 +643,7 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
     worker_root = tmp_path / "workers" / "worker-state"
     requested_base_dir = "agents/general/workspace/mind_data"
 
-    resolved = sandbox_runner_module._resolve_worker_base_dir(
+    resolved = sandbox_worker_prep_module.resolve_worker_base_dir(
         SimpleNamespace(root=worker_root, workspace=worker_root / "workspace"),
         storage_root,
         "v1:default:shared:general",
@@ -1075,7 +1076,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
 
     prepare_calls = 0
-    original_prepare = sandbox_runner_module._prepare_worker
+    original_prepare = sandbox_worker_prep_module.prepare_worker
 
     def _counting_prepare(
         worker_key: str,
@@ -1100,7 +1101,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
 
-    monkeypatch.setattr(sandbox_runner_module, "_prepare_worker", _counting_prepare)
+    monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", _counting_prepare)
     monkeypatch.setattr(sandbox_runner_module, "_execute_request_subprocess", _fake_execute_request_subprocess)
 
     response = runner_client.post(
@@ -1663,7 +1664,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
             args=cmd,
             returncode=0,
             stdout="",
-            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+            stderr=sandbox_protocol_module.RESPONSE_MARKER + response.model_dump_json(),
         )
 
     with (
@@ -1720,7 +1721,7 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
             args=cmd,
             returncode=0,
             stdout="",
-            stderr=sandbox_runner_module._RESPONSE_MARKER + response.model_dump_json(),
+            stderr=sandbox_protocol_module.RESPONSE_MARKER + response.model_dump_json(),
         )
 
     with (
@@ -1743,6 +1744,32 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
 
     worker_file = worker_root / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from inferred worker"
+
+
+def test_dedicated_worker_mode_does_not_treat_empty_worker_key_as_missing(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker mode should not rewrite explicit empty worker keys."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", "worker-a")
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(tmp_path / "dedicated-worker"))
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "file",
+            "function_name": "read_file",
+            "args": ["note.txt"],
+            "kwargs": {},
+            "worker_key": "",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Dedicated sandbox worker is pinned" in response.json()["detail"]
 
 
 def test_dedicated_worker_mode_rejects_mismatched_worker_key(
@@ -1784,7 +1811,7 @@ def test_prepare_worker_uses_explicit_runtime_storage_root_for_local_workers(
         process_env=dict(os.environ),
     )
 
-    worker = sandbox_runner_module._prepare_worker("worker-a", runtime_paths)
+    worker = sandbox_worker_prep_module.prepare_worker("worker-a", runtime_paths)
 
     assert worker.debug_metadata["state_root"] == str(
         tmp_path / "explicit-storage" / "workers" / worker_dir_name("worker-a"),
