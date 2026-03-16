@@ -1829,6 +1829,8 @@ class AgentBot:
                             model_name=model_name,
                             media=payload.media,
                             show_tool_calls=self.show_tool_calls,
+                            session_id=session_id,
+                            user_id=requester_user_id,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1872,6 +1874,8 @@ class AgentBot:
                             thread_history=thread_history,
                             model_name=model_name,
                             media=payload.media,
+                            session_id=session_id,
+                            user_id=requester_user_id,
                         )
 
                 # Either edit the thinking message or send new

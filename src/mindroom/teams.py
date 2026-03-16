@@ -571,6 +571,8 @@ async def team_response(
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Create a team and execute response."""
     agents = await _get_request_scoped_team_agents(agent_names, orchestrator)
@@ -589,6 +591,8 @@ async def team_response(
     async def _run(current_prompt: str, current_media_inputs: MediaInputs) -> object:
         return await team.arun(
             current_prompt,
+            session_id=session_id,
+            user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
             files=current_media_inputs.files,
@@ -640,6 +644,8 @@ async def _team_response_stream_raw(
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -669,6 +675,8 @@ async def _team_response_stream_raw(
             current_prompt,
             stream=True,
             stream_events=True,
+            session_id=session_id,
+            user_id=user_id,
             audio=current_media_inputs.audio,
             images=current_media_inputs.images,
             files=current_media_inputs.files,
@@ -696,6 +704,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -870,6 +880,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             thread_history=thread_history,
             model_name=model_name,
             media=attempt_media_inputs,
+            session_id=session_id,
+            user_id=user_id,
         )
         async for event in raw_stream:
             # Handle explicit fallback stream outputs (for example no agents available)
