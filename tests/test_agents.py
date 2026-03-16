@@ -277,6 +277,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
+        shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
@@ -286,6 +287,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             credentials_manager,
             tool_init_overrides,
             runtime_overrides,
+            shared_storage_root_path,
             worker_tools_override,
             worker_scope,
             routing_agent_name,
@@ -751,11 +753,12 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         credentials_manager: object | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
+        shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
     ) -> MagicMock:
-        del _runtime_paths, tool_init_overrides, runtime_overrides, worker_tools_override
+        del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
             worker_scope=worker_scope,

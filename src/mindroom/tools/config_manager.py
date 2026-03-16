@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.metadata import (
     SetupType,
     ToolCategory,
+    ToolManagedInitArg,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     icon="Settings",
     icon_color="text-purple-500",
     config_fields=[],
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["agno", "pydantic", "pyyaml"],
     docs_url="https://github.com/mindroom-ai/mindroom",
 )

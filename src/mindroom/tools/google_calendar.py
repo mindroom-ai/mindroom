@@ -8,6 +8,7 @@ from mindroom.tool_system.metadata import (
     ConfigField,
     SetupType,
     ToolCategory,
+    ToolManagedInitArg,
     ToolStatus,
     register_tool_with_metadata,
 )
@@ -45,6 +46,12 @@ if TYPE_CHECKING:
             description="Allow the agent to create, update, and delete calendar events",
         ),
     ],
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_SCOPE,
+        ToolManagedInitArg.ROUTING_AGENT_NAME,
+    ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",
 )

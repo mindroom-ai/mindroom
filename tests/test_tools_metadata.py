@@ -3,9 +3,21 @@
 import json
 from pathlib import Path
 
+import pytest
+from agno.tools import Toolkit
+
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
-from mindroom.tool_system.metadata import TOOL_METADATA, export_tools_metadata
+from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.metadata import (
+    _TOOL_REGISTRY,
+    TOOL_METADATA,
+    ToolCategory,
+    ToolManagedInitArg,
+    export_tools_metadata,
+    get_tool_by_name,
+    register_tool_with_metadata,
+)
 
 
 def test_export_tools_metadata_json() -> None:
@@ -35,6 +47,7 @@ def test_export_tools_metadata_json() -> None:
         required_fields = ["name", "display_name", "description", "category", "status", "setup_type"]
         for field in required_fields:
             assert field in first_tool, f"Missing required field: {field}"
+        assert "managed_init_args" not in first_tool
 
 
 def test_tool_metadata_consistency() -> None:
@@ -65,3 +78,114 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             assert not any(phrase in lowered for phrase in forbidden_phrases), (
                 f"Tool metadata for {tool_name} still advertises env fallback: {text}"
             )
+
+
+def test_special_tools_declare_explicit_managed_init_args() -> None:
+    """Special constructor context must be declared in metadata instead of inferred."""
+    assert TOOL_METADATA["browser"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
+    assert TOOL_METADATA["config_manager"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
+    assert TOOL_METADATA["shell"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
+    assert TOOL_METADATA["python"].managed_init_args == ()
+    assert TOOL_METADATA["homeassistant"].managed_init_args == (
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_SCOPE,
+        ToolManagedInitArg.ROUTING_AGENT_NAME,
+    )
+    google_args = (
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_SCOPE,
+        ToolManagedInitArg.ROUTING_AGENT_NAME,
+    )
+    assert TOOL_METADATA["gmail"].managed_init_args == google_args
+    assert TOOL_METADATA["google_calendar"].managed_init_args == google_args
+    assert TOOL_METADATA["google_sheets"].managed_init_args == google_args
+
+
+def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Path) -> None:
+    """Undeclared MindRoom-managed kwargs should not be inferred from parameter names."""
+    tool_name = "test_hidden_runtime_tool"
+
+    class HiddenRuntimeToolkit(Toolkit):
+        def __init__(self, *, runtime_paths: object) -> None:
+            self.runtime_paths = runtime_paths
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Hidden Runtime Tool",
+        description="Test-only toolkit for constructor contract coverage.",
+        category=ToolCategory.DEVELOPMENT,
+    )
+    def _hidden_runtime_tool_factory() -> type[HiddenRuntimeToolkit]:
+        return HiddenRuntimeToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    try:
+        with pytest.raises(TypeError, match="runtime_paths"):
+            get_tool_by_name(
+                tool_name,
+                runtime_paths,
+                runtime_overrides={"runtime_paths": runtime_paths},
+            )
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+
+def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> None:
+    """Declared MindRoom-managed kwargs should reach the constructor directly."""
+    tool_name = "test_explicit_runtime_tool"
+
+    class ExplicitRuntimeToolkit(Toolkit):
+        def __init__(
+            self,
+            *,
+            runtime_paths: object,
+            worker_scope: object,
+            routing_agent_name: object,
+        ) -> None:
+            self.runtime_paths = runtime_paths
+            self.worker_scope = worker_scope
+            self.routing_agent_name = routing_agent_name
+            super().__init__(name=tool_name, tools=[])
+
+    @register_tool_with_metadata(
+        name=tool_name,
+        display_name="Explicit Runtime Tool",
+        description="Test-only toolkit for explicit constructor contract coverage.",
+        category=ToolCategory.DEVELOPMENT,
+        managed_init_args=(
+            ToolManagedInitArg.RUNTIME_PATHS,
+            ToolManagedInitArg.WORKER_SCOPE,
+            ToolManagedInitArg.ROUTING_AGENT_NAME,
+        ),
+    )
+    def _explicit_runtime_tool_factory() -> type[ExplicitRuntimeToolkit]:
+        return ExplicitRuntimeToolkit
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    try:
+        tool = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        assert isinstance(tool, ExplicitRuntimeToolkit)
+        assert tool.runtime_paths == runtime_paths
+        assert tool.worker_scope == "shared"
+        assert tool.routing_agent_name == "general"
+    finally:
+        _TOOL_REGISTRY.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
