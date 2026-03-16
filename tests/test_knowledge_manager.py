@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call
 
@@ -141,6 +142,7 @@ def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Confi
 def _make_git_config(
     path: Path,
     *,
+    repo_url: str = "https://github.com/example/knowledge.git",
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> Config:
@@ -152,7 +154,7 @@ def _make_git_config(
                 path=str(path),
                 watch=False,
                 git=KnowledgeGitConfig(
-                    repo_url="https://github.com/example/knowledge.git",
+                    repo_url=repo_url,
                     branch="main",
                     poll_interval_seconds=30,
                     skip_hidden=True,
@@ -205,6 +207,48 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     manager = KnowledgeManager(base_id="research", config=config, runtime_paths=runtime_paths)
 
     assert manager.knowledge_path == (config_dir / "knowledge").resolve()
+
+
+@pytest.mark.asyncio
+async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing dotted path should still work once it becomes a directory."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    knowledge_path = tmp_path / "docs.v1"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(knowledge_path), watch=False),
+        },
+    )
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    assert manager.knowledge_path == knowledge_path.resolve()
+    assert manager.knowledge_path.is_dir() is True
+
+    file_path = manager.knowledge_path / "guide.md"
+    file_path.write_text("versioned docs", encoding="utf-8")
+
+    assert manager.list_files() == [file_path.resolve()]
+
+    indexed = await manager.index_file(file_path, upsert=True)
+
+    assert indexed is True
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    metadata = knowledge.insert_calls[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["source_path"] == "guide.md"
 
 
 def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
@@ -714,6 +758,57 @@ async def test_sync_git_repository_updates_index_for_changed_and_deleted_files(
         ],
         any_order=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_git_repository_indexes_files_after_initial_clone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial clones should index tracked files immediately."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=source_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init")
+    git("checkout", "-b", "main")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test User")
+
+    tracked_file = source_repo / "docs" / "guide.md"
+    tracked_file.parent.mkdir(parents=True, exist_ok=True)
+    tracked_file.write_text("hello from git", encoding="utf-8")
+    git("add", "docs/guide.md")
+    git("commit", "-m", "Initial docs")
+
+    manager = KnowledgeManager(
+        base_id="research",
+        config=_make_git_config(tmp_path / "knowledge-clone", repo_url=str(source_repo)),
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    result = await manager.sync_git_repository()
+
+    assert result == {"updated": True, "changed_count": 1, "removed_count": 0}
+    assert (manager.knowledge_path / "docs" / "guide.md").read_text(encoding="utf-8") == "hello from git"
+    assert manager.get_status()["indexed_count"] == 1
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    metadata = knowledge.insert_calls[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["source_path"] == "docs/guide.md"
 
 
 @pytest.mark.asyncio

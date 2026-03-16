@@ -430,7 +430,7 @@ class KnowledgeManager:
         raw_paths = [entry for entry in output.split("\x00") if entry]
         return {path for path in raw_paths if self._include_relative_path(path)}
 
-    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
+    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         git_dir = self.knowledge_path / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
@@ -442,7 +442,7 @@ class KnowledgeManager:
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             await self._run_git(["checkout", git_config.branch])
-            return
+            return False
 
         if self.knowledge_path.exists() and any(self.knowledge_path.iterdir()):
             msg = (
@@ -468,9 +468,12 @@ class KnowledgeManager:
             ],
             cwd=self.knowledge_path.parent,
         )
+        return True
 
     async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        await self._ensure_git_repository(git_config)
+        cloned = await self._ensure_git_repository(git_config)
+        if cloned:
+            return await self._git_list_tracked_files(), set(), True
 
         before_head = await self._git_rev_parse("HEAD")
         before_files = await self._git_list_tracked_files()
