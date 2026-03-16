@@ -20,7 +20,6 @@ from pydantic import BaseModel
 from mindroom import constants
 from mindroom.api.config_lifecycle import ApiConfigLock
 from mindroom.api.config_lifecycle import load_config_from_file as load_api_config_from_file
-from mindroom.api.config_lifecycle import load_runtime_config as load_api_runtime_config
 from mindroom.api.config_lifecycle import run_config_write as run_api_config_write
 from mindroom.api.config_lifecycle import watch_config as watch_api_config
 
@@ -47,8 +46,6 @@ from mindroom.workers.runtime import get_primary_worker_manager, primary_worker_
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-
-    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 _WORKER_CLEANUP_INTERVAL_ENV = "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS"
@@ -290,13 +287,6 @@ app.add_middleware(
 _API_ROUTE_PREFIXES = frozenset({"api", "v1"})
 _PLATFORM_AUTH_COOKIE_NAME = "mindroom_jwt"
 _STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
-
-
-def load_runtime_config(
-    runtime_paths: constants.RuntimePaths,
-) -> tuple[Config, Path]:
-    """Load the current runtime config and return it with its path."""
-    return load_api_runtime_config(runtime_paths)
 
 
 def _run_config_write[T](
