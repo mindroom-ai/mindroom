@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -36,7 +35,7 @@ from mindroom.tool_system.events import (
     extract_tool_completed_info,
     format_tool_started_event,
 )
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -48,7 +47,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 logger = get_logger(__name__)
@@ -424,20 +422,19 @@ def _build_prompt_with_context(
 def _get_agents_from_orchestrator(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[Agent]:
     """Get Agent instances from orchestrator for the given agent names.
 
     Args:
         agent_names: List of agent names to get
         orchestrator: The orchestrator containing agent bots
-        execution_identity: Request-scoped identity for private agents
 
     Returns:
         List of Agent instances (excluding router and missing agents)
 
     """
     assert orchestrator.config is not None
+    execution_identity = get_tool_execution_identity()
     agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
@@ -449,11 +446,9 @@ def _get_agents_from_orchestrator(
 
         agent_bot = orchestrator.agent_bots[name]
         if orchestrator.config.agents[name].private is not None and execution_identity is None:
-            msg = f"Private team agent '{name}' requires an explicit execution identity"
+            msg = f"Private team agent '{name}' requires an active execution identity"
             raise ValueError(msg)
-
-        with _execution_identity_context(execution_identity):
-            agent = agent_bot.agent
+        agent = agent_bot.agent
 
         if agent is None:
             logger.warning(f"Agent bot '{name}' has no agent instance")
@@ -547,14 +542,7 @@ def select_model_for_team(
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 
 
-def _execution_identity_context(
-    execution_identity: ToolExecutionIdentity | None,
-) -> AbstractContextManager[None]:
-    """Return a fresh context manager for the current execution identity."""
-    return tool_execution_identity(execution_identity) if execution_identity is not None else nullcontext()
-
-
-async def _run_team_response(
+async def team_response(
     agent_names: list[str],
     mode: TeamMode,
     message: str,
@@ -562,14 +550,9 @@ async def _run_team_response(
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> str:
-    """Execute one non-streaming team response after caller context is bound."""
-    agents = _get_agents_from_orchestrator(
-        agent_names,
-        orchestrator,
-        execution_identity=execution_identity,
-    )
+    """Create a team and execute response."""
+    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
     if not agents:
         return _NO_AGENTS_RESPONSE
 
@@ -628,30 +611,6 @@ async def _run_team_response(
     return team_header + team_response_text
 
 
-async def team_response(
-    agent_names: list[str],
-    mode: TeamMode,
-    message: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict] | None = None,
-    model_name: str | None = None,
-    media: MediaInputs | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> str:
-    """Create a team and execute response."""
-    with _execution_identity_context(execution_identity):
-        return await _run_team_response(
-            agent_names,
-            mode,
-            message,
-            orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-            media=media,
-            execution_identity=execution_identity,
-        )
-
-
 async def _team_response_stream_raw(
     agent_ids: list[MatrixID],
     mode: TeamMode,
@@ -660,7 +619,6 @@ async def _team_response_stream_raw(
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AsyncIterator[Any]:
     """Yield raw team events (for structured live rendering). Falls back to a final response.
 
@@ -669,11 +627,7 @@ async def _team_response_stream_raw(
     """
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
-    agents = _get_agents_from_orchestrator(
-        agent_names,
-        orchestrator,
-        execution_identity=execution_identity,
-    )
+    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
 
     if not agents:
 
@@ -712,32 +666,6 @@ async def _team_response_stream_raw(
         return _error()
 
 
-async def _iter_team_response_stream_events(
-    agent_ids: list[MatrixID],
-    mode: TeamMode,
-    message: str,
-    orchestrator: MultiAgentOrchestrator,
-    thread_history: list[dict] | None = None,
-    model_name: str | None = None,
-    media: MediaInputs | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> AsyncIterator[Any]:
-    """Yield raw team stream events while execution identity is bound."""
-    with _execution_identity_context(execution_identity):
-        raw_stream = await _team_response_stream_raw(
-            agent_ids=agent_ids,
-            mode=mode,
-            message=message,
-            orchestrator=orchestrator,
-            thread_history=thread_history,
-            model_name=model_name,
-            media=media,
-            execution_identity=execution_identity,
-        )
-        async for event in raw_stream:
-            yield event
-
-
 async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
@@ -747,7 +675,6 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     model_name: str | None = None,
     media: MediaInputs | None = None,
     show_tool_calls: bool = True,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AsyncIterator[_TeamStreamChunk]:
     """Aggregate team streaming into a non-stream-style document, live.
 
@@ -914,7 +841,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         emitted_output = False
         retry_requested = False
 
-        async for event in _iter_team_response_stream_events(
+        raw_stream = await _team_response_stream_raw(
             agent_ids=agent_ids,
             mode=mode,
             message=attempt_message,
@@ -922,8 +849,8 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
             thread_history=thread_history,
             model_name=model_name,
             media=attempt_media_inputs,
-            execution_identity=execution_identity,
-        ):
+        )
+        async for event in raw_stream:
             # Handle explicit fallback stream outputs (for example no agents available)
             if isinstance(event, RunOutput):
                 content = _get_response_content(event)

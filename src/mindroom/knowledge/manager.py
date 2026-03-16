@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import weakref
 from collections import OrderedDict
 from contextlib import suppress
 from copy import deepcopy
@@ -1156,7 +1157,9 @@ class KnowledgeManager:
 _knowledge_managers: dict[KnowledgeManagerKey, KnowledgeManager] = {}
 _static_knowledge_manager_keys: dict[str, KnowledgeManagerKey] = {}
 _scoped_private_manager_lru: OrderedDict[KnowledgeManagerKey, None] = OrderedDict()
-_knowledge_manager_init_locks: dict[KnowledgeManagerKey, asyncio.Lock] = {}
+_knowledge_manager_init_locks: weakref.WeakValueDictionary[KnowledgeManagerKey, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _SCOPED_PRIVATE_MANAGER_CACHE_LIMIT = 128
 
 
@@ -1175,7 +1178,11 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
 
 
 def _knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
-    return _knowledge_manager_init_locks.setdefault(key, asyncio.Lock())
+    lock = _knowledge_manager_init_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _knowledge_manager_init_locks[key] = lock
+    return lock
 
 
 async def _touch_scoped_private_manager_key(
@@ -1400,4 +1407,5 @@ async def shutdown_knowledge_managers() -> None:
 
     _static_knowledge_manager_keys.clear()
     _scoped_private_manager_lru.clear()
+    _knowledge_manager_init_locks.clear()
     _knowledge_managers.clear()

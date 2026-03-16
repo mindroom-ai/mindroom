@@ -18,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -209,8 +209,8 @@ class _DirectTeamAgentBot:
 
 
 @pytest.mark.asyncio
-async def test_team_response_requires_explicit_execution_identity_for_private_agents() -> None:
-    """Direct team helpers should reject private agents unless the caller passes execution identity."""
+async def test_team_response_requires_active_execution_identity_for_private_agents() -> None:
+    """Direct team helpers should reject private agents without an ambient execution identity."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     config = bind_runtime_paths(
         Config(
@@ -233,7 +233,7 @@ async def test_team_response_requires_explicit_execution_identity_for_private_ag
     orchestrator.runtime_paths = runtime_paths_for(config)
     orchestrator.agent_bots = {"general": _DirectTeamAgentBot("general", config)}
 
-    with pytest.raises(ValueError, match="requires an explicit execution identity"):
+    with pytest.raises(ValueError, match="requires an active execution identity"):
         await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
@@ -243,8 +243,8 @@ async def test_team_response_requires_explicit_execution_identity_for_private_ag
 
 
 @pytest.mark.asyncio
-async def test_team_response_uses_explicit_execution_identity_for_private_agents() -> None:
-    """Direct team helpers should run private agents when execution identity is passed explicitly."""
+async def test_team_response_uses_ambient_execution_identity_for_private_agents() -> None:
+    """Direct team helpers should honor the ambient execution identity context."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     config = bind_runtime_paths(
         Config(
@@ -278,13 +278,15 @@ async def test_team_response_uses_explicit_execution_identity_for_private_agents
         session_id="$thread",
     )
 
-    with patch("mindroom.teams._create_team_instance", return_value=mock_team):
+    with (
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        tool_execution_identity(execution_identity),
+    ):
         response = await team_response(
             agent_names=["general"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             orchestrator=orchestrator,
-            execution_identity=execution_identity,
         )
 
     assert "Private response" in response

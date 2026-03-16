@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, call, patch
@@ -18,6 +19,7 @@ from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     _create_embedder,
+    _knowledge_manager_init_locks,
     ensure_agent_knowledge_managers,
     get_knowledge_manager,
     initialize_knowledge_managers,
@@ -1421,6 +1423,8 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
             )
             is not None
         )
+        gc.collect()
+        assert len(_knowledge_manager_init_locks) <= 2
     finally:
         await shutdown_knowledge_managers()
 
