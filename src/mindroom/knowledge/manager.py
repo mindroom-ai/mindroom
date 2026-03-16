@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlparse, urlunparse
 
 from agno.knowledge.chunking.fixed import FixedSizeChunking
@@ -57,6 +57,34 @@ def _resolve_knowledge_path(
     runtime_paths: RuntimePaths,
 ) -> Path:
     return resolve_config_relative_path(path, runtime_paths=runtime_paths)
+
+
+def _knowledge_path_kind(
+    configured_path: str,
+    knowledge_path: Path,
+    *,
+    git_enabled: bool,
+) -> Literal["file", "directory", "unknown"]:
+    if knowledge_path.exists():
+        return "file" if knowledge_path.is_file() else "directory"
+    if git_enabled:
+        return "directory"
+    configured_path_obj = Path(configured_path)
+    if configured_path_obj == Path() or configured_path_obj.suffix == "":
+        return "directory"
+    return "unknown"
+
+
+def _ensure_knowledge_path_ready(
+    configured_path: str,
+    knowledge_path: Path,
+    *,
+    git_enabled: bool,
+) -> None:
+    if _knowledge_path_kind(configured_path, knowledge_path, git_enabled=git_enabled) != "directory":
+        knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        return
+    knowledge_path.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_identifier(value: str) -> str:
@@ -305,7 +333,14 @@ class KnowledgeManager:
         """Initialize filesystem paths and the underlying vector database."""
         base_config = _knowledge_base_config(self.config, self.base_id)
         self.knowledge_path = _resolve_knowledge_path(base_config.path, self.runtime_paths)
-        self.knowledge_path.mkdir(parents=True, exist_ok=True)
+        _ensure_knowledge_path_ready(
+            base_config.path,
+            self.knowledge_path,
+            git_enabled=base_config.git is not None,
+        )
+        if base_config.git is not None and self._knowledge_source_is_file():
+            msg = f"Knowledge base '{self.base_id}' uses Git sync and must point to a directory, not a file"
+            raise ValueError(msg)
         self._settings = _settings_key(self.config, self.base_id, self.runtime_paths)
         self._indexing_settings = _indexing_settings_key(
             self.config,
@@ -357,6 +392,27 @@ class KnowledgeManager:
     def _git_config(self) -> KnowledgeGitConfig | None:
         return _knowledge_base_config(self.config, self.base_id).git
 
+    def _knowledge_source_kind(self) -> Literal["file", "directory", "unknown"]:
+        base_config = _knowledge_base_config(self.config, self.base_id)
+        return _knowledge_path_kind(
+            base_config.path,
+            self.knowledge_path,
+            git_enabled=base_config.git is not None,
+        )
+
+    def _knowledge_source_is_file(self) -> bool:
+        return self._knowledge_source_kind() == "file"
+
+    def _knowledge_root(self) -> Path:
+        if self._knowledge_source_is_file():
+            return self.knowledge_path.parent
+        return self.knowledge_path
+
+    def _knowledge_watch_path(self) -> Path:
+        if self._knowledge_source_kind() == "directory" and self.knowledge_path.exists():
+            return self.knowledge_path
+        return self.knowledge_path.parent
+
     def _skip_hidden_paths(self) -> bool:
         git_config = self._git_config()
         return bool(git_config and git_config.skip_hidden)
@@ -365,8 +421,10 @@ class KnowledgeManager:
         return any(part.startswith(".") for part in relative_path.parts)
 
     def _include_file(self, file_path: Path) -> bool:
+        if self._knowledge_source_is_file():
+            return file_path.resolve() == self.knowledge_path and file_path.is_file()
         try:
-            relative_path = file_path.relative_to(self.knowledge_path)
+            relative_path = file_path.relative_to(self._knowledge_root())
         except ValueError:
             return False
         return file_path.is_file() and self._include_relative_path(relative_path.as_posix())
@@ -393,7 +451,7 @@ class KnowledgeManager:
         process = await asyncio.create_subprocess_exec(
             "git",
             *args,
-            cwd=str(cwd or self.knowledge_path),
+            cwd=str(cwd or self._knowledge_root()),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -430,8 +488,9 @@ class KnowledgeManager:
         raw_paths = [entry for entry in output.split("\x00") if entry]
         return {path for path in raw_paths if self._include_relative_path(path)}
 
-    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> None:
-        git_dir = self.knowledge_path / ".git"
+    async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
+        knowledge_root = self._knowledge_root()
+        git_dir = knowledge_root / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
             expected_remote = _authenticated_repo_url(
@@ -442,16 +501,16 @@ class KnowledgeManager:
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             await self._run_git(["checkout", git_config.branch])
-            return
+            return False
 
-        if self.knowledge_path.exists() and any(self.knowledge_path.iterdir()):
+        if knowledge_root.exists() and any(knowledge_root.iterdir()):
             msg = (
-                f"Cannot clone knowledge git repository into non-empty path {self.knowledge_path}. "
+                f"Cannot clone knowledge git repository into non-empty path {knowledge_root}. "
                 "Clear the folder or use a dedicated path."
             )
             raise RuntimeError(msg)
 
-        self.knowledge_path.parent.mkdir(parents=True, exist_ok=True)
+        knowledge_root.parent.mkdir(parents=True, exist_ok=True)
         clone_url = _authenticated_repo_url(
             git_config.repo_url,
             git_config.credentials_service,
@@ -464,13 +523,16 @@ class KnowledgeManager:
                 "--branch",
                 git_config.branch,
                 clone_url,
-                str(self.knowledge_path),
+                str(knowledge_root),
             ],
-            cwd=self.knowledge_path.parent,
+            cwd=knowledge_root.parent,
         )
+        return True
 
     async def _sync_git_repository_once(self, git_config: KnowledgeGitConfig) -> tuple[set[str], set[str], bool]:
-        await self._ensure_git_repository(git_config)
+        cloned = await self._ensure_git_repository(git_config)
+        if cloned:
+            return await self._git_list_tracked_files(), set(), True
 
         before_head = await self._git_rev_parse("HEAD")
         before_files = await self._git_list_tracked_files()
@@ -504,25 +566,35 @@ class KnowledgeManager:
         """List all files currently present in the knowledge folder."""
         if not self.knowledge_path.exists():
             return []
-        return sorted(path for path in self.knowledge_path.rglob("*") if self._include_file(path))
+        if self._knowledge_source_is_file():
+            return [self.knowledge_path] if self._include_file(self.knowledge_path) else []
+        return sorted(path for path in self._knowledge_root().rglob("*") if self._include_file(path))
 
     def resolve_file_path(self, file_path: Path | str) -> Path:
         """Resolve a path and ensure it stays inside the knowledge folder."""
         candidate = Path(file_path)
         resolved = (
-            candidate.expanduser().resolve() if candidate.is_absolute() else (self.knowledge_path / candidate).resolve()
+            candidate.expanduser().resolve()
+            if candidate.is_absolute()
+            else (self._knowledge_root() / candidate).resolve()
         )
 
+        if self._knowledge_source_is_file():
+            if resolved != self.knowledge_path:
+                msg = f"Path {resolved} is outside knowledge target {self.knowledge_path}"
+                raise ValueError(msg)
+            return resolved
+
         try:
-            resolved.relative_to(self.knowledge_path)
+            resolved.relative_to(self._knowledge_root())
         except ValueError as exc:
-            msg = f"Path {resolved} is outside knowledge folder {self.knowledge_path}"
+            msg = f"Path {resolved} is outside knowledge folder {self._knowledge_root()}"
             raise ValueError(msg) from exc
 
         return resolved
 
     def _relative_path(self, file_path: Path) -> str:
-        return file_path.relative_to(self.knowledge_path).as_posix()
+        return file_path.relative_to(self._knowledge_root()).as_posix()
 
     def _file_signature(self, file_path: Path) -> tuple[int, int]:
         stat = file_path.stat()
@@ -940,7 +1012,7 @@ class KnowledgeManager:
 
     async def _watch_loop(self) -> None:
         """Watch the knowledge folder for file changes."""
-        async for changes in awatch(self.knowledge_path, stop_event=self._watch_stop_event):
+        async for changes in awatch(self._knowledge_watch_path(), stop_event=self._watch_stop_event):
             if not changes:
                 continue
 

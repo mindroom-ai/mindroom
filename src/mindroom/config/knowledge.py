@@ -36,8 +36,8 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
-    path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
-    watch: bool = Field(default=True, description="Watch folder for changes")
+    path: str = Field(default="./knowledge_docs", description="Path to knowledge documents file or folder")
+    watch: bool = Field(default=True, description="Watch the configured knowledge path for changes")
     chunk_size: int = Field(
         default=5000,
         ge=128,
