@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import resolve_agent_state_storage_path
 
 from ._policy import (
     agent_scope_user_id,
@@ -34,6 +33,15 @@ def _mem0_results(payload: object) -> list[MemoryResult]:
         if isinstance(results, list):
             return cast("list[MemoryResult]", results)
     return []
+
+
+def _primary_mem0_storage_path(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> Path:
+    """Return the canonical mem0 storage root for one agent in the active scope."""
+    return effective_storage_paths_for_context(agent_name, storage_path, config)[0]
 
 
 async def _get_scoped_memory_by_id(
@@ -202,10 +210,7 @@ async def add_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> None:
     """Add one mem0 memory for an agent scope."""
-    resolved_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
+    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config)
     memory = await create_memory(resolved_storage_path, config)
     metadata = dict(metadata or {})
     metadata["agent"] = agent_name
@@ -228,10 +233,7 @@ async def search_mem0_agent_memories(
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """Search mem0 memories visible to an agent."""
-    resolved_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
+    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config)
     memory = await create_memory(resolved_storage_path, config)
 
     results = _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
@@ -257,10 +259,7 @@ async def list_mem0_agent_memories(
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """List mem0 memories stored for an agent."""
-    resolved_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
+    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config)
     result = await create_memory(resolved_storage_path, config)
     return _mem0_results(await result.get_all(user_id=agent_scope_user_id(agent_name), limit=limit))
 

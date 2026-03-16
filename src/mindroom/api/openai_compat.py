@@ -85,31 +85,84 @@ def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
+    incompatibilities: dict[str, frozenset[str]] = {}
     return [
         agent_name
         for agent_name in config.agents
         if agent_name != ROUTER_AGENT_NAME
-        and config.get_agent_worker_scope(agent_name) in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and not _openai_incompatible_agent_closure(agent_name, config, incompatibilities=incompatibilities)
     ]
 
 
 def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+    incompatibilities: dict[str, frozenset[str]] = {}
     return [
         agent_name
         for agent_name in agent_names
         if agent_name in config.agents
-        and config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and _openai_incompatible_agent_closure(agent_name, config, incompatibilities=incompatibilities)
     ]
+
+
+def _openai_incompatible_agent_closure(
+    agent_name: str,
+    config: Config,
+    *,
+    incompatibilities: dict[str, frozenset[str]],
+    visiting: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """Return the unsupported agents reachable from one /v1 agent request."""
+    if agent_name in incompatibilities:
+        return incompatibilities[agent_name]
+    if agent_name in visiting:
+        return frozenset()
+    agent_config = config.agents.get(agent_name)
+    if agent_config is None or agent_name == ROUTER_AGENT_NAME:
+        return frozenset({agent_name})
+    if config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES:
+        result = frozenset({agent_name})
+        incompatibilities[agent_name] = result
+        return result
+
+    next_visiting = visiting | {agent_name}
+    incompatible_targets: set[str] = set()
+    for target_name in agent_config.delegate_to:
+        incompatible_targets.update(
+            _openai_incompatible_agent_closure(
+                target_name,
+                config,
+                incompatibilities=incompatibilities,
+                visiting=next_visiting,
+            ),
+        )
+    result = frozenset(incompatible_targets)
+    incompatibilities[agent_name] = result
+    return result
 
 
 def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
-    invalid_scopes = {
-        config.get_agent_worker_scope(agent_name) for agent_name in agent_names if agent_name in config.agents
+    incompatibilities: dict[str, frozenset[str]] = {}
+    invalid_scope_agents = {
+        target_name
+        for agent_name in agent_names
+        for target_name in _openai_incompatible_agent_closure(
+            agent_name,
+            config,
+            incompatibilities=incompatibilities,
+        )
     }
-    message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
+    invalid_scopes = {
+        config.get_agent_worker_scope(agent_name) for agent_name in invalid_scope_agents if agent_name in config.agents
+    }
+    message = (
+        "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared, "
+        "including all delegation targets."
+    )
     if invalid_scopes & {"user", "user_agent"}:
         message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    if invalid_scope_agents and set(agent_names) != invalid_scope_agents:
+        message += f" Delegation reaches unsupported agents: {', '.join(sorted(invalid_scope_agents))}."
 
     return _error_response(
         400,

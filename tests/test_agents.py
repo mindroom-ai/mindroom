@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
+from mindroom.workspaces import resolve_agent_workspace
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -414,6 +415,27 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_path(tmp_path: Path) -> None:
+    """Legacy non-private memory_file_path should stay under the canonical agent workspace."""
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_file_path = "mind_data"
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+
+    workspace = resolve_agent_workspace(
+        "general",
+        bound_config,
+        runtime_paths=runtime_paths,
+        create=True,
+    )
+
+    expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    assert workspace is not None
+    assert workspace.root == expected_workspace
+    assert not (runtime_paths.config_dir / "mind_data").exists()
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -944,6 +966,32 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
         shared_storage_root(tmp_path) / "agents",
         private_instance_scope_root_path(tmp_path, worker_key),
     )
+
+
+@pytest.mark.parametrize("worker_scope", ["user_agent", "room_thread"])
+def test_visible_state_roots_for_private_scoped_workers_hide_shared_agent_root(
+    tmp_path: Path,
+    worker_scope: WorkerScope,
+) -> None:
+    """Private requester-scoped workers should only see their private-instance namespace."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    worker_key = resolve_worker_key(worker_scope, identity, agent_name="mind")
+
+    assert worker_key is not None
+    assert visible_state_roots_for_worker_key(
+        tmp_path,
+        worker_key,
+        private_agent_names=frozenset({"mind"}),
+    ) == (private_instance_scope_root_path(tmp_path, worker_key),)
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:

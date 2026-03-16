@@ -25,7 +25,7 @@ from mindroom.api.openai_compat import (
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -198,6 +198,29 @@ class TestListModels:
         assert "general" in model_ids
         assert "code" not in model_ids
         assert "team/dev-team" not in model_ids
+
+    def test_hides_agents_that_delegate_to_private_agents(self, test_config: Config) -> None:
+        """Shared agents should not be advertised on /v1 when delegation reaches private agents."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
+        test_config.agents["general"].delegate_to = ["research"]
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "general" not in model_ids
+        assert "research" not in model_ids
 
     def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
@@ -467,6 +490,35 @@ class TestChatCompletions:
         assert error["code"] == "unsupported_worker_scope"
         assert "unscoped agents and worker_scope=shared" in error["message"]
         assert "code" in error["message"]
+
+    def test_rejects_agent_that_delegates_to_private_agent(self, test_config: Config) -> None:
+        """Shared agents should fail on /v1 when delegation reaches a private agent."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
+        test_config.agents["general"].delegate_to = ["research"]
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "Delegation reaches unsupported agents: research" in error["message"]
 
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto-routing should fail when all agents require unsupported worker scopes."""

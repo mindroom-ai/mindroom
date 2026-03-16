@@ -317,7 +317,12 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def visible_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
+def visible_state_roots_for_worker_key(
+    base_storage_path: Path,
+    worker_key: str,
+    *,
+    private_agent_names: frozenset[str] = frozenset(),
+) -> tuple[Path, ...]:
     """Return the canonical durable state roots a worker key is allowed to see by default.
 
     Shared agent roots remain canonical for normal agents.
@@ -339,10 +344,9 @@ def visible_state_roots_for_worker_key(base_storage_path: Path, worker_key: str)
     agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
-    visible_roots = [agent_state_root_path(base_storage_path, agent_name)]
-    if scope in {"user_agent", "room_thread"}:
-        visible_roots.append(private_instance_scope_root_path(base_storage_path, worker_key))
-    return tuple(visible_roots)
+    if scope in {"user_agent", "room_thread"} and agent_name in private_agent_names:
+        return (private_instance_scope_root_path(base_storage_path, worker_key),)
+    return (agent_state_root_path(base_storage_path, agent_name),)
 
 
 def agent_workspace_root_path(base_storage_path: Path, agent_name: str) -> Path:

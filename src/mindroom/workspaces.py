@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
     private_instance_state_root_path,
+    resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
     resolve_worker_key,
@@ -188,7 +189,11 @@ def _resolve_workspace(
         memory_file_path = agent_config.memory_file_path
         if memory_file_path is None:
             return None
-        legacy_root = resolve_config_relative_path(memory_file_path, runtime_paths)
+        legacy_root = resolve_agent_owned_path(
+            memory_file_path,
+            agent_name=agent_name,
+            base_storage_path=runtime_paths.storage_root,
+        )
         if create:
             legacy_root.mkdir(parents=True, exist_ok=True)
         return ResolvedAgentWorkspace(

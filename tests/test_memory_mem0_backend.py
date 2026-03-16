@@ -8,12 +8,14 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory.functions import (
+    add_agent_memory,
     delete_agent_memory,
     get_agent_memory,
+    list_all_agent_memories,
     search_agent_memories,
     store_conversation_memory,
     update_agent_memory,
@@ -21,6 +23,8 @@ from mindroom.memory.functions import (
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
+    private_instance_state_root_path,
+    resolve_worker_key,
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -118,6 +122,85 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             {"type": "conversation", "session_id": "session-alice", "agent": "general"},
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_private_agent_explicit_mem0_uses_private_instance_storage(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Explicit mem0 CRUD for private agents should stay inside the private-instance root."""
+    config.memory.backend = "mem0"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+
+    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
+
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
+        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=scope_storage_path.name))
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+
+    assert worker_key is not None
+
+    with (
+        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        tool_execution_identity(execution_identity),
+    ):
+        await add_agent_memory("Private note", "general", storage_path, config, runtime_paths_for(config))
+        search_results = await search_agent_memories(
+            "Private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
+        listed = await list_all_agent_memories("general", storage_path, config, runtime_paths_for(config), limit=10)
+
+        assert len(listed) == 1
+        memory_id = listed[0]["id"]
+        loaded = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        assert loaded is not None
+
+        await update_agent_memory(
+            memory_id,
+            "Updated private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        updated = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        assert updated is not None
+        assert updated["memory"] == "Updated private note"
+
+        await delete_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        deleted = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        assert deleted is None
+
+    expected_private_path = private_instance_state_root_path(
+        storage_path,
+        worker_key=worker_key,
+        agent_name="general",
+    )
+    assert set(memories_by_path) == {expected_private_path}
+    assert agent_state_root_path(storage_path, "general") not in memories_by_path
+    assert any(result.get("memory") == "Private note" for result in search_results)
 
 
 @pytest.mark.asyncio

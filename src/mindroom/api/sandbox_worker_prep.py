@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from mindroom.api import sandbox_exec
+from mindroom.config.main import load_config
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import visible_state_roots_for_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
@@ -184,6 +185,7 @@ def resolve_worker_base_dir(
     storage_root: Path,
     worker_key: str,
     requested_base_dir: object | None,
+    private_agent_names: frozenset[str] = frozenset(),
 ) -> Path:
     """Resolve the effective base_dir inside shared storage or the worker root."""
     shared_root = storage_root.resolve()
@@ -193,7 +195,11 @@ def resolve_worker_base_dir(
         msg = "base_dir must be a string path."
         raise TypeError(msg)
 
-    visible_state_roots = visible_state_roots_for_worker_key(storage_root, worker_key)
+    visible_state_roots = visible_state_roots_for_worker_key(
+        storage_root,
+        worker_key,
+        private_agent_names=private_agent_names,
+    )
     raw_path = Path(requested_base_dir).expanduser()
     if raw_path.is_absolute():
         candidate = raw_path.resolve()
@@ -209,6 +215,16 @@ def resolve_worker_base_dir(
         raise ValueError(msg)
 
     return candidate
+
+
+def _runtime_private_agent_names(runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the set of agents that materialize requester-private state."""
+    if not runtime_paths.config_path.exists():
+        return frozenset()
+    config = load_config(runtime_paths)
+    return frozenset(
+        agent_name for agent_name, agent_config in config.agents.items() if agent_config.private is not None
+    )
 
 
 def ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
@@ -241,6 +257,7 @@ def prepare_worker_request(
         raise WorkerRequestPreparationError(str(exc)) from exc
 
     paths = local_worker_state_paths_from_handle(worker_handle)
+    private_agent_names = _runtime_private_agent_names(runtime_paths)
     try:
         runtime_overrides = {
             "base_dir": resolve_worker_base_dir(
@@ -248,6 +265,7 @@ def prepare_worker_request(
                 sandbox_exec.runner_storage_root(runtime_paths),
                 worker_key,
                 tool_init_overrides.get("base_dir"),
+                private_agent_names=private_agent_names,
             ),
         }
     except (TypeError, ValueError) as exc:
