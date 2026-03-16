@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
-from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, worker_dir_name
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_unscoped_worker_key,
+    resolve_worker_key,
+    worker_dir_name,
+)
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, _KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
@@ -577,6 +582,71 @@ def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
     assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key)}"
     assert "/app/worker/credentials" not in mount_paths
     assert "/app/worker/.shared_credentials" not in mount_paths
+
+
+def test_kubernetes_backend_user_agent_mounts_use_cached_private_visibility_after_invalid_reload(
+    tmp_path: Path,
+) -> None:
+    """User-agent mounts should keep using the cached private visibility during hot-edit parse failures."""
+    config_path = tmp_path / "config.yaml"
+    template_dir = tmp_path / "mind_template"
+    template_dir.mkdir()
+    config_path.write_text(
+        """agents:
+  mind:
+    display_name: Mind
+    private:
+      per: user_agent
+      root: mind_data
+      template_dir: ./mind_template
+models: {}
+""",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key_a = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    worker_key_b = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@bob:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key_a), now=10.0)
+    config_path.write_text("agents:\n  mind:\n    private: [\nmodels: {}\n", encoding="utf-8")
+    backend.ensure_worker(WorkerSpec(worker_key_b), now=20.0)
+
+    deployment = apps_api.created_bodies[-1]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key_b)}"
+    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key_b)}"
+
+    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key_b)}"
+    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key_b)}"
+    assert "/app/worker/agents/mind" not in mount_paths
 
 
 def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:

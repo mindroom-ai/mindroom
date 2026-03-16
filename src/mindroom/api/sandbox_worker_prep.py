@@ -13,9 +13,9 @@ from fastapi import HTTPException
 from loguru import logger
 
 from mindroom.api import sandbox_exec
+from mindroom.config.main import runtime_private_agent_names
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import (
-    resolved_worker_key_scope,
     visible_state_roots_for_worker_key,
     worker_dir_name,
 )
@@ -253,10 +253,11 @@ def prepare_worker_request(
 
     try:
         paths = local_worker_state_paths_from_handle(worker_handle)
-        if resolved_worker_key_scope(worker_key) == "user_agent":
-            private_agent_names = config.get_private_agent_names()
-        else:
-            private_agent_names = frozenset()
+        private_agent_names = runtime_private_agent_names(
+            runtime_paths,
+            worker_key=worker_key,
+            config=config,
+        )
         runtime_overrides = {
             "base_dir": resolve_worker_base_dir(
                 paths,

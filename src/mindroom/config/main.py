@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
@@ -30,6 +31,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -47,6 +49,8 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "matrix_message",
 )
 logger = get_logger(__name__)
+_RUNTIME_PRIVATE_AGENT_NAMES_CACHE: dict[Path, tuple[int, frozenset[str]]] = {}
+_RUNTIME_PRIVATE_AGENT_NAMES_LOCK = threading.Lock()
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -835,3 +839,51 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
+
+
+def runtime_private_agent_names(
+    runtime_paths: RuntimePaths,
+    *,
+    worker_key: str | None = None,
+    config: Config | None = None,
+) -> frozenset[str]:
+    """Return private-agent visibility, with last-known-good fallback for user-agent workers."""
+    if worker_key is not None and resolved_worker_key_scope(worker_key) != "user_agent":
+        return frozenset()
+
+    config_path = runtime_paths.config_path
+    if config is not None:
+        private_agent_names = config.get_private_agent_names()
+        if config_path.exists():
+            resolved_config_path = config_path.resolve()
+            config_mtime_ns = config_path.stat().st_mtime_ns
+            with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
+                _RUNTIME_PRIVATE_AGENT_NAMES_CACHE[resolved_config_path] = (config_mtime_ns, private_agent_names)
+        return private_agent_names
+
+    if not config_path.exists():
+        return frozenset()
+
+    resolved_config_path = config_path.resolve()
+    config_mtime_ns = config_path.stat().st_mtime_ns
+    with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
+        cached = _RUNTIME_PRIVATE_AGENT_NAMES_CACHE.get(resolved_config_path)
+        if cached is not None and cached[0] == config_mtime_ns:
+            return cached[1]
+
+    try:
+        private_agent_names = load_config(runtime_paths).get_private_agent_names()
+    except Exception:
+        with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
+            cached = _RUNTIME_PRIVATE_AGENT_NAMES_CACHE.get(resolved_config_path)
+            if cached is not None:
+                logger.warning(
+                    "Using cached private agent visibility after config reload failure",
+                    config_path=str(resolved_config_path),
+                )
+                return cached[1]
+        raise
+
+    with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
+        _RUNTIME_PRIVATE_AGENT_NAMES_CACHE[resolved_config_path] = (config_mtime_ns, private_agent_names)
+    return private_agent_names

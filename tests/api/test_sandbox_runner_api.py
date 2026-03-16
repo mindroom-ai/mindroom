@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
@@ -1391,6 +1393,62 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
+
+
+def test_runtime_private_agent_names_skips_config_load_for_non_user_agent_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-user-agent workers should not reload config to compute private visibility."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    runtime_paths.config_path.write_text("not: [valid\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "mindroom.config.main.load_config",
+        lambda _runtime_paths: (_ for _ in ()).throw(AssertionError("load_config should not run")),
+    )
+
+    assert runtime_private_agent_names(runtime_paths, worker_key="v1:tenant-123:shared:general") == frozenset()
+
+
+def test_runtime_private_agent_names_uses_cached_private_names_after_invalid_reload(tmp_path: Path) -> None:
+    """User-agent visibility should fall back to the last known-good private-agent set."""
+    config_path = tmp_path / "config.yaml"
+    storage_path = tmp_path / "storage"
+    template_dir = tmp_path / "mind_template"
+    template_dir.mkdir()
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+    config_path.write_text(
+        """agents:
+  mind:
+    display_name: Mind
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+models: {}
+""",
+        encoding="utf-8",
+    )
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+        agent_name="mind",
+    )
+
+    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
+
+    time.sleep(0.01)
+    config_path.write_text("agents:\n  mind:\n    private: [\nmodels: {}\n", encoding="utf-8")
+
+    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
 
 
 def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
