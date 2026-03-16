@@ -267,7 +267,7 @@ def prepare_worker_request(
                 private_agent_names=private_agent_names,
             ),
         }
-    except (TypeError, ValueError) as exc:
+    except (FileNotFoundError, TypeError, ValueError) as exc:
         raise WorkerRequestPreparationError(str(exc)) from exc
 
     return PreparedWorkerRequest(

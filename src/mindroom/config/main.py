@@ -848,7 +848,8 @@ def runtime_private_agent_names(
     config: Config | None = None,
 ) -> frozenset[str]:
     """Return private-agent visibility, with last-known-good fallback for user-agent workers."""
-    if worker_key is not None and resolved_worker_key_scope(worker_key) != "user_agent":
+    worker_scope = resolved_worker_key_scope(worker_key) if worker_key is not None else None
+    if worker_scope != "user_agent":
         return frozenset()
 
     config_path = runtime_paths.config_path
@@ -862,7 +863,8 @@ def runtime_private_agent_names(
         return private_agent_names
 
     if not config_path.exists():
-        return frozenset()
+        msg = f"Cannot resolve private agent visibility for user_agent worker without config file: {config_path}"
+        raise FileNotFoundError(msg)
 
     resolved_config_path = config_path.resolve()
     config_mtime_ns = config_path.stat().st_mtime_ns

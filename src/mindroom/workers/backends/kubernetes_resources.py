@@ -723,7 +723,10 @@ class KubernetesResourceManager:
 
     def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        private_agent_names = runtime_private_agent_names(self.runtime_paths, worker_key=worker_key)
+        try:
+            private_agent_names = runtime_private_agent_names(self.runtime_paths, worker_key=worker_key)
+        except (FileNotFoundError, ValueError) as exc:
+            raise WorkerBackendError(str(exc)) from exc
         visible_state_roots = visible_state_roots_for_worker_key(
             mounted_storage_root,
             worker_key,

@@ -649,6 +649,32 @@ models: {}
     assert "/app/worker/agents/mind" not in mount_paths
 
 
+def test_kubernetes_backend_user_agent_mounts_require_runtime_config(tmp_path: Path) -> None:
+    """User-agent mounts should fail closed when runtime config is unavailable."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+
+    with pytest.raises(WorkerBackendError, match="Cannot resolve private agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+
 def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:
     """Unscoped dedicated workers should mount only the addressed agent root."""
     backend, apps_api, _core_api = _backend()
