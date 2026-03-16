@@ -469,12 +469,19 @@ class AgentBot:
         execution_identity: ToolExecutionIdentity,
     ) -> dict[str, KnowledgeManager]:
         """Ensure and collect managers needed for the current request scope."""
-        return await ensure_request_knowledge_managers(
-            agent_names,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=execution_identity,
-        )
+        try:
+            return await ensure_request_knowledge_managers(
+                agent_names,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to initialize request-scoped knowledge managers",
+                agent_names=agent_names,
+            )
+            return {}
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
