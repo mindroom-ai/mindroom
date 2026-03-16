@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
+
+KnowledgePathKind = Literal["auto", "file", "directory"]
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -37,6 +41,10 @@ class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents file or folder")
+    kind: KnowledgePathKind = Field(
+        default="auto",
+        description="Whether the knowledge path should be auto-detected, treated as a single file, or treated as a directory",
+    )
     watch: bool = Field(default=True, description="Watch the configured knowledge path for changes")
     chunk_size: int = Field(
         default=5000,

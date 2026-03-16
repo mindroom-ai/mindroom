@@ -56,20 +56,22 @@ Place files in `./knowledge_docs/` and they'll be indexed automatically on start
 knowledge_bases:
   my_docs:
     path: ./knowledge_docs/my_docs   # File or folder containing documents
+    kind: auto                       # Optional: auto, file, or directory
     watch: true                       # Auto-reindex on file changes
     chunk_size: 5000                  # Max characters per chunk
     chunk_overlap: 0                  # Overlap between adjacent chunks
 ```
 
-| Field           | Type   | Default            | Description                                                                                            |
-| --------------- | ------ | ------------------ | ------------------------------------------------------------------------------------------------------ |
-| `path`          | string | `./knowledge_docs` | File or folder path (relative to the config file directory or absolute)                                |
-| `watch`         | bool   | `true`             | Watch for filesystem changes and reindex automatically. Single-file targets watch the parent directory |
-| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                      |
-| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                    |
-| `git`           | object | `null`             | Optional Git repository sync settings                                                                  |
+| Field           | Type   | Default            | Description                                                                                                                            |
+| --------------- | ------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`          | string | `./knowledge_docs` | File or folder path (relative to the config file directory or absolute)                                                                |
+| `kind`          | string | `auto`             | How to treat `path`: `auto`, `file`, or `directory`. Use `file` or `directory` for ambiguous missing paths like `LICENSE` or `docs.v1` |
+| `watch`         | bool   | `true`             | Watch for filesystem changes and reindex automatically. Single-file targets watch the parent directory                                 |
+| `chunk_size`    | int    | `5000`             | Maximum characters per chunk for text-like files (minimum: `128`)                                                                      |
+| `chunk_overlap` | int    | `0`                | Overlap characters between adjacent chunks (must be `< chunk_size`)                                                                    |
+| `git`           | object | `null`             | Optional Git repository sync settings                                                                                                  |
 
-Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors.
+Use smaller `chunk_size` values when your embedding server has lower token or batch limits. If chunking is too large, indexing retries will fail with embedder 500 errors. When the path is missing and its type is ambiguous, set `kind` explicitly so MindRoom knows whether to treat it as a file or a directory.
 
 ### Multiple Knowledge Bases
 

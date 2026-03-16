@@ -252,6 +252,47 @@ async def test_knowledge_manager_indexes_single_file_target_without_creating_dir
 
 
 @pytest.mark.asyncio
+async def test_knowledge_manager_indexes_suffixless_single_file_target_when_kind_is_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suffixless file targets should stay file-backed when the config opts into file mode."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    file_path = tmp_path / "knowledge" / "LICENSE"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(file_path), kind="file", watch=False),
+        },
+    )
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    assert manager.knowledge_path == file_path.resolve()
+    assert manager.knowledge_path.exists() is False
+    assert manager.knowledge_path.parent.is_dir()
+
+    file_path.write_text("license text", encoding="utf-8")
+
+    indexed = await manager.index_file(file_path.name, upsert=True)
+
+    assert indexed is True
+    assert manager.list_files() == [manager.knowledge_path]
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    metadata = knowledge.insert_calls[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["source_path"] == "LICENSE"
+
+
+@pytest.mark.asyncio
 async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -276,10 +317,9 @@ async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
     )
 
     assert manager.knowledge_path == knowledge_path.resolve()
-    assert manager.knowledge_path.exists() is False
+    assert manager.knowledge_path.is_dir() is True
 
     file_path = manager.knowledge_path / "guide.md"
-    file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text("versioned docs", encoding="utf-8")
 
     assert manager.list_files() == [file_path.resolve()]
@@ -292,6 +332,45 @@ async def test_knowledge_manager_treats_missing_dotted_path_as_directory(
     metadata = knowledge.insert_calls[0]["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["source_path"] == "guide.md"
+
+
+@pytest.mark.asyncio
+async def test_remove_file_cleans_up_deleted_single_file_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing a deleted single-file target should clear the original source path."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    file_path = tmp_path / "knowledge" / "notes.md"
+    config = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(path=str(file_path), watch=False),
+        },
+    )
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    file_path.write_text("single file", encoding="utf-8")
+    assert await manager.index_file(file_path, upsert=True)
+
+    file_path.unlink()
+
+    removed = await manager.remove_file(file_path.name)
+
+    assert removed is True
+    assert manager._indexed_files == set()
+    assert manager._indexed_signatures == {}
+    knowledge = manager.get_knowledge()
+    assert isinstance(knowledge, _DummyKnowledge)
+    assert knowledge.remove_calls == [{"source_path": "notes.md"}, {"source_path": "notes.md"}]
 
 
 def test_knowledge_manager_reindexes_when_embedding_dimensions_change(

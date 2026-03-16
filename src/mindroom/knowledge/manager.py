@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
     from agno.knowledge.reader.base import Reader
 
-    from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
+    from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig, KnowledgePathKind
     from mindroom.config.main import Config
 
 logger = get_logger(__name__)
@@ -50,6 +50,31 @@ _SOURCE_MTIME_NS_KEY = "source_mtime_ns"
 _SOURCE_SIZE_KEY = "source_size"
 _FAILED_SIGNATURE_RETRY_SECONDS = 300
 _FAILED_SIGNATURE_RETRY_NS = _FAILED_SIGNATURE_RETRY_SECONDS * 1_000_000_000
+_AUTO_FILE_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".doc",
+        ".docx",
+        ".htm",
+        ".html",
+        ".json",
+        ".log",
+        ".markdown",
+        ".md",
+        ".pdf",
+        ".ppt",
+        ".pptx",
+        ".rst",
+        ".text",
+        ".tsv",
+        ".txt",
+        ".xls",
+        ".xlsx",
+        ".xml",
+        ".yaml",
+        ".yml",
+    },
+)
 
 
 def _resolve_knowledge_path(
@@ -59,29 +84,47 @@ def _resolve_knowledge_path(
     return resolve_config_relative_path(path, runtime_paths=runtime_paths)
 
 
-def _knowledge_path_kind(
+def knowledge_path_kind(
     configured_path: str,
     knowledge_path: Path,
     *,
     git_enabled: bool,
-) -> Literal["file", "directory", "unknown"]:
+    configured_kind: KnowledgePathKind,
+) -> Literal["file", "directory"]:
+    """Resolve whether the configured knowledge target should behave like a file or a directory."""
     if knowledge_path.exists():
-        return "file" if knowledge_path.is_file() else "directory"
+        actual_kind: Literal["file", "directory"] = "file" if knowledge_path.is_file() else "directory"
+        if configured_kind not in {"auto", actual_kind}:
+            msg = (
+                f"Knowledge path {knowledge_path} exists as a {actual_kind}, "
+                f"but the configuration requires a {configured_kind}"
+            )
+            raise ValueError(msg)
+        return actual_kind
+    if configured_kind != "auto":
+        return configured_kind
     if git_enabled:
         return "directory"
-    configured_path_obj = Path(configured_path)
-    if configured_path_obj == Path() or configured_path_obj.suffix == "":
-        return "directory"
-    return "unknown"
+    return "file" if Path(configured_path).suffix.lower() in _AUTO_FILE_SUFFIXES else "directory"
 
 
-def _ensure_knowledge_path_ready(
+def ensure_knowledge_path_ready(
     configured_path: str,
     knowledge_path: Path,
     *,
     git_enabled: bool,
+    configured_kind: KnowledgePathKind,
 ) -> None:
-    if _knowledge_path_kind(configured_path, knowledge_path, git_enabled=git_enabled) != "directory":
+    """Create the configured knowledge path or its parent directory, depending on the resolved target kind."""
+    if (
+        knowledge_path_kind(
+            configured_path,
+            knowledge_path,
+            git_enabled=git_enabled,
+            configured_kind=configured_kind,
+        )
+        != "directory"
+    ):
         knowledge_path.parent.mkdir(parents=True, exist_ok=True)
         return
     knowledge_path.mkdir(parents=True, exist_ok=True)
@@ -121,6 +164,7 @@ def _indexing_settings_key(
         base_id,
         str(runtime_paths.storage_root.resolve()),
         str(knowledge_path),
+        base_config.kind,
         *effective_knowledge_embedder_signature(
             config.memory.embedder.provider,
             embedder_config.model,
@@ -333,10 +377,11 @@ class KnowledgeManager:
         """Initialize filesystem paths and the underlying vector database."""
         base_config = _knowledge_base_config(self.config, self.base_id)
         self.knowledge_path = _resolve_knowledge_path(base_config.path, self.runtime_paths)
-        _ensure_knowledge_path_ready(
+        ensure_knowledge_path_ready(
             base_config.path,
             self.knowledge_path,
             git_enabled=base_config.git is not None,
+            configured_kind=base_config.kind,
         )
         if base_config.git is not None and self._knowledge_source_is_file():
             msg = f"Knowledge base '{self.base_id}' uses Git sync and must point to a directory, not a file"
@@ -392,12 +437,13 @@ class KnowledgeManager:
     def _git_config(self) -> KnowledgeGitConfig | None:
         return _knowledge_base_config(self.config, self.base_id).git
 
-    def _knowledge_source_kind(self) -> Literal["file", "directory", "unknown"]:
+    def _knowledge_source_kind(self) -> Literal["file", "directory"]:
         base_config = _knowledge_base_config(self.config, self.base_id)
-        return _knowledge_path_kind(
+        return knowledge_path_kind(
             base_config.path,
             self.knowledge_path,
             git_enabled=base_config.git is not None,
+            configured_kind=base_config.kind,
         )
 
     def _knowledge_source_is_file(self) -> bool:

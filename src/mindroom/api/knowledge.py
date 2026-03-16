@@ -15,6 +15,7 @@ from mindroom.knowledge.manager import (
     KnowledgeManager,
     get_knowledge_manager,
     initialize_knowledge_managers,
+    knowledge_path_kind,
 )
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -40,10 +41,32 @@ def _knowledge_root(
     create: bool = False,
 ) -> Path:
     _ensure_base_exists(config, base_id)
-    root = constants.resolve_config_relative_path(config.knowledge_bases[base_id].path, runtime_paths)
+    base_config = config.knowledge_bases[base_id]
+    root = constants.resolve_config_relative_path(base_config.path, runtime_paths)
     if create:
-        root.mkdir(parents=True, exist_ok=True)
+        if _knowledge_root_kind(config, base_id, runtime_paths, root=root) == "directory":
+            root.mkdir(parents=True, exist_ok=True)
+        else:
+            root.parent.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _knowledge_root_kind(
+    config: Config,
+    base_id: str,
+    runtime_paths: constants.RuntimePaths,
+    *,
+    root: Path | None = None,
+) -> str:
+    _ensure_base_exists(config, base_id)
+    base_config = config.knowledge_bases[base_id]
+    resolved_root = root or constants.resolve_config_relative_path(base_config.path, runtime_paths)
+    return knowledge_path_kind(
+        base_config.path,
+        resolved_root,
+        git_enabled=base_config.git is not None,
+        configured_kind=base_config.kind,
+    )
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -63,14 +86,17 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
     files: list[dict[str, Any]] = []
     total_size = 0
 
-    if not root.is_dir():
-        return files, total_size
+    if file_paths is None:
+        if root.is_file():
+            paths = [root]
+        elif root.is_dir():
+            paths = sorted(path for path in root.rglob("*") if path.is_file())
+        else:
+            return files, total_size
+    else:
+        paths = sorted(path for path in file_paths if path.is_file())
 
-    paths = (
-        sorted(path for path in root.rglob("*") if path.is_file())
-        if file_paths is None
-        else sorted(path for path in file_paths if path.is_file())
-    )
+    base_root = root if root.is_dir() else root.parent
     for file_path in paths:
         stat = file_path.stat()
         total_size += stat.st_size
@@ -78,7 +104,7 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
         files.append(
             {
                 "name": file_path.name,
-                "path": file_path.relative_to(root).as_posix(),
+                "path": file_path.relative_to(base_root).as_posix(),
                 "size": stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
                 "type": file_type,
@@ -213,6 +239,9 @@ async def upload_knowledge_files(
 
     config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
     root = _knowledge_root(config, base_id, runtime_paths, create=True)
+    root_kind = _knowledge_root_kind(config, base_id, runtime_paths, root=root)
+    if root_kind == "file" and len(files) > 1:
+        raise HTTPException(status_code=400, detail="Single-file knowledge bases accept only one uploaded file")
 
     uploaded: list[str] = []
     uploaded_paths: list[Path] = []
@@ -222,7 +251,7 @@ async def upload_knowledge_files(
             await upload.close()
             continue
 
-        destination = _resolve_within_root(root, filename)
+        destination = root if root_kind == "file" else _resolve_within_root(root, filename)
 
         try:
             _validate_upload_size_hint(upload, filename)
@@ -236,7 +265,7 @@ async def upload_knowledge_files(
             await upload.close()
 
         uploaded_paths.append(destination)
-        uploaded.append(destination.relative_to(root).as_posix())
+        uploaded.append(destination.name if root_kind == "file" else destination.relative_to(root).as_posix())
 
     manager = await _ensure_manager(config, base_id, runtime_paths)
     if manager is not None:
@@ -257,13 +286,19 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
 
     config, runtime_paths = _load_runtime_config(api_runtime_paths(request))
     root = _knowledge_root(config, base_id, runtime_paths)
+    root_kind = _knowledge_root_kind(config, base_id, runtime_paths, root=root)
     decoded_path = unquote(path)
-    target = _resolve_within_root(root, decoded_path)
+    if root_kind == "file":
+        if decoded_path != root.name:
+            raise HTTPException(status_code=404, detail="Knowledge file not found")
+        target = root
+    else:
+        target = _resolve_within_root(root, decoded_path)
 
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Knowledge file not found")
 
-    relative_path = target.relative_to(root).as_posix()
+    relative_path = target.name if root_kind == "file" else target.relative_to(root).as_posix()
     target.unlink()
 
     manager = await _ensure_manager(config, base_id, runtime_paths)
