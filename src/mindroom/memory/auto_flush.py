@@ -196,6 +196,29 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     return cast("_FlushSessionEntry", entry)
 
 
+def _stale_private_session_entry(
+    config: Config,
+    agent_name: str,
+    entry: _FlushSessionEntry,
+) -> bool:
+    agent_config = config.agents.get(agent_name)
+    worker_key = entry.get("worker_key")
+    execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
+    if agent_config is None or agent_config.private is None:
+        return worker_key is not None or execution_identity is not None
+    if not isinstance(worker_key, str) or execution_identity is None:
+        return True
+    try:
+        resolved_worker_key, _ = _resolve_flush_scope(
+            config,
+            agent_name,
+            execution_identity,
+        )
+    except ValueError:
+        return True
+    return resolved_worker_key != worker_key
+
+
 def _read_state_unlocked(storage_path: Path) -> _FlushState:
     path = _state_path(storage_path)
     if not path.exists():
@@ -590,18 +613,13 @@ class MemoryAutoFlushWorker:
             ]
             for key in non_file_agent_keys:
                 del sessions[key]
-            invalid_private_entry_keys = [
+            stale_private_entry_keys = [
                 key
                 for key, entry in sessions.items()
                 if isinstance(entry.get("agent_name"), str)
-                and (agent_config := config.agents.get(entry["agent_name"])) is not None
-                and agent_config.private is not None
-                and (
-                    not isinstance(entry.get("worker_key"), str)
-                    or _deserialize_execution_identity(entry.get("execution_identity")) is None
-                )
+                and _stale_private_session_entry(config, entry["agent_name"], entry)
             ]
-            for key in invalid_private_entry_keys:
+            for key in stale_private_entry_keys:
                 del sessions[key]
             _write_state_unlocked(self.storage_path, state)
 

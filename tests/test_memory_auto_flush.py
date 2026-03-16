@@ -709,6 +709,39 @@ def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_worker_removes_stale_private_entries_when_agent_becomes_shared(tmp_path: Path) -> None:
+    """Config reloads should drop persisted private dirty entries once the agent is no longer private."""
+    config = _private_auto_flush_config(tmp_path)
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="mind",
+        session_id="!room:example.org:$thread",
+        execution_identity=alice_identity,
+    )
+    config.agents["mind"].private = None
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    await worker._run_cycle(config)
+
+    payload = json.loads((tmp_path / "memory_flush_state.json").read_text(encoding="utf-8"))
+    assert payload["sessions"] == {}
+
+
+@pytest.mark.asyncio
 async def test_worker_flush_private_agent_uses_persisted_private_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
