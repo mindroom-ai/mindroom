@@ -45,6 +45,7 @@ async def test_team_response_retries_without_inline_media_on_validation_error() 
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
 
     media_validation_error = "Error code: 500 - audio input is not supported"
     mock_team = MagicMock()
@@ -84,6 +85,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
@@ -117,6 +119,7 @@ async def test_team_stream_retries_without_inline_media_on_setup_error() -> None
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
@@ -160,6 +163,7 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
 
     media_validation_error = "Error code: 500 - audio input is not supported"
 
