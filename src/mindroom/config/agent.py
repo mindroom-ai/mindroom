@@ -14,7 +14,7 @@ from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_rel
 
 CultureMode = Literal["automatic", "agentic", "manual"]
 PrivateWorkerScope = Literal["user", "user_agent"]
-_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db"})
+_RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma"})
 
 
 def _validate_safe_relative_path(
