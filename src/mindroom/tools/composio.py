@@ -27,7 +27,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="comp_...",
-            description="Composio API key (can also be set via COMPOSIO_API_KEY env var)",
+            description="Composio API key",
         ),
         ConfigField(
             name="base_url",

@@ -12,29 +12,48 @@ from aioresponses import aioresponses
 
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
+from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.teams import TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
     from pathlib import Path
 
 
+def _runtime_paths(storage_path: Path) -> RuntimePaths:
+    config_path = storage_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+
+
+def _make_config(storage_path: Path) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!test:localhost"]),
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
+            },
+            teams={},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+            authorization=AuthorizationConfig(default_room_access=True),
+        ),
+        _runtime_paths(storage_path),
+    )
+
+
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
-    # Import here to get the actual domain from environment
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="calculator",
-        user_id=f"@mindroom_calculator:{config.domain}",
+        user_id="@mindroom_calculator:localhost",
         display_name="CalculatorAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -44,13 +63,9 @@ def mock_calculator_agent() -> AgentMatrixUser:
 @pytest.fixture
 def mock_general_agent() -> AgentMatrixUser:
     """Create a mock general agent user."""
-    # Import here to get the actual domain from environment
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    config = Config.from_yaml()
     return AgentMatrixUser(
         agent_name="general",
-        user_id=f"@mindroom_general:{config.domain}",
+        user_id="@mindroom_general:localhost",
         display_name="GeneralAgent",
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
@@ -77,13 +92,13 @@ async def test_agent_processes_direct_mention(
         mock_client.access_token = mock_calculator_agent.access_token
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         await bot.start()
 
         # Create a message mentioning the calculator agent
-        message_body = f"@mindroom_calculator:{config.domain} What's 15% of 200?"
+        message_body = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         message_event = nio.RoomMessageText(
             body=message_body,
             formatted_body=message_body,
@@ -92,7 +107,9 @@ async def test_agent_processes_direct_mention(
                 "content": {
                     "msgtype": "m.text",
                     "body": message_body,
-                    "m.mentions": {"user_ids": [f"@mindroom_calculator:{config.domain}"]},
+                    "m.mentions": {
+                        "user_ids": [f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"],
+                    },
                     "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                 },
                 "event_id": "$test_event:localhost",
@@ -131,10 +148,13 @@ async def test_agent_processes_direct_mention(
                 mock_ai.assert_called_once()
                 ai_kwargs = mock_ai.call_args.kwargs
                 assert ai_kwargs["agent_name"] == "calculator"
-                assert ai_kwargs["prompt"] == f"@mindroom_calculator:{config.domain} What's 15% of 200?"
+                assert (
+                    ai_kwargs["prompt"]
+                    == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+                )
                 assert ai_kwargs["session_id"] == f"{test_room_id}:$thread_root:localhost"
                 assert ai_kwargs["thread_history"] == []
-                assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+                assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
                 assert ai_kwargs["config"] == config
                 assert ai_kwargs["room_id"] == test_room_id
                 assert ai_kwargs["knowledge"] is None
@@ -164,9 +184,9 @@ async def test_agent_ignores_other_agents(
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[test_room_id])
         await bot.start()
 
         # Create a message from another agent
@@ -203,18 +223,11 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 ) -> None:
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
-    mock_config = Config(
-        agents={
-            "calculator": AgentConfig(display_name="Calculator", rooms=["!test:localhost"]),
-            "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-        },
-        teams={},
-        room_models={},
-        models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
-    )
+    mock_config = _make_config(tmp_path)
+    mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
-    domain = mock_config.domain
+    domain = mock_config.get_domain(runtime_paths_for(mock_config))
     test_room_id = "!test:localhost"  # Room ID can stay as localhost
     test_user_id = f"@alice:{domain}"
     thread_root_id = f"$thread_root:{domain}"
@@ -233,9 +246,16 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_login.return_value = mock_client
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
-        config = Config.from_yaml()
+        config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[test_room_id], enable_streaming=False)
+        bot = AgentBot(
+            mock_calculator_agent,
+            tmp_path,
+            config,
+            runtime_paths_for(config),
+            rooms=[test_room_id],
+            enable_streaming=False,
+        )
 
         # Mock orchestrator
         mock_orchestrator = MagicMock()
@@ -422,7 +442,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
             assert ai_kwargs["session_id"] == f"{test_room_id}:{thread_root_id}"
             assert ai_kwargs["thread_history"] == mock_fetch.return_value
-            assert ai_kwargs["runtime_paths"].storage_root == tmp_path
+            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
             assert ai_kwargs["config"] == config
             assert ai_kwargs["room_id"] == test_room_id
             assert ai_kwargs["knowledge"] is None
@@ -474,7 +494,7 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
             mock_from_yaml.return_value = mock_config
 
             with patch("mindroom.orchestrator.MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-                orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+                orchestrator = MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
                 await orchestrator.initialize()
 
                 # Verify agents were created (2 agents + 1 router)
@@ -518,9 +538,9 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_client.user_id = mock_calculator_agent.user_id
         mock_login.return_value = mock_client
 
-        config = Config.from_yaml()
+        config = _make_config(tmp_path)
 
-        bot = AgentBot(mock_calculator_agent, tmp_path, config, rooms=[initial_room])
+        bot = AgentBot(mock_calculator_agent, tmp_path, config, runtime_paths_for(config), rooms=[initial_room])
         await bot.start()
 
         # Create invite event for a different room

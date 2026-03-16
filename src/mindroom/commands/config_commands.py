@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path  # noqa: TC003
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 from pydantic import ValidationError
 
-from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -133,6 +134,11 @@ def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
+def _validate_config_dict(config_dict: dict[str, Any], runtime_paths: RuntimePaths) -> Config:
+    """Validate one config payload against the active runtime context."""
+    return Config.validate_with_runtime(config_dict, runtime_paths)
+
+
 def _format_value(value: Any) -> str:  # noqa: ANN401
     """Format a value for display as YAML.
 
@@ -152,12 +158,15 @@ def _format_value(value: Any) -> str:  # noqa: ANN401
     return yaml_str
 
 
-async def handle_config_command(args_text: str, config_path: Path | None = None) -> tuple[str, dict[str, Any] | None]:  # noqa: C901, PLR0911, PLR0912
+async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
+    args_text: str,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, dict[str, Any] | None]:
     """Handle config command execution.
 
     Args:
         args_text: The command arguments
-        config_path: Optional path to config file
+        runtime_paths: Runtime context carrying the active config path
 
     Returns:
         Tuple of (response message, config change dict or None)
@@ -165,10 +174,10 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 
     """
     operation, args = _parse_config_args(args_text)
-    path = constants.runtime_config_path(config_path)
+    path = runtime_paths.config_path
 
     # Load current config
-    config = Config.from_yaml(path)
+    config = load_config(runtime_paths)
     config_dict = config.model_dump(exclude_none=True)
 
     if operation == "show":
@@ -220,7 +229,7 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
             _set_nested_value(test_config_dict, config_path_str, value)
 
             # Validate the modified config
-            Config(**test_config_dict)  # This will raise ValidationError if invalid
+            _validate_config_dict(test_config_dict, runtime_paths)
         except (KeyError, IndexError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
         except ValidationError as e:
@@ -279,24 +288,24 @@ async def handle_config_command(args_text: str, config_path: Path | None = None)
 async def apply_config_change(
     config_path_str: str,
     new_value: Any,  # noqa: ANN401
-    config_file_path: Path | None = None,
+    runtime_paths: RuntimePaths,
 ) -> str:
     """Apply a confirmed configuration change.
 
     Args:
         config_path_str: The configuration path (e.g., "agents.analyst.role")
         new_value: The new value to set
-        config_file_path: Optional path to config file
+        runtime_paths: Runtime context carrying the active config path
 
     Returns:
         Success or error message
 
     """
-    path = constants.runtime_config_path(config_file_path)
+    path = runtime_paths.config_path
 
     try:
         # Load the current configuration
-        config = Config.from_yaml(path)
+        config = load_config(runtime_paths)
         config_dict = config.model_dump()
 
         # Apply the specific change
@@ -304,7 +313,7 @@ async def apply_config_change(
 
         # Validate the modified config
         try:
-            new_config = Config(**config_dict)
+            new_config = _validate_config_dict(config_dict, runtime_paths)
         except ValidationError as ve:
             errors = ["❌ Configuration validation failed:"]
             for error in ve.errors():

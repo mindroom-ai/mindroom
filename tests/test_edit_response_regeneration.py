@@ -13,10 +13,44 @@ from mindroom import interactive
 from mindroom.bot import AgentBot
 from mindroom.commands import config_confirmation
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.identity import MatrixID
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
+from tests.conftest import bind_runtime_paths, runtime_paths_for
+
+
+def _test_config(
+    tmp_path: Path,
+    *,
+    agent_names: tuple[str, ...] = ("test_agent",),
+    voice_enabled: bool = False,
+) -> Config:
+    config = Config(
+        agents={
+            name: {
+                "display_name": name.replace("_", " ").title(),
+                "rooms": ["!test:example.com"],
+            }
+            for name in agent_names
+        },
+        voice={"enabled": voice_enabled},
+        authorization={"default_room_access": True, "agent_reply_permissions": {}},
+        mindroom_user={"username": "mindroom", "display_name": "MindRoom"},
+    )
+    return _bind_runtime_paths(config, tmp_path)
+
+
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    """Attach example.com runtime paths to a test config."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={
+            "MATRIX_HOMESERVER": "http://example.com",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(config, runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -30,20 +64,14 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.get_agent_worker_scope.return_value = None
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -180,20 +208,14 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.get_agent_worker_scope.return_value = None
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -274,22 +296,14 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with multiple agents
-    config = Mock()
-    config.agents = {
-        "test_agent": Mock(knowledge_bases=[]),
-        "helper_agent": Mock(knowledge_bases=[]),
-    }
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, agent_names=("test_agent", "helper_agent"))
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -393,13 +407,22 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
         patch.object(bot, "_extract_message_context", new_callable=AsyncMock) as mock_context,
         patch.object(bot, "_edit_message", new_callable=AsyncMock) as mock_edit,
     ):
+        mock_context.return_value = MagicMock(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_history=[],
+            thread_id=None,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
         # Process the bot's own edit event
         await bot._on_message(room, own_edit_event)
 
         # Process another agent's edit event
         await bot._on_message(room, other_agent_edit)
 
-        # Verify that the bot did NOT attempt to regenerate for either edit
+        # Both edits should be ignored before any regeneration work begins.
         mock_context.assert_not_called()
         mock_edit.assert_not_called()
 
@@ -443,19 +466,14 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.authorization = Mock()
-    config.authorization.is_authorized = Mock(return_value=True)
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -537,23 +555,27 @@ async def test_on_reaction_respects_agent_reply_permissions(tmp_path: Path) -> N
         password="test_password",  # noqa: S106
     )
 
-    config = Config(
-        agents={
-            "test_agent": {
-                "display_name": "Test Agent",
-                "rooms": ["!test:example.com"],
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "test_agent": {
+                    "display_name": "Test Agent",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
-        },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {"test_agent": ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -641,23 +663,27 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
         password="test_password",  # noqa: S106
     )
 
-    config = Config(
-        agents={
-            "assistant": {
-                "display_name": "Assistant",
-                "rooms": ["!test:example.com"],
+    config = _bind_runtime_paths(
+        Config(
+            agents={
+                "assistant": {
+                    "display_name": "Assistant",
+                    "rooms": ["!test:example.com"],
+                },
             },
-        },
-        authorization={
-            "default_room_access": True,
-            "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
-        },
+            authorization={
+                "default_room_access": True,
+                "agent_reply_permissions": {ROUTER_AGENT_NAME: ["@alice:example.com"]},
+            },
+        ),
+        tmp_path,
     )
 
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -720,21 +746,14 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -813,7 +832,13 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
 
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
-        assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
+        assert mock_handle_voice.call_args.args == (
+            bot.client,
+            room,
+            voice_event,
+            config,
+            runtime_paths_for(config),
+        )
         mock_generate_response.assert_called_once()
 
 
@@ -828,21 +853,14 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {"test_agent": MatrixID.parse("@mindroom_test_agent:example.com")}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -921,7 +939,13 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
 
         # Verify voice handler was called and the fallback relay ran.
         mock_handle_voice.assert_called_once()
-        assert mock_handle_voice.call_args.args == (bot.client, room, voice_event, config)
+        assert mock_handle_voice.call_args.args == (
+            bot.client,
+            room,
+            voice_event,
+            config,
+            runtime_paths_for(config),
+        )
         mock_generate_response.assert_called_once()
 
 
@@ -937,21 +961,24 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     )
 
     # Create a minimal mock config with authorization
-    config = Config(
-        agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
-        authorization={
-            "global_users": ["@authorized:example.com"],
-            "room_permissions": {},
-            "default_room_access": False,
-        },
+    config = _bind_runtime_paths(
+        Config(
+            agents={"test_agent": {"display_name": "Test Agent", "role": "Test agent", "rooms": ["!test:example.com"]}},
+            authorization={
+                "global_users": ["@authorized:example.com"],
+                "room_permissions": {},
+                "default_room_access": False,
+            },
+        ),
+        tmp_path,
     )
-    config.domain = "example.com"
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 
@@ -1003,7 +1030,13 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     ):
         await bot._on_message(room, edit_event)
         # Verify authorization was checked
-        mock_is_auth.assert_called_once_with(edit_event.sender, config, room.room_id, room_alias=None)
+        mock_is_auth.assert_called_once_with(
+            edit_event.sender,
+            config,
+            room.room_id,
+            runtime_paths_for(config),
+            room_alias=None,
+        )
         # Should not handle edit for unauthorized user
         mock_handle_edit.assert_not_called()
 
@@ -1019,21 +1052,14 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
         password="test_password",  # noqa: S106
     )
 
-    # Create a minimal mock config with voice enabled
-    config = Mock()
-    config.agents = {"test_agent": Mock(knowledge_bases=[])}
-    config.domain = "example.com"
-    config.ids = {}
-    config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-    config.voice = Mock()
-    config.voice.enabled = True
-    config.authorization.agent_reply_permissions = {}
+    config = _test_config(tmp_path, voice_enabled=True)
 
     # Create the bot
     bot = AgentBot(
         agent_user=agent_user,
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
 

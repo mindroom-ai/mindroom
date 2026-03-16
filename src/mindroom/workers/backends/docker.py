@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV, CredentialsManager, sync_shared_credentials_to_worker
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import is_unscoped_worker_key, worker_dir_name
@@ -163,7 +165,11 @@ def _resolved_docker_image_identity(
 def ensure_docker_dependencies() -> None:
     """Install the optional Docker SDK runtime when needed."""
     try:
-        ensure_optional_deps(_DOCKER_DEPENDENCIES, _DOCKER_EXTRA)
+        ensure_optional_deps(
+            _DOCKER_DEPENDENCIES,
+            _DOCKER_EXTRA,
+            resolve_primary_runtime_paths(process_env=dict(os.environ)),
+        )
     except ImportError as exc:
         raise WorkerBackendError(str(exc)) from exc
 

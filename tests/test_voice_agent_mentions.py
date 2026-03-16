@@ -2,33 +2,54 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.voice_handler import (
     _is_speculative_command_rewrite,
     _process_transcription,
     _sanitize_unavailable_mentions,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _voice_config(agent_display_names: dict[str, str]) -> Config:
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                agent_name: AgentConfig(display_name=display_name)
+                for agent_name, display_name in agent_display_names.items()
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    config.voice.intelligence.model = "test-model"
+    return config
+
+
+async def _process_transcription_for_test(transcription: str, config: Config, **kwargs: object) -> str:
+    """Run voice transcription processing with the test config's runtime context."""
+    return await _process_transcription(transcription, config, runtime_paths_for(config), **kwargs)
 
 
 @pytest.mark.asyncio
 async def test_voice_correctly_formats_agent_mentions() -> None:
     """Test that voice processing uses correct agent names, not display names."""
     # Create a config with an agent that has different name and display name
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "home": MagicMock(spec=AgentConfig, display_name="HomeAssistant"),
-        "research": MagicMock(spec=AgentConfig, display_name="Research Agent"),
-    }
-    config.teams = {}
-    # Mock the voice configuration
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "home": "HomeAssistant",
+            "research": "Research Agent",
+        },
+    )
 
     # Mock the Agent to return a response that tests our prompt
     # The AI should understand to use @home not @homeassistant
@@ -45,7 +66,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()  # Mock model instance
 
-        result = await _process_transcription("HomeAssistant turn on the lights", config)
+        result = await _process_transcription_for_test("HomeAssistant turn on the lights", config)
         assert result == "@home turn on the lights"
 
     # Test 2: Agent with command
@@ -59,7 +80,7 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription(
+        result = await _process_transcription_for_test(
             "hey home assistant schedule to turn off the lights in 10 minutes",
             config,
         )
@@ -76,23 +97,19 @@ async def test_voice_correctly_formats_agent_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("research agent find papers on AI", config)
+        result = await _process_transcription_for_test("research agent find papers on AI", config)
         assert result == "@research find papers on AI"
 
 
 @pytest.mark.asyncio
 async def test_voice_prompt_includes_correct_agent_format() -> None:
     """Test that the AI prompt correctly shows agent names vs display names."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "home": MagicMock(spec=AgentConfig, display_name="HomeAssistant"),
-        "calc": MagicMock(spec=AgentConfig, display_name="Calculator"),
-    }
-    config.teams = {}
-    # Mock the voice configuration
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "home": "HomeAssistant",
+            "calc": "Calculator",
+        },
+    )
 
     # Capture the prompt sent to the AI
     captured_prompt = None
@@ -113,7 +130,7 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        await _process_transcription("test", config)
+        await _process_transcription_for_test("test", config)
 
         # Verify the prompt shows the correct format
         assert "@home or @mindroom_home (spoken as: HomeAssistant)" in captured_prompt
@@ -125,15 +142,12 @@ async def test_voice_prompt_includes_correct_agent_format() -> None:
 @pytest.mark.asyncio
 async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
     """Test that room-scoped entities are the only entities listed in the prompt."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
-        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
-    }
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "openclaw": "OpenClaw",
+            "code": "CodeAgent",
+        },
+    )
 
     captured_prompt = None
 
@@ -153,7 +167,7 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        await _process_transcription(
+        await _process_transcription_for_test(
             "test",
             config,
             available_agent_names=["openclaw"],
@@ -168,15 +182,12 @@ async def test_voice_prompt_scopes_agents_to_room_entities() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
     """Test that configured but unavailable entities are not left as mentions."""
-    config = MagicMock(spec=Config)
-    config.agents = {
-        "openclaw": MagicMock(spec=AgentConfig, display_name="OpenClaw"),
-        "code": MagicMock(spec=AgentConfig, display_name="CodeAgent"),
-    }
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config(
+        {
+            "openclaw": "OpenClaw",
+            "code": "CodeAgent",
+        },
+    )
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -189,7 +200,7 @@ async def test_voice_transcription_strips_unavailable_entity_mentions() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription(
+        result = await _process_transcription_for_test(
             "review this",
             config,
             available_agent_names=["openclaw"],
@@ -252,12 +263,7 @@ def test_is_speculative_command_rewrite(
 @pytest.mark.asyncio
 async def test_voice_transcription_rejects_invented_skill_command() -> None:
     """A general sessions question must not be rewritten into !skill."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -271,7 +277,7 @@ async def test_voice_transcription_rejects_invented_skill_command() -> None:
         mock_get_model.return_value = MagicMock()
 
         transcription = "How do agent sessions work?"
-        result = await _process_transcription(transcription, config)
+        result = await _process_transcription_for_test(transcription, config)
 
     assert result == transcription
 
@@ -279,12 +285,7 @@ async def test_voice_transcription_rejects_invented_skill_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_keeps_explicit_skill_command() -> None:
     """Explicit skill intent should continue to produce !skill commands."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -297,7 +298,7 @@ async def test_voice_transcription_keeps_explicit_skill_command() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("run skill session list", config)
+        result = await _process_transcription_for_test("run skill session list", config)
 
     assert result == "!skill session list"
 
@@ -305,12 +306,7 @@ async def test_voice_transcription_keeps_explicit_skill_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_rejects_invented_help_command() -> None:
     """A general question must not be rewritten into !help."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -324,7 +320,7 @@ async def test_voice_transcription_rejects_invented_help_command() -> None:
         mock_get_model.return_value = MagicMock()
 
         transcription = "What is photosynthesis?"
-        result = await _process_transcription(transcription, config)
+        result = await _process_transcription_for_test(transcription, config)
 
     assert result == transcription
 
@@ -332,12 +328,7 @@ async def test_voice_transcription_rejects_invented_help_command() -> None:
 @pytest.mark.asyncio
 async def test_voice_transcription_keeps_explicit_help_command() -> None:
     """Explicit help intent should continue to produce !help commands."""
-    config = MagicMock(spec=Config)
-    config.agents = {}
-    config.teams = {}
-    config.voice = MagicMock()
-    config.voice.intelligence = MagicMock()
-    config.voice.intelligence.model = "test-model"
+    config = _voice_config({})
 
     with (
         patch("mindroom.voice_handler.Agent") as mock_agent_class,
@@ -350,6 +341,6 @@ async def test_voice_transcription_keeps_explicit_help_command() -> None:
         mock_agent_class.return_value = mock_agent
         mock_get_model.return_value = MagicMock()
 
-        result = await _process_transcription("help command", config)
+        result = await _process_transcription_for_test("help command", config)
 
     assert result == "!help"

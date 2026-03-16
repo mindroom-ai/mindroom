@@ -7,14 +7,12 @@ used by both agents and the dashboard interface.
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mindroom import constants
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -23,6 +21,9 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     worker_root_path,
 )
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 _SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
 _WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
@@ -35,7 +36,6 @@ logger = get_logger(__name__)
 _credentials_manager: CredentialsManager | None = None
 _credentials_manager_signature: tuple[Path, Path, str | None, Path | None] | None = None
 _credentials_manager_lock = threading.Lock()
-_PRIMARY_CREDENTIALS_STORAGE_PATH: Path | None = None
 
 
 def validate_service_name(service: str) -> str:
@@ -53,24 +53,33 @@ def validate_service_name(service: str) -> str:
 class CredentialsManager:
     """Centralized credentials storage and retrieval for MindRoom."""
 
-    def __init__(self, base_path: Path | None = None, *, shared_base_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        base_path: Path,
+        *,
+        shared_base_path: Path | None = None,
+        current_worker_key: str | None = None,
+        current_worker_root: Path | None = None,
+    ) -> None:
         """Initialize the credentials manager.
 
         Args:
             base_path: Base directory for storing credentials.
-                      Defaults to STORAGE_PATH/credentials (usually mindroom_data/credentials)
             shared_base_path: Optional shared credential layer used for inherited or mirrored
                 credentials within the current execution context.
+            current_worker_key: Optional worker key for the current runtime context.
+            current_worker_root: Optional worker root for the current runtime context.
 
         """
-        if base_path is None:
-            self.base_path = _default_credentials_base_path()
-        else:
-            self.base_path = Path(base_path)
+        self.base_path = Path(base_path)
         if shared_base_path is None:
             self.shared_base_path = _default_shared_credentials_base_path(self.base_path)
         else:
             self.shared_base_path = Path(shared_base_path)
+        self.current_worker_key = current_worker_key
+        self.current_worker_root = (
+            Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
+        )
 
         # Ensure the directory exists
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -90,6 +99,8 @@ class CredentialsManager:
         return CredentialsManager(
             base_path=worker_credentials_path,
             shared_base_path=worker_shared_credentials_path,
+            current_worker_key=worker_key,
+            current_worker_root=worker_root,
         )
 
     def shared_manager(self) -> CredentialsManager:
@@ -97,6 +108,8 @@ class CredentialsManager:
         return CredentialsManager(
             base_path=self.shared_base_path,
             shared_base_path=self.shared_base_path,
+            current_worker_key=self.current_worker_key,
+            current_worker_root=self.current_worker_root,
         )
 
     def get_credentials_path(self, service: str) -> Path:
@@ -205,45 +218,36 @@ class CredentialsManager:
         self.save_credentials(service, credentials)
 
 
-def _default_credentials_base_path() -> Path:
-    if _PRIMARY_CREDENTIALS_STORAGE_PATH is not None:
-        return _PRIMARY_CREDENTIALS_STORAGE_PATH / "credentials"
-    return constants.get_runtime_paths().storage_root / "credentials"
+def credentials_base_path(storage_root: Path) -> Path:
+    """Return the credentials directory under one explicit storage root."""
+    return Path(storage_root).expanduser().resolve() / "credentials"
 
 
 def _default_shared_credentials_base_path(base_path: Path) -> Path:
-    shared_storage_path = os.getenv(SHARED_CREDENTIALS_PATH_ENV, "").strip()
-    if shared_storage_path:
+    return base_path
+
+
+def _runtime_shared_credentials_base_path(runtime_paths: RuntimePaths, base_path: Path) -> Path:
+    shared_storage_path = runtime_paths.env_value(SHARED_CREDENTIALS_PATH_ENV, default="") or ""
+    if shared_storage_path.strip():
         return Path(shared_storage_path).expanduser().resolve()
     return base_path
 
 
-def _current_dedicated_worker_key() -> str | None:
-    raw_worker_key = os.getenv(_DEDICATED_WORKER_KEY_ENV, "").strip()
-    return raw_worker_key or None
+def _runtime_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
+    raw_worker_key = runtime_paths.env_value(_DEDICATED_WORKER_KEY_ENV, default="") or ""
+    normalized = raw_worker_key.strip()
+    return normalized or None
 
 
-def _current_dedicated_worker_root() -> Path | None:
-    raw_worker_root = os.getenv(_DEDICATED_WORKER_ROOT_ENV, "").strip()
-    if not raw_worker_root:
+def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
+    raw_worker_root = runtime_paths.env_value(_DEDICATED_WORKER_ROOT_ENV, default="") or ""
+    if not raw_worker_root.strip():
         return None
     return Path(raw_worker_root).expanduser().resolve()
 
 
-def set_primary_credentials_storage_path(storage_path: Path | None) -> None:
-    """Set the primary runtime storage root used for default credentials access."""
-    global _credentials_manager, _credentials_manager_signature, _PRIMARY_CREDENTIALS_STORAGE_PATH
-    with _credentials_manager_lock:
-        normalized_storage_path = None if storage_path is None else storage_path.expanduser().resolve()
-        if normalized_storage_path == _PRIMARY_CREDENTIALS_STORAGE_PATH:
-            return
-
-        _PRIMARY_CREDENTIALS_STORAGE_PATH = normalized_storage_path
-        _credentials_manager = None
-        _credentials_manager_signature = None
-
-
-def get_credentials_manager() -> CredentialsManager:
+def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
     """Get the global credentials manager instance.
 
     Returns:
@@ -252,20 +256,57 @@ def get_credentials_manager() -> CredentialsManager:
     """
     global _credentials_manager, _credentials_manager_signature
 
-    base_path = _default_credentials_base_path()
+    base_path = credentials_base_path(storage_root)
     shared_base_path = _default_shared_credentials_base_path(base_path)
     current_signature = (
         base_path,
         shared_base_path,
-        _current_dedicated_worker_key(),
-        _current_dedicated_worker_root(),
+        None,
+        None,
     )
 
     with _credentials_manager_lock:
         if _credentials_manager is None or _credentials_manager_signature != current_signature:
-            _credentials_manager = CredentialsManager()
+            _credentials_manager = CredentialsManager(base_path=base_path, shared_base_path=shared_base_path)
             _credentials_manager_signature = current_signature
         return _credentials_manager
+
+
+def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
+    """Return the global credentials manager for one explicit runtime context."""
+    global _credentials_manager, _credentials_manager_signature
+
+    base_path = credentials_base_path(runtime_paths.storage_root)
+    shared_base_path = _runtime_shared_credentials_base_path(runtime_paths, base_path)
+    current_signature = (
+        base_path,
+        shared_base_path,
+        _runtime_dedicated_worker_key(runtime_paths),
+        _runtime_dedicated_worker_root(runtime_paths),
+    )
+
+    with _credentials_manager_lock:
+        if _credentials_manager is None or _credentials_manager_signature != current_signature:
+            _credentials_manager = CredentialsManager(
+                base_path=base_path,
+                shared_base_path=shared_base_path,
+                current_worker_key=_runtime_dedicated_worker_key(runtime_paths),
+                current_worker_root=_runtime_dedicated_worker_root(runtime_paths),
+            )
+            _credentials_manager_signature = current_signature
+        return _credentials_manager
+
+
+def shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
+    """Return the shared credential layer for one execution context."""
+    if credentials_manager.shared_base_path == credentials_manager.base_path:
+        return credentials_manager
+    return credentials_manager.shared_manager()
+
+
+def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
+    """Return the shared credential layer for one explicit runtime context."""
+    return shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
 
 
 def _resolve_worker_credentials_manager(
@@ -274,6 +315,8 @@ def _resolve_worker_credentials_manager(
     routing_agent_name: str | None,
     credentials_manager: CredentialsManager,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> CredentialsManager | None:
     """Return the worker-scoped credentials manager for the current execution, if any."""
     if worker_scope is None:
@@ -283,6 +326,8 @@ def _resolve_worker_credentials_manager(
         worker_scope,
         agent_name=routing_agent_name,
         execution_identity=execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
     )
     if execution_identity is None:
         return None
@@ -291,13 +336,13 @@ def _resolve_worker_credentials_manager(
     if worker_key is None:
         return None
 
-    current_dedicated_worker_key = _current_dedicated_worker_key()
-    current_dedicated_worker_root = _current_dedicated_worker_root()
     current_storage_root = credentials_manager.storage_root.expanduser().resolve()
+    current_worker_key = credentials_manager.current_worker_key
+    current_worker_root = credentials_manager.current_worker_root
     if (
-        current_dedicated_worker_key == worker_key
-        and current_dedicated_worker_root is not None
-        and current_storage_root == current_dedicated_worker_root
+        current_worker_key == worker_key
+        and current_worker_root is not None
+        and current_storage_root == current_worker_root
     ):
         return credentials_manager
 
@@ -352,7 +397,7 @@ def sync_shared_credentials_to_worker(
     worker_key: str,
     *,
     include_ui_credentials: bool = False,
-    credentials_manager: CredentialsManager | None = None,
+    credentials_manager: CredentialsManager,
 ) -> None:
     """Sync shared credentials into one worker's dedicated shared-credential mirror.
 
@@ -360,13 +405,14 @@ def sync_shared_credentials_to_worker(
     copied; UI-backed shared credentials and legacy untagged shared credentials are copied
     only when explicitly requested.
     """
-    manager = credentials_manager or get_credentials_manager()
+    manager = credentials_manager
     worker_shared_manager = manager.for_worker(worker_key).shared_manager()
+    source_manager = shared_credentials_manager(manager)
     mirrored_services = set(worker_shared_manager.list_services())
     allowed_services: set[str] = set()
 
-    for service in manager.list_services():
-        shared_credentials = manager.load_credentials(service)
+    for service in source_manager.list_services():
+        shared_credentials = source_manager.load_credentials(service)
         if not isinstance(shared_credentials, Mapping):
             continue
         source = shared_credentials.get("_source")
@@ -385,7 +431,7 @@ def sync_shared_credentials_to_worker(
 def _sync_env_credentials_to_worker(
     worker_key: str,
     *,
-    credentials_manager: CredentialsManager | None = None,
+    credentials_manager: CredentialsManager,
 ) -> None:
     """Backward-compatible wrapper for syncing env-backed shared credentials."""
     sync_shared_credentials_to_worker(
@@ -400,11 +446,13 @@ def load_scoped_credentials(
     *,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
-    credentials_manager: CredentialsManager | None = None,
+    credentials_manager: CredentialsManager,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Load credentials for a service, resolving worker-scoped overrides when available."""
-    manager = credentials_manager or get_credentials_manager()
+    manager = credentials_manager
     shared_manager = manager.shared_manager()
     if worker_scope is None:
         if manager.shared_base_path != manager.base_path:
@@ -420,6 +468,8 @@ def load_scoped_credentials(
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
         execution_identity=execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
     )
     return merge_scoped_credentials(
         service,
@@ -434,11 +484,13 @@ def save_scoped_credentials(
     *,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
-    credentials_manager: CredentialsManager | None = None,
+    credentials_manager: CredentialsManager,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
-    manager = credentials_manager or get_credentials_manager()
+    manager = credentials_manager
     if worker_scope is None:
         target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
         target_manager.save_credentials(service, credentials)
@@ -449,6 +501,8 @@ def save_scoped_credentials(
         routing_agent_name=routing_agent_name,
         credentials_manager=manager,
         execution_identity=execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
     )
     target_manager = worker_manager or manager.shared_manager()
     target_manager.save_credentials(service, credentials)

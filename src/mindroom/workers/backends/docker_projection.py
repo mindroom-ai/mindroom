@@ -15,12 +15,13 @@ from typing import TYPE_CHECKING, cast
 
 import yaml
 
-from mindroom.constants import resolve_config_relative_path
+from mindroom.constants import resolve_config_relative_path, resolve_primary_runtime_paths
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from mindroom.constants import RuntimePaths
     from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
@@ -86,10 +87,14 @@ def _ordered_unique_nonempty_strings(values: Iterable[object]) -> tuple[str, ...
     return tuple(ordered_values)
 
 
-def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
+def _projection_runtime_paths(host_config_path: Path) -> RuntimePaths:
+    return resolve_primary_runtime_paths(config_path=host_config_path, process_env=dict(os.environ))
+
+
+def _plugin_uses_filesystem_path(plugin_path: str, *, host_config_path: Path) -> bool:
     if plugin_path.startswith(("python:", "pkg:", "module:")):
         return False
-    candidate = resolve_config_relative_path(plugin_path, config_path=config_path)
+    candidate = resolve_config_relative_path(plugin_path, _projection_runtime_paths(host_config_path))
     if candidate.exists():
         return True
     unresolved = Path(plugin_path).expanduser()
@@ -590,10 +595,10 @@ class DockerProjectionManager:
         for index, raw_plugin in enumerate(plugins):
             if not isinstance(raw_plugin, str) or not _plugin_uses_filesystem_path(
                 raw_plugin,
-                config_path=host_config_path,
+                host_config_path=host_config_path,
             ):
                 continue
-            host_path = resolve_config_relative_path(raw_plugin, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_plugin, _projection_runtime_paths(host_config_path))
             plugins[index] = self._projected_path_value(
                 host_path,
                 PurePosixPath(
@@ -629,7 +634,7 @@ class DockerProjectionManager:
             raw_path = knowledge_base.get("path")
             if not isinstance(raw_path, str) or not raw_path.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_path, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_path, _projection_runtime_paths(host_config_path))
             knowledge_base["path"] = self._projected_path_value(
                 host_path,
                 PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
@@ -693,7 +698,7 @@ class DockerProjectionManager:
         for index, raw_context_file in enumerate(context_files):
             if not isinstance(raw_context_file, str) or not raw_context_file.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_context_file, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_context_file, _projection_runtime_paths(host_config_path))
             context_files[index] = self._projected_path_value(
                 host_path,
                 agent_dir

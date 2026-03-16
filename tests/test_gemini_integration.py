@@ -1,11 +1,26 @@
 """Tests for Google Gemini integration."""
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.mindroom.ai import get_model_instance
 from src.mindroom.config.main import Config
+from src.mindroom.constants import RuntimePaths, resolve_runtime_paths
+
+
+def _config_with_runtime_paths() -> tuple[Config, RuntimePaths]:
+    runtime_root = Path(tempfile.mkdtemp())
+    runtime_paths = resolve_runtime_paths(
+        config_path=runtime_root / "config.yaml",
+        storage_path=runtime_root / "mindroom_data",
+        process_env={},
+    )
+    config = Config()
+    config._runtime_paths = runtime_paths
+    return config, runtime_paths
 
 
 class TestGeminiIntegration:
@@ -13,7 +28,7 @@ class TestGeminiIntegration:
 
     def test_gemini_provider_creates_gemini_instance(self) -> None:
         """Test that 'gemini' provider creates a Gemini instance."""
-        config = Config()
+        config, runtime_paths = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
@@ -23,14 +38,14 @@ class TestGeminiIntegration:
         }
 
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
-            model = get_model_instance(config, "test_model")
+            model = get_model_instance(config, runtime_paths, "test_model")
             assert model.__class__.__name__ == "Gemini"
             assert model.id == "gemini-2.0-flash-001"
             assert model.provider == "Google"
 
     def test_google_provider_creates_gemini_instance(self) -> None:
         """Test that 'google' provider also creates a Gemini instance."""
-        config = Config()
+        config, runtime_paths = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="google",
@@ -40,14 +55,14 @@ class TestGeminiIntegration:
         }
 
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
-            model = get_model_instance(config, "test_model")
+            model = get_model_instance(config, runtime_paths, "test_model")
             assert model.__class__.__name__ == "Gemini"
             assert model.id == "gemini-2.0-pro-001"
             assert model.provider == "Google"
 
     def test_gemini_api_key_environment_variable(self) -> None:
         """Test that GOOGLE_API_KEY is set from credentials manager."""
-        config = Config()
+        config, runtime_paths = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="gemini",
@@ -59,13 +74,13 @@ class TestGeminiIntegration:
         with patch("src.mindroom.ai.get_api_key_for_provider") as mock_get_api_key:
             mock_get_api_key.return_value = "test-google-api-key"
             with patch.dict("os.environ", {}, clear=True):
-                get_model_instance(config, "test_model")
+                get_model_instance(config, runtime_paths, "test_model")
                 # Check that the API key was retrieved for gemini
-                mock_get_api_key.assert_called_with("gemini")
+                mock_get_api_key.assert_called_with("gemini", runtime_paths=runtime_paths)
 
     def test_unsupported_provider_raises_error(self) -> None:
         """Test that unsupported providers raise appropriate errors."""
-        config = Config()
+        config, runtime_paths = _config_with_runtime_paths()
         config.models = {
             "test_model": MagicMock(
                 provider="unsupported_provider",
@@ -75,11 +90,11 @@ class TestGeminiIntegration:
         }
 
         with pytest.raises(ValueError, match="Unsupported AI provider: unsupported_provider"):
-            get_model_instance(config, "test_model")
+            get_model_instance(config, runtime_paths, "test_model")
 
     def test_gemini_models_in_config(self) -> None:
         """Test that Gemini models can be configured properly."""
-        config = Config()
+        config, runtime_paths = _config_with_runtime_paths()
 
         # Test various Gemini model configurations
         gemini_configs = [
@@ -99,7 +114,7 @@ class TestGeminiIntegration:
             }
 
             with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}):
-                model = get_model_instance(config, "test")
+                model = get_model_instance(config, runtime_paths, "test")
                 assert model.__class__.__name__ == "Gemini"
                 assert model.id == model_id
                 assert model.provider == "Google"

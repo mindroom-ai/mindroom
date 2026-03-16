@@ -15,7 +15,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.text import Text
 
 from mindroom import constants
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     resolve_avatar_path,
@@ -144,14 +144,18 @@ def get_console() -> Console:
     return Console()
 
 
-def load_validated_config() -> Config:
+def load_validated_config(runtime_paths: constants.RuntimePaths) -> Config:
     """Load and validate the active MindRoom configuration."""
-    return Config.from_yaml(constants.runtime_config_path())
+    return load_config(runtime_paths)
 
 
-def get_avatar_path(entity_type: str, entity_name: str) -> Path:
+def get_avatar_path(
+    entity_type: str,
+    entity_name: str,
+    runtime_paths: constants.RuntimePaths,
+) -> Path:
     """Get the output path for an avatar file."""
-    avatar_path = workspace_avatar_path(entity_type, entity_name)
+    avatar_path = workspace_avatar_path(entity_type, entity_name, runtime_paths)
     avatar_path.parent.mkdir(parents=True, exist_ok=True)
     return avatar_path
 
@@ -174,20 +178,19 @@ def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
 
 def _missing_avatar_targets(
     config: Config,
-    *,
-    config_path: Path | None = None,
+    runtime_paths: constants.RuntimePaths,
 ) -> set[tuple[str, str]]:
     """Return the managed avatar targets with no bundled or workspace avatar yet."""
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in _managed_avatar_targets(config)
-        if not resolve_avatar_path(entity_type, entity_name, config_path=config_path).exists()
+        if not resolve_avatar_path(entity_type, entity_name, runtime_paths).exists()
     }
 
 
-def has_missing_managed_avatars(config: Config, *, config_path: Path | None = None) -> bool:
+def has_missing_managed_avatars(config: Config, runtime_paths: constants.RuntimePaths) -> bool:
     """Return whether any managed avatar file is missing from the workspace."""
-    return bool(_missing_avatar_targets(config, config_path=config_path))
+    return bool(_missing_avatar_targets(config, runtime_paths))
 
 
 async def generate_prompt(
@@ -246,9 +249,10 @@ def extract_image_bytes(response: types.GenerateContentResponse) -> bytes | None
 async def generate_avatar(
     client: genai.Client,
     target: AvatarTarget,
+    runtime_paths: constants.RuntimePaths,
 ) -> None:
     """Generate an avatar for a single entity if it does not exist."""
-    avatar_path = get_avatar_path(target.entity_type, target.entity_name)
+    avatar_path = get_avatar_path(target.entity_type, target.entity_name, runtime_paths)
     if avatar_path.exists():
         get_console().print(
             f"[green]✓[/green] Avatar already exists for [bold]{target.entity_type}/{target.entity_name}[/bold]",
@@ -283,9 +287,15 @@ async def generate_avatar(
     console.print(f"[green]✓ Generated avatar for {target.entity_type}/{target.entity_name}[/green]")
 
 
-def _build_router_user(router_account: _MatrixAccount) -> AgentMatrixUser:
+def _build_router_user(
+    router_account: _MatrixAccount,
+    runtime_paths: constants.RuntimePaths,
+) -> AgentMatrixUser:
     """Create the router user object from persisted Matrix state."""
-    server_name = extract_server_name_from_homeserver(constants.runtime_matrix_homeserver())
+    server_name = extract_server_name_from_homeserver(
+        constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
+        runtime_paths=runtime_paths,
+    )
     return AgentMatrixUser(
         agent_name=ROUTER_AGENT_NAME,
         user_id=MatrixID.from_username(router_account.username, server_name).full_id,
@@ -310,18 +320,22 @@ async def _sync_avatar_target(
     return False
 
 
-async def _sync_configured_room_avatars(client: nio.AsyncClient, config: Config) -> tuple[int, int, list[str]]:
+async def _sync_configured_room_avatars(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[int, int, list[str]]:
     """Apply configured room avatars and return success/skip counts plus failed labels."""
     success_count = 0
     skip_count = 0
     failed_labels: list[str] = []
     for room_name in sorted(_managed_room_avatar_keys(config)):
-        avatar_path = resolve_avatar_path("rooms", room_name)
+        avatar_path = resolve_avatar_path("rooms", room_name, runtime_paths)
         if not avatar_path.exists():
             skip_count += 1
             continue
 
-        room_id = get_room_id(room_name)
+        room_id = get_room_id(room_name, runtime_paths)
         if not room_id:
             get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
             continue
@@ -343,12 +357,17 @@ async def _sync_root_space_avatar(
     client: nio.AsyncClient,
     config: Config,
     state: MatrixState,
+    runtime_paths: constants.RuntimePaths,
 ) -> bool | None:
     """Apply the managed root-space avatar when both the asset and room exist."""
     if not config.matrix_space.enabled or not state.space_room_id:
         return None
 
-    root_space_avatar_path = resolve_avatar_path("spaces", ROOT_SPACE_AVATAR_NAME)
+    root_space_avatar_path = resolve_avatar_path(
+        "spaces",
+        ROOT_SPACE_AVATAR_NAME,
+        runtime_paths,
+    )
     if not root_space_avatar_path.exists():
         return None
 
@@ -360,30 +379,34 @@ async def _sync_root_space_avatar(
     )
 
 
-async def set_room_avatars_in_matrix() -> None:
+async def set_room_avatars_in_matrix(runtime_paths: constants.RuntimePaths) -> None:
     """Set avatars for all rooms in Matrix."""
     console = get_console()
     console.print("\n[bold cyan]Setting room avatars in Matrix...[/bold cyan]")
 
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     router_account = state.get_account(f"agent_{ROUTER_AGENT_NAME}")
     if not router_account:
         msg = "No router account found in Matrix state. Make sure mindroom has been started at least once."
         raise AvatarSyncError(msg)
 
-    router_user = _build_router_user(router_account)
+    router_user = _build_router_user(router_account, runtime_paths)
     try:
-        client = await login_agent_user(constants.runtime_matrix_homeserver(), router_user)
+        client = await login_agent_user(
+            constants.runtime_matrix_homeserver(runtime_paths=runtime_paths),
+            router_user,
+            runtime_paths,
+        )
     except ValueError as exc:
         msg = f"Failed to log in as router for avatar sync: {exc}"
         raise AvatarSyncError(msg) from exc
     console.print("[green]✓ Logged in to Matrix as router[/green]")
 
-    config = load_validated_config()
+    config = load_validated_config(runtime_paths)
     failed_labels: list[str] = []
     try:
-        success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config)
-        root_space_success = await _sync_root_space_avatar(client, config, state)
+        success_count, skip_count, failed_labels = await _sync_configured_room_avatars(client, config, runtime_paths)
+        root_space_success = await _sync_root_space_avatar(client, config, state, runtime_paths)
         if root_space_success is True:
             success_count += 1
         elif root_space_success is False:
@@ -480,17 +503,21 @@ def _print_avatar_generation_plan(missing_targets: set[tuple[str, str]]) -> None
     )
 
 
-def _remaining_missing_avatar_targets(missing_targets: set[tuple[str, str]]) -> set[tuple[str, str]]:
+def _remaining_missing_avatar_targets(
+    missing_targets: set[tuple[str, str]],
+    runtime_paths: constants.RuntimePaths,
+) -> set[tuple[str, str]]:
     """Return targets that are still missing after a generation attempt."""
     return {
         (entity_type, entity_name)
         for entity_type, entity_name in missing_targets
-        if not workspace_avatar_path(entity_type, entity_name).exists()
+        if not workspace_avatar_path(entity_type, entity_name, runtime_paths).exists()
     }
 
 
 async def _generate_missing_avatars(
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     missing_targets: set[tuple[str, str]],
 ) -> bool:
     """Generate every missing managed avatar and report whether startup may continue."""
@@ -499,7 +526,7 @@ async def _generate_missing_avatars(
         console.print("\n[dim]⊘ All managed avatars already exist; skipping generation[/dim]")
         return True
 
-    api_key = get_secret_from_env("GOOGLE_API_KEY")
+    api_key = get_secret_from_env("GOOGLE_API_KEY", runtime_paths=runtime_paths)
     if not api_key:
         console.print("[red]Error: GOOGLE_API_KEY or GOOGLE_API_KEY_FILE environment variable not set[/red]")
         console.print("Please set it in your .env file, secrets mount, or environment")
@@ -517,7 +544,7 @@ async def _generate_missing_avatars(
         ) as progress:
             task_id = progress.add_task("Processing avatars...", total=None)
             results = await asyncio.gather(
-                *(generate_avatar(client, target) for target in targets),
+                *(generate_avatar(client, target, runtime_paths) for target in targets),
                 return_exceptions=True,
             )
             progress.update(task_id, completed=True)
@@ -537,7 +564,7 @@ async def _generate_missing_avatars(
             )
             console.print(f"[red]✗ Failed to generate {target.entity_type}/{target.entity_name}: {result}[/red]")
 
-    remaining_targets = _remaining_missing_avatar_targets(missing_targets)
+    remaining_targets = _remaining_missing_avatar_targets(missing_targets, runtime_paths)
     if failed_targets or remaining_targets:
         failed_target_keys = {(target.entity_type, target.entity_name) for target, _error in failed_targets}
         formatted_targets = ", ".join(
@@ -551,11 +578,11 @@ async def _generate_missing_avatars(
     return True
 
 
-async def run_avatar_generation() -> None:
+async def run_avatar_generation(runtime_paths: constants.RuntimePaths) -> None:
     """Generate missing managed avatars in the workspace."""
-    config = load_validated_config()
-    missing_targets = _missing_avatar_targets(config)
+    config = load_validated_config(runtime_paths)
+    missing_targets = _missing_avatar_targets(config, runtime_paths)
 
-    if not await _generate_missing_avatars(config, missing_targets):
+    if not await _generate_missing_avatars(config, runtime_paths, missing_targets):
         msg = "Avatar generation failed. See errors above."
         raise AvatarGenerationError(msg)

@@ -33,7 +33,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="your_account_id",
-            description="Zoom account ID from Server-to-Server OAuth app (can also be set via ZOOM_ACCOUNT_ID env var)",
+            description="Zoom account ID from Server-to-Server OAuth app",
         ),
         ConfigField(
             name="client_id",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             placeholder="your_client_id",
-            description="Client ID from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_ID env var)",
+            description="Client ID from Server-to-Server OAuth app",
         ),
         ConfigField(
             name="client_secret",
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="your_client_secret",
-            description="Client secret from Server-to-Server OAuth app (can also be set via ZOOM_CLIENT_SECRET env var)",
+            description="Client secret from Server-to-Server OAuth app",
         ),
     ],
     dependencies=["requests"],

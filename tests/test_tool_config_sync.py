@@ -45,6 +45,9 @@ def verify_tool_configfields(tool_name: str, tool_class: type) -> None:  # noqa:
         # Skip **kwargs as it's for forward compatibility
         if param.kind == inspect.Parameter.VAR_KEYWORD:
             continue
+        # runtime_paths is injected by MindRoom, not end-user tool config.
+        if name == "runtime_paths":
+            continue
         agno_params[name] = {
             "type": param.annotation if param.annotation != inspect.Parameter.empty else None,
         }

@@ -34,6 +34,7 @@ from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
@@ -47,13 +48,14 @@ async def _set_room_avatar_if_available(
     avatar_category: str,
     avatar_name: str,
     context: str,
+    runtime_paths: RuntimePaths,
 ) -> None:
     """Set a room avatar when a managed asset exists.
 
     Avatar reconciliation is cosmetic, so failures are logged but do not abort
     room or Space creation.
     """
-    avatar_path = resolve_avatar_path(avatar_category, avatar_name)
+    avatar_path = resolve_avatar_path(avatar_category, avatar_name, runtime_paths)
     if not avatar_path.exists():
         return
 
@@ -79,15 +81,22 @@ async def _configure_managed_room_access(
     room_key: str,
     room_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     room_alias: str | None = None,
     context: str,
 ) -> bool:
     """Apply configured room joinability/discoverability policy for one managed room."""
     access_config = config.matrix_room_access
-    target_join_rule = access_config.get_target_join_rule(room_key, room_id=room_id, room_alias=room_alias)
+    target_join_rule = access_config.get_target_join_rule(
+        room_key,
+        runtime_paths,
+        room_id=room_id,
+        room_alias=room_alias,
+    )
     target_directory_visibility = access_config.get_target_directory_visibility(
         room_key,
+        runtime_paths,
         room_id=room_id,
         room_alias=room_alias,
     )
@@ -142,67 +151,78 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def load_rooms() -> dict[str, MatrixRoom]:
+def load_rooms(runtime_paths: RuntimePaths) -> dict[str, MatrixRoom]:
     """Load room state from YAML file."""
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     return state.rooms
 
 
-def _get_room_aliases() -> dict[str, str]:
+def _get_room_aliases(runtime_paths: RuntimePaths) -> dict[str, str]:
     """Get mapping of room aliases to room IDs."""
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     return state.get_room_aliases()
 
 
-def get_room_id(room_key: str) -> str | None:
+def get_room_id(room_key: str, runtime_paths: RuntimePaths) -> str | None:
     """Get room ID for a given room key/alias."""
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     room = state.get_room(room_key)
     return room.room_id if room else None
 
 
-def _add_room(room_key: str, room_id: str, alias: str, name: str) -> None:
+def _add_room(
+    room_key: str,
+    room_id: str,
+    alias: str,
+    name: str,
+    runtime_paths: RuntimePaths,
+) -> None:
     """Add a new room to the state."""
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room(room_key, room_id, alias, name)
-    state.save()
+    state.save(runtime_paths=runtime_paths)
 
 
-def _remove_room(room_key: str) -> bool:
+def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
     """Remove a room from the state."""
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     if room_key in state.rooms:
         del state.rooms[room_key]
-        state.save()
+        state.save(runtime_paths=runtime_paths)
         return True
     return False
 
 
-def resolve_room_aliases(room_list: list[str]) -> list[str]:
+def resolve_room_aliases(
+    room_list: list[str],
+    runtime_paths: RuntimePaths,
+) -> list[str]:
     """Resolve room aliases to room IDs.
 
     Args:
         room_list: List of room aliases or IDs
+        runtime_paths: Explicit runtime context for Matrix state lookup
 
     Returns:
         List of room IDs (aliases resolved to IDs, IDs passed through)
 
     """
-    room_aliases = _get_room_aliases()
+    room_aliases = _get_room_aliases(runtime_paths)
     return [room_aliases.get(room, room) for room in room_list]
 
 
-def get_room_alias_from_id(room_id: str) -> str | None:
+def get_room_alias_from_id(room_id: str, runtime_paths: RuntimePaths) -> str | None:
     """Get room alias from room ID (reverse lookup).
 
     Args:
         room_id: Matrix room ID
+        runtime_paths: Explicit runtime context for Matrix state lookup
 
     Returns:
         Room alias if found, None otherwise
 
     """
-    room_aliases = _get_room_aliases()
+    room_aliases = _get_room_aliases(runtime_paths)
     for alias, rid in room_aliases.items():
         if rid == room_id:
             return alias
@@ -213,6 +233,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     room_key: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     room_name: str | None = None,
     power_users: list[str] | None = None,
 ) -> str | None:
@@ -222,6 +243,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         client: Matrix client to use for room creation
         room_key: The room key/alias (without domain)
         config: Configuration with agent settings for topic generation
+        runtime_paths: Explicit runtime context for room aliases, topics, and avatars
         room_name: Display name for the room (defaults to room_key with underscores replaced)
         power_users: List of user IDs to grant power levels to
 
@@ -229,12 +251,12 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         Room ID if room exists or was created, None on failure
 
     """
-    existing_rooms = load_rooms()
+    existing_rooms = load_rooms(runtime_paths=runtime_paths)
 
     # First, try to resolve the room alias on the server
     # This handles cases where the room exists on server but not in our state
-    server_name = extract_server_name_from_homeserver(client.homeserver)
-    alias_localpart = managed_room_alias_localpart(room_key)
+    server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
+    alias_localpart = managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
 
     response = await client.room_resolve_alias(full_alias)
@@ -246,7 +268,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
         if room_key not in existing_rooms or existing_rooms[room_key].room_id != room_id:
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
-            _add_room(room_key, room_id, full_alias, room_name)
+            _add_room(room_key, room_id, full_alias, room_name, runtime_paths)
             logger.info(f"Updated state with existing room {room_key} (ID: {room_id})")
 
         # Room existence and room membership are separate concerns. Existing
@@ -261,7 +283,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             # For existing rooms, ensure they have a topic set
             if room_name is None:
                 room_name = _room_key_to_name(room_key)
-            await ensure_room_has_topic(client, room_id, room_key, room_name, config)
+            await ensure_room_has_topic(client, room_id, room_key, room_name, config, runtime_paths)
 
             if config.matrix_room_access.is_multi_user_mode() and config.matrix_room_access.reconcile_existing_rooms:
                 await _configure_managed_room_access(
@@ -269,6 +291,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                     room_key=room_key,
                     room_id=room_id,
                     config=config,
+                    runtime_paths=runtime_paths,
                     room_alias=full_alias,
                     context="existing_room_reconciliation",
                 )
@@ -296,14 +319,14 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
     if room_key in existing_rooms:
         # Remove stale entry from state
         logger.debug(f"Removing stale room {room_key} from state")
-        _remove_room(room_key)
+        _remove_room(room_key, runtime_paths=runtime_paths)
 
     # Create the room
     if room_name is None:
         room_name = _room_key_to_name(room_key)
 
     # Generate a contextual topic for the room using AI
-    topic = await generate_room_topic_ai(room_key, room_name, config)
+    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
     logger.info(f"Creating room {room_key} with topic: {topic}")
 
     created_room_id = await create_room(
@@ -316,7 +339,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 
     if created_room_id:
         # Save room info
-        _add_room(room_key, created_room_id, full_alias, room_name)
+        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
         logger.info(f"Created room {room_key} with ID {created_room_id}")
 
         if config.matrix_room_access.is_multi_user_mode():
@@ -325,6 +348,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
                 room_key=room_key,
                 room_id=created_room_id,
                 config=config,
+                runtime_paths=runtime_paths,
                 room_alias=full_alias,
                 context="new_room_creation",
             )
@@ -344,6 +368,7 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
             avatar_category="rooms",
             avatar_name=room_key,
             context=f"managed_room:{room_key}",
+            runtime_paths=runtime_paths,
         )
 
         return created_room_id
@@ -354,12 +379,14 @@ async def _ensure_room_exists(  # noqa: C901, PLR0912
 async def ensure_all_rooms_exist(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> dict[str, str]:
     """Ensure all configured rooms exist and invite user account.
 
     Args:
         client: Matrix client to use for room creation
         config: Configuration with room settings
+        runtime_paths: Explicit runtime context for room resolution and state updates
 
     Returns:
         Dict mapping room keys to room IDs
@@ -379,7 +406,7 @@ async def ensure_all_rooms_exist(
             continue
 
         # Get power users for this room
-        power_users = get_agent_ids_for_room(room_key, config)
+        power_users = get_agent_ids_for_room(room_key, config, runtime_paths)
 
         # Ensure room exists
         try:
@@ -387,6 +414,7 @@ async def ensure_all_rooms_exist(
                 client=client,
                 room_key=room_key,
                 config=config,
+                runtime_paths=runtime_paths,
                 power_users=power_users,
             )
         except RuntimeError:
@@ -405,18 +433,19 @@ async def ensure_all_rooms_exist(
 async def _ensure_root_space_exists(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
     if not config.matrix_space.enabled:
         return None
 
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     joined_room_ids = await get_joined_rooms(client) or []
     if state.space_room_id and state.space_room_id in joined_room_ids:
         return state.space_room_id
 
-    server_name = extract_server_name_from_homeserver(client.homeserver)
-    alias_localpart = managed_space_alias_localpart()
+    server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
+    alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
     response = await client.room_resolve_alias(full_alias)
     if isinstance(response, nio.RoomResolveAliasResponse):
@@ -431,7 +460,7 @@ async def _ensure_root_space_exists(
             return None
         if state.space_room_id != space_room_id:
             state.set_space_room_id(space_room_id)
-            state.save()
+            state.save(runtime_paths=runtime_paths)
         return space_room_id
 
     space_room_id = await create_space(
@@ -444,20 +473,21 @@ async def _ensure_root_space_exists(
         return None
 
     state.set_space_room_id(space_room_id)
-    state.save()
+    state.save(runtime_paths=runtime_paths)
     return space_room_id
 
 
 async def ensure_root_space(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
     room_ids: dict[str, str],
 ) -> str | None:
     """Ensure the optional root Matrix Space exists and links the supplied managed rooms."""
     if not config.matrix_space.enabled:
         return None
 
-    root_space_id = await _ensure_root_space_exists(client, config)
+    root_space_id = await _ensure_root_space_exists(client, config, runtime_paths)
     if root_space_id is None:
         return None
 
@@ -465,7 +495,7 @@ async def ensure_root_space(
         logger.warning("Failed to set root space name; skipping child linking", space_id=root_space_id)
         return None
 
-    server_name = extract_server_name_from_homeserver(client.homeserver)
+    server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     for room_id in dict.fromkeys(room_ids.values()):
         if not await add_room_to_space(client, root_space_id, room_id, server_name):
             logger.warning(
@@ -481,30 +511,36 @@ async def ensure_root_space(
         avatar_category="spaces",
         avatar_name=_ROOT_SPACE_AVATAR_KEY,
         context="root_space",
+        runtime_paths=runtime_paths,
     )
 
     return root_space_id
 
 
-async def ensure_user_in_rooms(homeserver: str, room_ids: dict[str, str]) -> None:
+async def ensure_user_in_rooms(
+    homeserver: str,
+    room_ids: dict[str, str],
+    runtime_paths: RuntimePaths,
+) -> None:
     """Ensure the user account is a member of all specified rooms.
 
     Args:
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
+        runtime_paths: Explicit runtime context for server-name resolution.
 
     """
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
     if not user_account:
         logger.warning("No user account found, skipping user room membership")
         return
 
-    server_name = extract_server_name_from_homeserver(homeserver)
+    server_name = extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
     user_id = MatrixID.from_username(user_account.username, server_name).full_id
 
     # Create a client for the user to join rooms
-    async with matrix_client(homeserver, user_id) as user_client:
+    async with matrix_client(homeserver, runtime_paths, user_id=user_id) as user_client:
         # Login as the user
         login_response = await user_client.login(password=user_account.password)
         if not isinstance(login_response, nio.LoginResponse):

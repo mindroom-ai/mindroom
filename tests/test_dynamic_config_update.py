@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import MultiAgentOrchestrator
 from mindroom.scheduling import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import orchestrator_runtime_paths
 
 
 class TestDynamicConfigUpdate:
@@ -39,7 +37,7 @@ class TestDynamicConfigUpdate:
         )
 
         # Create orchestrator and set initial config
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         # Create a mock bot for the general agent
@@ -67,8 +65,8 @@ class TestDynamicConfigUpdate:
             models={"default": {"provider": "test", "id": "test-model"}},
         )
 
-        # Mock the from_yaml method to return our updated config
-        with patch.object(Config, "from_yaml", return_value=updated_config):  # noqa: SIM117
+        # Mock the explicit runtime-bound config loader used by update_config().
+        with patch("mindroom.orchestrator.load_config", return_value=updated_config):  # noqa: SIM117
             # Mock the bot creation and setup methods to avoid actual Matrix operations
             with (
                 patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
@@ -154,6 +152,7 @@ class TestDynamicConfigUpdate:
                 result = await _parse_workflow_schedule(
                     request,
                     updated_config,
+                    resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
                     available_agents=[
                         MatrixID(username="email_assistant", domain="localhost"),
                         MatrixID(username="callagent", domain="localhost"),
@@ -194,7 +193,7 @@ class TestDynamicConfigUpdate:
             defaults={"enable_streaming": False},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         mock_bot = MagicMock(spec=AgentBot)
@@ -207,7 +206,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
         ):
             updated = await orchestrator.update_config()
@@ -250,7 +249,7 @@ class TestDynamicConfigUpdate:
             },
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         general_bot = MagicMock(spec=AgentBot)
@@ -263,7 +262,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -302,7 +301,7 @@ class TestDynamicConfigUpdate:
             authorization={"global_users": ["@alice:example.com"]},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
 
         general_bot = MagicMock(spec=AgentBot)
@@ -315,7 +314,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -353,7 +352,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config
@@ -367,7 +366,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
@@ -407,7 +406,7 @@ class TestDynamicConfigUpdate:
             mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
         )
 
-        orchestrator = MultiAgentOrchestrator(storage_path=tmp_path)
+        orchestrator = MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
         orchestrator.config = initial_config
         mock_bot = MagicMock(spec=AgentBot)
         mock_bot.config = initial_config
@@ -421,7 +420,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch.object(Config, "from_yaml", return_value=updated_config),
+            patch("mindroom.orchestrator.load_config", return_value=updated_config),
             patch("mindroom.orchestration.config_updates._identify_entities_to_restart", return_value=set()),
             patch.object(
                 orchestrator,

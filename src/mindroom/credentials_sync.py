@@ -1,17 +1,18 @@
-"""Sync API keys from environment variables to CredentialsManager.
+"""Sync shared provider/bootstrap credentials from runtime env into CredentialsManager.
 
-On first run, API keys from .env are seeded into the CredentialsManager.
-On subsequent runs, env-sourced credentials (_source=env) are updated from
-.env, but UI-sourced credentials (_source=ui) are never overwritten.
-This lets users change keys via the UI without losing them on restart,
-while still picking up .env changes for keys that were never manually set.
+On first run, supported provider/bootstrap env values from the config-adjacent
+`.env` or exported process env are seeded into the shared credentials store.
+On subsequent runs, env-sourced shared credentials (`_source=env`) are updated,
+but UI-sourced credentials (`_source=ui`) are never overwritten.
+
+This is intentionally limited to supported shared credentials such as model
+provider API keys, Ollama host settings, and `GITHUB_TOKEN` mirroring for
+private Git knowledge sync.
+It is not a generic bridge for tool-specific env var configuration.
 """
 
-import os
-from pathlib import Path
-
-from mindroom.constants import PROVIDER_ENV_KEYS
-from mindroom.credentials import get_credentials_manager
+from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, runtime_env_path
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -20,36 +21,34 @@ logger = get_logger(__name__)
 _ENV_TO_SERVICE_MAP = {v: k for k, v in PROVIDER_ENV_KEYS.items()}
 
 
-def get_secret_from_env(name: str) -> str | None:
+def get_secret_from_env(name: str, runtime_paths: RuntimePaths) -> str | None:
     """Read a secret from NAME or NAME_FILE.
 
     If env var `NAME` is set, return it. Otherwise, if `NAME_FILE` points to
     a readable file, return its stripped contents. Else return None.
     """
-    val = os.getenv(name)
+    val = runtime_paths.env_value(name)
     if val:
         return val
     file_var = f"{name}_FILE"
-    file_path = os.getenv(file_var)
-    if file_path and Path(file_path).exists():
+    file_path = runtime_env_path(runtime_paths, file_var)
+    if file_path is not None and file_path.exists():
         try:
-            return Path(file_path).read_text(encoding="utf-8").strip()
+            return file_path.read_text(encoding="utf-8").strip()
         except Exception:
             # Avoid noisy logs here; callers can handle None gracefully
             return None
     return None
 
 
-def _sync_github_private_credentials() -> bool:
+def _sync_github_private_credentials(runtime_paths: RuntimePaths) -> bool:
     """Seed/update github_private from GITHUB_TOKEN for Git knowledge sync."""
-    github_token = get_secret_from_env("GITHUB_TOKEN")
+    github_token = get_secret_from_env("GITHUB_TOKEN", runtime_paths=runtime_paths)
     if not github_token:
         logger.debug("No value found for GITHUB_TOKEN or GITHUB_TOKEN_FILE")
         return False
 
-    os.environ["GITHUB_TOKEN"] = github_token
-
-    creds_manager = get_credentials_manager()
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     existing = creds_manager.load_credentials("github_private")
     if existing is not None:
         source = existing.get("_source")
@@ -73,33 +72,29 @@ def _sync_github_private_credentials() -> bool:
     return True
 
 
-def sync_env_to_credentials() -> None:
-    """Sync API keys from environment variables into CredentialsManager.
+def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
+    """Sync supported shared provider/bootstrap env values into CredentialsManager.
 
-    - If no credential file exists for a service, seed it from .env.
-    - If the existing credential has ``_source=env``, update it from .env
-      (the user never touched it via UI, so .env should still win).
+    - If no shared credential file exists for a supported service, seed it from runtime env.
+    - If the existing credential has ``_source=env``, update it from runtime env
+      (the user never touched it via UI, so runtime env should still win).
     - If the existing credential has ``_source=ui`` (or no ``_source``,
       for legacy files), skip it to protect the user's manual override.
 
-    Environment variables are always exported to ``os.environ`` so that
-    libraries like mem0 can pick them up regardless.
+    This keeps conventional provider/bootstrap `.env` support without treating
+    arbitrary tool-specific env vars as a supported tool configuration path.
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     synced_count = 0
 
     for env_var, service in _ENV_TO_SERVICE_MAP.items():
-        env_value = get_secret_from_env(env_var)
+        env_value = get_secret_from_env(env_var, runtime_paths=runtime_paths)
 
         if not env_value:
             logger.debug(f"No value found for {env_var} or {env_var}_FILE")
             continue
 
         logger.debug(f"Found value for {env_var}: length={len(env_value)}")
-
-        # Always export to os.environ so libraries (mem0, etc.) can use it
-        if service != "ollama":
-            os.environ[env_var] = env_value
 
         # Check existing credentials and their source
         existing = creds_manager.load_credentials(service)
@@ -122,7 +117,7 @@ def sync_env_to_credentials() -> None:
             logger.info(f"Updated {service} credentials from environment")
         synced_count += 1
 
-    if _sync_github_private_credentials():
+    if _sync_github_private_credentials(runtime_paths=runtime_paths):
         synced_count += 1
 
     if synced_count > 0:
@@ -131,20 +126,21 @@ def sync_env_to_credentials() -> None:
         logger.debug("No credentials to sync from environment")
 
 
-def get_api_key_for_provider(provider: str) -> str | None:
+def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str | None:
     """Get API key for a provider, checking CredentialsManager first.
 
-    Since we sync from .env to CredentialsManager on startup,
-    CredentialsManager will always have the latest keys from .env.
+    Supported provider env values are mirrored into the shared credentials store
+    during startup, so model creation reads from one explicit source of truth.
 
     Args:
         provider: The provider name (e.g., 'openai', 'anthropic')
+        runtime_paths: Explicit runtime context for credential lookup.
 
     Returns:
         The API key if found, None otherwise
 
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
 
     # Special case for Ollama - return None as it doesn't use API keys
     if provider == "ollama":
@@ -157,14 +153,14 @@ def get_api_key_for_provider(provider: str) -> str | None:
     return creds_manager.get_api_key(provider)
 
 
-def get_ollama_host() -> str | None:
+def get_ollama_host(runtime_paths: RuntimePaths) -> str | None:
     """Get Ollama host configuration.
 
     Returns:
         The Ollama host URL if configured, None otherwise
 
     """
-    creds_manager = get_credentials_manager()
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     ollama_creds = creds_manager.load_credentials("ollama")
     if ollama_creds:
         return ollama_creds.get("host")

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.scheduling import (
     _SCHEDULED_TASK_EVENT_TYPE,
     CronSchedule,
@@ -21,6 +23,10 @@ from mindroom.scheduling import (
     list_scheduled_tasks,
     save_edited_scheduled_task,
 )
+
+
+def _runtime_paths() -> object:
+    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 def _record(
@@ -318,7 +324,7 @@ async def test_run_once_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
         patch("mindroom.scheduling.asyncio.sleep", new=AsyncMock()),
     ):
-        await _run_once_task(client, "task_once_cancelled", workflow, config)
+        await _run_once_task(client, "task_once_cancelled", workflow, config, _runtime_paths())
 
     execute_mock.assert_not_awaited()
 
@@ -352,7 +358,7 @@ async def test_run_once_task_executes_latest_state_workflow() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await _run_once_task(client, "task_once_updated", initial_workflow, config)
+        await _run_once_task(client, "task_once_updated", initial_workflow, config, _runtime_paths())
 
     execute_mock.assert_awaited_once()
     executed_workflow = execute_mock.await_args.args[1]
@@ -394,7 +400,7 @@ async def test_run_cron_task_executes_latest_state_workflow() -> None:
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
         patch("mindroom.scheduling.croniter", return_value=_ImmediateCron()),
     ):
-        await _run_cron_task(client, "task_cron_updated", initial_workflow, {}, config)
+        await _run_cron_task(client, "task_cron_updated", initial_workflow, {}, config, _runtime_paths())
 
     execute_mock.assert_awaited_once()
     executed_workflow = execute_mock.await_args.args[1]
@@ -423,7 +429,7 @@ async def test_run_cron_task_stops_when_cancelled_via_matrix_state() -> None:
         patch("mindroom.scheduling.get_scheduled_task", side_effect=_fetch_task),
         patch("mindroom.scheduling._execute_scheduled_workflow", new=AsyncMock()) as execute_mock,
     ):
-        await _run_cron_task(client, "task_cron_cancelled", workflow, {}, config)
+        await _run_cron_task(client, "task_cron_cancelled", workflow, {}, config, _runtime_paths())
 
     execute_mock.assert_not_awaited()
 
@@ -615,6 +621,7 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
             full_text="tomorrow at 9am updated task",
             scheduled_by="@user:server",
             config=config,
+            runtime_paths=_runtime_paths(),
             room=room,
             thread_id="$fallback_thread",
         )
@@ -655,6 +662,7 @@ async def test_edit_scheduled_task_rejects_non_pending() -> None:
         full_text="tomorrow at 9am updated task",
         scheduled_by="@user:server",
         config=MagicMock(),
+        runtime_paths=_runtime_paths(),
         room=room,
         thread_id="$thread123",
     )
@@ -697,6 +705,7 @@ async def test_save_edited_scheduled_task_preserves_created_at() -> None:
         task_id="task123",
         workflow=updated_workflow,
         config=MagicMock(),
+        runtime_paths=_runtime_paths(),
         existing_task=existing_task,
         restart_task=False,
     )
@@ -741,6 +750,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change() -> None
             task_id="task123",
             workflow=updated_workflow,
             config=MagicMock(),
+            runtime_paths=_runtime_paths(),
             existing_task=existing_task,
             restart_task=False,
         )

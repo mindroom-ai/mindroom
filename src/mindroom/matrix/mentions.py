@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths
 from mindroom.matrix.identity import MatrixID, mindroom_namespace
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.tool_system.events import build_tool_trace_content
@@ -12,13 +13,19 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
 
 
-def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tuple[str, list[str], str]:
+def parse_mentions_in_text(
+    text: str,
+    sender_domain: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, list[str], str]:
     """Parse text for agent mentions and return processed text with user IDs.
 
     Args:
         text: Text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID (e.g., "localhost" from "@user:localhost")
         config: Application configuration
+        runtime_paths: Explicit runtime context for namespace-aware mention resolution
 
     Returns:
         Tuple of (plain_text, list_of_mentioned_user_ids, markdown_text_with_links)
@@ -31,7 +38,7 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     # Find all mentions and process them
     mentions_data = []
     for match in re.finditer(pattern, text):
-        mention_info = _process_mention(match, config, sender_domain)
+        mention_info = _process_mention(match, config, sender_domain, runtime_paths)
         if mention_info:
             mentions_data.append(mention_info)
 
@@ -56,13 +63,19 @@ def parse_mentions_in_text(text: str, sender_domain: str, config: Config) -> tup
     return plain_text, mentioned_user_ids, markdown_text
 
 
-def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tuple[str, str, str] | None:
+def _process_mention(
+    match: re.Match,
+    config: Config,
+    sender_domain: str,
+    runtime_paths: RuntimePaths,
+) -> tuple[str, str, str] | None:
     """Process a single mention match and return replacement data.
 
     Args:
         match: The regex match object
         config: The loaded config
         sender_domain: Domain for constructing Matrix IDs
+        runtime_paths: Explicit runtime context for namespace-aware agent lookup
 
     Returns:
         Tuple of (original_text, matrix_user_id, display_name) or None if not a valid agent
@@ -77,7 +90,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
     # Try to find the agent (case-insensitive), accepting optional namespace suffix.
     candidate_names = [name]
-    namespace = mindroom_namespace()
+    namespace = mindroom_namespace(runtime_paths)
     if namespace:
         suffix = f"_{namespace}"
         if name.lower().endswith(suffix):
@@ -97,7 +110,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
     if agent_name:
         agent_config = config.agents[agent_name]
-        user_id = MatrixID.from_agent(agent_name, sender_domain).full_id
+        user_id = MatrixID.from_agent(agent_name, sender_domain, runtime_paths).full_id
         return (original, user_id, agent_config.display_name)
 
     return None
@@ -105,6 +118,7 @@ def _process_mention(match: re.Match, config: Config, sender_domain: str) -> tup
 
 def format_message_with_mentions(
     config: Config,
+    runtime_paths: RuntimePaths,
     text: str,
     sender_domain: str = "localhost",
     thread_event_id: str | None = None,
@@ -119,6 +133,7 @@ def format_message_with_mentions(
 
     Args:
         config: Application configuration
+        runtime_paths: Explicit runtime context for mention parsing and HTML rendering
         text: Message text that may contain @agent_name mentions
         sender_domain: Domain part of the sender's user ID
         thread_event_id: Optional thread root event ID
@@ -131,7 +146,7 @@ def format_message_with_mentions(
         Properly formatted content dict for room_send
 
     """
-    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config)
+    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(text, sender_domain, config, runtime_paths)
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format

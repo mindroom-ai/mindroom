@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from mindroom.constants import runtime_env_values
 from mindroom.workers.backend import WorkerBackendError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -44,8 +51,12 @@ _OWNER_DEPLOYMENT_NAME_ENV = "MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME"
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 
 
-def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, str(default)).strip()
+def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
+    return env.get(name, default).strip()
+
+
+def _read_float_env(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = _read_env(env, name, str(default))
     try:
         value = float(raw)
     except ValueError:
@@ -53,8 +64,8 @@ def _read_float_env(name: str, default: float) -> float:
     return max(1.0, value)
 
 
-def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
+def _read_int_env(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = _read_env(env, name, str(default))
     try:
         value = int(raw)
     except ValueError:
@@ -62,15 +73,15 @@ def _read_int_env(name: str, default: int) -> int:
     return max(1, value)
 
 
-def _read_bool_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
+def _read_bool_env(env: Mapping[str, str], name: str, default: bool = False) -> bool:
+    raw = env.get(name)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _read_json_mapping_env(name: str) -> dict[str, str]:
-    raw = os.getenv(name, "").strip()
+def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
+    raw = _read_env(env, name)
     if not raw:
         return {}
     try:
@@ -117,53 +128,59 @@ class _KubernetesWorkerBackendConfig:
     owner_deployment_name: str | None
 
     @classmethod
-    def from_env(cls) -> _KubernetesWorkerBackendConfig:
-        """Build Kubernetes worker configuration from the current environment."""
-        namespace = os.getenv(_NAMESPACE_ENV, "").strip() or os.getenv(_POD_NAMESPACE_ENV, "").strip() or "default"
-        image = os.getenv(_IMAGE_ENV, "").strip()
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> _KubernetesWorkerBackendConfig:
+        """Build Kubernetes worker configuration from one explicit runtime context."""
+        env = runtime_env_values(runtime_paths)
+        namespace = _read_env(env, _NAMESPACE_ENV) or _read_env(env, _POD_NAMESPACE_ENV) or "default"
+        image = _read_env(env, _IMAGE_ENV)
         if not image:
             msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        storage_pvc_name = os.getenv(_STORAGE_PVC_ENV, "").strip()
+        storage_pvc_name = _read_env(env, _STORAGE_PVC_ENV)
         if not storage_pvc_name:
             msg = f"{_STORAGE_PVC_ENV} must be set when {_WORKER_BACKEND_ENV}=kubernetes."
             raise WorkerBackendError(msg)
 
-        config_map_name = os.getenv(_CONFIG_MAP_NAME_ENV, "").strip() or None
-        token_secret_name = os.getenv(_TOKEN_SECRET_NAME_ENV, "").strip() or None
+        config_map_name = _read_env(env, _CONFIG_MAP_NAME_ENV) or None
+        token_secret_name = _read_env(env, _TOKEN_SECRET_NAME_ENV) or None
         return cls(
             namespace=namespace,
             image=image,
-            image_pull_policy=os.getenv(_IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY).strip()
+            image_pull_policy=_read_env(env, _IMAGE_PULL_POLICY_ENV, _DEFAULT_IMAGE_PULL_POLICY)
             or _DEFAULT_IMAGE_PULL_POLICY,
-            worker_port=_read_int_env(_PORT_ENV, _DEFAULT_WORKER_PORT),
-            service_account_name=os.getenv(_SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME).strip()
+            worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
+            service_account_name=_read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
             or _DEFAULT_SERVICE_ACCOUNT_NAME,
             storage_pvc_name=storage_pvc_name,
-            storage_mount_path=os.getenv(_STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH).strip()
+            storage_mount_path=_read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
-            storage_subpath_prefix=os.getenv(_STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX).strip()
+            storage_subpath_prefix=_read_env(env, _STORAGE_SUBPATH_PREFIX_ENV, _DEFAULT_STORAGE_SUBPATH_PREFIX)
             or _DEFAULT_STORAGE_SUBPATH_PREFIX,
             config_map_name=config_map_name,
-            config_key=os.getenv(_CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY).strip() or _DEFAULT_CONFIG_KEY,
-            config_path=os.getenv(_CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH).strip() or _DEFAULT_CONFIG_PATH,
+            config_key=_read_env(env, _CONFIG_KEY_ENV, _DEFAULT_CONFIG_KEY) or _DEFAULT_CONFIG_KEY,
+            config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
             token_secret_name=token_secret_name,
-            token_secret_key=os.getenv(_TOKEN_SECRET_KEY_ENV, "sandbox_proxy_token").strip() or "sandbox_proxy_token",
-            idle_timeout_seconds=_read_float_env(_IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(_READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=os.getenv(_NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX).strip() or _DEFAULT_NAME_PREFIX,
-            node_name=os.getenv(_NODE_NAME_ENV, "").strip() or None,
-            colocate_with_control_plane_node=_read_bool_env(_COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
-            extra_env=_read_json_mapping_env(_EXTRA_ENV_JSON_ENV),
-            extra_labels=_read_json_mapping_env(_EXTRA_LABELS_JSON_ENV),
-            owner_deployment_name=os.getenv(_OWNER_DEPLOYMENT_NAME_ENV, "").strip() or None,
+            token_secret_key=_read_env(env, _TOKEN_SECRET_KEY_ENV, "sandbox_proxy_token") or "sandbox_proxy_token",
+            idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
+            name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
+            node_name=_read_env(env, _NODE_NAME_ENV) or None,
+            colocate_with_control_plane_node=_read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
+            extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
+            extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            owner_deployment_name=_read_env(env, _OWNER_DEPLOYMENT_NAME_ENV) or None,
         )
 
 
-def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str, ...]:
+def kubernetes_backend_config_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    auth_token: str | None,
+    storage_root: Path | None = None,
+) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = _KubernetesWorkerBackendConfig.from_env()
+    config = _KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (
@@ -190,4 +207,5 @@ def kubernetes_backend_config_signature(*, auth_token: str | None) -> tuple[str,
         extra_labels_json,
         config.owner_deployment_name or "",
         auth_token or "",
+        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )

@@ -21,18 +21,19 @@ from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
 
-def _get_all_known_bot_usernames() -> set[str]:
+def _get_all_known_bot_usernames(runtime_paths: RuntimePaths) -> set[str]:
     """Get all bot usernames that have ever been created (from matrix_state.yaml).
 
     Returns:
         Set of all known bot usernames
 
     """
-    state = MatrixState.load()
+    state = MatrixState.load(runtime_paths=runtime_paths)
     bot_usernames = set()
 
     # Get all agent accounts from state
@@ -49,6 +50,7 @@ async def _cleanup_orphaned_bots_in_room(
     client: nio.AsyncClient,
     room_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
@@ -58,6 +60,7 @@ async def _cleanup_orphaned_bots_in_room(
         client: An authenticated Matrix client with kick permissions
         room_id: The room to check
         config: Current configuration
+        runtime_paths: Explicit runtime context for Matrix state and identity resolution
 
     Returns:
         List of bot usernames that were kicked
@@ -75,8 +78,8 @@ async def _cleanup_orphaned_bots_in_room(
         return []
 
     # Get configured bots for this room
-    configured_bots = config.get_configured_bots_for_room(room_id)
-    known_bot_usernames = _get_all_known_bot_usernames()
+    configured_bots = config.get_configured_bots_for_room(room_id, runtime_paths)
+    known_bot_usernames = _get_all_known_bot_usernames(runtime_paths)
 
     kicked_bots = []
 
@@ -105,6 +108,7 @@ async def _cleanup_orphaned_bots_in_room(
 async def cleanup_all_orphaned_bots(
     client: nio.AsyncClient,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> dict[str, list[str]]:
     """Remove all orphaned bots from all rooms the client has access to.
 
@@ -126,7 +130,7 @@ async def cleanup_all_orphaned_bots(
     logger.info(f"Checking {len(joined_rooms)} rooms for orphaned bots")
 
     for room_id in joined_rooms:
-        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config)
+        room_kicked = await _cleanup_orphaned_bots_in_room(client, room_id, config, runtime_paths)
         if room_kicked:
             kicked_bots[room_id] = room_kicked
 

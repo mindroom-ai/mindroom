@@ -14,6 +14,7 @@ from mindroom.matrix.identity import MatrixID
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -29,6 +30,7 @@ async def suggest_agent(
     message: str,
     available_agent_names: list[str],
     config: Config,
+    runtime_paths: RuntimePaths,
     thread_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
@@ -39,6 +41,7 @@ async def suggest_agent(
         message: The user message to route.
         available_agent_names: Plain agent names (e.g. ["code", "research"]).
         config: Application configuration.
+        runtime_paths: Explicit runtime context for model and Matrix identity resolution.
         thread_context: Optional recent messages for context.
             Each dict should have "sender" and "body" keys.
 
@@ -76,7 +79,7 @@ Choose the most appropriate agent based on their role, tools, and instructions."
         # Get router model from config
         router_model_name = config.router.model
 
-        model = get_model_instance(config, router_model_name)
+        model = get_model_instance(config, runtime_paths, router_model_name)
         logger.info(f"Using router model: {router_model_name} -> {model.__class__.__name__}(id={model.id})")
 
         agent = Agent(
@@ -120,6 +123,7 @@ async def suggest_agent_for_message(
     message: str,
     available_agents: list[MatrixID],
     config: Config,
+    runtime_paths: RuntimePaths,
     thread_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Use AI to suggest which agent should respond to a message.
@@ -128,7 +132,7 @@ async def suggest_agent_for_message(
     objects to plain agent names and resolves sender identities in
     thread context.
     """
-    agent_names = [name for mid in available_agents if (name := mid.agent_name(config)) is not None]
+    agent_names = [name for mid in available_agents if (name := mid.agent_name(config, runtime_paths)) is not None]
 
     # Resolve Matrix sender IDs to readable names for thread context
     resolved_context = None
@@ -138,7 +142,7 @@ async def suggest_agent_for_message(
             sender = msg.get("sender", "")
             if sender.startswith("@") and ":" in sender:
                 sender_id = MatrixID.parse(sender)
-                sender = sender_id.agent_name(config) or sender_id.domain
+                sender = sender_id.agent_name(config, runtime_paths) or sender_id.domain
             resolved_context.append({"sender": sender, "body": msg.get("body", "")})
 
-    return await suggest_agent(message, agent_names, config, resolved_context)
+    return await suggest_agent(message, agent_names, config, runtime_paths, resolved_context)

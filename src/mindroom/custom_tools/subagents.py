@@ -143,7 +143,11 @@ def _session_key_to_room_thread(session_key: str) -> tuple[str, str | None]:
 
 
 def _agent_thread_mode(context: ToolRuntimeContext, agent_name: str, room_id: str | None = None) -> str:
-    mode = context.config.get_entity_thread_mode(agent_name, room_id=room_id or context.room_id)
+    mode = context.config.get_entity_thread_mode(
+        agent_name,
+        context.runtime_paths,
+        room_id=room_id or context.room_id,
+    )
     return "room" if mode == "room" else "thread"
 
 
@@ -180,8 +184,9 @@ async def _send_matrix_text(
     """Send a formatted text message to a Matrix room, optionally in a thread."""
     content = format_message_with_mentions(
         context.config,
+        context.runtime_paths,
         text,
-        sender_domain=context.config.domain,
+        sender_domain=context.config.get_domain(context.runtime_paths),
         thread_event_id=thread_id,
     )
     if original_sender:

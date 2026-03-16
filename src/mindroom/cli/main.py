@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
 import socket
 import sys
 from pathlib import Path  # noqa: TC003
@@ -18,16 +17,15 @@ from pydantic import ValidationError
 import mindroom.cli.connect as cli_connect
 from mindroom import __version__, constants
 from mindroom.constants import (
-    MATRIX_SSL_VERIFY,
     config_search_locations,
     ensure_writable_config_path,
-    set_runtime_storage_path,
 )
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
 from mindroom.frontend_assets import ensure_frontend_dist_dir
 
 from .banner import make_banner
 from .config import (
+    _activate_cli_runtime,
     _check_env_keys,
     _format_validation_errors,
     _load_config_quiet,
@@ -38,7 +36,10 @@ from .doctor import doctor
 from .local_stack import local_stack_setup
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 _HELP = """\
 AI agents that live in Matrix and work everywhere via bridges.
@@ -112,7 +113,7 @@ def run(
     asyncio.run(
         _run(
             log_level=log_level.upper(),
-            storage_path=storage_path or constants.get_runtime_paths().storage_root,
+            storage_path=storage_path,
             api=api,
             api_port=api_port,
             api_host=api_host,
@@ -120,17 +121,17 @@ def run(
     )
 
 
-def _load_active_config_or_exit() -> Config:
+def _load_active_config_or_exit(runtime_paths: RuntimePaths) -> Config:
     """Load the active config file or exit with friendly validation errors."""
-    ensure_writable_config_path()
+    ensure_writable_config_path(runtime_paths=runtime_paths)
 
-    config_path = constants.runtime_config_path()
+    config_path = runtime_paths.config_path
     if not config_path.exists():
-        _print_missing_config_error()
+        _print_missing_config_error(runtime_paths.process_env)
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(config_path)
+        config = _load_config_quiet(runtime_paths=runtime_paths)
     except ValidationError as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
@@ -144,24 +145,24 @@ def _load_active_config_or_exit() -> Config:
 
 async def _run(
     log_level: str,
-    storage_path: Path,
+    storage_path: Path | None,
     *,
     api: bool,
     api_port: int,
     api_host: str,
 ) -> None:
     """Run the multi-agent system with friendly error handling."""
-    resolved_storage_path = set_runtime_storage_path(storage_path)
-    config = _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime(storage_path=storage_path)
+    config = _load_active_config_or_exit(runtime_paths)
 
     # Check for missing API keys
-    _check_env_keys(config)
+    _check_env_keys(config, runtime_paths=runtime_paths)
 
     console.print(make_banner())
     console.print()
     console.print(f"Starting Mindroom (log level: {log_level})...")
     if api:
-        frontend_dir = ensure_frontend_dist_dir()
+        frontend_dir = ensure_frontend_dist_dir(runtime_paths)
         display_host = "localhost" if api_host == "0.0.0.0" else api_host  # noqa: S104
         if frontend_dir is None:
             console.print("Dashboard: unavailable (frontend assets missing)")
@@ -176,7 +177,7 @@ async def _run(
 
         await bot_main(
             log_level=log_level,
-            storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
             api=api,
             api_port=api_port,
             api_host=api_host,
@@ -184,11 +185,11 @@ async def _run(
     except KeyboardInterrupt:
         console.print("\nStopped")
     except ConnectionError as exc:
-        _print_connection_error(exc)
+        _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc)
+            _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
 
@@ -199,12 +200,13 @@ app.command()(doctor)
 @avatars_app.command("generate")
 def avatars_generate() -> None:
     """Generate missing managed avatar files in the workspace."""
-    _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime()
+    _load_active_config_or_exit(runtime_paths)
 
     try:
         from mindroom.avatar_generation import run_avatar_generation  # noqa: PLC0415
 
-        asyncio.run(run_avatar_generation())
+        asyncio.run(run_avatar_generation(runtime_paths))
     except AvatarGenerationError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -213,21 +215,22 @@ def avatars_generate() -> None:
 @avatars_app.command("sync")
 def avatars_sync() -> None:
     """Sync configured room and root-space avatars to Matrix using the initialized router account."""
-    _load_active_config_or_exit()
+    runtime_paths = _activate_cli_runtime()
+    _load_active_config_or_exit(runtime_paths)
 
     try:
         from mindroom.avatar_generation import set_room_avatars_in_matrix  # noqa: PLC0415
 
-        asyncio.run(set_room_avatars_in_matrix())
+        asyncio.run(set_room_avatars_in_matrix(runtime_paths))
     except AvatarSyncError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from None
     except ConnectionError as exc:
-        _print_connection_error(exc)
+        _print_connection_error(exc, runtime_paths)
         raise typer.Exit(1) from None
     except OSError as exc:
         if "connect" in str(exc).lower() or "refused" in str(exc).lower():
-            _print_connection_error(exc)
+            _print_connection_error(exc, runtime_paths)
             raise typer.Exit(1) from None
         raise
 
@@ -267,14 +270,15 @@ def connect(
         console.print("[red]Error:[/red] Invalid pair code format. Expected ABCD-EFGH.")
         raise typer.Exit(1)
 
+    runtime_paths = _activate_cli_runtime(path)
     resolved_provisioning_url = (
-        provisioning_url or os.getenv("MINDROOM_PROVISIONING_URL", "https://mindroom.chat")
+        provisioning_url or runtime_paths.env_value("MINDROOM_PROVISIONING_URL") or "https://mindroom.chat"
     ).strip()
     if not resolved_provisioning_url:
         console.print("[red]Error:[/red] Invalid provisioning URL.")
         raise typer.Exit(1)
 
-    resolved_config_path = (path or constants.runtime_config_path()).expanduser().resolve()
+    resolved_config_path = runtime_paths.config_path
     normalized_client_name = client_name.strip() or socket.gethostname()
     try:
         credentials = cli_connect.complete_local_pairing(
@@ -282,7 +286,7 @@ def connect(
             pair_code=normalized_pair_code,
             client_name=normalized_client_name,
             client_fingerprint=_local_client_fingerprint(config_path=resolved_config_path),
-            matrix_ssl_verify=MATRIX_SSL_VERIFY,
+            matrix_ssl_verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
             post_request=httpx.post,
         )
     except (TypeError, ValueError) as exc:
@@ -355,9 +359,9 @@ def _print_pairing_success_with_exports(
     console.print("  uv run mindroom run")
 
 
-def _local_client_fingerprint(*, config_path: Path | None = None) -> str:
+def _local_client_fingerprint(*, config_path: Path) -> str:
     """Return a stable, non-secret local fingerprint."""
-    resolved_config_path = (config_path or constants.runtime_config_path()).expanduser().resolve()
+    resolved_config_path = config_path.expanduser().resolve()
     raw = f"{socket.gethostname()}:{resolved_config_path}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -368,26 +372,27 @@ def _local_client_fingerprint(*, config_path: Path | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _print_missing_config_error() -> None:
+def _print_missing_config_error(process_env: Mapping[str, str]) -> None:
     console.print("[red]Error:[/red] No config.yaml found.\n")
     console.print("MindRoom needs a configuration file to know which agents to run.\n")
     console.print("Quick start:")
     console.print("  [cyan]mindroom config init[/cyan]    Create a starter config")
     console.print("  [cyan]mindroom config edit[/cyan]    Edit your config\n")
     console.print("Config search locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(), 1):
+    for i, loc in enumerate(config_search_locations(process_env), 1):
         status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({status})")
     console.print("\nLearn more: https://github.com/mindroom-ai/mindroom")
 
 
-def _print_connection_error(exc: BaseException) -> None:
+def _print_connection_error(exc: BaseException, runtime_paths: RuntimePaths) -> None:
     console.print("[red]Error:[/red] Could not connect to the Matrix homeserver.\n")
     console.print(f"  Details: {exc}\n")
     console.print("Check that:")
     console.print("  1. Your Matrix homeserver is running")
     console.print(
-        f"  2. MATRIX_HOMESERVER is set correctly (current: {constants.runtime_matrix_homeserver()})",
+        "  2. MATRIX_HOMESERVER is set correctly "
+        f"(current: {constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)})",
     )
     console.print("  3. The server is reachable from this machine")
 

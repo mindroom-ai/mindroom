@@ -34,5 +34,6 @@ def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
         context.requester_id,
         context.config,
         room_id,
+        context.runtime_paths,
         room_alias=room_alias,
     )

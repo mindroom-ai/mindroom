@@ -8,6 +8,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -39,13 +40,13 @@ def get_authorized_user_ids_to_invite(config: Config) -> set[str]:
     )
 
 
-def get_root_space_user_ids_to_invite(config: Config) -> set[str]:
+def get_root_space_user_ids_to_invite(config: Config, runtime_paths: RuntimePaths) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
     user_ids = _filter_concrete_matrix_user_ids(
         set(config.authorization.global_users),
         warning_message="Skipping non-concrete global user IDs for root space invites",
     )
-    internal_user_id = config.get_mindroom_user_id()
+    internal_user_id = config.get_mindroom_user_id(runtime_paths)
     if internal_user_id is not None:
         user_ids.add(internal_user_id)
     return user_ids

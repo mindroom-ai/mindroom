@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 
 def use_file_memory_backend(config: Config, *, agent_name: str | None = None) -> bool:
@@ -122,17 +123,20 @@ def file_memory_resolution_from_paths(
     *,
     original_storage_path: Path,
     resolved_storage_path: Path,
+    runtime_paths: RuntimePaths,
     preserve_resolved_storage_path: bool = False,
 ) -> FileMemoryResolution:
     """Build file-memory resolution settings from original and resolved roots."""
     if preserve_resolved_storage_path:
         return FileMemoryResolution(
             storage_path=resolved_storage_path,
+            runtime_paths=runtime_paths,
             use_configured_path=False,
         )
 
     return FileMemoryResolution(
         storage_path=resolved_storage_path,
+        runtime_paths=runtime_paths,
         use_configured_path=storage_paths_match(
             original_storage_path,
             resolved_storage_path,
@@ -148,6 +152,7 @@ def storage_paths_match(original_storage_path: Path, resolved_storage_path: Path
 def resolve_file_memory_resolution(
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str | None = None,
     original_storage_path: Path | None = None,
@@ -165,6 +170,7 @@ def resolve_file_memory_resolution(
     resolution = file_memory_resolution_from_paths(
         original_storage_path=original_storage_path or storage_path,
         resolved_storage_path=resolved_storage_path,
+        runtime_paths=runtime_paths,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     if agent_name is None:
@@ -181,6 +187,7 @@ def resolve_file_memory_resolution(
     )
     return FileMemoryResolution(
         storage_path=resolution.storage_path,
+        runtime_paths=runtime_paths,
         use_configured_path=resolution.use_configured_path,
         agent_memory_scope_path=agent_memory_scope_path,
     )

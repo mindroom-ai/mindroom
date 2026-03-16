@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from mindroom.constants import CONFIG_PATH, STORAGE_PATH_OBJ
+from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 
@@ -83,8 +83,9 @@ def _read_host_config_path() -> Path | None:
             msg = f"{_HOST_CONFIG_PATH_ENV} points to a missing file: {resolved}"
             raise WorkerBackendError(msg)
         return resolved
-    if CONFIG_PATH.exists():
-        return CONFIG_PATH.expanduser().resolve()
+    runtime_config_path = resolve_primary_runtime_paths(process_env=dict(os.environ)).config_path
+    if runtime_config_path.exists():
+        return runtime_config_path.expanduser().resolve()
     return None
 
 
@@ -121,7 +122,11 @@ def docker_workers_root(base_storage_path: Path) -> Path:
 
 def resolve_docker_storage_path(storage_path: Path | None = None) -> Path:
     """Resolve the storage root used by the Docker backend."""
-    base_storage_path = STORAGE_PATH_OBJ if storage_path is None else storage_path
+    base_storage_path = (
+        resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
+        if storage_path is None
+        else storage_path
+    )
     return base_storage_path.expanduser().resolve()
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -12,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom import constants
-from mindroom.constants import MATRIX_SSL_VERIFY, ROUTER_AGENT_NAME
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
@@ -34,9 +33,11 @@ STARTUP_RETRY_INITIAL_DELAY_SECONDS = 2.0
 STARTUP_RETRY_MAX_DELAY_SECONDS = 60.0
 
 
-def _matrix_homeserver_startup_timeout_seconds_from_env() -> int | None:
+def _matrix_homeserver_startup_timeout_seconds_from_env(
+    runtime_paths: RuntimePaths,
+) -> int | None:
     """Return the startup wait timeout from the environment, if configured."""
-    raw_timeout = os.getenv(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV, "").strip()
+    raw_timeout = (runtime_paths.env_value(_MATRIX_HOMESERVER_STARTUP_TIMEOUT_ENV) or "").strip()
     if not raw_timeout:
         return None
     timeout_seconds = int(raw_timeout)
@@ -141,14 +142,15 @@ async def run_with_retry(
 
 async def wait_for_matrix_homeserver(
     *,
+    runtime_paths: RuntimePaths,
     timeout_seconds: float | None = None,
     request_timeout_seconds: float = _MATRIX_HOMESERVER_REQUEST_TIMEOUT_SECONDS,
     retry_interval_seconds: float = _MATRIX_HOMESERVER_RETRY_INTERVAL_SECONDS,
 ) -> None:
     """Wait for the configured Matrix homeserver to answer `/versions`."""
     if timeout_seconds is None:
-        timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env()
-    versions_url = matrix_versions_url(constants.runtime_matrix_homeserver())
+        timeout_seconds = _matrix_homeserver_startup_timeout_seconds_from_env(runtime_paths)
+    versions_url = matrix_versions_url(constants.runtime_matrix_homeserver(runtime_paths=runtime_paths))
     set_runtime_starting(f"Waiting for Matrix homeserver at {versions_url}")
     loop = asyncio.get_running_loop()
     deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
@@ -159,7 +161,10 @@ async def wait_for_matrix_homeserver(
         timeout_seconds=timeout_seconds,
     )
 
-    async with httpx.AsyncClient(timeout=request_timeout_seconds, verify=MATRIX_SSL_VERIFY) as client:
+    async with httpx.AsyncClient(
+        timeout=request_timeout_seconds,
+        verify=runtime_matrix_ssl_verify(runtime_paths=runtime_paths),
+    ) as client:
         while deadline is None or loop.time() < deadline:
             attempt += 1
             try:

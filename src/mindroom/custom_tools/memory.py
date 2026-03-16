@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -32,10 +33,17 @@ logger = get_logger(__name__)
 class MemoryTools(Toolkit):
     """Tools that let an agent explicitly store and search its own memories."""
 
-    def __init__(self, agent_name: str, storage_path: Path, config: Config) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        storage_path: Path,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> None:
         self._agent_name = agent_name
         self._storage_path = storage_path
         self._config = config
+        self._runtime_paths = runtime_paths
 
         super().__init__(
             name="memory",
@@ -68,6 +76,7 @@ class MemoryTools(Toolkit):
                 self._agent_name,
                 self._storage_path,
                 self._config,
+                self._runtime_paths,
                 metadata={"source": "explicit_tool"},
             )
         except Exception as e:
@@ -95,6 +104,7 @@ class MemoryTools(Toolkit):
                 self._agent_name,
                 self._storage_path,
                 self._config,
+                self._runtime_paths,
                 limit=limit,
             )
             if not results:
@@ -126,6 +136,7 @@ class MemoryTools(Toolkit):
                 self._agent_name,
                 self._storage_path,
                 self._config,
+                self._runtime_paths,
                 limit=limit,
             )
             if not results:
@@ -153,7 +164,13 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            result = await get_agent_memory(memory_id, self._agent_name, self._storage_path, self._config)
+            result = await get_agent_memory(
+                memory_id,
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                self._runtime_paths,
+            )
             if result is None:
                 return f"No memory found with id={memory_id}"
             return f"[id={result.get('id', memory_id)}] {result.get('memory', '')}"
@@ -175,7 +192,14 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            await update_agent_memory(memory_id, new_content, self._agent_name, self._storage_path, self._config)
+            await update_agent_memory(
+                memory_id,
+                new_content,
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                self._runtime_paths,
+            )
         except Exception as e:
             logger.exception(
                 "Failed to update memory via tool",
@@ -201,7 +225,13 @@ class MemoryTools(Toolkit):
 
         """
         try:
-            await delete_agent_memory(memory_id, self._agent_name, self._storage_path, self._config)
+            await delete_agent_memory(
+                memory_id,
+                self._agent_name,
+                self._storage_path,
+                self._config,
+                self._runtime_paths,
+            )
         except Exception as e:
             logger.exception(
                 "Failed to delete memory via tool",

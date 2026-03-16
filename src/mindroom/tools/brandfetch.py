@@ -25,14 +25,14 @@ if TYPE_CHECKING:
             label="API Key",
             type="password",
             required=False,
-            description="Brandfetch API key for Brand API (falls back to BRANDFETCH_API_KEY env var)",
+            description="Brandfetch API key for Brand API",
         ),
         ConfigField(
             name="client_id",
             label="Client ID",
             type="text",
             required=False,
-            description="Brandfetch Client ID for Brand Search API (falls back to BRANDFETCH_CLIENT_ID env var)",
+            description="Brandfetch Client ID for Brand Search API",
         ),
         ConfigField(
             name="enable_search_by_identifier",
