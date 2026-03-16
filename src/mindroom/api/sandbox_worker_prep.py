@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from mindroom.api import sandbox_exec
-from mindroom.config.main import load_config
+from mindroom.config.main import runtime_private_agent_names
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.worker_routing import visible_state_roots_for_worker_key, worker_dir_name
 from mindroom.workers.backend import WorkerBackendError
@@ -217,16 +217,6 @@ def resolve_worker_base_dir(
     return candidate
 
 
-def _runtime_private_agent_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the set of agents that materialize requester-private state."""
-    if not runtime_paths.config_path.exists():
-        return frozenset()
-    config = load_config(runtime_paths)
-    return frozenset(
-        agent_name for agent_name, agent_config in config.agents.items() if agent_config.private is not None
-    )
-
-
 def ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:
     """Materialize runtime override paths before tool execution."""
     if runtime_overrides is None:
@@ -256,9 +246,9 @@ def prepare_worker_request(
         logger.opt(exception=True).warning("Sandbox worker initialization failed", worker_key=worker_key)
         raise WorkerRequestPreparationError(str(exc)) from exc
 
-    paths = local_worker_state_paths_from_handle(worker_handle)
-    private_agent_names = _runtime_private_agent_names(runtime_paths)
     try:
+        paths = local_worker_state_paths_from_handle(worker_handle)
+        private_agent_names = runtime_private_agent_names(runtime_paths, worker_key=worker_key)
         runtime_overrides = {
             "base_dir": resolve_worker_base_dir(
                 paths,

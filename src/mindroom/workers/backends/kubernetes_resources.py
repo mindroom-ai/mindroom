@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.config.main import load_config
+from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import visible_state_roots_for_worker_key
@@ -58,16 +58,6 @@ _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
 _STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEFAULT_CONTAINER_PATH = "/app/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-
-def _runtime_private_agent_names(runtime_paths: RuntimePaths) -> frozenset[str]:
-    """Return the agents that use requester-private state in this runtime."""
-    if not runtime_paths.config_path.exists():
-        return frozenset()
-    config = load_config(runtime_paths)
-    return frozenset(
-        agent_name for agent_name, agent_config in config.agents.items() if agent_config.private is not None
-    )
 
 
 class _ApiStatusError(Exception):
@@ -733,7 +723,7 @@ class KubernetesResourceManager:
 
     def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        private_agent_names = _runtime_private_agent_names(self.runtime_paths)
+        private_agent_names = runtime_private_agent_names(self.runtime_paths, worker_key=worker_key)
         visible_state_roots = visible_state_roots_for_worker_key(
             mounted_storage_root,
             worker_key,
