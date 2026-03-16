@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     dashboard_supports_worker_credentials,
     load_credentials_for_target,
@@ -127,10 +128,10 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    config, _ = load_runtime_config(runtime_paths)
+    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
     worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None

@@ -686,7 +686,7 @@ def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(tes
     config = _config_with_worker_scope("user")
 
     with (
-        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
     ):
         response = test_client.get("/api/tools/?agent_name=general")
 
@@ -703,7 +703,7 @@ def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClien
     config = _config_with_worker_scope("user")
 
     with (
-        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
     ):
         response = test_client.post("/api/google/disconnect?agent_name=general")
 
@@ -716,7 +716,7 @@ def test_homeassistant_connect_oauth_rejects_isolating_worker_scope(test_client:
     config = _config_with_worker_scope("user")
 
     with (
-        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
     ):
         response = test_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
@@ -777,7 +777,7 @@ def test_google_connect_uses_pending_oauth_state(
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
-    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
         response = api_key_client.post("/api/google/connect?agent_name=general")
 
     assert response.status_code == 200
@@ -845,7 +845,7 @@ def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
         "mindroom.api.google_integration._ensure_google_packages",
         lambda _runtime_paths: (object, object, _FakeFlowFactory),
     )
-    with patch("mindroom.api.main.load_runtime_config", return_value=(config, temp_config_file)):
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
         connect_response = api_key_client.post(
             "/api/google/connect?agent_name=general",
             headers={"Authorization": "Bearer test-key"},
@@ -892,7 +892,7 @@ def test_google_reset_clears_runtime_env_file_and_refreshes_runtime(
     assert "GOOGLE_REDIRECT_URI=" not in env_contents
     assert "UNRELATED=value" in env_contents
 
-    with patch("mindroom.api.main.load_runtime_config", return_value=(config, temp_config_file)):
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, temp_config_file)):
         connect_response = api_key_client.post(
             "/api/google/connect?agent_name=general",
             headers={"Authorization": "Bearer test-key"},
@@ -994,7 +994,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
-    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
         response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general",
             json={
@@ -1034,7 +1034,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     async_client.__aenter__.return_value.post.return_value = token_response
 
     with (
-        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
         patch("mindroom.api.homeassistant_integration.resolve_request_credentials_target", return_value=target),
         patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
     ):
@@ -1123,7 +1123,7 @@ def test_spotify_connect_uses_pending_oauth_state(
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
-    with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
         response = api_key_client.post("/api/integrations/spotify/connect?agent_name=general")
 
     assert response.status_code == 200
@@ -1137,7 +1137,7 @@ def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) 
     config = _config_with_worker_scope("user")
 
     with (
-        patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
     ):
         response = test_client.get("/api/integrations/spotify/status?agent_name=general")
 
