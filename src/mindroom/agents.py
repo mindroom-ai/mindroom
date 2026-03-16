@@ -100,7 +100,6 @@ class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
-    worker_routed_tools: frozenset[str]
     worker_scope: WorkerScope | None
 
 
@@ -385,7 +384,6 @@ def build_agent_tool_init_context(
         )
     return AgentToolInitContext(
         workspace_path=workspace_path,
-        worker_routed_tools=frozenset(config.get_agent_worker_tools(agent_name, runtime_paths)),
         worker_scope=config.get_agent_worker_scope(agent_name),
     )
 
