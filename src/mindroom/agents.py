@@ -346,6 +346,17 @@ def _tool_base_dir_override(
     return {"base_dir": str(workspace_path)}
 
 
+def _tool_runtime_overrides(
+    tool_name: str,
+    *,
+    storage_path: Path,
+) -> dict[str, object] | None:
+    """Return explicit runtime config overrides for tools that intentionally receive them."""
+    if tool_name == "browser":
+        return {"output_dir": storage_path / "browser"}
+    return None
+
+
 def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
@@ -386,12 +397,6 @@ def build_agent_toolkit(
     storage_path = runtime_paths.storage_root
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     shared_storage_path = shared_storage_root(storage_path)
-    metadata = TOOL_METADATA[tool_name]
-    runtime_overrides = (
-        {"output_dir": storage_path / "browser"}
-        if any(field.name == "output_dir" for field in metadata.config_fields or [])
-        else None
-    )
 
     if tool_name == "memory":
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
@@ -441,7 +446,7 @@ def build_agent_toolkit(
             tool_name,
             workspace_path=tool_init_context.workspace_path,
         ),
-        runtime_overrides=runtime_overrides,
+        runtime_overrides=_tool_runtime_overrides(tool_name, storage_path=storage_path),
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         worker_scope=tool_init_context.worker_scope,
