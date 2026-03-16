@@ -413,6 +413,101 @@ async def test_mixed_private_team_mem0_conversation_memory_stays_out_of_shared_a
 
 
 @pytest.mark.asyncio
+async def test_mixed_private_team_can_crud_shared_member_mem0_memory(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mixed teams should still reach shared member memories through team member access."""
+    config.memory.backend = "mem0"
+    config.memory.team_reads_member_memory = True
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
+
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
+        id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
+        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    private_root = private_instance_state_root_path(
+        storage_path,
+        worker_key=resolve_worker_key("user", execution_identity, agent_name="general"),
+        agent_name="general",
+    )
+
+    with (
+        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        tool_execution_identity(execution_identity),
+    ):
+        await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
+        calculator_memory_id = (
+            await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)
+        )[0]["id"]
+
+        loaded = await get_agent_memory(
+            calculator_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        assert loaded is not None
+        assert loaded["memory"] == "Shared calculator note"
+
+        await update_agent_memory(
+            calculator_memory_id,
+            "Updated shared calculator note",
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        updated = await get_agent_memory(
+            calculator_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        assert updated is not None
+        assert updated["memory"] == "Updated shared calculator note"
+
+        await delete_agent_memory(
+            calculator_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        deleted = await get_agent_memory(
+            calculator_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
+        assert deleted is None
+
+    assert agent_state_root_path(storage_path, "calculator") in memories_by_path
+    assert private_root not in memories_by_path or memories_by_path[private_root]._entries == {}
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_across_worker_roots(
     storage_path: Path,
     config: Config,

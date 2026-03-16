@@ -18,8 +18,8 @@ from ._policy import (
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
-    mutation_target_storage_paths,
     resolve_file_memory_resolution,
+    storage_paths_for_scope_user_id,
 )
 from ._shared import (
     FILE_MEMORY_DAILY_DIR,
@@ -452,7 +452,6 @@ def _mutate_file_memory_targets(
     *,
     memory_id: str,
     content: str | None,
-    caller_context: str | list[str],
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -460,7 +459,7 @@ def _mutate_file_memory_targets(
 ) -> tuple[str, int]:
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in mutation_target_storage_paths(scope_user_id, caller_context, storage_path, config):
+    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
         resolution = resolve_file_memory_resolution(
             target_storage_path,
             config,
@@ -539,7 +538,7 @@ def search_file_agent_memories(
     )
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        for target_storage_path in mutation_target_storage_paths(team_id, agent_name, storage_path, config):
+        for target_storage_path in storage_paths_for_scope_user_id(team_id, storage_path, config):
             team_resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
@@ -624,7 +623,6 @@ def update_file_agent_memory(
     scope_user_id, updated_targets = _mutate_file_memory_targets(
         memory_id=memory_id,
         content=content,
-        caller_context=caller_context,
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths,
@@ -663,7 +661,6 @@ def delete_file_agent_memory(
     scope_user_id, deleted_targets = _mutate_file_memory_targets(
         memory_id=memory_id,
         content=None,
-        caller_context=caller_context,
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths,

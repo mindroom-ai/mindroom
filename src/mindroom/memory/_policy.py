@@ -129,16 +129,18 @@ def _team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list
     return members or None
 
 
-def mutation_target_storage_paths(
+def storage_paths_for_scope_user_id(
     scope_user_id: str,
-    caller_context: str | list[str],
     storage_path: Path,
     config: Config,
 ) -> list[Path]:
-    """Return all storage roots that should reflect mutations for this scope."""
+    """Return the canonical storage roots for one memory scope."""
     if (team_members := _team_members_from_scope_user_id(scope_user_id, config)) is not None:
         return effective_storage_paths_for_context(team_members, storage_path, config)
-    return effective_storage_paths_for_context(caller_context, storage_path, config)
+    if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None:
+        return [_effective_storage_path_for_agent(agent_name, storage_path, config)]
+    msg = f"Unsupported memory scope user_id: {scope_user_id}"
+    raise ValueError(msg)
 
 
 def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:

@@ -14,7 +14,7 @@ from ._policy import (
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
-    mutation_target_storage_paths,
+    storage_paths_for_scope_user_id,
 )
 from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, ScopedMemoryCrud, ScopedMemoryWriter
 
@@ -128,10 +128,11 @@ async def _find_mem0_anchor_memory_result(
     *,
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        memory = await create_memory(target_storage_path, config)
-        if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
-            return result
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
+            memory = await create_memory(target_storage_path, config)
+            if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
+                return result
     return None
 
 
@@ -166,7 +167,7 @@ async def _mutate_mem0_memory_targets(
 ) -> int:
     mutated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in mutation_target_storage_paths(scope_user_id, caller_context, storage_path, config):
+    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
         memory = await create_memory(target_storage_path, config)
         target_ids = await _mem0_mutation_target_ids(
             memory,
@@ -273,11 +274,12 @@ async def get_mem0_agent_memory(
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
     """Return one mem0 memory visible to the caller."""
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        memory = await create_memory(target_storage_path, config)
-        result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
-        if result is not None:
-            return result
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
+            memory = await create_memory(target_storage_path, config)
+            result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
+            if result is not None:
+                return result
     return None
 
 

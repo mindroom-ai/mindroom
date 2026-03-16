@@ -13,9 +13,11 @@ from mindroom.memory._policy import (
     effective_storage_paths_for_context,
     get_allowed_memory_user_ids,
     get_team_ids_for_agent,
+    storage_paths_for_scope_user_id,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    agent_state_root_path,
     private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
@@ -95,6 +97,40 @@ def test_effective_storage_paths_for_mixed_private_team_prefers_private_roots(tm
     with tool_execution_identity(identity):
         assert effective_storage_paths_for_context(["general", "calculator"], tmp_path, config) == [
             expected_private_root,
+        ]
+
+
+def test_storage_paths_for_scope_user_id_uses_member_root_for_mixed_private_team(
+    tmp_path: Path,
+    config: Config,
+) -> None:
+    """Member-scope access should still target each member's canonical storage root."""
+    config.agents = {
+        "general": AgentConfig(display_name="General", private=AgentPrivateConfig(per="user", root="mind_data")),
+        "calculator": AgentConfig(display_name="Calculator"),
+    }
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="general")
+    expected_private_root = private_instance_state_root_path(
+        tmp_path,
+        worker_key=worker_key,
+        agent_name="general",
+    )
+
+    with tool_execution_identity(identity):
+        assert storage_paths_for_scope_user_id("team_calculator+general", tmp_path, config) == [
+            expected_private_root,
+        ]
+        assert storage_paths_for_scope_user_id("agent_calculator", tmp_path, config) == [
+            agent_state_root_path(tmp_path, "calculator"),
         ]
 
 
