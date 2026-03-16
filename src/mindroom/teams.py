@@ -24,6 +24,7 @@ from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.knowledge.utils import bound_knowledge_managers, ensure_request_knowledge_managers
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -434,7 +435,6 @@ def _get_agents_from_orchestrator(
 
     """
     assert orchestrator.config is not None
-    execution_identity = get_tool_execution_identity()
     agents: list[Agent] = []
     for name in agent_names:
         if name == ROUTER_AGENT_NAME:
@@ -445,9 +445,6 @@ def _get_agents_from_orchestrator(
             continue
 
         agent_bot = orchestrator.agent_bots[name]
-        if orchestrator.config.agents[name].private is not None and execution_identity is None:
-            msg = f"Private team agent '{name}' requires an active execution identity"
-            raise ValueError(msg)
         agent = agent_bot.agent
 
         if agent is None:
@@ -463,6 +460,28 @@ def _get_agents_from_orchestrator(
         agents.append(agent)
 
     return agents
+
+
+async def _get_request_scoped_team_agents(
+    agent_names: list[str],
+    orchestrator: MultiAgentOrchestrator,
+) -> list[Agent]:
+    """Materialize team members with the current request's knowledge bindings."""
+    assert orchestrator.config is not None
+    execution_identity = get_tool_execution_identity()
+    if execution_identity is None:
+        for agent_name in agent_names:
+            if orchestrator.config.agents[agent_name].private is not None:
+                msg = f"Private team agent '{agent_name}' requires an active execution identity"
+                raise ValueError(msg)
+    request_knowledge_managers = await ensure_request_knowledge_managers(
+        agent_names,
+        config=orchestrator.config,
+        runtime_paths=orchestrator.runtime_paths,
+        execution_identity=execution_identity,
+    )
+    with bound_knowledge_managers(request_knowledge_managers):
+        return _get_agents_from_orchestrator(agent_names, orchestrator)
 
 
 def _create_team_instance(
@@ -552,7 +571,7 @@ async def team_response(
     media: MediaInputs | None = None,
 ) -> str:
     """Create a team and execute response."""
-    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
+    agents = await _get_request_scoped_team_agents(agent_names, orchestrator)
     if not agents:
         return _NO_AGENTS_RESPONSE
 
@@ -627,7 +646,7 @@ async def _team_response_stream_raw(
     """
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
-    agents = _get_agents_from_orchestrator(agent_names, orchestrator)
+    agents = await _get_request_scoped_team_agents(agent_names, orchestrator)
 
     if not agents:
 

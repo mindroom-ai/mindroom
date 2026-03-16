@@ -109,10 +109,10 @@ from .constants import (
     RuntimePaths,
     resolve_avatar_path,
 )
-from .knowledge.manager import ensure_agent_knowledge_managers
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     bound_knowledge_managers,
+    ensure_request_knowledge_managers,
     get_knowledge_for_base,
     resolve_agent_knowledge,
 )
@@ -469,17 +469,12 @@ class AgentBot:
         execution_identity: ToolExecutionIdentity,
     ) -> dict[str, KnowledgeManager]:
         """Ensure and collect managers needed for the current request scope."""
-        managers: dict[str, KnowledgeManager] = {}
-        for agent_name in agent_names:
-            managers.update(
-                await ensure_agent_knowledge_managers(
-                    agent_name,
-                    self.config,
-                    self.runtime_paths,
-                    execution_identity=execution_identity,
-                ),
-            )
-        return managers
+        return await ensure_request_knowledge_managers(
+            agent_names,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
+        )
 
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:

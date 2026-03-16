@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
-from mindroom.knowledge.manager import get_knowledge_manager
+from mindroom.knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -66,6 +66,27 @@ def bound_knowledge_managers(managers: Mapping[str, KnowledgeManager] | None) ->
         yield
     finally:
         _BOUND_KNOWLEDGE_MANAGERS.reset(token)
+
+
+async def ensure_request_knowledge_managers(
+    agent_names: list[str],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> dict[str, KnowledgeManager]:
+    """Ensure and collect request-scoped knowledge managers for one agent set."""
+    managers: dict[str, KnowledgeManager] = {}
+    for agent_name in agent_names:
+        managers.update(
+            await ensure_agent_knowledge_managers(
+                agent_name,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            ),
+        )
+    return managers
 
 
 def get_knowledge_for_base(
