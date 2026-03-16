@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+_TEMPLATE_INITIALIZED_MARKER = ".mindroom-template-initialized"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,10 @@ def ensure_workspace_template(
         raise ValueError(msg)
     copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
     (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+
+
+def _template_initialized_marker(root: Path) -> Path:
+    return root / _TEMPLATE_INITIALIZED_MARKER
 
 
 def _private_root_name(agent_name: str, config: Config) -> str:
@@ -227,12 +232,13 @@ def _resolve_workspace(
         field_name="private.root",
     )
     template_dir = workspace.template_dir
-    should_initialize_template = template_dir is not None and (not root.exists() or not any(root.iterdir()))
+    should_initialize_template = template_dir is not None and not _template_initialized_marker(root).exists()
     if create:
         root.mkdir(parents=True, exist_ok=True)
         if should_initialize_template:
             assert template_dir is not None
             copy_workspace_template(root, template_dir=template_dir)
+            _template_initialized_marker(root).touch()
 
     context_files = tuple(
         resolve_workspace_relative_path(

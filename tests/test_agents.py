@@ -570,6 +570,55 @@ def test_private_workspace_template_preserves_metadata_and_initializes_only_once
     assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
 
 
+def test_private_workspace_template_initializes_missing_files_in_partially_populated_root(tmp_path: Path) -> None:
+    """First-use template initialization should fill missing files even if the root already exists."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "SOUL.md").write_text("soul\n", encoding="utf-8")
+    (template_dir / "USER.md").write_text("user\n", encoding="utf-8")
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    state_root = resolve_agent_private_state_storage_path(
+        "general",
+        bound_config,
+        base_storage_path=runtime_paths.storage_root,
+        execution_identity=identity,
+    )
+    workspace_root = state_root / "mind_data"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    existing_file = workspace_root / "existing.txt"
+    existing_file.write_text("keep\n", encoding="utf-8")
+
+    workspace = resolve_agent_workspace(
+        "general",
+        bound_config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert workspace is not None
+    assert existing_file.read_text(encoding="utf-8") == "keep\n"
+    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "soul\n"
+    assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
+
+
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
 def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
