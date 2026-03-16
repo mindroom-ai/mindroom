@@ -1,5 +1,6 @@
 """Test tool metadata and generate JSON for dashboard consumption."""
 
+import inspect
 import json
 from pathlib import Path
 
@@ -80,26 +81,30 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
             )
 
 
-def test_special_tools_declare_explicit_managed_init_args() -> None:
-    """Special constructor context must be declared in metadata instead of inferred."""
-    assert TOOL_METADATA["browser"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
-    assert TOOL_METADATA["config_manager"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
-    assert TOOL_METADATA["shell"].managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS,)
-    assert TOOL_METADATA["python"].managed_init_args == ()
-    assert TOOL_METADATA["homeassistant"].managed_init_args == (
-        ToolManagedInitArg.CREDENTIALS_MANAGER,
-        ToolManagedInitArg.WORKER_SCOPE,
-        ToolManagedInitArg.ROUTING_AGENT_NAME,
-    )
-    google_args = (
-        ToolManagedInitArg.RUNTIME_PATHS,
-        ToolManagedInitArg.CREDENTIALS_MANAGER,
-        ToolManagedInitArg.WORKER_SCOPE,
-        ToolManagedInitArg.ROUTING_AGENT_NAME,
-    )
-    assert TOOL_METADATA["gmail"].managed_init_args == google_args
-    assert TOOL_METADATA["google_calendar"].managed_init_args == google_args
-    assert TOOL_METADATA["google_sheets"].managed_init_args == google_args
+def test_registered_tools_declare_managed_init_args_for_explicit_constructor_inputs() -> None:
+    """Built-in tools must opt in explicitly instead of relying on hidden constructor inference."""
+    managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
+
+    for tool_name, tool_factory in _TOOL_REGISTRY.items():
+        metadata = TOOL_METADATA[tool_name]
+        tool_class = tool_factory()
+        init_signature = inspect.signature(tool_class.__init__)
+        constructor_param_names = {name for name in init_signature.parameters if name != "self"}
+        expected_managed_args = tuple(
+            managed_arg for managed_arg in ToolManagedInitArg if managed_arg.value in constructor_param_names
+        )
+        assert metadata.managed_init_args == expected_managed_args, (
+            f"{tool_name} declares constructor inputs "
+            f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
+            f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+        )
+
+    for tool_name, metadata in TOOL_METADATA.items():
+        if tool_name not in _TOOL_REGISTRY:
+            assert metadata.managed_init_args == (), (
+                f"{tool_name} is metadata-only and should not declare managed init args: "
+                f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
+            )
 
 
 def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Path) -> None:

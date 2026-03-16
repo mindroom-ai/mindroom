@@ -414,12 +414,12 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
 
 @patch("mindroom.agents.get_tool_by_name")
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_applies_browser_output_dir_override_only_to_browser(
+def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Browser gets the explicit runtime output path without leaking it to other tools."""
+    """Agent construction should not special-case browser artifact paths anymore."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
@@ -431,7 +431,7 @@ def test_create_agent_applies_browser_output_dir_override_only_to_browser(
     runtime_overrides_by_tool = {
         call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert runtime_overrides_by_tool["browser"] == {"output_dir": tmp_path / "browser"}
+    assert runtime_overrides_by_tool["browser"] is None
     assert runtime_overrides_by_tool["visualization"] is None
 
 

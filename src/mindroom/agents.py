@@ -346,17 +346,6 @@ def _tool_base_dir_override(
     return {"base_dir": str(workspace_path)}
 
 
-def _tool_runtime_overrides(
-    tool_name: str,
-    *,
-    storage_path: Path,
-) -> dict[str, object] | None:
-    """Return explicit runtime config overrides for tools that intentionally receive them."""
-    if tool_name == "browser":
-        return {"output_dir": storage_path / "browser"}
-    return None
-
-
 def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
@@ -446,7 +435,6 @@ def build_agent_toolkit(
             tool_name,
             workspace_path=tool_init_context.workspace_path,
         ),
-        runtime_overrides=_tool_runtime_overrides(tool_name, storage_path=storage_path),
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
         worker_scope=tool_init_context.worker_scope,

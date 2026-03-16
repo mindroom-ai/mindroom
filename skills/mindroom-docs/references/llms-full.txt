@@ -2505,6 +2505,32 @@ Common optional fields:
 - `config_fields`: List of `ConfigField` objects for configuration
 - `dependencies`: List of required pip packages
 - `docs_url`: Link to documentation
+- `managed_init_args`: Explicit MindRoom-managed constructor kwargs such as `runtime_paths` or `credentials_manager`
+
+If your toolkit constructor expects MindRoom-managed values like `runtime_paths`, `credentials_manager`, `worker_scope`, or `routing_agent_name`, declare them with `managed_init_args`. This applies to built-in tools under `src/mindroom/tools/` just as much as external plugins. MindRoom no longer inspects constructor parameter names and injects those values automatically. Undeclared managed constructor inputs will not be passed through.
+
+For example, a toolkit that expects `runtime_paths` must opt in explicitly:
+
+```
+from agno.tools import Toolkit
+from mindroom.tool_system.metadata import ToolCategory, ToolManagedInitArg, register_tool_with_metadata
+
+
+@register_tool_with_metadata(
+    name="needs_runtime",
+    display_name="Needs Runtime",
+    description="Example tool that needs runtime paths",
+    category=ToolCategory.DEVELOPMENT,
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+)
+def needs_runtime_tools() -> type[Toolkit]:
+    class NeedsRuntimeTools(Toolkit):
+        def __init__(self, *, runtime_paths):
+            self.runtime_paths = runtime_paths
+            super().__init__(name="needs_runtime", tools=[])
+
+    return NeedsRuntimeTools
+```
 
 ## Plugin skills
 
