@@ -427,9 +427,10 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         *,
         agent_name: str,
         session_id: str,
-        _execution_identity: ToolExecutionIdentity | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
         nonlocal session_updated_at
+        _ = execution_identity
         session_updated_at = 200
         mark_auto_flush_dirty_session(
             storage_path,
