@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -156,7 +156,6 @@ class Config(BaseModel):
     """Complete configuration from YAML."""
 
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
-    _runtime_paths: RuntimePaths | None = PrivateAttr(default=None)
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -442,9 +441,7 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
     ) -> Config:
         """Validate config data against one explicit runtime context."""
-        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
-        config._runtime_paths = runtime_paths
-        return config
+        return cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
 
     @classmethod
     def from_yaml(

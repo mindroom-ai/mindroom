@@ -166,10 +166,9 @@ The current time is {time_str} ({timezone_str} timezone).
 
 def _load_context_files(
     context_files: list[Path | str],
-    *,
+    runtime_paths: constants.RuntimePaths,
     agent_name: str | None = None,
     storage_path: Path | None = None,
-    runtime_paths: constants.RuntimePaths,
 ) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
@@ -304,9 +303,9 @@ def _build_additional_context(
     if context_files:
         personality_chunks = _load_context_files(
             context_files,
-            agent_name=agent_name,
-            storage_path=storage_path,
-            runtime_paths=runtime_paths,
+            runtime_paths,
+            agent_name,
+            storage_path,
         )
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
@@ -748,32 +747,30 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     """
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
-    resolved_runtime_paths = runtime_paths
-    config._runtime_paths = resolved_runtime_paths
-    resolved_storage_path = resolved_runtime_paths.storage_root
+    resolved_storage_path = runtime_paths.storage_root
     execution_identity = get_tool_execution_identity()
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
     defaults = config.defaults
 
-    load_plugins(config, resolved_runtime_paths)
+    load_plugins(config, runtime_paths)
 
     tool_names = get_agent_toolkit_names(
         agent_name,
         config,
         delegation_depth=delegation_depth,
     )
-    worker_tools = config.get_agent_worker_tools(agent_name, resolved_runtime_paths)
+    worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     tool_init_context = build_agent_tool_init_context(
         config,
         agent_name,
-        runtime_paths=resolved_runtime_paths,
+        runtime_paths=runtime_paths,
     )
     workspace = resolve_agent_workspace(
         agent_name,
         config,
-        runtime_paths=resolved_runtime_paths,
+        runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=True,
     )
@@ -785,7 +782,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 tool_name,
                 agent_name=agent_name,
                 config=config,
-                runtime_paths=resolved_runtime_paths,
+                runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
                 delegation_depth=delegation_depth,
@@ -842,7 +839,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config.defaults.max_preload_chars,
         workspace_context_files=workspace.context_files if workspace is not None else (),
         storage_path=resolved_storage_path,
-        runtime_paths=resolved_runtime_paths,
+        runtime_paths=runtime_paths,
     )
 
     # Use rich prompt if available, otherwise use YAML config

@@ -18,9 +18,7 @@ def _config_with_runtime_paths() -> tuple[Config, RuntimePaths]:
         storage_path=runtime_root / "mindroom_data",
         process_env={},
     )
-    config = Config()
-    config._runtime_paths = runtime_paths
-    return config, runtime_paths
+    return Config.validate_with_runtime({}, runtime_paths), runtime_paths
 
 
 class TestGeminiIntegration:

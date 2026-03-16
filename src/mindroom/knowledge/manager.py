@@ -62,19 +62,6 @@ def _resolve_knowledge_path(
     return resolve_config_relative_path(path, runtime_paths=runtime_paths)
 
 
-def _runtime_paths_with_storage_root(config: Config, storage_path: Path) -> RuntimePaths:
-    if config._runtime_paths is None:
-        msg = "Knowledge manager requires a runtime-bound config"
-        raise ValueError(msg)
-    base_runtime_paths = config._runtime_paths
-    return RuntimePaths(
-        config_path=base_runtime_paths.config_path,
-        config_dir=base_runtime_paths.config_dir,
-        env_path=base_runtime_paths.env_path,
-        storage_root=storage_path.expanduser().resolve(),
-    )
-
-
 def _match_paths(
     config: Config,
     base_id: str,
@@ -347,7 +334,6 @@ def _knowledge_base_uses_isolating_worker_workspace(
 def _should_start_background_watchers(
     config: Config,
     base_id: str,
-    *,
     start_watchers: bool,
 ) -> bool:
     if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
@@ -358,7 +344,6 @@ def _should_start_background_watchers(
 def _should_incrementally_sync_on_access(
     config: Config,
     base_id: str,
-    *,
     start_watchers: bool,
 ) -> bool:
     if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
@@ -370,7 +355,6 @@ def _resolve_manager_storage_path(
     config: Config,
     runtime_paths: RuntimePaths,
     base_id: str,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     effective_agent_name = config.get_private_knowledge_base_agent(base_id)
@@ -388,7 +372,6 @@ def _resolve_effective_knowledge_path(
     config: Config,
     runtime_paths: RuntimePaths,
     base_id: str,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> tuple[Path, Path]:
@@ -435,7 +418,6 @@ def _knowledge_manager_key(
     config: Config,
     runtime_paths: RuntimePaths,
     base_id: str,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> tuple[KnowledgeManagerKey, Path, Path]:
@@ -1248,7 +1230,6 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
 
 async def _touch_scoped_private_manager_key(
     key: KnowledgeManagerKey,
-    *,
     config: Config,
     base_id: str,
 ) -> None:
@@ -1283,7 +1264,7 @@ async def _ensure_knowledge_manager(
             await _sync_manager_without_full_reindex(existing)
         if start_background_watchers:
             await existing.start_watcher()
-        await _touch_scoped_private_manager_key(key, config=config, base_id=base_id)
+        await _touch_scoped_private_manager_key(key, config, base_id)
         return existing
 
     full_reindex_required = (
@@ -1329,15 +1310,14 @@ async def _ensure_knowledge_manager(
         await manager.start_watcher()
 
     _knowledge_managers[key] = manager
-    await _touch_scoped_private_manager_key(key, config=config, base_id=base_id)
+    await _touch_scoped_private_manager_key(key, config, base_id)
     return manager
 
 
 async def ensure_agent_knowledge_managers(
     agent_name: str,
     config: Config,
-    storage_path: Path,
-    *,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     start_watchers: bool = True,
     reindex_on_create: bool = False,
@@ -1350,21 +1330,19 @@ async def ensure_agent_knowledge_managers(
     if not base_ids:
         return {}
 
-    runtime_paths = _runtime_paths_with_storage_root(config, storage_path)
-    config._runtime_paths = runtime_paths
     managers: dict[str, KnowledgeManager] = {}
     for base_id in base_ids:
         start_background_watchers = _should_start_background_watchers(
             config,
             base_id,
-            start_watchers=start_watchers,
+            start_watchers,
         )
         key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
             config,
             runtime_paths,
             base_id,
-            execution_identity=execution_identity,
-            create=True,
+            execution_identity,
+            True,
         )
         managers[base_id] = await _ensure_knowledge_manager(
             key=key,
@@ -1377,7 +1355,7 @@ async def ensure_agent_knowledge_managers(
             incremental_sync_on_access=_should_incrementally_sync_on_access(
                 config,
                 base_id,
-                start_watchers=start_watchers,
+                start_watchers,
             ),
             reindex_on_create=reindex_on_create,
         )
@@ -1391,7 +1369,6 @@ async def initialize_knowledge_managers(
     reindex_on_create: bool = True,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-wide knowledge managers for all configured knowledge bases."""
-    config._runtime_paths = runtime_paths
     configured_base_ids = set(config.knowledge_bases)
     for key in list(_knowledge_managers):
         if key.base_id not in configured_base_ids and config.get_private_knowledge_base_agent(key.base_id) is None:
@@ -1425,7 +1402,7 @@ async def initialize_knowledge_managers(
             start_background_watchers=_should_start_background_watchers(
                 config,
                 base_id,
-                start_watchers=start_watchers,
+                start_watchers,
             ),
             incremental_sync_on_access=False,
             reindex_on_create=reindex_on_create,
@@ -1443,17 +1420,17 @@ def get_knowledge_manager(
     base_id: str,
     *,
     config: Config | None = None,
-    storage_path: Path | None = None,
+    runtime_paths: RuntimePaths | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> KnowledgeManager | None:
     """Get one process-wide knowledge manager by effective base/storage/path key."""
-    if config is not None and storage_path is not None:
+    if config is not None and runtime_paths is not None:
         try:
             key, _, _ = _knowledge_manager_key(
                 config,
-                _runtime_paths_with_storage_root(config, storage_path),
+                runtime_paths,
                 base_id,
-                execution_identity=execution_identity,
+                execution_identity,
             )
         except ValueError:
             return None

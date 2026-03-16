@@ -462,7 +462,6 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", allow_self_config=True)},
         )
         try:
-            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = _create_agent_for_test(
                 "writer",
                 config=config,
@@ -484,7 +483,6 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["self_config"])},
         )
         try:
-            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = _create_agent_for_test(
                 "writer",
                 config=config,
@@ -505,7 +503,6 @@ class TestAgentCreationInjection:
             agents={"writer": AgentConfig(display_name="Writer", role="Write", tools=["config_manager"])},
         )
         try:
-            config._runtime_paths = resolve_runtime_paths(config_path=config_path)
             agent = _create_agent_for_test(
                 "writer",
                 config=config,

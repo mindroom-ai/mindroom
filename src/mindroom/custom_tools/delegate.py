@@ -88,7 +88,7 @@ class DelegateTools(Toolkit):
             request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_agent_knowledge_managers(
                 agent_name,
                 self._config,
-                self._runtime_paths.storage_root,
+                self._runtime_paths,
                 execution_identity=execution_identity,
             )
 
@@ -99,7 +99,7 @@ class DelegateTools(Toolkit):
                     lambda base_id: get_knowledge_for_base(
                         base_id,
                         config=self._config,
-                        storage_path=self._runtime_paths.storage_root,
+                        runtime_paths=self._runtime_paths,
                         execution_identity=execution_identity,
                     ),
                 )

@@ -452,7 +452,7 @@ class AgentBot:
             lambda base_id: get_knowledge_for_base(
                 base_id,
                 config=self.config,
-                storage_path=self.storage_path,
+                runtime_paths=self.runtime_paths,
                 shared_manager_lookup=_shared_manager,
                 execution_identity=execution_identity,
             ),
@@ -475,7 +475,7 @@ class AgentBot:
                 await ensure_agent_knowledge_managers(
                     agent_name,
                     self.config,
-                    self.storage_path,
+                    self.runtime_paths,
                     execution_identity=execution_identity,
                 ),
             )

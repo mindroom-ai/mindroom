@@ -646,7 +646,7 @@ class TestPrepareAgentAndPrompt:
         tmp_path: Path,
     ) -> None:
         """Editing a context file should affect the next reply preparation without restart."""
-        config._runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
         config.agents["general"].memory_backend = "file"
         config.agents["general"].memory_file_path = "mind_data"
         config.agents["general"].context_files = ["mind_data/SOUL.md"]

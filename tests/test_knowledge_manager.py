@@ -25,7 +25,7 @@ from mindroom.knowledge.manager import (
 )
 from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
-from tests.conftest import bind_runtime_paths
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -782,21 +782,31 @@ async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots
     )
 
     try:
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=alice_identity)
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=alice_identity,
+        )
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=bob_identity,
+        )
 
         assert get_knowledge_manager(private_base_id) is None
 
         alice_manager = get_knowledge_manager(
             private_base_id,
             config=config,
-            storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(config),
             execution_identity=alice_identity,
         )
         bob_manager = get_knowledge_manager(
             private_base_id,
             config=config,
-            storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(config),
             execution_identity=bob_identity,
         )
 
@@ -867,7 +877,12 @@ async def test_private_knowledge_single_file_target_indexes_without_creating_dir
     )
 
     try:
-        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        managers = await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+        )
         manager = managers[private_base_id]
 
         worker_key = resolve_worker_key("user", identity)
@@ -914,7 +929,7 @@ async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassifi
     config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     try:
-        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        managers = await ensure_agent_knowledge_managers("researcher", config, runtime_paths_for(config))
         manager = managers["docs"]
 
         assert docs_path.parent.is_dir()
@@ -974,8 +989,8 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
     monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
 
     try:
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
 
         assert sync_indexed_files.await_count == 2
         start_watcher.assert_not_awaited()
@@ -1029,8 +1044,8 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
     monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
 
     try:
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
-        await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
+        await ensure_agent_knowledge_managers("mind", config, runtime_paths_for(config), execution_identity=identity)
 
         assert sync_git_repository.await_count == 2
         sync_indexed_files.assert_not_awaited()
@@ -1072,7 +1087,12 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
     )
 
     try:
-        managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+        managers = await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+        )
         scoped_manager = managers[private_base_id]
 
         static_managers = await initialize_knowledge_managers(
@@ -1083,7 +1103,7 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
         resolved_manager = get_knowledge_manager(
             private_base_id,
             config=config,
-            storage_path=tmp_path,
+            runtime_paths=runtime_paths_for(config),
             execution_identity=identity,
         )
 
@@ -1121,9 +1141,9 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
     config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     try:
-        managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
+        managers = await ensure_agent_knowledge_managers("researcher", config, runtime_paths_for(config))
         manager = managers["docs"]
-        knowledge = get_knowledge_for_base("docs", config=config, storage_path=tmp_path)
+        knowledge = get_knowledge_for_base("docs", config=config, runtime_paths=runtime_paths_for(config))
 
         assert knowledge is manager.get_knowledge()
     finally:
@@ -1173,12 +1193,17 @@ async def test_initialize_knowledge_managers_removes_private_scoped_managers_whe
     )
 
     try:
-        await ensure_agent_knowledge_managers("mind", config_with_private, tmp_path, execution_identity=identity)
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config_with_private,
+            runtime_paths_for(config_with_private),
+            execution_identity=identity,
+        )
         assert (
             get_knowledge_manager(
                 private_base_id,
                 config=config_with_private,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config_with_private),
                 execution_identity=identity,
             )
             is not None
@@ -1194,7 +1219,7 @@ async def test_initialize_knowledge_managers_removes_private_scoped_managers_whe
             get_knowledge_manager(
                 private_base_id,
                 config=config_with_private,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config_with_private),
                 execution_identity=identity,
             )
             is None
@@ -1252,13 +1277,18 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
 
     try:
         for identity in identities:
-            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
+            await ensure_agent_knowledge_managers(
+                "mind",
+                config,
+                runtime_paths_for(config),
+                execution_identity=identity,
+            )
 
         assert (
             get_knowledge_manager(
                 private_base_id,
                 config=config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config),
                 execution_identity=identities[0],
             )
             is None
@@ -1267,7 +1297,7 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
             get_knowledge_manager(
                 private_base_id,
                 config=config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config),
                 execution_identity=identities[1],
             )
             is not None
@@ -1276,7 +1306,7 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
             get_knowledge_manager(
                 private_base_id,
                 config=config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config),
                 execution_identity=identities[2],
             )
             is not None
@@ -1341,18 +1371,23 @@ async def test_request_bound_private_manager_survives_cache_eviction(
         alice_managers = await ensure_agent_knowledge_managers(
             "mind",
             config,
-            tmp_path,
+            runtime_paths_for(config),
             execution_identity=alice_identity,
         )
         assert private_base_id in alice_managers
 
         with bound_knowledge_managers(alice_managers):
-            await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=bob_identity)
+            await ensure_agent_knowledge_managers(
+                "mind",
+                config,
+                runtime_paths_for(config),
+                execution_identity=bob_identity,
+            )
             assert (
                 get_knowledge_for_base(
                     private_base_id,
                     config=config,
-                    storage_path=tmp_path,
+                    runtime_paths=runtime_paths_for(config),
                     execution_identity=alice_identity,
                 )
                 is not None
@@ -1362,7 +1397,7 @@ async def test_request_bound_private_manager_survives_cache_eviction(
             get_knowledge_manager(
                 private_base_id,
                 config=config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths_for(config),
                 execution_identity=alice_identity,
             )
             is None

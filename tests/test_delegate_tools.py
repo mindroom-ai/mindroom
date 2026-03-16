@@ -289,7 +289,7 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once_with(
                 "docs",
                 config=config,
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths,
                 execution_identity=None,
             )
             mock_create.assert_called_once_with(

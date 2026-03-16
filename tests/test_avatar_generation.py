@@ -39,9 +39,7 @@ def _config_with_runtime_paths(
     tmp_path: Path,
 ) -> generate_avatars.Config:
     runtime_paths = _runtime_paths(tmp_path)
-    config = generate_avatars.Config.model_validate(raw_config, context={"runtime_paths": runtime_paths})
-    config._runtime_paths = runtime_paths
-    return config
+    return generate_avatars.Config.validate_with_runtime(raw_config, runtime_paths)
 
 
 @pytest.fixture

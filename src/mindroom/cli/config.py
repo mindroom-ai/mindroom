@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import textwrap
+from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
 import typer
@@ -35,7 +36,6 @@ from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
 console = Console()
 

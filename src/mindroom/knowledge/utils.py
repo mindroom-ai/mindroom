@@ -15,11 +15,11 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-    from pathlib import Path
 
     from agno.knowledge.document import Document
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -72,7 +72,7 @@ def get_knowledge_for_base(
     base_id: str,
     *,
     config: Config,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
@@ -85,7 +85,7 @@ def get_knowledge_for_base(
         manager = get_knowledge_manager(
             base_id,
             config=config,
-            storage_path=storage_path,
+            runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
     if manager is None and config.get_private_knowledge_base_agent(base_id) is None:

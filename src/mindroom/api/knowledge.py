@@ -102,9 +102,8 @@ async def _ensure_manager(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeManager | None:
-    existing = get_knowledge_manager(base_id)
-    knowledge_path = _knowledge_root(config, base_id, runtime_paths)
-    if existing is not None and existing.matches(config, runtime_paths.storage_root, knowledge_path):
+    existing = get_knowledge_manager(base_id, config=config, runtime_paths=runtime_paths)
+    if existing is not None and existing.matches(config, runtime_paths):
         return existing
     managers = await _ensure_managers(config, runtime_paths)
     return managers.get(base_id)
