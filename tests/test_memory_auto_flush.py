@@ -22,6 +22,7 @@ from mindroom.memory.functions import add_agent_memory, append_agent_daily_memor
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
+    get_tool_execution_identity,
     private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
@@ -593,6 +594,89 @@ def test_mark_dirty_separates_private_agent_sessions_by_requester_scope(tmp_path
     }
     requester_ids = {entry["execution_identity"]["requester_id"] for entry in sessions.values()}
     assert requester_ids == {"@alice:example.org", "@bob:example.org"}
+
+
+@pytest.mark.asyncio
+async def test_worker_batch_limits_are_scoped_per_private_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different private requester scopes should not compete for one per-agent batch slot."""
+    config = _private_auto_flush_config(tmp_path)
+    config.memory.auto_flush.batch.max_sessions_per_cycle = 2
+    config.memory.auto_flush.batch.max_sessions_per_agent_per_cycle = 1
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-bob",
+    )
+    fake_session = _FakeSession(
+        updated_at=100,
+        messages=[_FakeMessage(role="user", content="remember this important decision")],
+    )
+
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="mind",
+        session_id="session-alice",
+        execution_identity=alice_identity,
+    )
+    mark_auto_flush_dirty_session(
+        tmp_path,
+        config,
+        agent_name="mind",
+        session_id="session-bob",
+        execution_identity=bob_identity,
+    )
+
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._load_agent_session",
+        lambda _config, _storage, _agent, _sid, **_kwargs: fake_session,
+    )
+    monkeypatch.setattr(
+        "mindroom.memory.auto_flush._extract_memory_summary",
+        _fake_extract_memory_summary,
+    )
+
+    writes: list[tuple[str, str | None]] = []
+
+    def _fake_append_daily_memory(
+        content: str,
+        agent_name: str,
+        **_: object,
+    ) -> dict[str, str]:
+        identity = get_tool_execution_identity()
+        writes.append((agent_name, identity.requester_id if identity is not None else None))
+        return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
+
+    monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
+
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
+    await worker._run_cycle(config)
+
+    assert len(writes) == 2
+    assert set(writes) == {
+        ("mind", "@alice:example.org"),
+        ("mind", "@bob:example.org"),
+    }
 
 
 def test_load_agent_session_passes_execution_identity_for_private_agents(
