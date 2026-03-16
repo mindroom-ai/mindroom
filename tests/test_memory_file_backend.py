@@ -542,6 +542,86 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
 
 
 @pytest.mark.asyncio
+async def test_file_backend_mixed_private_team_conversation_memory_stays_out_of_shared_agent_root(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mixed private/shared teams should keep requester-local team memory out of shared roots."""
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="team",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="team",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+    alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    private_memory_file = (
+        private_instance_state_root_path(storage_path, worker_key=alice_worker_key, agent_name="general")
+        / "memory_files"
+        / "team_calculator+general"
+        / "MEMORY.md"
+    )
+    shared_memory_file = (
+        agent_state_root_path(storage_path, "calculator") / "memory_files" / "team_calculator+general" / "MEMORY.md"
+    )
+
+    with tool_execution_identity(alice_identity):
+        await store_conversation_memory(
+            "Alice-authored private team memory",
+            ["general", "calculator"],
+            storage_path,
+            "session-alice",
+            config,
+        )
+        private_results = await search_agent_memories(
+            "Alice-authored private team",
+            "general",
+            storage_path,
+            config,
+            limit=5,
+        )
+        shared_results_for_alice = await search_agent_memories(
+            "Alice-authored private team",
+            "calculator",
+            storage_path,
+            config,
+            limit=5,
+        )
+
+    with tool_execution_identity(bob_identity):
+        shared_results_for_bob = await search_agent_memories(
+            "Alice-authored private team",
+            "calculator",
+            storage_path,
+            config,
+            limit=5,
+        )
+
+    assert any(result.get("memory") == "Alice-authored private team memory" for result in private_results)
+    assert shared_results_for_alice == []
+    assert shared_results_for_bob == []
+    assert private_memory_file.exists()
+    assert not shared_memory_file.exists()
+
+
+@pytest.mark.asyncio
 async def test_file_backend_team_search_ignores_agent_memory_file_path_override(
     storage_path: Path,
     config: Config,

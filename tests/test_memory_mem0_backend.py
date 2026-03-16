@@ -303,6 +303,116 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
 
 
 @pytest.mark.asyncio
+async def test_mixed_private_team_mem0_conversation_memory_stays_out_of_shared_agent_root(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mixed private/shared teams should keep requester-local team memory out of shared roots."""
+    config.memory.backend = "mem0"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="team",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="team",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+    alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
+    private_root = private_instance_state_root_path(
+        storage_path,
+        worker_key=alice_worker_key,
+        agent_name="general",
+    )
+    stored_memories: dict[tuple[Path, str], list[dict[str, object]]] = {}
+
+    class FakeScopedMemory:
+        def __init__(self, scope_storage_path: Path) -> None:
+            self.scope_storage_path = scope_storage_path
+
+        async def add(self, messages: list[dict], user_id: str, metadata: dict) -> None:
+            entry = {
+                "id": f"{user_id}-{len(stored_memories)}",
+                "memory": " ".join(str(message["content"]).strip() for message in messages if message.get("content")),
+                "user_id": user_id,
+                "metadata": metadata,
+            }
+            stored_memories.setdefault((self.scope_storage_path, user_id), []).append(entry)
+
+        async def search(self, query: str, user_id: str, limit: int = 3) -> dict[str, list[dict[str, object]]]:
+            matches = [
+                dict(entry)
+                for entry in stored_memories.get((self.scope_storage_path, user_id), [])
+                if query.lower() in str(entry["memory"]).lower()
+            ]
+            return {"results": matches[:limit]}
+
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeScopedMemory:
+        del runtime_paths
+        return FakeScopedMemory(scope_storage_path)
+
+    with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
+        with tool_execution_identity(alice_identity):
+            await store_conversation_memory(
+                "Alice-authored private team memory",
+                ["general", "calculator"],
+                storage_path,
+                "session-alice",
+                config,
+                runtime_paths_for(config),
+            )
+            private_results = await search_agent_memories(
+                "Alice-authored private team",
+                "general",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+                limit=5,
+            )
+            shared_results_for_alice = await search_agent_memories(
+                "Alice-authored private team",
+                "calculator",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+                limit=5,
+            )
+
+        with tool_execution_identity(bob_identity):
+            shared_results_for_bob = await search_agent_memories(
+                "Alice-authored private team",
+                "calculator",
+                storage_path,
+                config,
+                runtime_paths_for(config),
+                limit=5,
+            )
+
+    assert any(result.get("memory") == "Alice-authored private team memory" for result in private_results)
+    assert shared_results_for_alice == []
+    assert shared_results_for_bob == []
+    assert (private_root, "team_calculator+general") in stored_memories
+    assert (agent_state_root_path(storage_path, "calculator"), "team_calculator+general") not in stored_memories
+
+
+@pytest.mark.asyncio
 async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_across_worker_roots(
     storage_path: Path,
     config: Config,

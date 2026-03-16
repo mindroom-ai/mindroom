@@ -48,12 +48,17 @@ def effective_storage_paths_for_context(
     if isinstance(caller_context, str):
         return [_effective_storage_path_for_agent(caller_context, storage_path, config)]
 
-    effective_paths: list[Path] = []
+    private_effective_paths: list[Path] = []
+    shared_effective_paths: list[Path] = []
     for agent_name in caller_context:
         effective_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
-        if effective_path not in effective_paths:
-            effective_paths.append(effective_path)
-    return effective_paths or [storage_path]
+        if _agent_has_private_state(agent_name, config):
+            if effective_path not in private_effective_paths:
+                private_effective_paths.append(effective_path)
+            continue
+        if effective_path not in shared_effective_paths:
+            shared_effective_paths.append(effective_path)
+    return private_effective_paths or shared_effective_paths or [storage_path]
 
 
 def _effective_storage_path_for_agent(
@@ -61,8 +66,7 @@ def _effective_storage_path_for_agent(
     storage_path: Path,
     config: Config,
 ) -> Path:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is not None and agent_config.private is not None:
+    if _agent_has_private_state(agent_name, config):
         return resolve_agent_private_state_storage_path(
             agent_name,
             config,
@@ -73,6 +77,11 @@ def _effective_storage_path_for_agent(
         agent_name=agent_name,
         base_storage_path=storage_path,
     )
+
+
+def _agent_has_private_state(agent_name: str, config: Config) -> bool:
+    agent_config = config.agents.get(agent_name)
+    return agent_config is not None and agent_config.private is not None
 
 
 def build_team_user_id(agent_names: list[str]) -> str:
@@ -92,6 +101,12 @@ def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
     return None
 
 
+def _team_memory_is_visible_to_agent(agent_name: str, team_members: list[str], config: Config) -> bool:
+    if all(not _agent_has_private_state(member_name, config) for member_name in team_members):
+        return True
+    return _agent_has_private_state(agent_name, config)
+
+
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     """Get all team scope IDs that include the specified agent."""
     if not config.teams:
@@ -99,7 +114,7 @@ def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     return [
         build_team_user_id(team_config.agents)
         for team_config in config.teams.values()
-        if agent_name in team_config.agents
+        if agent_name in team_config.agents and _team_memory_is_visible_to_agent(agent_name, team_config.agents, config)
     ]
 
 
@@ -183,7 +198,7 @@ def resolve_file_memory_resolution(
     base_storage_path = original_storage_path or storage_path
     agent_config = config.agents.get(agent_name) if agent_name is not None else None
     if agent_name is not None:
-        if agent_config is not None and agent_config.private is not None:
+        if _agent_has_private_state(agent_name, config):
             resolved_storage_path = resolve_agent_private_state_storage_path(
                 agent_name,
                 config,
