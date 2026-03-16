@@ -16,7 +16,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.knowledge.utils import get_bound_knowledge_manager
+from mindroom.knowledge.utils import bound_knowledge_managers, get_bound_knowledge_manager
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
@@ -408,6 +408,78 @@ async def test_team_response_binds_private_knowledge_for_direct_team_helpers() -
         patch("mindroom.teams._get_agents_from_orchestrator", side_effect=_assert_bound_manager),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
         tool_execution_identity(execution_identity),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+        )
+
+    assert "Private knowledge response" in response
+
+
+@pytest.mark.asyncio
+async def test_team_response_reuses_already_bound_request_knowledge() -> None:
+    """Direct team helpers should not re-ensure knowledge managers already bound by the caller."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                    ),
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
+    private_base_id = config.get_agent_private_knowledge_base_id("general")
+    assert private_base_id is not None
+    bound_manager = MagicMock()
+    team_agent = MagicMock()
+    team_agent.name = "GeneralAgent"
+    team_agent.instructions = []
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+
+    def _assert_bound_manager(agent_names: list[str], _orchestrator: MagicMock) -> list[MagicMock]:
+        assert agent_names == ["general"]
+        assert get_bound_knowledge_manager(private_base_id) is bound_manager
+        return [team_agent]
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Private knowledge response"))
+
+    with (
+        patch(
+            "mindroom.teams.ensure_request_knowledge_managers",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("request knowledge should already be bound"),
+        ),
+        patch("mindroom.teams._get_agents_from_orchestrator", side_effect=_assert_bound_manager),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        tool_execution_identity(execution_identity),
+        bound_knowledge_managers({private_base_id: bound_manager}),
     ):
         response = await team_response(
             agent_names=["general"],

@@ -24,7 +24,11 @@ from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.knowledge.utils import bound_knowledge_managers, ensure_request_knowledge_managers
+from mindroom.knowledge.utils import (
+    bound_knowledge_managers,
+    ensure_request_knowledge_managers,
+    get_bound_knowledge_manager,
+)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -476,6 +480,8 @@ async def _get_request_scoped_team_agents(
             if orchestrator.config.agents[agent_name].private is not None:
                 msg = f"Private team agent '{agent_name}' requires an active execution identity"
                 raise ValueError(msg)
+    if _request_knowledge_is_already_bound(available_agent_names, orchestrator.config):
+        return _get_agents_from_orchestrator(available_agent_names, orchestrator)
     request_knowledge_managers = await ensure_request_knowledge_managers(
         available_agent_names,
         config=orchestrator.config,
@@ -484,6 +490,18 @@ async def _get_request_scoped_team_agents(
     )
     with bound_knowledge_managers(request_knowledge_managers):
         return _get_agents_from_orchestrator(available_agent_names, orchestrator)
+
+
+def _request_knowledge_is_already_bound(
+    agent_names: list[str],
+    config: Config,
+) -> bool:
+    """Return whether the current request scope already has all needed knowledge bound."""
+    for agent_name in agent_names:
+        for base_id in config.get_agent_knowledge_base_ids(agent_name):
+            if get_bound_knowledge_manager(base_id) is None:
+                return False
+    return True
 
 
 def _create_team_instance(
