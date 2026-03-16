@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -25,7 +24,6 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
@@ -46,6 +44,7 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
     resolve_worker_key,
     worker_dir_name,
 )
@@ -128,10 +127,10 @@ def _set_sandbox_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", SANDBOX_TOKEN)
 
 
-def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config | None]:
+def _refresh_runner_app_from_env() -> tuple[RuntimePaths, Config]:
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths)
-    config = sandbox_runner_module.load_config(runtime_paths) if runtime_paths.config_path.exists() else None
     sandbox_runner_module.ensure_registry_loaded_with_config(runtime_paths, config)
     return runtime_paths, config
 
@@ -246,6 +245,7 @@ def test_public_startup_runtime_still_allows_python_execution_env(
             execution_env={"OPENAI_API_KEY": "sk-secret", "TEST_EXECUTION_ENV": "visible"},
         ),
         child_runtime,
+        sandbox_runner_module._runtime_config_or_empty(child_runtime),
         runner_token=SANDBOX_TOKEN,
     )
 
@@ -300,6 +300,7 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
             kwargs={},
         ),
         runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
     )
     child_runtime = sandbox_runner_module.constants.deserialize_runtime_paths(captured_payload)
 
@@ -327,7 +328,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
 
     toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=runtime_paths,
-        config=None,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
         function_name="list_spaces",
     )
@@ -369,6 +370,7 @@ def test_sandbox_runner_subprocess_python_sees_runtime_env(
             kwargs={},
         ),
         runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         runner_token=SANDBOX_TOKEN,
     )
 
@@ -407,6 +409,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
             kwargs={},
         ),
         runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         runner_token=SANDBOX_TOKEN,
     )
 
@@ -1093,12 +1096,14 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
+        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -1388,40 +1393,41 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
 
 
-def test_runtime_private_agent_names_skips_config_load_for_non_user_agent_worker(
+def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Non-user-agent workers should not reload config to compute private visibility."""
+    """Shared workers should not consult private-agent config visibility."""
+    worker_key = "v1:tenant-123:shared:general"
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    runtime_paths.config_path.write_text("not: [valid\n", encoding="utf-8")
+    worker_handle = SimpleNamespace()
+    worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "general")
+    config = SimpleNamespace(
+        get_private_agent_names=lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
     monkeypatch.setattr(
-        "mindroom.config.main.load_config",
-        lambda _runtime_paths: (_ for _ in ()).throw(AssertionError("load_config should not run")),
+        sandbox_worker_prep_module,
+        "local_worker_state_paths_from_handle",
+        lambda _handle: worker_paths,
     )
 
-    assert runtime_private_agent_names(runtime_paths, worker_key="v1:tenant-123:shared:general") == frozenset()
-
-
-def test_runtime_private_agent_names_uses_cached_private_names_after_invalid_reload(tmp_path: Path) -> None:
-    """User-agent visibility should fall back to the last known-good private-agent set."""
-    config_path = tmp_path / "config.yaml"
-    storage_path = tmp_path / "storage"
-    template_dir = tmp_path / "mind_template"
-    template_dir.mkdir()
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
-    config_path.write_text(
-        """agents:
-  mind:
-    display_name: Mind
-    private:
-      per: user
-      root: mind_data
-      template_dir: ./mind_template
-models: {}
-""",
-        encoding="utf-8",
+    prepared = sandbox_worker_prep_module.prepare_worker_request(
+        worker_key=worker_key,
+        tool_init_overrides={"base_dir": "agents/general/workspace"},
+        runtime_paths=runtime_paths,
+        config=config,
     )
+
+    assert prepared.handle is worker_handle
+
+
+def test_prepare_worker_request_user_agent_private_visibility_comes_from_explicit_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-agent workers should derive private visibility from the provided config object."""
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -1432,16 +1438,32 @@ models: {}
             thread_id=None,
             resolved_thread_id=None,
             session_id=None,
+            tenant_id="tenant-123",
         ),
         agent_name="mind",
     )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    worker_handle = SimpleNamespace()
+    worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "mind")
+    config = SimpleNamespace(get_private_agent_names=lambda: frozenset({"mind"}))
 
-    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
+    monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "local_worker_state_paths_from_handle",
+        lambda _handle: worker_paths,
+    )
 
-    time.sleep(0.01)
-    config_path.write_text("agents:\n  mind:\n    private: [\nmodels: {}\n", encoding="utf-8")
+    prepared = sandbox_worker_prep_module.prepare_worker_request(
+        worker_key=worker_key,
+        tool_init_overrides={
+            "base_dir": str(private_instance_scope_root_path(runtime_paths.storage_root, worker_key)),
+        },
+        runtime_paths=runtime_paths,
+        config=config,
+    )
 
-    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
+    assert prepared.handle is worker_handle
 
 
 def test_prepare_worker_request_wraps_private_visibility_config_errors(
@@ -1460,10 +1482,9 @@ def test_prepare_worker_request_wraps_private_visibility_config_errors(
     def _local_worker_state_paths_from_handle(_handle: object) -> local_workers_module.LocalWorkerStatePaths:
         return worker_paths
 
-    def _runtime_private_agent_names(_runtime_paths: object, *, worker_key: str | None = None) -> frozenset[str]:
-        del worker_key
-        msg = "invalid config"
-        raise ValueError(msg)
+    config = SimpleNamespace(
+        get_private_agent_names=lambda: (_ for _ in ()).throw(ValueError("invalid config")),
+    )
 
     monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", _prepare_worker)
     monkeypatch.setattr(
@@ -1471,17 +1492,12 @@ def test_prepare_worker_request_wraps_private_visibility_config_errors(
         "local_worker_state_paths_from_handle",
         _local_worker_state_paths_from_handle,
     )
-    monkeypatch.setattr(
-        sandbox_worker_prep_module,
-        "runtime_private_agent_names",
-        _runtime_private_agent_names,
-    )
-
     with pytest.raises(sandbox_worker_prep_module.WorkerRequestPreparationError, match="invalid config"):
         sandbox_worker_prep_module.prepare_worker_request(
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},
             runtime_paths=runtime_paths,
+            config=config,
         )
 
 

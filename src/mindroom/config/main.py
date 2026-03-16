@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import threading
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
@@ -31,10 +30,10 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
-from mindroom.tool_system.worker_routing import WorkerScope, resolved_worker_key_scope
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
@@ -48,8 +47,6 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "matrix_message",
 )
 logger = get_logger(__name__)
-_RUNTIME_PRIVATE_AGENT_NAMES_CACHE: dict[Path, tuple[int, frozenset[str]]] = {}
-_RUNTIME_PRIVATE_AGENT_NAMES_LOCK = threading.Lock()
 
 _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
@@ -606,6 +603,12 @@ class Config(BaseModel):
             tool_names.extend(self.defaults.tools)
         return self.expand_tool_names(tool_names)
 
+    def get_private_agent_names(self) -> frozenset[str]:
+        """Return agent names that materialize requester-private state."""
+        return frozenset(
+            agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
+        )
+
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
         """Return the tool expansion for a preset name."""
@@ -832,44 +835,3 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
-
-
-def runtime_private_agent_names(
-    runtime_paths: RuntimePaths,
-    *,
-    worker_key: str | None = None,
-) -> frozenset[str]:
-    """Return cached requester-private agent names for runtime worker visibility checks."""
-    if worker_key is not None and resolved_worker_key_scope(worker_key) != "user_agent":
-        return frozenset()
-
-    config_path = runtime_paths.config_path
-    if not config_path.exists():
-        return frozenset()
-    resolved_config_path = config_path.resolve()
-    config_mtime_ns = config_path.stat().st_mtime_ns
-
-    with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
-        cached = _RUNTIME_PRIVATE_AGENT_NAMES_CACHE.get(resolved_config_path)
-        if cached is not None and cached[0] == config_mtime_ns:
-            return cached[1]
-
-    try:
-        config = load_config(runtime_paths)
-        private_agent_names = frozenset(
-            agent_name for agent_name, agent_config in config.agents.items() if agent_config.private is not None
-        )
-    except Exception:
-        with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
-            cached = _RUNTIME_PRIVATE_AGENT_NAMES_CACHE.get(resolved_config_path)
-            if cached is not None:
-                logger.warning(
-                    "Using cached private agent visibility after config reload failure",
-                    config_path=str(resolved_config_path),
-                )
-                return cached[1]
-        raise
-
-    with _RUNTIME_PRIVATE_AGENT_NAMES_LOCK:
-        _RUNTIME_PRIVATE_AGENT_NAMES_CACHE[resolved_config_path] = (config_mtime_ns, private_agent_names)
-    return private_agent_names

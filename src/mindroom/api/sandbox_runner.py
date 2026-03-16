@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
-from mindroom.config.main import load_config
+from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
@@ -44,7 +44,6 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.models import WorkerHandle
 
@@ -93,12 +92,17 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
-def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config | None]:
+def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+    """Return the active runtime config, or an explicit empty config if none exists."""
+    if runtime_paths.config_path.exists():
+        return load_config(runtime_paths)
+    return Config.validate_with_runtime({}, runtime_paths)
+
+
+def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
-    if runtime_paths.config_path.exists():
-        return runtime_paths, load_config(runtime_paths)
-    return runtime_paths, None
+    return runtime_paths, _runtime_config_or_empty(runtime_paths)
 
 
 def initialize_sandbox_runner_app(
@@ -114,7 +118,7 @@ def initialize_sandbox_runner_app(
     )
 
 
-def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config | None) -> None:
+def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
     """Load config from env and ensure the tool registry is populated.
 
     Used by both the FastAPI startup and the subprocess worker so that
@@ -269,7 +273,7 @@ async def _maybe_await(value: object) -> object:
 def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
-    config: Config | None,
+    config: Config,
     tool_name: str,
     function_name: str,
     credential_overrides: dict[str, object] | None = None,
@@ -322,6 +326,7 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -332,6 +337,7 @@ async def _execute_request_inprocess(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
+            config=config,
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -347,7 +353,7 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    config = load_config(effective_runtime_paths) if effective_runtime_paths.config_path.exists() else None
+    config = _runtime_config_or_empty(effective_runtime_paths)
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
@@ -419,6 +425,7 @@ def _parse_subprocess_response(
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -429,6 +436,7 @@ def _execute_request_subprocess_sync(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
+            config=config,
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -466,6 +474,7 @@ def _execute_request_subprocess_sync(
 async def _execute_request_subprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -474,6 +483,7 @@ async def _execute_request_subprocess(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
+        config,
         prepared_worker,
         runner_token=runner_token,
     )
@@ -509,13 +519,14 @@ def _run_subprocess_worker() -> int:
         return 1
     runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
     request.worker_key = sandbox_worker_prep.normalize_request_worker_key(request.worker_key, runtime_paths)
+    config = _runtime_config_or_empty(runtime_paths)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker we write to stderr afterwards.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        response = asyncio.run(_execute_request_inprocess(request, runtime_paths))
+        response = asyncio.run(_execute_request_inprocess(request, runtime_paths, config))
 
     # Flush captured tool output to real stdout/stderr (informational only).
     tool_stdout = captured_out.getvalue()
@@ -579,6 +590,7 @@ async def execute_tool_call(  # noqa: C901
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
+    config = _runtime_config_or_empty(runtime_paths)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     if payload.credential_overrides:
@@ -608,6 +620,7 @@ async def execute_tool_call(  # noqa: C901
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
+                config=config,
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -616,6 +629,7 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -627,6 +641,7 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -637,15 +652,11 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
+            config,
             prepared_worker,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess(
-        payload,
-        runtime_paths,
-        prepared_worker,
-        runner_token=runner_token,
-    )
+    return await _execute_request_inprocess(payload, runtime_paths, config, prepared_worker, runner_token=runner_token)
 
 
 if __name__ == "__main__":
