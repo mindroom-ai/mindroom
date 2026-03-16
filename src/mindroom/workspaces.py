@@ -149,6 +149,17 @@ def _resolve_workspace_execution_identity(
     return resolved_identity
 
 
+def _resolve_private_state_root(canonical_state_root: Path) -> Path:
+    """Resolve one private-instance state root while rejecting symlink escapes."""
+    canonical_root = canonical_state_root.expanduser()
+    resolved_scope_root = canonical_root.parent.resolve()
+    resolved_state_root = canonical_root.resolve()
+    if not resolved_state_root.is_relative_to(resolved_scope_root):
+        msg = f"Private state root must stay within its canonical private-instance scope: {canonical_root}"
+        raise ValueError(msg)
+    return resolved_state_root
+
+
 def resolve_agent_private_state_storage_path(
     agent_name: str,
     config: Config,
@@ -181,11 +192,13 @@ def resolve_agent_private_state_storage_path(
     if worker_key is None:
         msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{agent_config.private.per}'"
         raise ValueError(msg)
-    return private_instance_state_root_path(
-        base_storage_path,
-        worker_key=worker_key,
-        agent_name=agent_name,
-    ).resolve()
+    return _resolve_private_state_root(
+        private_instance_state_root_path(
+            base_storage_path,
+            worker_key=worker_key,
+            agent_name=agent_name,
+        ),
+    )
 
 
 def _resolve_workspace(
