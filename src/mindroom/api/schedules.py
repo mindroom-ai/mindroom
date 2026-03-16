@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from mindroom import constants
+from mindroom.api import config_lifecycle
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases
@@ -246,10 +247,10 @@ async def list_schedules(
     include_cancelled: IncludeCancelled = False,
 ) -> ListSchedulesResponse:
     """List scheduled tasks from one room or all configured rooms."""
-    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(request)
-    runtime_config, _ = load_runtime_config(runtime_paths)
+    runtime_config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     room_ids = (
         [_resolve_room_id(room_id, runtime_paths=runtime_paths)]
         if room_id
@@ -283,10 +284,10 @@ async def update_schedule(
     api_request: Request,
 ) -> ScheduledTaskResponse:
     """Update prompt text and schedule fields for an existing task."""
-    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     runtime_paths = api_runtime_paths(api_request)
-    runtime_config, _ = load_runtime_config(runtime_paths)
+    runtime_config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     resolved_room_id = _resolve_room_id(request.room_id, runtime_paths=runtime_paths)
 
     client = await _get_router_client(runtime_paths)
