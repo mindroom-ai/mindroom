@@ -27,7 +27,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
             placeholder="bolt://localhost:7687",
-            description="Neo4j connection URI (falls back to NEO4J_URI env var)",
+            description="Neo4j connection URI",
         ),
         ConfigField(
             name="user",
@@ -35,14 +35,14 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="neo4j",
-            description="Neo4j username (falls back to NEO4J_USERNAME env var)",
+            description="Neo4j username",
         ),
         ConfigField(
             name="password",
             label="Password",
             type="password",
             required=True,
-            description="Neo4j password (falls back to NEO4J_PASSWORD env var)",
+            description="Neo4j password",
         ),
         ConfigField(
             name="database",

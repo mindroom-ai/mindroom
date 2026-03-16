@@ -1,5 +1,5 @@
 """Tests for the file-backed memory implementation and file-specific facade paths."""
-# ruff: noqa: D103
+# ruff: noqa: D103, ANN201
 
 from __future__ import annotations
 
@@ -8,19 +8,10 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
-from mindroom.config.agent import AgentPrivateConfig
+import mindroom.memory.functions as memory_functions
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.memory.functions import (
-    add_agent_memory,
-    append_agent_daily_memory,
-    build_memory_enhanced_prompt,
-    delete_agent_memory,
-    get_agent_memory,
-    list_all_agent_memories,
-    search_agent_memories,
-    store_conversation_memory,
-    update_agent_memory,
-)
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -29,11 +20,189 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
     worker_root_path,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+
+async def add_agent_memory(
+    content: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    metadata: dict | None = None,
+) -> None:
+    await memory_functions.add_agent_memory(
+        content,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        metadata,
+    )
+
+
+def append_agent_daily_memory(
+    content: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    *,
+    preserve_resolved_storage_path: bool = False,
+):
+    return memory_functions.append_agent_daily_memory(
+        content,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        preserve_resolved_storage_path=preserve_resolved_storage_path,
+    )
+
+
+async def search_agent_memories(
+    query: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    limit: int = 3,
+):
+    return await memory_functions.search_agent_memories(
+        query,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        limit,
+    )
+
+
+async def list_all_agent_memories(
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+    limit: int = 100,
+    *,
+    preserve_resolved_storage_path: bool = False,
+):
+    return await memory_functions.list_all_agent_memories(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+        limit,
+        preserve_resolved_storage_path=preserve_resolved_storage_path,
+    )
+
+
+async def get_agent_memory(
+    memory_id: str,
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+):
+    return await memory_functions.get_agent_memory(
+        memory_id,
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+async def update_agent_memory(
+    memory_id: str,
+    content: str,
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+) -> None:
+    await memory_functions.update_agent_memory(
+        memory_id,
+        content,
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+async def delete_agent_memory(
+    memory_id: str,
+    caller_context: str | list[str],
+    storage_path: Path,
+    config: Config,
+) -> None:
+    await memory_functions.delete_agent_memory(
+        memory_id,
+        caller_context,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+async def build_memory_enhanced_prompt(
+    prompt: str,
+    agent_name: str,
+    storage_path: Path,
+    config: Config,
+) -> str:
+    return await memory_functions.build_memory_enhanced_prompt(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths_for(config),
+    )
+
+
+async def store_conversation_memory(
+    prompt: str,
+    agent_name: str | list[str],
+    storage_path: Path,
+    session_id: str,
+    config: Config,
+    **kwargs: object,
+) -> None:
+    await memory_functions.store_conversation_memory(
+        prompt,
+        agent_name,
+        storage_path,
+        session_id,
+        config,
+        runtime_paths_for(config),
+        **kwargs,
+    )
+
+
+def _test_config(storage_path: Path) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General"),
+                "calculator": AgentConfig(display_name="Calculator"),
+                "helper": AgentConfig(display_name="Helper"),
+                "test_agent": AgentConfig(display_name="Test Agent"),
+                "a_b": AgentConfig(display_name="A B"),
+                "c": AgentConfig(display_name="C"),
+                "a": AgentConfig(display_name="A"),
+                "b_c": AgentConfig(display_name="B C"),
+            },
+        ),
+        runtime_paths,
+    )
 
 
 @pytest.fixture
@@ -42,8 +211,8 @@ def storage_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def config() -> Config:
-    return Config.from_yaml()
+def config(storage_path: Path) -> Config:
+    return _test_config(storage_path)
 
 
 @pytest.mark.asyncio

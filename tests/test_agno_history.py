@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -21,9 +22,9 @@ from agno.session.agent import AgentSession
 from pydantic import ValidationError
 
 import mindroom
+import mindroom.agents
 from mindroom.agents import (
     _get_agent_session,
-    create_agent,
     get_seen_event_ids,
     remove_run_by_event_id,
 )
@@ -42,6 +43,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 # ---------------------------------------------------------------------------
 # Config tests
@@ -53,6 +55,50 @@ def _runtime_paths(tmp_path: object, *, config_path: Path | None = None) -> Runt
     return resolve_runtime_paths(
         config_path=config_path or base_path / "config.yaml",
         storage_path=base_path,
+    )
+
+
+def _runtime_bound_config(config: Config, tmp_path: object | None = None) -> Config:
+    """Return a runtime-bound config for history tests."""
+    return bind_runtime_paths(config, _runtime_paths(tmp_path or tempfile.mkdtemp()))
+
+
+def _load_default_config() -> Config:
+    """Create a stable runtime-bound config for agent-history tests."""
+    return _runtime_bound_config(
+        Config(
+            agents={
+                "calculator": AgentConfig(display_name="Calculator"),
+                "general": AgentConfig(display_name="General"),
+            },
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+    )
+
+
+def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
+    """Create an agent with the test config's bound runtime context."""
+    return mindroom.agents.create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
+
+
+def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    return AgentBot(
+        agent_user=agent_user,
+        storage_path=storage_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=rooms,
+    )
+
+
+def _edit_test_config() -> Config:
+    """Create a minimal runtime-bound config for edit/regeneration bot tests."""
+    return _runtime_bound_config(
+        Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
     )
 
 
@@ -120,53 +166,53 @@ class TestHistoryConfig:
 
     def test_defaults_num_history_messages_wired_to_agent(self) -> None:
         """Defaults-level num_history_messages flows to agent when no per-agent override."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.defaults = DefaultsConfig(num_history_runs=None, num_history_messages=50)
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.num_history_messages == 50
         assert agent.num_history_runs is None
 
     def test_num_history_runs_config_wired_to_agent(self) -> None:
         """Default config includes all history (None bypasses Agno's default of 3)."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.add_history_to_context is True
         # Both defaults are None → post-construction override to None (all history)
         assert agent.num_history_runs is None
 
     def test_num_history_runs_per_agent_override(self) -> None:
         """Per-agent num_history_runs overrides defaults and clears num_history_messages."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.agents["calculator"].num_history_runs = 7
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.num_history_runs == 7
         assert agent.num_history_messages is None
 
     def test_num_history_messages_per_agent_override(self) -> None:
         """Per-agent num_history_messages overrides defaults and clears num_history_runs."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.agents["calculator"].num_history_messages = 50
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.num_history_messages == 50
         assert agent.num_history_runs is None
 
     def test_compress_tool_results_default(self) -> None:
         """create_agent() sets compress_tool_results=True by default."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.compress_tool_results is True
 
     def test_compress_tool_results_per_agent_override(self) -> None:
         """Per-agent compress_tool_results=False overrides the default."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.agents["calculator"].compress_tool_results = False
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.compress_tool_results is False
 
     # -- enable_session_summaries --
@@ -183,34 +229,34 @@ class TestHistoryConfig:
 
     def test_enable_session_summaries_wired_default(self) -> None:
         """create_agent() sets enable_session_summaries=False by default."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is False
 
     def test_enable_session_summaries_defaults_override(self) -> None:
         """Defaults-level enable_session_summaries=True flows to agent."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.defaults.enable_session_summaries = True
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is True
 
     def test_enable_session_summaries_per_agent_true(self) -> None:
         """Per-agent enable_session_summaries=True overrides defaults False."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.agents["calculator"].enable_session_summaries = True
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is True
 
     def test_enable_session_summaries_per_agent_false_overrides_defaults_true(self) -> None:
         """Per-agent enable_session_summaries=False overrides defaults True."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.defaults.enable_session_summaries = True
         config.agents["calculator"].enable_session_summaries = False
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.enable_session_summaries is False
 
     # -- max_tool_calls_from_history --
@@ -227,25 +273,25 @@ class TestHistoryConfig:
 
     def test_max_tool_calls_from_history_wired_default(self) -> None:
         """create_agent() sets max_tool_calls_from_history=None by default."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.max_tool_calls_from_history is None
 
     def test_max_tool_calls_from_history_defaults_override(self) -> None:
         """Defaults-level max_tool_calls_from_history=5 flows to agent."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.defaults.max_tool_calls_from_history = 5
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.max_tool_calls_from_history == 5
 
     def test_max_tool_calls_from_history_per_agent_override(self) -> None:
         """Per-agent max_tool_calls_from_history=3 overrides defaults None."""
-        config = Config.from_yaml()
+        config = _load_default_config()
         config.agents["calculator"].max_tool_calls_from_history = 3
         with patch("mindroom.agents.SqliteDb"):
-            agent = create_agent("calculator", config=config)
+            agent = _create_agent_for_test("calculator", config)
         assert agent.max_tool_calls_from_history == 3
 
     def test_max_tool_calls_from_history_defaults_rejects_negative(self) -> None:
@@ -375,20 +421,22 @@ class TestGetUnseenMessages:
 
     def _make_config(self) -> Config:
         """Create a minimal Config for testing."""
-        return Config(
-            agents={"test_agent": AgentConfig(display_name="Test")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        return _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
 
     def test_filters_agent_messages(self) -> None:
         """Messages from this agent are excluded."""
         config = self._make_config()
-        agent_id = config.ids["test_agent"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         thread_history = [
             {"sender": agent_id, "body": "I am the agent", "event_id": "$a1"},
             {"sender": "@user:example.com", "body": "Hello", "event_id": "$u1"},
         ]
-        unseen = _get_unseen_messages(thread_history, "test_agent", config, set(), None)
+        unseen = _get_unseen_messages(thread_history, "test_agent", config, runtime_paths_for(config), set(), None)
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u1"
 
@@ -399,7 +447,7 @@ class TestGetUnseenMessages:
             {"sender": "@user:example.com", "body": "Old msg", "event_id": "$u1"},
             {"sender": "@user:example.com", "body": "New msg", "event_id": "$u2"},
         ]
-        unseen = _get_unseen_messages(thread_history, "test_agent", config, {"$u1"}, None)
+        unseen = _get_unseen_messages(thread_history, "test_agent", config, runtime_paths_for(config), {"$u1"}, None)
         assert len(unseen) == 1
         assert unseen[0]["event_id"] == "$u2"
 
@@ -409,19 +457,19 @@ class TestGetUnseenMessages:
         thread_history = [
             {"sender": "@user:example.com", "body": "Current", "event_id": "$u1"},
         ]
-        unseen = _get_unseen_messages(thread_history, "test_agent", config, set(), "$u1")
+        unseen = _get_unseen_messages(thread_history, "test_agent", config, runtime_paths_for(config), set(), "$u1")
         assert len(unseen) == 0
 
     def test_empty_history(self) -> None:
         """Empty thread history returns empty list."""
         config = self._make_config()
-        unseen = _get_unseen_messages([], "test_agent", config, set(), None)
+        unseen = _get_unseen_messages([], "test_agent", config, runtime_paths_for(config), set(), None)
         assert unseen == []
 
     def test_multi_user_scenario(self) -> None:
         """Multiple users/agents in thread, only unseen from non-self returned."""
         config = self._make_config()
-        agent_id = config.ids["test_agent"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["test_agent"].full_id
         thread_history = [
             {"sender": "@alice:example.com", "body": "Hi", "event_id": "$a1"},
             {"sender": agent_id, "body": "Hello Alice", "event_id": "$bot1"},
@@ -433,6 +481,7 @@ class TestGetUnseenMessages:
             thread_history,
             "test_agent",
             config,
+            runtime_paths_for(config),
             {"$a1"},
             "$a2",
         )
@@ -477,7 +526,7 @@ class TestPrepareAgentAndPrompt:
     @pytest.fixture
     def config(self) -> Config:
         """Load config for testing."""
-        return Config.from_yaml()
+        return _load_default_config()
 
     def _mock_session(self, runs: list[RunOutput] | None = None) -> AgentSession | None:
         """Create a mock AgentSession or None."""
@@ -597,6 +646,7 @@ class TestPrepareAgentAndPrompt:
         tmp_path: Path,
     ) -> None:
         """Editing a context file should affect the next reply preparation without restart."""
+        config._runtime_paths = _runtime_paths(tmp_path)
         config.agents["general"].memory_backend = "file"
         config.agents["general"].memory_file_path = "mind_data"
         config.agents["general"].context_files = ["mind_data/SOUL.md"]
@@ -711,7 +761,7 @@ class TestMetadataPassing:
     @pytest.mark.asyncio
     async def test_event_id_in_metadata(self, tmp_path: object) -> None:
         """Verify matrix_event_id and matrix_seen_event_ids stored in metadata."""
-        config = Config.from_yaml()
+        config = _load_default_config()
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
@@ -741,7 +791,7 @@ class TestMetadataPassing:
     @pytest.mark.asyncio
     async def test_no_metadata_without_reply_to_event_id(self, tmp_path: object) -> None:
         """When reply_to_event_id is None, metadata is None."""
-        config = Config.from_yaml()
+        config = _load_default_config()
 
         with (
             patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prep,
@@ -774,9 +824,11 @@ class TestUnseenNotReinjected:
 
     def test_unseen_messages_not_reinjected(self) -> None:
         """Consumed unseen event_ids are excluded from detection on the next turn."""
-        config = Config(
-            agents={"bot": AgentConfig(display_name="Bot")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        config = _runtime_bound_config(
+            Config(
+                agents={"bot": AgentConfig(display_name="Bot")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
 
         thread_history = [
@@ -787,7 +839,7 @@ class TestUnseenNotReinjected:
 
         # Turn 1: agent sees $a1, $b1 is unseen
         turn1_seen = {"$a1"}
-        unseen_turn1 = _get_unseen_messages(thread_history, "bot", config, turn1_seen, "$a1")
+        unseen_turn1 = _get_unseen_messages(thread_history, "bot", config, runtime_paths_for(config), turn1_seen, "$a1")
         unseen_turn1_ids = [m["event_id"] for m in unseen_turn1]
         assert "$b1" in unseen_turn1_ids
 
@@ -795,7 +847,7 @@ class TestUnseenNotReinjected:
         turn2_seen = {"$a1", "$b1"}
 
         # Turn 2: $b1 should NOT appear as unseen
-        unseen_turn2 = _get_unseen_messages(thread_history, "bot", config, turn2_seen, "$a2")
+        unseen_turn2 = _get_unseen_messages(thread_history, "bot", config, runtime_paths_for(config), turn2_seen, "$a2")
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         assert "$b1" not in unseen_turn2_ids
         assert unseen_turn2_ids == []
@@ -819,17 +871,10 @@ class TestEditRemovesStaleRun:
             password="test_password",  # noqa: S106
         )
 
-        config = Mock()
-        config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
-        config.domain = "example.com"
-        config.ids = {}
-        config.get_agent_knowledge_base_ids.return_value = []
-        config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-        config.authorization.agent_reply_permissions = {}
-
-        bot = AgentBot(
+        config = _edit_test_config()
+        bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
+            storage_path=Path(str(tmp_path)),
             config=config,
             rooms=["!test:example.com"],
         )
@@ -909,17 +954,10 @@ class TestEditRemovesStaleRun:
             password="test_password",  # noqa: S106
         )
 
-        config = Mock()
-        config.agents = {"test_agent": Mock(knowledge_bases=[], private=None)}
-        config.domain = "example.com"
-        config.ids = {}
-        config.get_agent_knowledge_base_ids.return_value = []
-        config.get_mindroom_user_id.return_value = "@mindroom:example.com"
-        config.authorization.agent_reply_permissions = {}
-
-        bot = AgentBot(
+        config = _edit_test_config()
+        bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
+            storage_path=Path(str(tmp_path)),
             config=config,
             rooms=["!test:example.com"],
         )
@@ -1003,11 +1041,13 @@ class TestFullScenario:
 
     def test_multi_user_edit_restart(self) -> None:
         """Asserts exact unseen IDs injected each turn and no reinjection."""
-        config = Config(
-            agents={"bot": AgentConfig(display_name="Bot")},
-            models={"default": {"provider": "openai", "id": "test"}},
+        config = _runtime_bound_config(
+            Config(
+                agents={"bot": AgentConfig(display_name="Bot")},
+                models={"default": {"provider": "openai", "id": "test"}},
+            ),
         )
-        agent_id = config.ids["bot"].full_id
+        agent_id = config.get_ids(runtime_paths_for(config))["bot"].full_id
 
         # Simulate a thread with multiple users
         thread_history = [
@@ -1021,7 +1061,14 @@ class TestFullScenario:
         # Turn 1: Agent responded to $a1. It saw $a1.
         turn1_seen = {"$a1"}
         # Current message for turn 2 is $a2
-        unseen_turn2 = _get_unseen_messages(thread_history, "bot", config, turn1_seen, "$a2")
+        unseen_turn2 = _get_unseen_messages(
+            thread_history,
+            "bot",
+            config,
+            runtime_paths_for(config),
+            turn1_seen,
+            "$a2",
+        )
         unseen_turn2_ids = [m["event_id"] for m in unseen_turn2]
         # Should see $b1 and $c1 (not $bot1 (self), not $a1 (seen), not $a2 (current))
         assert unseen_turn2_ids == ["$b1", "$c1"]
@@ -1033,14 +1080,28 @@ class TestFullScenario:
         thread_history.append({"sender": "@bob:example.com", "body": "Another", "event_id": "$b2"})
         thread_history.append({"sender": "@alice:example.com", "body": "Turn 3", "event_id": "$a3"})
 
-        unseen_turn3 = _get_unseen_messages(thread_history, "bot", config, turn3_seen, "$a3")
+        unseen_turn3 = _get_unseen_messages(
+            thread_history,
+            "bot",
+            config,
+            runtime_paths_for(config),
+            turn3_seen,
+            "$a3",
+        )
         unseen_turn3_ids = [m["event_id"] for m in unseen_turn3]
         assert unseen_turn3_ids == ["$b2"]
 
         # Simulate restart: seen_event_ids still come from stored metadata
         # Same assertion holds — no reinjection
         restart_seen = {"$a1", "$b1", "$c1", "$a2", "$b2", "$a3"}
-        unseen_after_restart = _get_unseen_messages(thread_history, "bot", config, restart_seen, "$a3")
+        unseen_after_restart = _get_unseen_messages(
+            thread_history,
+            "bot",
+            config,
+            runtime_paths_for(config),
+            restart_seen,
+            "$a3",
+        )
         assert unseen_after_restart == []
 
 
@@ -1055,9 +1116,11 @@ class TestApplyContextWindowLimit:
     @staticmethod
     def _make_config(context_window: int | None = None) -> Config:
         """Create a Config with the given context_window on the default model."""
-        return Config(
-            agents={"test_agent": AgentConfig(display_name="Test")},
-            models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+        return _runtime_bound_config(
+            Config(
+                agents={"test_agent": AgentConfig(display_name="Test")},
+                models={"default": {"provider": "openai", "id": "test", "context_window": context_window}},
+            ),
         )
 
     @staticmethod

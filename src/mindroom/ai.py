@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import functools
-import os
+import importlib
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -33,8 +33,14 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.agents import _get_agent_session, create_agent, create_session_storage, get_seen_event_ids
-from mindroom.constants import AI_RUN_METADATA_KEY, ENABLE_AI_CACHE, PROVIDER_ENV_KEYS, ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.credentials import get_credentials_manager
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    ROUTER_AGENT_NAME,
+    RuntimePaths,
+    runtime_ai_cache_enabled,
+    runtime_env_path,
+)
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.logging_config import get_logger
@@ -482,40 +488,18 @@ def _build_ai_run_metadata_content(  # noqa: C901, PLR0912
 
 
 @functools.cache
-def _get_cache(storage_path: Path) -> diskcache.Cache | None:
+def _get_cache(storage_path: Path, enabled: bool) -> diskcache.Cache | None:
     """Get or create a cache instance for the given storage path."""
-    return diskcache.Cache(storage_path / ".ai_cache") if ENABLE_AI_CACHE else None
+    return diskcache.Cache(storage_path / ".ai_cache") if enabled else None
 
 
-def _set_api_key_env_var(provider: str) -> None:
-    """Set environment variable for a provider from CredentialsManager.
-
-    Since we sync from .env to CredentialsManager on startup,
-    this will always use the latest keys from .env.
-
-    Args:
-        provider: Provider name (e.g., 'openai', 'anthropic')
-
-    """
-    env_vars = {
-        **PROVIDER_ENV_KEYS,
-        "gemini": PROVIDER_ENV_KEYS["google"],
-    }
-
-    canonical_provider = _canonical_provider(provider)
-    if canonical_provider not in env_vars:
-        return
-
-    # Get API key from CredentialsManager (which has been synced from .env)
-    api_key = get_api_key_for_provider(canonical_provider)
-
-    # Set environment variable if key exists
-    if api_key:
-        os.environ[env_vars[canonical_provider]] = api_key
-        logger.debug(f"Set {env_vars[canonical_provider]} from CredentialsManager")
-
-
-def _create_model_for_provider(provider: str, model_id: str, model_config: ModelConfig, extra_kwargs: dict) -> Model:
+def _create_model_for_provider(  # noqa: C901, PLR0912
+    provider: str,
+    model_id: str,
+    model_config: ModelConfig,
+    extra_kwargs: dict,
+    runtime_paths: RuntimePaths,
+) -> Model:
     """Create a model instance for a specific provider.
 
     Args:
@@ -523,6 +507,7 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
         model_id: The model identifier
         model_config: The model configuration object
         extra_kwargs: Additional keyword arguments for the model
+        runtime_paths: Explicit runtime context for provider credentials and host resolution.
 
     Returns:
         Instantiated model for the provider
@@ -533,11 +518,43 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     """
     canonical_provider = _canonical_provider(provider)
 
+    if canonical_provider not in {"ollama", "vertexai_claude"} and "api_key" not in extra_kwargs:
+        api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
+        if api_key:
+            extra_kwargs["api_key"] = api_key
+
+    if canonical_provider == "vertexai_claude":
+        if "project_id" not in extra_kwargs:
+            project_id = runtime_paths.env_value("ANTHROPIC_VERTEX_PROJECT_ID")
+            if project_id:
+                extra_kwargs["project_id"] = project_id
+        if "region" not in extra_kwargs:
+            region = runtime_paths.env_value("CLOUD_ML_REGION")
+            if region:
+                extra_kwargs["region"] = region
+        if "base_url" not in extra_kwargs:
+            base_url = runtime_paths.env_value("ANTHROPIC_VERTEX_BASE_URL")
+            if base_url:
+                extra_kwargs["base_url"] = base_url
+        client_params = dict(cast("dict[str, Any]", extra_kwargs.get("client_params") or {}))
+        if "credentials" not in client_params and (
+            google_application_credentials := runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        ):
+            google_auth = importlib.import_module("google.auth")
+            load_credentials_from_file = google_auth.load_credentials_from_file
+            credentials, _project_id = load_credentials_from_file(
+                str(google_application_credentials),
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            client_params["credentials"] = credentials
+        if client_params:
+            extra_kwargs["client_params"] = client_params
+
     # Handle Ollama separately due to special host configuration
     if canonical_provider == "ollama":
         # Priority: model config > env/CredentialsManager > default
         # This allows per-model host configuration in config.yaml
-        host = model_config.host or get_ollama_host() or "http://localhost:11434"
+        host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or "http://localhost:11434"
         logger.debug(f"Using Ollama host: {host}")
         return Ollama(id=model_id, host=host, **extra_kwargs)
 
@@ -545,7 +562,9 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     if canonical_provider == "openrouter":
         # OpenRouter needs the API key passed explicitly because it captures
         # the environment variable at import time, not at instantiation time
-        api_key = extra_kwargs.pop("api_key", None) or get_api_key_for_provider(canonical_provider)
+        api_key = extra_kwargs.pop("api_key", None)
+        if not api_key:
+            api_key = get_api_key_for_provider(canonical_provider, runtime_paths=runtime_paths)
         if not api_key:
             logger.warning("No OpenRouter API key found in environment or CredentialsManager")
         return OpenRouter(id=model_id, api_key=api_key, **extra_kwargs)
@@ -570,11 +589,16 @@ def _create_model_for_provider(provider: str, model_id: str, model_config: Model
     raise ValueError(msg)
 
 
-def get_model_instance(config: Config, model_name: str = "default") -> Model:
+def get_model_instance(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str = "default",
+) -> Model:
     """Get a model instance from config.yaml.
 
     Args:
         config: Application configuration
+        runtime_paths: Explicit runtime context for model credentials and env-backed settings.
         model_name: Name of the model configuration to use (default: "default")
 
     Returns:
@@ -599,17 +623,20 @@ def get_model_instance(config: Config, model_name: str = "default") -> Model:
     extra_kwargs = dict(model_config.extra_kwargs or {})
 
     # Check for model-specific API key first, then fall back to provider-level
-    creds_manager = get_credentials_manager()
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
     model_creds = creds_manager.load_credentials(f"model:{model_name}")
     model_api_key = model_creds.get("api_key") if model_creds else None
 
     if model_api_key:
         extra_kwargs["api_key"] = model_api_key
-    else:
-        # Set environment variable from CredentialsManager for Agno to use
-        _set_api_key_env_var(provider)
 
-    return _create_model_for_provider(provider, model_id, model_config, extra_kwargs)
+    return _create_model_for_provider(
+        provider,
+        model_id,
+        model_config,
+        extra_kwargs,
+        runtime_paths,
+    )
 
 
 def _format_messages_context(messages: list[dict[str, Any]], header: str, prompt: str) -> str:
@@ -637,6 +664,7 @@ def _get_unseen_messages(
     thread_history: list[dict[str, Any]],
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     seen_event_ids: set[str],
     current_event_id: str | None,
 ) -> list[dict[str, Any]]:
@@ -647,7 +675,7 @@ def _get_unseen_messages(
     - Messages whose event_id is in seen_event_ids
     - The current triggering message (current_event_id)
     """
-    matrix_id = config.ids.get(agent_name)
+    matrix_id = config.get_ids(runtime_paths).get(agent_name)
     agent_sender_id = matrix_id.full_id if matrix_id else None
     unseen: list[dict[str, Any]] = []
     for msg in thread_history:
@@ -811,16 +839,22 @@ async def _cached_agent_run(
     full_prompt: str,
     session_id: str,
     agent_name: str,
-    storage_path: Path,
+    *,
+    runtime_paths: RuntimePaths,
     user_id: str | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> RunOutput:
     """Cached wrapper for agent.arun() calls."""
     media_inputs = media or MediaInputs()
+    storage_path = runtime_paths.storage_root
     # Skip cache when media is present (large bytes, unlikely to repeat)
     # or when Agno history is enabled (prompt can be identical but replayed history differs)
-    cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)
+    cache = (
+        None
+        if (media_inputs.has_any() or agent.add_history_to_context)
+        else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
+    )
     if cache is None:
         return await agent.arun(
             full_prompt,
@@ -869,7 +903,7 @@ async def _prepare_agent_and_prompt(
 
     """
     storage_path = runtime_paths.storage_root
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config)
+    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, runtime_paths)
 
     unseen_event_ids: list[str] = []
 
@@ -886,7 +920,14 @@ async def _prepare_agent_and_prompt(
         assert session is not None
         assert thread_history is not None
         seen_ids = get_seen_event_ids(session)
-        unseen = _get_unseen_messages(thread_history, agent_name, config, seen_ids, reply_to_event_id)
+        unseen = _get_unseen_messages(
+            thread_history,
+            agent_name,
+            config,
+            runtime_paths,
+            seen_ids,
+            reply_to_event_id,
+        )
         unseen_event_ids = [msg["event_id"] for msg in unseen if msg.get("event_id")]
         full_prompt = _build_prompt_with_unseen(enhanced_prompt, unseen)
     elif has_prior_runs and not reply_to_event_id:
@@ -901,7 +942,7 @@ async def _prepare_agent_and_prompt(
     agent = create_agent(
         agent_name,
         config,
-        runtime_paths=runtime_paths,
+        runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
@@ -956,7 +997,6 @@ async def ai_response(
     """
     logger.info("AI request", agent=agent_name, room_id=room_id)
     media_inputs = media or MediaInputs()
-    storage_path = runtime_paths.storage_root
 
     # Prepare agent and prompt - this can fail if agent creation fails (e.g., missing API key)
     try:
@@ -984,7 +1024,7 @@ async def ai_response(
             full_prompt,
             session_id,
             agent_name,
-            storage_path,
+            runtime_paths=runtime_paths,
             user_id=user_id,
             media=media_inputs,
             metadata=metadata,
@@ -1003,7 +1043,7 @@ async def ai_response(
                     fallback_prompt,
                     session_id,
                     agent_name,
-                    storage_path,
+                    runtime_paths=runtime_paths,
                     user_id=user_id,
                     media=MediaInputs(),
                     metadata=metadata,
@@ -1184,7 +1224,11 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     metadata = _build_run_metadata(reply_to_event_id, unseen_event_ids)
 
     # Check cache (skip when media is present or history is enabled)
-    cache = None if (media_inputs.has_any() or agent.add_history_to_context) else _get_cache(storage_path)
+    cache = (
+        None
+        if (media_inputs.has_any() or agent.add_history_to_context)
+        else _get_cache(storage_path, runtime_ai_cache_enabled(runtime_paths=runtime_paths))
+    )
     if cache is not None:
         model = agent.model
         assert model is not None

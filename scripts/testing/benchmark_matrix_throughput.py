@@ -10,7 +10,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
@@ -21,7 +20,7 @@ logging.getLogger("mindroom").setLevel(logging.WARNING)
 logging.getLogger("mindroom.matrix").setLevel(logging.WARNING)
 logging.getLogger("mindroom.matrix.client").setLevel(logging.WARNING)
 
-from mindroom.constants import MATRIX_HOMESERVER  # noqa: E402
+from mindroom.constants import matrix_state_file, resolve_primary_runtime_paths, runtime_matrix_homeserver  # noqa: E402
 from mindroom.matrix.client import send_message  # noqa: E402
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user  # noqa: E402
 
@@ -73,7 +72,8 @@ class MatrixBenchmark:
     """Benchmark Matrix server message throughput."""
 
     def __init__(self, homeserver: str | None = None) -> None:
-        self.homeserver = homeserver or MATRIX_HOMESERVER
+        self.runtime_paths = resolve_primary_runtime_paths()
+        self.homeserver = homeserver or runtime_matrix_homeserver(runtime_paths=self.runtime_paths)
         self.client: nio.AsyncClient | None = None
         self.room_id: str | None = None
         self.metrics = BenchmarkMetrics()
@@ -82,7 +82,7 @@ class MatrixBenchmark:
     async def setup(self) -> None:
         """Load credentials and setup client."""
         # Load credentials from matrix_state.yaml
-        with Path("matrix_state.yaml").open() as f:  # noqa: ASYNC230
+        with matrix_state_file(self.runtime_paths).open() as f:
             data = yaml.safe_load(f)
 
         # Use the main user account
@@ -106,14 +106,17 @@ class MatrixBenchmark:
 
     async def login(self) -> None:
         """Login to Matrix server."""
+        assert self.agent_user is not None
         print(f"🔑 Logging in as {self.agent_user.user_id} to {self.homeserver}...")
 
         # Use the login utility from mindroom
-        self.client = await login_agent_user(self.homeserver, self.agent_user)
+        self.client = await login_agent_user(self.homeserver, self.agent_user, self.runtime_paths)
         print(f"✅ Logged in successfully as {self.agent_user.user_id}")
 
     async def send_message(self, content: str, batch_id: int, msg_id: int) -> bool:
         """Send a single message and return success status."""
+        assert self.client is not None
+        assert self.room_id is not None
         try:
             message_content = {"msgtype": "m.text", "body": f"[Benchmark B{batch_id:03d}M{msg_id:04d}] {content}"}
 

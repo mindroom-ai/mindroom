@@ -26,7 +26,7 @@ if TYPE_CHECKING:
             type="url",
             required=True,
             placeholder="my-cluster.xxxx.region.redshift.amazonaws.com",
-            description="Redshift cluster endpoint (falls back to REDSHIFT_HOST env var)",
+            description="Redshift cluster endpoint",
         ),
         ConfigField(
             name="port",
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="dev",
-            description="Database name (falls back to REDSHIFT_DATABASE env var)",
+            description="Database name",
         ),
         ConfigField(
             name="user",

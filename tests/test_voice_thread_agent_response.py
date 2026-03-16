@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -11,7 +10,9 @@ import pytest
 from agno.media import Audio
 
 from mindroom.bot import ROUTER_AGENT_NAME, AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -21,10 +22,28 @@ from mindroom.constants import (
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.teams import TeamFormationDecision, TeamMode
-from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
-def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # noqa: ARG001
+def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+    """Construct an agent bot with the explicit runtime bound to the test config."""
+    return AgentBot(
+        agent_user=agent_user,
+        storage_path=storage_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=rooms,
+    )
+
+
+def _extract_agent_side_effect(
+    user_id: str,
+    _config: Config,
+    _runtime_paths: object,
+) -> str | None:
     if user_id == f"@mindroom_{ROUTER_AGENT_NAME}:localhost":
         return ROUTER_AGENT_NAME
     if user_id == "@mindroom_home:localhost":
@@ -33,7 +52,7 @@ def _extract_agent_side_effect(user_id: str, config: Config) -> str | None:  # n
 
 
 @pytest.fixture
-def mock_home_bot() -> AgentBot:
+def mock_home_bot(tmp_path: Path) -> AgentBot:
     """Create a mock home assistant bot for testing."""
     agent_user = AgentMatrixUser(
         agent_name="home",
@@ -42,9 +61,16 @@ def mock_home_bot() -> AgentBot:
         password=TEST_PASSWORD,
         access_token=TEST_ACCESS_TOKEN,
     )
-    config = Config.from_yaml()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        bot = AgentBot(agent_user=agent_user, storage_path=Path(tmpdir), config=config, rooms=["!test:server"])
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "home": AgentConfig(display_name="HomeAssistant", rooms=["!test:server"]),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    bot = _agent_bot(agent_user=agent_user, storage_path=tmp_path, config=config, rooms=["!test:server"])
     bot.client = AsyncMock()
     bot.logger = MagicMock()
     bot._generate_response = AsyncMock()

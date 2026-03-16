@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import client as matrix_client
 from mindroom.matrix import rooms as matrix_rooms
-from tests.conftest import TEST_ACCESS_TOKEN
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from tests.conftest import TEST_ACCESS_TOKEN, bind_runtime_paths, runtime_paths_for
 
 
 class _FakeHttpResponse:
@@ -30,6 +28,17 @@ class _FakeHttpResponse:
 
     def release(self) -> None:
         self.released = True
+
+
+def _config_with_runtime_paths(
+    tmp_path: Path,
+    **config_data: object,
+) -> Config:
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "mindroom_data")
+    return bind_runtime_paths(
+        Config.model_validate(config_data, context={"runtime_paths": runtime_paths}),
+        runtime_paths,
+    )
 
 
 def test_matrix_room_access_defaults() -> None:
@@ -54,24 +63,27 @@ def test_matrix_room_access_yaml_null_uses_defaults(tmp_path: Path) -> None:
 
 def test_matrix_room_access_invite_only_matching() -> None:
     """Invite-only matching should work for room key, alias, and room ID."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "invite_only_rooms": ["lobby", "#ops:example.com", "!secret:example.com"],
         },
     )
     access = config.matrix_room_access
+    runtime_paths = runtime_paths_for(config)
 
-    assert access.is_invite_only_room("lobby")
-    assert access.is_invite_only_room("ops", room_alias="#ops:example.com")
-    assert access.is_invite_only_room("random", room_id="!secret:example.com")
-    assert not access.is_invite_only_room("public-room")
+    assert access.is_invite_only_room("lobby", runtime_paths)
+    assert access.is_invite_only_room("ops", runtime_paths, room_alias="#ops:example.com")
+    assert access.is_invite_only_room("random", runtime_paths, room_id="!secret:example.com")
+    assert not access.is_invite_only_room("public-room", runtime_paths)
 
 
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Multi-user mode should configure non-restricted rooms as joinable/publishable when enabled."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -89,6 +101,7 @@ async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.Mon
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         context="test",
     )
 
@@ -100,7 +113,8 @@ async def test_configure_managed_room_access_public_mode(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_invite_only_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invite-only room overrides should force invite/private targets even in multi-user mode."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -119,6 +133,7 @@ async def test_configure_managed_room_access_invite_only_override(monkeypatch: p
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         context="test",
     )
 
@@ -131,11 +146,13 @@ async def test_configure_managed_room_access_invite_only_override(monkeypatch: p
 @pytest.mark.parametrize(("reconcile_existing", "expected_calls"), [(False, 0), (True, 1)])
 async def test_existing_room_reconciliation_respects_flag(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     reconcile_existing: bool,
     expected_calls: int,
 ) -> None:
     """Existing room updates should be gated behind `reconcile_existing_rooms`."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": reconcile_existing,
@@ -161,6 +178,7 @@ async def test_existing_room_reconciliation_respects_flag(
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -170,9 +188,13 @@ async def test_existing_room_reconciliation_respects_flag(
 
 
 @pytest.mark.asyncio
-async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_new_room_creation_applies_access_policy_in_multi_user_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Newly created managed rooms should apply access policy when multi-user mode is enabled."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -194,6 +216,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -204,6 +227,7 @@ async def test_new_room_creation_applies_access_policy_in_multi_user_mode(monkey
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#lobby:example.com",
         context="new_room_creation",
     )
@@ -293,9 +317,13 @@ async def test_set_room_directory_visibility_releases_response_on_success() -> N
 
 
 @pytest.mark.asyncio
-async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_existing_room_reconciliation_skipped_when_not_joined(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Reconciliation should not run when the service account cannot join the room."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": True,
@@ -321,6 +349,7 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -330,9 +359,13 @@ async def test_existing_room_reconciliation_skipped_when_not_joined(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_existing_room_reconciliation_runs_after_later_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Reconciliation should run on a later retry once the service account is joined."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        tmp_path,
         matrix_room_access={
             "mode": "multi_user",
             "reconcile_existing_rooms": True,
@@ -359,6 +392,7 @@ async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: p
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
@@ -373,17 +407,26 @@ async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: p
         client=mock_client,
         room_key="lobby",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_name="Lobby",
         power_users=[],
     )
 
     assert second_room_id == "!lobby:example.com"
-    ensure_room_has_topic.assert_awaited_once_with(mock_client, "!lobby:example.com", "lobby", "Lobby", config)
+    ensure_room_has_topic.assert_awaited_once_with(
+        mock_client,
+        "!lobby:example.com",
+        "lobby",
+        "Lobby",
+        config,
+        runtime_paths_for(config),
+    )
     configure_access.assert_awaited_once_with(
         client=mock_client,
         room_key="lobby",
         room_id="!lobby:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#lobby:example.com",
         context="existing_room_reconciliation",
     )
@@ -392,7 +435,8 @@ async def test_existing_room_reconciliation_runs_after_later_join(monkeypatch: p
 @pytest.mark.asyncio
 async def test_configure_managed_room_access_respects_alias_invite_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invite-only matching via room_alias should work when passed through configure_managed_room_access."""
-    config = Config(
+    config = _config_with_runtime_paths(
+        Path(),
         matrix_room_access={
             "mode": "multi_user",
             "multi_user_join_rule": "public",
@@ -411,6 +455,7 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
         room_key="secret",
         room_id="!secret:example.com",
         config=config,
+        runtime_paths=runtime_paths_for(config),
         room_alias="#secret:example.com",
         context="test",
     )
@@ -423,11 +468,11 @@ async def test_configure_managed_room_access_respects_alias_invite_only(monkeypa
 @pytest.mark.asyncio
 async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A single room setup failure should not abort setup for remaining rooms."""
-    config = Config()
+    config = _config_with_runtime_paths(Path())
     mock_client = AsyncMock()
 
     monkeypatch.setattr(Config, "get_all_configured_rooms", lambda _self: ["lobby", "ops"])
-    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config: [])
+    monkeypatch.setattr("mindroom.agents.get_agent_ids_for_room", lambda _room_key, _config, _runtime_paths: [])
 
     async def _ensure_room_exists(*, room_key: str, **_kwargs: object) -> str:
         if room_key == "lobby":
@@ -440,8 +485,7 @@ async def test_ensure_all_rooms_exist_continues_after_room_failure(monkeypatch: 
     logger_exception = MagicMock()
     monkeypatch.setattr(matrix_rooms.logger, "exception", logger_exception)
 
-    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config)
-
+    room_ids = await matrix_rooms.ensure_all_rooms_exist(mock_client, config, runtime_paths_for(config))
     assert room_ids == {"ops": "!ops:example.com"}
     assert ensure_room_exists_mock.await_count == 2
     logger_exception.assert_called_once()

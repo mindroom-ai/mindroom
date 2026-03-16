@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,10 +12,31 @@ import pytest
 
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
+
+
+def _runtime_bound_config() -> Config:
+    """Return a minimal runtime-bound config for bot error-display tests."""
+    return bind_runtime_paths(Config(), test_runtime_paths(Path(tempfile.mkdtemp())))
+
+
+def _mock_bot(tmp_path: Path) -> MagicMock:
+    """Create a bot double with explicit runtime state."""
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.stop_manager = MagicMock()
+    bot.stop_manager.remove_stop_button = AsyncMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "test_agent"
+    bot.storage_path = tmp_path
+    bot.config = _runtime_bound_config()
+    bot.runtime_paths = runtime_paths_for(bot.config)
+    bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
+    bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
+    return bot
 
 
 class TestAIErrorDisplay:
@@ -22,17 +45,7 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_non_streaming_error_edits_thinking_message(self, tmp_path: Path) -> None:
         """Test that when AI fails in non-streaming mode, the thinking message is edited with the error."""
-        # Create a minimal bot instance
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "test_agent"
-        bot.storage_path = tmp_path
-        bot.config = Config.from_yaml()
-        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
+        bot = _mock_bot(tmp_path)
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -78,19 +91,9 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_streaming_error_updates_message(self, tmp_path: Path) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
-        # Create a minimal bot instance
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "test_agent"
+        bot = _mock_bot(tmp_path)
         bot.matrix_id = MagicMock()
         bot.matrix_id.domain = "localhost"
-        bot.config = Config.from_yaml()
-        bot.storage_path = tmp_path
-        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -140,15 +143,7 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
         """Test that when a response is cancelled, it shows a cancellation message."""
-        # Create a minimal bot instance
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "test_agent"
-        bot.storage_path = tmp_path
-        bot.config = Config.from_yaml()
-        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
+        bot = _mock_bot(tmp_path)
 
         # Mock the _edit_message method to track what gets edited
         edited_messages = []
@@ -192,17 +187,7 @@ class TestAIErrorDisplay:
     @pytest.mark.asyncio
     async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
         """Test that various error types result in user-friendly messages."""
-        # Create a minimal bot instance
-        bot = MagicMock(spec=AgentBot)
-        bot.logger = MagicMock()
-        bot.stop_manager = MagicMock()
-        bot.stop_manager.remove_stop_button = AsyncMock()
-        bot.client = AsyncMock()
-        bot.agent_name = "test_agent"
-        bot.storage_path = tmp_path
-        bot.config = Config.from_yaml()
-        bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
-        bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
+        bot = _mock_bot(tmp_path)
 
         # Track edited messages
         edited_messages = []

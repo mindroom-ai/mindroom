@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.memory.functions import (
     delete_agent_memory,
     get_agent_memory,
@@ -21,6 +23,7 @@ from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
     tool_execution_identity,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
 
 if TYPE_CHECKING:
@@ -33,8 +36,24 @@ def storage_path(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def config() -> Config:
-    return Config.from_yaml()
+def config(storage_path: Path) -> Config:
+    runtime_paths = resolve_runtime_paths(
+        config_path=storage_path / "config.yaml",
+        storage_path=storage_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", role="General assistant"),
+                "calculator": AgentConfig(display_name="Calculator", role="Calculator assistant"),
+            },
+        ),
+        runtime_paths,
+    )
 
 
 @pytest.mark.asyncio
@@ -61,7 +80,13 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             del messages
             captured_calls.append((self.scope_storage_path, user_id, metadata or {}))
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeScopedMemory:
+        del runtime_paths
         return FakeScopedMemory(scope_storage_path)
 
     execution_identity = ToolExecutionIdentity(
@@ -81,6 +106,7 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
             storage_path,
             "session-alice",
             config,
+            runtime_paths_for(config),
             execution_identity=execution_identity,
         )
 
@@ -147,7 +173,13 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             ]
             return {"results": matches[:limit]}
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeScopedMemory:
+        del runtime_paths
         return FakeScopedMemory(scope_storage_path)
 
     with patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance):
@@ -158,12 +190,14 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 storage_path,
                 "session-alice",
                 config,
+                runtime_paths_for(config),
             )
             alice_results = await search_agent_memories(
                 "Alice-authored shared team",
                 "general",
                 storage_path,
                 config,
+                runtime_paths_for(config),
                 limit=5,
             )
 
@@ -173,6 +207,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 "general",
                 storage_path,
                 config,
+                runtime_paths_for(config),
                 limit=5,
             )
 
@@ -196,7 +231,13 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
 
     memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
 
-    async def create_fake_memory_instance(scope_storage_path: Path, _config: Config) -> FakeMem0ScopedMemory:
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
         id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
         return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
 
@@ -220,22 +261,44 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             storage_path,
             "session-alice",
             config,
+            runtime_paths_for(config),
         )
 
-        general_results = await search_agent_memories("shared note", "general", storage_path, config, limit=10)
-        calculator_results = await search_agent_memories("shared note", "calculator", storage_path, config, limit=10)
+        general_results = await search_agent_memories(
+            "shared note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
+        calculator_results = await search_agent_memories(
+            "shared note",
+            "calculator",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
         assert len(general_results) == 1
         assert len(calculator_results) == 1
         general_memory_id = general_results[0]["id"]
         calculator_memory_id = calculator_results[0]["id"]
         assert general_memory_id != calculator_memory_id
 
-        general_loaded = await get_agent_memory(general_memory_id, ["general", "calculator"], storage_path, config)
+        general_loaded = await get_agent_memory(
+            general_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
         calculator_loaded = await get_agent_memory(
             calculator_memory_id,
             ["general", "calculator"],
             storage_path,
             config,
+            runtime_paths_for(config),
         )
         assert general_loaded is not None
         assert calculator_loaded is not None
@@ -248,17 +311,52 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
             ["general", "calculator"],
             storage_path,
             config,
+            runtime_paths_for(config),
         )
 
-        general_updated = await search_agent_memories("updated team", "general", storage_path, config, limit=10)
-        calculator_updated = await search_agent_memories("updated team", "calculator", storage_path, config, limit=10)
+        general_updated = await search_agent_memories(
+            "updated team",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
+        calculator_updated = await search_agent_memories(
+            "updated team",
+            "calculator",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
         assert any(result.get("memory") == "Updated team shared note" for result in general_updated)
         assert any(result.get("memory") == "Updated team shared note" for result in calculator_updated)
 
-        await delete_agent_memory(general_memory_id, ["general", "calculator"], storage_path, config)
+        await delete_agent_memory(
+            general_memory_id,
+            ["general", "calculator"],
+            storage_path,
+            config,
+            runtime_paths_for(config),
+        )
 
-        general_deleted = await search_agent_memories("team", "general", storage_path, config, limit=10)
-        calculator_deleted = await search_agent_memories("team", "calculator", storage_path, config, limit=10)
+        general_deleted = await search_agent_memories(
+            "team",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
+        calculator_deleted = await search_agent_memories(
+            "team",
+            "calculator",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            limit=10,
+        )
         assert not any(result.get("memory") == "Team shared note" for result in general_deleted)
         assert not any(result.get("memory") == "Team shared note" for result in calculator_deleted)
         assert not any(result.get("memory") == "Updated team shared note" for result in general_deleted)

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationInfo, model_validator
 
 from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
@@ -21,7 +20,7 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
-    get_runtime_paths,
+    resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
 )
@@ -49,10 +48,20 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
 )
 logger = get_logger(__name__)
 
+_OPTIONAL_DICT_SECTION_NAMES = (
+    "teams",
+    "cultures",
+    "room_models",
+    "knowledge_bases",
+    "matrix_room_access",
+    "matrix_space",
+)
+
 
 def _resolve_agent_thread_mode(
     agent_config: AgentConfig,
     room_id: str | None,
+    runtime_paths: RuntimePaths,
 ) -> Literal["thread", "room"]:
     """Resolve one agent's effective thread mode for an optional room context.
 
@@ -76,23 +85,47 @@ def _resolve_agent_thread_mode(
     # Keep this import local to avoid config<->matrix import cycles during module initialization.
     from mindroom.matrix.rooms import get_room_alias_from_id, resolve_room_aliases  # noqa: PLC0415
 
-    room_alias = get_room_alias_from_id(room_id)
+    room_alias = get_room_alias_from_id(room_id, runtime_paths)
     if room_alias:
         alias_mode = overrides.get(room_alias)
         if alias_mode is not None:
             return alias_mode
 
-    for override_key, resolved_room_id in zip(overrides, resolve_room_aliases(list(overrides)), strict=False):
+    for override_key, resolved_room_id in zip(
+        overrides,
+        resolve_room_aliases(list(overrides), runtime_paths),
+        strict=False,
+    ):
         if resolved_room_id == room_id:
             return overrides[override_key]
 
     return default_mode
 
 
+def _normalize_optional_config_sections(data: dict[str, object]) -> None:
+    """Replace explicit YAML nulls with the model's expected empty containers."""
+    for name in _OPTIONAL_DICT_SECTION_NAMES:
+        if data.get(name) is None:
+            data[name] = {}
+    if data.get("plugins") is None:
+        data["plugins"] = []
+
+
+def _normalized_config_data(data: object) -> object:
+    """Return config input with legacy optional sections normalized."""
+    if not isinstance(data, dict):
+        return data
+
+    normalized_data = cast("dict[str, object]", data.copy())
+    _normalize_optional_config_sections(normalized_data)
+    return normalized_data
+
+
 def _router_agents_for_room(
     agents: dict[str, AgentConfig],
     teams: dict[str, TeamConfig],
     room_id: str | None,
+    runtime_paths: RuntimePaths,
 ) -> set[str]:
     """Return agents relevant for router mode resolution in one room context.
 
@@ -110,10 +143,10 @@ def _router_agents_for_room(
 
     router_agents: set[str] = set()
     for agent_name, agent_cfg in agents.items():
-        if room_id in set(resolve_room_aliases(agent_cfg.rooms)):
+        if room_id in set(resolve_room_aliases(agent_cfg.rooms, runtime_paths)):
             router_agents.add(agent_name)
     for team_cfg in teams.values():
-        if room_id not in set(resolve_room_aliases(team_cfg.rooms)):
+        if room_id not in set(resolve_room_aliases(team_cfg.rooms, runtime_paths)):
             continue
         router_agents.update(agent_name for agent_name in team_cfg.agents if agent_name in agents)
     return router_agents or set(agents)
@@ -315,14 +348,23 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_internal_user_username_not_reserved(self) -> Config:
+    def validate_internal_user_username_not_reserved(self, info: ValidationInfo) -> Config:
         """Ensure the internal user localpart does not collide with bot accounts."""
         if self.mindroom_user is None:
             return self
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
         reserved_localparts = {
-            agent_username_localpart(ROUTER_AGENT_NAME): f"router '{ROUTER_AGENT_NAME}'",
-            **{agent_username_localpart(agent_name): f"agent '{agent_name}'" for agent_name in self.agents},
-            **{agent_username_localpart(team_name): f"team '{team_name}'" for team_name in self.teams},
+            agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths=runtime_paths): f"router '{ROUTER_AGENT_NAME}'",
+            **{
+                agent_username_localpart(agent_name, runtime_paths=runtime_paths): f"agent '{agent_name}'"
+                for agent_name in self.agents
+            },
+            **{
+                agent_username_localpart(team_name, runtime_paths=runtime_paths): f"team '{team_name}'"
+                for team_name in self.teams
+            },
         }
         conflict = reserved_localparts.get(self.mindroom_user.username)
         if conflict:
@@ -331,16 +373,19 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_root_space_alias_does_not_collide_with_managed_rooms(self) -> Config:
+    def validate_root_space_alias_does_not_collide_with_managed_rooms(self, info: ValidationInfo) -> Config:
         """Ensure no managed room key maps to the reserved root Space alias."""
         if not self.matrix_space.enabled:
             return self
-        reserved_alias_localpart = managed_space_alias_localpart()
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
+        reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
         colliding_rooms = sorted(
             room_key
             for room_key in self.get_all_configured_rooms()
             if not room_key.startswith(("!", "#"))
-            and managed_room_alias_localpart(room_key) == reserved_alias_localpart
+            and managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
         )
         if colliding_rooms:
             formatted = ", ".join(colliding_rooms)
@@ -351,17 +396,14 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
-    @cached_property
-    def domain(self) -> str:
-        """Extract the domain from the MATRIX_HOMESERVER."""
+    def get_domain(self, runtime_paths: RuntimePaths) -> str:
+        """Extract the Matrix domain for one explicit runtime context."""
         from mindroom.matrix.identity import extract_server_name_from_homeserver  # noqa: PLC0415
 
-        return extract_server_name_from_homeserver(
-            runtime_matrix_homeserver(runtime_paths=self._runtime_paths),
-        )
+        homeserver = runtime_matrix_homeserver(runtime_paths)
+        return extract_server_name_from_homeserver(homeserver, runtime_paths)
 
-    @cached_property
-    def ids(self) -> dict[str, MatrixID]:
+    def get_ids(self, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
         """Get MatrixID objects for all agents and teams.
 
         Returns:
@@ -371,38 +413,46 @@ class Config(BaseModel):
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
         mapping: dict[str, MatrixID] = {}
+        domain = self.get_domain(runtime_paths)
 
         # Add all agents
         for agent_name in self.agents:
-            mapping[agent_name] = MatrixID.from_agent(agent_name, self.domain)
+            mapping[agent_name] = MatrixID.from_agent(agent_name, domain, runtime_paths)
 
         # Add router agent separately (it's not in config.agents)
-        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, self.domain)
+        mapping[ROUTER_AGENT_NAME] = MatrixID.from_agent(ROUTER_AGENT_NAME, domain, runtime_paths)
 
         # Add all teams
         for team_name in self.teams:
-            mapping[team_name] = MatrixID.from_agent(team_name, self.domain)
+            mapping[team_name] = MatrixID.from_agent(team_name, domain, runtime_paths)
         return mapping
 
-    def get_mindroom_user_id(self) -> str | None:
+    def get_mindroom_user_id(self, runtime_paths: RuntimePaths) -> str | None:
         """Get the full Matrix user ID for the configured internal user."""
         if self.mindroom_user is None:
             return None
         from mindroom.matrix.identity import MatrixID  # noqa: PLC0415
 
-        return MatrixID.from_username(self.mindroom_user.username, self.domain).full_id
+        return MatrixID.from_username(self.mindroom_user.username, self.get_domain(runtime_paths)).full_id
+
+    @classmethod
+    def validate_with_runtime(
+        cls,
+        data: object,
+        runtime_paths: RuntimePaths,
+    ) -> Config:
+        """Validate config data against one explicit runtime context."""
+        config = cls.model_validate(_normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config._runtime_paths = runtime_paths
+        return config
 
     @classmethod
     def from_yaml(
         cls,
-        config_path: Path | None = None,
-        *,
-        runtime_paths: RuntimePaths | None = None,
+        config_path: Path,
     ) -> Config:
-        """Create a Config instance from YAML data."""
-        resolved_runtime_paths = runtime_paths or get_runtime_paths(config_path=config_path)
-        path = resolved_runtime_paths.config_path
-
+        """Create a pure Config instance from one explicit YAML file path."""
+        path = Path(config_path).expanduser().resolve()
         if not path.exists():
             msg = f"Agent configuration file not found: {path}"
             raise FileNotFoundError(msg)
@@ -410,24 +460,8 @@ class Config(BaseModel):
         with path.open() as f:
             data = yaml.safe_load(f) or {}
 
-        # Handle None values for optional dictionaries
-        if data.get("teams") is None:
-            data["teams"] = {}
-        if data.get("cultures") is None:
-            data["cultures"] = {}
-        if data.get("room_models") is None:
-            data["room_models"] = {}
-        if data.get("plugins") is None:
-            data["plugins"] = []
-        if data.get("knowledge_bases") is None:
-            data["knowledge_bases"] = {}
-        if data.get("matrix_room_access") is None:
-            data["matrix_room_access"] = {}
-        if data.get("matrix_space") is None:
-            data["matrix_space"] = {}
-
-        config = cls(**data)
-        config._runtime_paths = resolved_runtime_paths
+        runtime_paths = resolve_runtime_paths(config_path=path)
+        config = cls.validate_with_runtime(data, runtime_paths)
         logger.info(f"Loaded agent configuration from {path}")
         logger.info(f"Found {len(config.agents)} agent configurations")
         return config
@@ -458,7 +492,11 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self.agents[agent_name]
 
-    def get_agent_worker_tools(self, agent_name: str) -> list[str]:
+    def get_agent_worker_tools(
+        self,
+        agent_name: str,
+        runtime_paths: RuntimePaths,
+    ) -> list[str]:
         """Get effective worker-routed tools for an agent, including default policy resolution."""
         agent_config = self.get_agent(agent_name)
         configured = agent_config.worker_tools
@@ -471,7 +509,7 @@ class Config(BaseModel):
                 ensure_tool_registry_loaded,
             )
 
-            ensure_tool_registry_loaded(self)
+            ensure_tool_registry_loaded(runtime_paths, self)
             return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
 
@@ -633,6 +671,7 @@ class Config(BaseModel):
     def get_entity_thread_mode(
         self,
         entity_name: str,
+        runtime_paths: RuntimePaths,
         room_id: str | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
@@ -643,11 +682,19 @@ class Config(BaseModel):
         In ambiguous cases, default to "thread".
         """
         if entity_name in self.agents:
-            return _resolve_agent_thread_mode(self.agents[entity_name], room_id)
+            return _resolve_agent_thread_mode(
+                self.agents[entity_name],
+                room_id,
+                runtime_paths,
+            )
 
         if entity_name in self.teams:
             team_modes: set[Literal["thread", "room"]] = {
-                _resolve_agent_thread_mode(self.agents[name], room_id)
+                _resolve_agent_thread_mode(
+                    self.agents[name],
+                    room_id,
+                    runtime_paths,
+                )
                 for name in self.teams[entity_name].agents
                 if name in self.agents
             }
@@ -655,9 +702,19 @@ class Config(BaseModel):
                 return next(iter(team_modes))
 
         if entity_name == ROUTER_AGENT_NAME:
-            router_agents = _router_agents_for_room(self.agents, self.teams, room_id)
+            router_agents = _router_agents_for_room(
+                self.agents,
+                self.teams,
+                room_id,
+                runtime_paths,
+            )
             configured_modes: set[Literal["thread", "room"]] = {
-                _resolve_agent_thread_mode(self.agents[agent_name], room_id) for agent_name in router_agents
+                _resolve_agent_thread_mode(
+                    self.agents[agent_name],
+                    room_id,
+                    runtime_paths,
+                )
+                for agent_name in router_agents
             }
             if len(configured_modes) == 1:
                 return next(iter(configured_modes))
@@ -696,11 +753,16 @@ class Config(BaseModel):
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
 
-    def get_configured_bots_for_room(self, room_id: str) -> set[str]:
+    def get_configured_bots_for_room(
+        self,
+        room_id: str,
+        runtime_paths: RuntimePaths,
+    ) -> set[str]:
         """Get the set of bot usernames that should be in a specific room.
 
         Args:
             room_id: The Matrix room ID
+            runtime_paths: Explicit runtime context for room resolution.
 
         Returns:
             Set of bot usernames (without domain) that should be in this room
@@ -713,35 +775,34 @@ class Config(BaseModel):
 
         # Check which agents should be in this room
         for agent_name, agent_config in self.agents.items():
-            resolved_rooms = set(resolve_room_aliases(agent_config.rooms))
+            resolved_rooms = set(resolve_room_aliases(agent_config.rooms, runtime_paths))
             if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(agent_name))
+                configured_bots.add(agent_username_localpart(agent_name, runtime_paths))
 
         # Check which teams should be in this room
         for team_name, team_config in self.teams.items():
-            resolved_rooms = set(resolve_room_aliases(team_config.rooms))
+            resolved_rooms = set(resolve_room_aliases(team_config.rooms, runtime_paths))
             if room_id in resolved_rooms:
-                configured_bots.add(agent_username_localpart(team_name))
+                configured_bots.add(agent_username_localpart(team_name, runtime_paths))
 
         # Router should be in any room that has any configured agents/teams
         if configured_bots:  # If any bots are configured for this room
-            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME))
+            configured_bots.add(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths))
 
         return configured_bots
 
     def save_to_yaml(
         self,
-        config_path: Path | None = None,
+        config_path: Path,
     ) -> None:
         """Save the config to a YAML file, excluding None values.
 
         Args:
-            config_path: Path to save the config to. If None, uses CONFIG_PATH.
+            config_path: Path to save the config to.
 
         """
-        path = config_path or get_runtime_paths().config_path
         config_dict = self.model_dump(exclude_none=True)
-        path_obj = Path(path)
+        path_obj = Path(config_path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path_obj.with_suffix(path_obj.suffix + ".tmp")
         with tmp_path.open("w", encoding="utf-8") as f:
@@ -754,4 +815,20 @@ class Config(BaseModel):
                 width=120,  # Wider lines to reduce wrapping
             )
         safe_replace(tmp_path, path_obj)
-        logger.info(f"Saved configuration to {path}")
+        logger.info(f"Saved configuration to {config_path}")
+
+
+def load_config(runtime_paths: RuntimePaths) -> Config:
+    """Load and validate one config against an explicit runtime context."""
+    path = runtime_paths.config_path
+    if not path.exists():
+        msg = f"Agent configuration file not found: {path}"
+        raise FileNotFoundError(msg)
+
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+
+    config = Config.validate_with_runtime(data, runtime_paths)
+    logger.info(f"Loaded agent configuration from {path}")
+    logger.info(f"Found {len(config.agents)} agent configurations")
+    return config

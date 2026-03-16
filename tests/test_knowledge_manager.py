@@ -25,6 +25,7 @@ from mindroom.knowledge.manager import (
 )
 from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_root_path
+from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -158,13 +159,17 @@ def _make_config(path: Path, *, embedder_dimensions: int | None = None) -> Confi
                 },
             },
         }
-    return Config(
+    config = Config(
         agents={},
         models={},
         knowledge_bases={
             "research": KnowledgeBaseConfig(path=str(path), watch=False),
         },
         **({"memory": memory} if memory is not None else {}),
+    )
+    return bind_runtime_paths(
+        config,
+        _runtime_paths(path.parent / "config.yaml", path.parent / "storage"),
     )
 
 
@@ -174,7 +179,7 @@ def _make_git_config(
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> Config:
-    return Config(
+    config = Config(
         agents={},
         models={},
         knowledge_bases={
@@ -191,6 +196,10 @@ def _make_git_config(
                 ),
             ),
         },
+    )
+    return bind_runtime_paths(
+        config,
+        _runtime_paths(path.parent / "config.yaml", path.parent / "storage"),
     )
 
 
@@ -235,6 +244,7 @@ def test_knowledge_base_relative_path_resolves_from_config_dir(
     manager = KnowledgeManager(
         base_id="research",
         config=config,
+        runtime_paths=runtime_paths,
         storage_path=runtime_paths.storage_root,
         knowledge_path=(config_dir / "knowledge").resolve(),
     )
@@ -261,6 +271,7 @@ def test_knowledge_manager_reindexes_when_embedding_dimensions_change(
     manager = KnowledgeManager(
         base_id="research",
         config=config_1536,
+        runtime_paths=runtime_paths,
         storage_path=storage_path,
         knowledge_path=knowledge_path,
     )
@@ -316,6 +327,7 @@ def test_knowledge_manager_keeps_index_for_equivalent_openai_default_dimensions(
     manager = KnowledgeManager(
         base_id="research",
         config=implicit_default,
+        runtime_paths=runtime_paths,
         storage_path=runtime_paths.storage_root,
         knowledge_path=knowledge_path,
     )
@@ -329,7 +341,8 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
     sentinel = object()
     captured: dict[str, object] = {}
 
-    def _fake_create(model: str, *, dimensions: int | None = None) -> object:
+    def _fake_create(runtime_paths: object, model: str, *, dimensions: int | None = None) -> object:
+        captured["runtime_paths"] = runtime_paths
         captured["model"] = model
         captured["dimensions"] = dimensions
         return sentinel
@@ -350,8 +363,10 @@ def test_create_embedder_supports_sentence_transformers(monkeypatch: pytest.Monk
         },
     )
 
-    assert _create_embedder(config) is sentinel
+    runtime_paths = resolve_runtime_paths()
+    assert _create_embedder(config, runtime_paths) is sentinel
     assert captured == {
+        "runtime_paths": runtime_paths,
         "model": "sentence-transformers/all-MiniLM-L6-v2",
         "dimensions": 384,
     }
@@ -743,6 +758,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_worker_roots
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -836,6 +852,7 @@ async def test_private_knowledge_single_file_target_indexes_without_creating_dir
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -894,6 +911,7 @@ async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassifi
             "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
         },
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     try:
         managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
@@ -938,6 +956,7 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -990,6 +1009,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -1037,6 +1057,7 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -1054,7 +1075,11 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
         managers = await ensure_agent_knowledge_managers("mind", config, tmp_path, execution_identity=identity)
         scoped_manager = managers[private_base_id]
 
-        static_managers = await initialize_knowledge_managers(config, tmp_path, reindex_on_create=False)
+        static_managers = await initialize_knowledge_managers(
+            config,
+            _runtime_paths(tmp_path / "config.yaml", tmp_path),
+            reindex_on_create=False,
+        )
         resolved_manager = get_knowledge_manager(
             private_base_id,
             config=config,
@@ -1093,6 +1118,7 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
             "docs": KnowledgeBaseConfig(path=str(docs_path), watch=False),
         },
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
 
     try:
         managers = await ensure_agent_knowledge_managers("researcher", config, tmp_path)
@@ -1128,6 +1154,11 @@ async def test_initialize_knowledge_managers_removes_private_scoped_managers_whe
         },
         models={},
     )
+    config_with_private = bind_runtime_paths(config_with_private, _runtime_paths(tmp_path / "config.yaml", tmp_path))
+    config_without_private = bind_runtime_paths(
+        config_without_private,
+        _runtime_paths(tmp_path / "config.yaml", tmp_path),
+    )
     private_base_id = config_with_private.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -1153,7 +1184,11 @@ async def test_initialize_knowledge_managers_removes_private_scoped_managers_whe
             is not None
         )
 
-        await initialize_knowledge_managers(config_without_private, tmp_path, reindex_on_create=False)
+        await initialize_knowledge_managers(
+            config_without_private,
+            _runtime_paths(tmp_path / "config.yaml", tmp_path),
+            reindex_on_create=False,
+        )
 
         assert (
             get_knowledge_manager(
@@ -1198,6 +1233,7 @@ async def test_private_scoped_knowledge_manager_cache_is_bounded(
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -1278,6 +1314,7 @@ async def test_request_bound_private_manager_survives_cache_eviction(
         },
         models={},
     )
+    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
 
@@ -1372,7 +1409,12 @@ async def test_sync_git_repository_indexes_files_after_initial_clone(
         },
     )
 
-    manager = KnowledgeManager(base_id="research", config=config, storage_path=tmp_path / "storage")
+    manager = KnowledgeManager(
+        base_id="research",
+        config=config,
+        runtime_paths=_runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+        storage_path=tmp_path / "storage",
+    )
 
     result = await manager.sync_git_repository()
 

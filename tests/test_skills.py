@@ -123,6 +123,7 @@ def test_parse_skill_with_json5_metadata(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -143,6 +144,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     eligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={"TEST_ENV": "1"},
         credential_keys=set(),
@@ -152,6 +154,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     ineligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -161,6 +164,7 @@ def test_skill_eligibility_env_and_config(tmp_path: Path) -> None:
     eligible_with_credentials = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys={"TEST_ENV"},
@@ -182,6 +186,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
     missing = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -192,6 +197,7 @@ def test_skill_eligibility_requires_bins(tmp_path: Path, monkeypatch: pytest.Mon
     available = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -213,6 +219,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     eligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -223,6 +230,7 @@ def test_skill_eligibility_any_bins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     ineligible = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -242,6 +250,7 @@ def test_skill_eligibility_os_mismatch(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -258,6 +267,7 @@ def test_skill_eligibility_always_overrides(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -274,6 +284,7 @@ def test_get_agent_skills_ordering(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -290,6 +301,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     skills = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -304,6 +316,7 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     refreshed = build_agent_skills(
         "code",
         config,
+        _runtime_paths(tmp_path),
         skill_roots=[tmp_path],
         env_vars={},
         credential_keys=set(),
@@ -330,6 +343,7 @@ def test_skill_command_spec_parses_frontmatter(tmp_path: Path) -> None:
     spec = resolve_skill_command_spec(
         "dispatch",
         config,
+        _runtime_paths(tmp_path),
         "code",
         skill_roots=[tmp_path],
         env_vars={},
@@ -350,8 +364,8 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     """Skill command dispatch should reuse the same workspace override rules as create_agent()."""
     captured_calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
-        captured_calls.append((tool_name, dict(kwargs)))
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
@@ -380,7 +394,7 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     expected_workspace = resolve_agent_workspace(
         "code",
         config,
-        base_storage_path=runtime_storage_path,
+        runtime_paths=_runtime_paths(runtime_storage_path),
         execution_identity=identity,
         create=False,
     )
@@ -409,8 +423,8 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
 
     captured_calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> DemoTools:
-        captured_calls.append((tool_name, dict(kwargs)))
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> DemoTools:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return DemoTools()
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
@@ -449,7 +463,7 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
     expected_workspace = resolve_agent_workspace(
         "code",
         config,
-        base_storage_path=runtime_storage_path,
+        runtime_paths=_runtime_paths(runtime_storage_path),
         execution_identity=identity,
         create=False,
     )
@@ -470,8 +484,8 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
     """Skill command dispatch should respect the bot runtime storage path."""
     captured_calls: list[tuple[str, dict[str, object]]] = []
 
-    def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> object:
-        captured_calls.append((tool_name, dict(kwargs)))
+    def fake_get_tool_by_name(tool_name: str, runtime_paths: object, **kwargs: object) -> object:
+        captured_calls.append((tool_name, {"runtime_paths": runtime_paths, **dict(kwargs)}))
         return object()
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", fake_get_tool_by_name)
@@ -498,7 +512,6 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
     )
     expected_workspace = agent_workspace_root_path(runtime_storage, "code") / "mind_data"
 
-    monkeypatch.setattr("mindroom.constants.CONFIG_PATH", config_dir / "config.yaml")
     with tool_execution_identity(identity):
         toolkits = _collect_agent_toolkits(
             config,
@@ -849,10 +862,10 @@ async def test_skill_command_tool_dispatch_loads_worker_scoped_config_field_cred
             },
         )
 
-        monkeypatch.setattr(
-            "mindroom.tool_system.metadata.get_credentials_manager",
-            lambda: fake_credentials,
-        )
+        def _get_runtime_credentials_manager(_runtime_paths: object) -> FakeCredentialsManager:
+            return fake_credentials
+
+        monkeypatch.setattr("mindroom.agents.get_runtime_credentials_manager", _get_runtime_credentials_manager)
         monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
         monkeypatch.setenv("ACCOUNT_ID", "account-456")
 

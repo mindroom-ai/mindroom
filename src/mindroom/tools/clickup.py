@@ -26,7 +26,7 @@ if TYPE_CHECKING:
             type="password",
             required=True,
             placeholder="ClickUp API key",
-            description="API key from ClickUp (falls back to CLICKUP_API_KEY env var)",
+            description="API key from ClickUp",
         ),
         ConfigField(
             name="master_space_id",
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
             type="text",
             required=True,
             placeholder="ClickUp space ID",
-            description="ID of the master space to work with (falls back to MASTER_SPACE_ID env var)",
+            description="ID of the master space to work with",
         ),
     ],
     dependencies=["requests"],

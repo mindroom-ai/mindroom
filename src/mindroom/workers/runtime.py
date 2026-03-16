@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import os
 import threading
+from typing import TYPE_CHECKING
 
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, kubernetes_backend_config_signature
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend, normalize_static_runner_api_root
 from mindroom.workers.manager import WorkerManager
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _PRIMARY_WORKER_MANAGER: WorkerManager | None = None
@@ -26,21 +31,26 @@ def _normalize_backend_name(raw_value: str | None) -> str:
     raise WorkerBackendError(msg)
 
 
-def primary_worker_backend_name() -> str:
+def primary_worker_backend_name(runtime_paths: RuntimePaths) -> str:
     """Return the configured primary-runtime worker backend name."""
-    return _normalize_backend_name(os.getenv(_PRIMARY_WORKER_BACKEND_ENV))
+    return _normalize_backend_name(runtime_paths.env_value(_PRIMARY_WORKER_BACKEND_ENV))
 
 
-def primary_worker_backend_available(*, proxy_url: str | None, proxy_token: str | None) -> bool:
+def primary_worker_backend_available(
+    runtime_paths: RuntimePaths,
+    *,
+    proxy_url: str | None,
+    proxy_token: str | None,
+) -> bool:
     """Return whether the configured primary-runtime worker backend can route tool calls."""
-    backend_name = primary_worker_backend_name()
+    backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner":
         return bool(proxy_url)
     if backend_name == "kubernetes":
         if not proxy_token:
             return False
         try:
-            kubernetes_backend_config_signature(auth_token=proxy_token)
+            kubernetes_backend_config_signature(runtime_paths, auth_token=proxy_token)
         except WorkerBackendError:
             return False
         return True
@@ -60,25 +70,29 @@ def _static_runner_backend_config_signature(
 
 
 def _primary_worker_backend_config_signature(
+    runtime_paths: RuntimePaths,
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None,
 ) -> tuple[str, ...]:
-    backend_name = primary_worker_backend_name()
+    backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner":
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "kubernetes":
-        return kubernetes_backend_config_signature(auth_token=proxy_token)
+        return kubernetes_backend_config_signature(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
 
 def _build_primary_worker_manager(
+    runtime_paths: RuntimePaths,
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None,
 ) -> WorkerManager:
-    backend_name = primary_worker_backend_name()
+    backend_name = primary_worker_backend_name(runtime_paths)
     if backend_name == "static_runner":
         return WorkerManager(
             StaticSandboxRunnerBackend(
@@ -87,28 +101,43 @@ def _build_primary_worker_manager(
             ),
         )
     if backend_name == "kubernetes":
-        return WorkerManager(KubernetesWorkerBackend.from_env(auth_token=proxy_token))
+        if storage_root is None:
+            msg = "Kubernetes worker backend requires an explicit runtime storage root."
+            raise WorkerBackendError(msg)
+        return WorkerManager(
+            KubernetesWorkerBackend.from_runtime(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_root=storage_root,
+            ),
+        )
     msg = f"Unsupported worker backend: {backend_name}"
     raise WorkerBackendError(msg)
 
 
 def get_primary_worker_manager(
+    runtime_paths: RuntimePaths,
     *,
     proxy_url: str | None,
     proxy_token: str | None,
+    storage_root: Path | None = None,
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
     global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
 
     config_signature = _primary_worker_backend_config_signature(
+        runtime_paths,
         proxy_url=proxy_url,
         proxy_token=proxy_token,
+        storage_root=storage_root,
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
         if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
             _PRIMARY_WORKER_MANAGER = _build_primary_worker_manager(
+                runtime_paths,
                 proxy_url=proxy_url,
                 proxy_token=proxy_token,
+                storage_root=storage_root,
             )
             _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
     return _PRIMARY_WORKER_MANAGER

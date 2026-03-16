@@ -10,27 +10,32 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import typer
 import yaml
-from dotenv import dotenv_values
 from pydantic import ValidationError
 from rich.console import Console
 from rich.syntax import Syntax
 
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     OWNER_MATRIX_USER_ID_PLACEHOLDER,
     VERTEXAI_CLAUDE_ENV_KEYS,
+    RuntimePaths,
     config_search_locations,
     env_key_for_provider,
-    get_runtime_paths,
+    exported_process_env,
+    resolve_primary_runtime_paths,
+    resolve_runtime_paths,
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.workspaces import ensure_workspace_template
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
 
 console = Console()
 
@@ -68,31 +73,6 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
 _CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
 
 
-def _configured_storage_root_override() -> Path | None:
-    """Return the active storage-root override from the environment, if any."""
-    configured_root = os.getenv("MINDROOM_STORAGE_PATH", "").strip()
-    if not configured_root:
-        return None
-    return Path(configured_root).expanduser().resolve()
-
-
-def _storage_root_for_config(config_dir: Path) -> Path:
-    """Return the runtime storage root implied by env overrides or config location."""
-    if configured_root := _configured_storage_root_override():
-        return configured_root
-    return (config_dir / "mindroom_data").resolve()
-
-
-def _storage_root_from_env_file(env_path: Path) -> Path | None:
-    """Return MINDROOM_STORAGE_PATH from one env file when it is defined."""
-    if not env_path.is_file():
-        return None
-    configured_root = dotenv_values(env_path).get("MINDROOM_STORAGE_PATH")
-    if not isinstance(configured_root, str) or not configured_root.strip():
-        return None
-    return Path(configured_root).expanduser().resolve()
-
-
 def _config_init_storage_plan(
     config_dir: Path,
     env_path: Path,
@@ -100,11 +80,12 @@ def _config_init_storage_plan(
     write_env_file: bool,
 ) -> tuple[Path, bool]:
     """Return the storage root and whether the starter config can use the env placeholder."""
+    runtime_paths = resolve_runtime_paths(config_path=config_dir / "config.yaml")
     if write_env_file:
-        return _storage_root_for_config(config_dir), True
-    if preserved_storage_root := _storage_root_from_env_file(env_path):
-        return preserved_storage_root, True
-    return _storage_root_for_config(config_dir), False
+        return runtime_paths.storage_root, True
+    if "MINDROOM_STORAGE_PATH" in runtime_paths.env_file_values and env_path.is_file():
+        return runtime_paths.storage_root, True
+    return runtime_paths.storage_root, False
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
@@ -201,11 +182,43 @@ def _print_config_init_next_steps(
     console.print("  [cyan]mindroom run[/cyan]              Start the system")
 
 
-def _resolve_config_path(path: Path | None) -> Path:
+def _config_discovery_env(path: Path | None = None) -> dict[str, str]:
+    """Return the exported env snapshot used for config discovery and display."""
+    process_env = exported_process_env()
+    if path is not None:
+        process_env["MINDROOM_CONFIG_PATH"] = str(path.expanduser().resolve())
+    return process_env
+
+
+def _resolve_config_path(
+    path: Path | None,
+    *,
+    process_env: Mapping[str, str] | None = None,
+) -> Path:
     """Resolve the config file path from explicit argument or default."""
     if path is not None:
         return path.expanduser().resolve()
-    return get_runtime_paths().config_path.resolve()
+    resolved_process_env = dict(process_env) if process_env is not None else exported_process_env()
+    return resolve_primary_runtime_paths(process_env=resolved_process_env).config_path.resolve()
+
+
+def _activate_cli_runtime(
+    path: Path | None = None,
+    *,
+    storage_path: Path | None = None,
+) -> RuntimePaths:
+    """Create the CLI runtime context once and return it for explicit threading."""
+    if path is not None:
+        return resolve_primary_runtime_paths(
+            config_path=path.expanduser().resolve(),
+            storage_path=storage_path,
+            process_env=exported_process_env(),
+        )
+
+    return resolve_primary_runtime_paths(
+        storage_path=storage_path,
+        process_env=exported_process_env(),
+    )
 
 
 def _get_editor() -> str:
@@ -347,13 +360,14 @@ def config_show(
     ),
 ) -> None:
     """Display the current config file with syntax highlighting."""
-    config_file = _resolve_config_path(path)
+    process_env = _config_discovery_env(path)
+    config_file = _resolve_config_path(path, process_env=process_env)
 
     if not config_file.exists():
         console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         console.print("\nSearch locations (first match wins):")
-        for i, loc in enumerate(config_search_locations(), 1):
+        for i, loc in enumerate(config_search_locations(process_env), 1):
             status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
             console.print(f"  {i}. {loc} ({status})")
         raise typer.Exit(1)
@@ -422,7 +436,8 @@ def config_validate(
     Parses the YAML config using Pydantic and reports errors in a friendly format.
     Also checks whether required API keys are set as environment variables.
     """
-    config_path = _resolve_config_path(path)
+    runtime_paths = _activate_cli_runtime(path)
+    config_path = runtime_paths.config_path
     console.print(f"Validating configuration: [bold]{config_path}[/bold]\n")
 
     if not config_path.exists():
@@ -431,7 +446,7 @@ def config_validate(
         raise typer.Exit(1)
 
     try:
-        config = _load_config_quiet(config_path)
+        config = _load_config_quiet(runtime_paths=runtime_paths)
     except ValidationError as exc:
         _format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
@@ -447,7 +462,7 @@ def config_validate(
     console.print(f"  Rooms:  {len(rooms)} ({', '.join(sorted(rooms)) or 'none'})")
 
     # Check for missing API keys based on configured providers
-    _check_env_keys(config)
+    _check_env_keys(config, runtime_paths=runtime_paths)
 
 
 @config_app.command("path")
@@ -455,13 +470,14 @@ def config_path_cmd(
     path: Path | None = _CONFIG_PATH_OPTION,
 ) -> None:
     """Show the resolved config file path and search locations."""
-    resolved = _resolve_config_path(path)
+    process_env = _config_discovery_env(path)
+    resolved = _resolve_config_path(path, process_env=process_env)
     exists = resolved.exists()
     status = "[green]exists[/green]" if exists else "[red]not found[/red]"
     console.print(f"Resolved config path: {resolved} ({status})")
 
     console.print("\nSearch locations (first match wins):")
-    for i, loc in enumerate(config_search_locations(), 1):
+    for i, loc in enumerate(config_search_locations(process_env), 1):
         loc_status = "[green]exists[/green]" if loc.exists() else "[dim]not found[/dim]"
         console.print(f"  {i}. {loc} ({loc_status})")
 
@@ -471,7 +487,9 @@ def config_path_cmd(
 # ---------------------------------------------------------------------------
 
 
-def _load_config_quiet(path: Path) -> Config:
+def _load_config_quiet(
+    runtime_paths: RuntimePaths,
+) -> Config:
     """Load config while temporarily suppressing structlog output.
 
     structlog's default PrintLogger bypasses stdlib log levels, so we
@@ -489,24 +507,29 @@ def _load_config_quiet(path: Path) -> Config:
             logger_factory=structlog.stdlib.LoggerFactory(),
         )
     try:
-        return Config.from_yaml(path)
+        return load_config(runtime_paths)
     finally:
         if not was_configured:
             structlog.reset_defaults()
 
 
-def _find_missing_env_keys(config: Config) -> list[tuple[str, str]]:
+def _find_missing_env_keys(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[tuple[str, str]]:
     """Return (provider, env_key) pairs for configured providers missing env vars."""
     providers_used: set[str] = {model.provider for model in config.models.values()}
     missing: list[tuple[str, str]] = []
     for provider in sorted(providers_used):
         if provider == "vertexai_claude":
             missing.extend(
-                (provider, env_key) for env_key in VERTEXAI_CLAUDE_ENV_KEYS if not get_secret_from_env(env_key)
+                (provider, env_key)
+                for env_key in VERTEXAI_CLAUDE_ENV_KEYS
+                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
         env_key = env_key_for_provider(provider)
-        if env_key and not get_secret_from_env(env_key):
+        if env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
             missing.append((provider, env_key))
     return missing
 
@@ -557,9 +580,9 @@ def _normalize_init_profile(profile: str) -> tuple[_ConfigInitProfile, _Provider
     return aliases.get(profile.strip().lower())
 
 
-def _check_env_keys(config: Config) -> None:
+def _check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     """Warn about missing environment variables for configured providers."""
-    missing = _find_missing_env_keys(config)
+    missing = _find_missing_env_keys(config, runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
         for provider, env_key in missing:

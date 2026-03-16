@@ -3,14 +3,38 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
+from agno.models.ollama import Ollama
 
 from mindroom.agents import _get_datetime_context, create_agent
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _datetime_test_config() -> Config:
+    """Build a deterministic config for datetime prompt tests."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    return bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    rooms=[],
+                    include_default_tools=False,
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+        ),
+        runtime_paths,
+    )
 
 
 def test_get_datetime_context_format() -> None:
@@ -53,11 +77,14 @@ def test_get_datetime_context_invalid_timezone() -> None:
 def test_agent_prompt_includes_datetime() -> None:
     """Test that agent's role prompt includes datetime context."""
     # Create a test config
-    config = Config.from_yaml(Path("config.yaml"))
+    config = _datetime_test_config()
     config.timezone = "America/Los_Angeles"
+    runtime_paths = runtime_paths_for(config)
+    model = Ollama(id="test-model")
 
     # Create an agent
-    agent = create_agent("general", config)
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        agent = create_agent("general", config, runtime_paths)
 
     # Check that the role includes all expected sections
     role = agent.role
@@ -83,15 +110,19 @@ def test_agent_prompt_includes_datetime() -> None:
 
 def test_agent_prompt_datetime_changes_with_timezone() -> None:
     """Test that changing timezone in config changes the agent's datetime context."""
-    config = Config.from_yaml(Path("config.yaml"))
+    config = _datetime_test_config()
+    runtime_paths = runtime_paths_for(config)
+    model = Ollama(id="test-model")
 
     # Test with New York timezone
     config.timezone = "America/New_York"
-    agent_ny = create_agent("general", config)
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        agent_ny = create_agent("general", config, runtime_paths)
 
     # Test with Tokyo timezone
     config.timezone = "Asia/Tokyo"
-    agent_tokyo = create_agent("general", config)
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        agent_tokyo = create_agent("general", config, runtime_paths)
 
     # The prompts should be different (different timezones)
     assert "America/New_York timezone" in agent_ny.role

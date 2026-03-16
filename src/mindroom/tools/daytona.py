@@ -27,7 +27,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="dt_...",
-            description="Daytona API key (can also be set via DAYTONA_API_KEY env var)",
+            description="Daytona API key",
         ),
         ConfigField(
             name="api_url",
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             placeholder="https://api.daytona.io",
-            description="Daytona API URL (can also be set via DAYTONA_API_URL env var)",
+            description="Daytona API URL",
         ),
         # Sandbox configuration
         ConfigField(

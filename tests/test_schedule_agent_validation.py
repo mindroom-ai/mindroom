@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -12,6 +14,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.scheduling import ScheduledWorkflow, schedule_task
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _runtime_bound_config(config: Config) -> Config:
+    """Return a runtime-bound config for scheduling tests."""
+    return bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
 
 
 def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.MatrixRoom:
@@ -31,27 +39,32 @@ def create_mock_room(room_id: str, user_ids: list[str] | None = None) -> nio.Mat
 async def test_schedule_validates_agents_in_room() -> None:
     """Test that schedule command validates agents are configured for the room."""
     # Create config with some agents
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],  # Assistant is in test_room
-            ),
-            "calculator": AgentConfig(
-                display_name="Calculator",
-                role="Math calculations",
-                rooms=[],  # Calculator is NOT in test_room
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],  # Assistant is in test_room
+                ),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Math calculations",
+                    rooms=[],  # Calculator is NOT in test_room
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     # Mock client
     client = AsyncMock()
 
     # Create a mock room with the agents - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock the workflow parsing to return a workflow with calculator mentioned
     mock_workflow = ScheduledWorkflow(
@@ -72,6 +85,7 @@ async def test_schedule_validates_agents_in_room() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -79,7 +93,7 @@ async def test_schedule_validates_agents_in_room() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this room" in response
 
@@ -88,27 +102,32 @@ async def test_schedule_validates_agents_in_room() -> None:
 async def test_schedule_validates_agents_in_thread() -> None:
     """Test that schedule command validates agents are invited to threads."""
     # Create config with agents
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],
-            ),
-            "calculator": AgentConfig(
-                display_name="Calculator",
-                role="Math calculations",
-                rooms=[],  # Not in room, but could be invited to thread
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Math calculations",
+                    rooms=[],  # Not in room, but could be invited to thread
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     # Mock client
     client = AsyncMock()
 
     # Create a mock room with assistant - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock the workflow parsing
     mock_workflow = ScheduledWorkflow(
@@ -129,6 +148,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -136,7 +156,7 @@ async def test_schedule_validates_agents_in_thread() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         assert "not available in this thread" in response
 
@@ -145,20 +165,22 @@ async def test_schedule_validates_agents_in_thread() -> None:
 async def test_schedule_allows_agents_in_room() -> None:
     """Test that schedule command allows agents that are in the room."""
     # Create config
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],
-            ),
-            "calculator": AgentConfig(
-                display_name="Calculator",
-                role="Math calculations",
-                rooms=["test_room"],  # Calculator is also in the room
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Math calculations",
+                    rooms=["test_room"],  # Calculator is also in the room
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     # Mock client
@@ -169,8 +191,8 @@ async def test_schedule_allows_agents_in_room() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.domain}",
-            f"@mindroom_calculator:{config.domain}",
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}",
         ],
     )
 
@@ -197,6 +219,7 @@ async def test_schedule_allows_agents_in_room() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask calculator to calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -211,25 +234,27 @@ async def test_schedule_allows_agents_in_room() -> None:
 @pytest.mark.asyncio
 async def test_schedule_with_multiple_agents_validation() -> None:
     """Test validation when multiple agents are mentioned."""
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],
-            ),
-            "calculator": AgentConfig(
-                display_name="Calculator",
-                role="Math calculations",
-                rooms=[],  # Not in room
-            ),
-            "researcher": AgentConfig(
-                display_name="Researcher",
-                role="Research",
-                rooms=["test_room"],  # In room
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+                "calculator": AgentConfig(
+                    display_name="Calculator",
+                    role="Math calculations",
+                    rooms=[],  # Not in room
+                ),
+                "researcher": AgentConfig(
+                    display_name="Researcher",
+                    role="Research",
+                    rooms=["test_room"],  # In room
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     client = AsyncMock()
@@ -238,8 +263,8 @@ async def test_schedule_with_multiple_agents_validation() -> None:
     room = create_mock_room(
         "test_room",
         [
-            f"@mindroom_assistant:{config.domain}",
-            f"@mindroom_researcher:{config.domain}",
+            f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}",
+            f"@mindroom_researcher:{config.get_domain(runtime_paths_for(config))}",
         ],
     )
 
@@ -261,6 +286,7 @@ async def test_schedule_with_multiple_agents_validation() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes research and calculate",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -268,32 +294,37 @@ async def test_schedule_with_multiple_agents_validation() -> None:
         assert task_id is None
         assert "❌ Failed to schedule" in response
         # The response will contain the full Matrix ID
-        calculator_matrix_id = config.ids["calculator"].full_id
+        calculator_matrix_id = config.get_ids(runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
         # Researcher should not be mentioned as invalid
-        researcher_matrix_id = config.ids["researcher"].full_id
+        researcher_matrix_id = config.get_ids(runtime_paths_for(config))["researcher"].full_id
         assert researcher_matrix_id not in response.split("not available")[1] if "not available" in response else True
 
 
 @pytest.mark.asyncio
 async def test_schedule_with_no_agent_mentions() -> None:
     """Test that schedules without agent mentions work fine."""
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     client = AsyncMock()
     client.room_put_state = AsyncMock()
 
     # Create a mock room - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock workflow without any agent mentions
     mock_workflow = ScheduledWorkflow(
@@ -313,6 +344,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
             scheduled_by="@user:localhost",
             full_text="in 5 minutes remind me about deployment",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 
@@ -324,21 +356,26 @@ async def test_schedule_with_no_agent_mentions() -> None:
 @pytest.mark.asyncio
 async def test_schedule_with_nonexistent_agent() -> None:
     """Test that mentioning a non-existent agent fails appropriately."""
-    config = Config(
-        agents={
-            "assistant": AgentConfig(
-                display_name="Assistant",
-                role="General assistance",
-                rooms=["test_room"],
-            ),
-        },
-        router=RouterConfig(model="default"),
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    role="General assistance",
+                    rooms=["test_room"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
     )
 
     client = AsyncMock()
 
     # Create a mock room - use the actual domain from config
-    room = create_mock_room("test_room", [f"@mindroom_assistant:{config.domain}"])
+    room = create_mock_room(
+        "test_room",
+        [f"@mindroom_assistant:{config.get_domain(runtime_paths_for(config))}"],
+    )
 
     # Mock workflow mentioning non-existent agent
     mock_workflow = ScheduledWorkflow(
@@ -351,13 +388,14 @@ async def test_schedule_with_nonexistent_agent() -> None:
     with patch("mindroom.scheduling._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, response = await schedule_task(
+        task_id, _response = await schedule_task(
             client=client,
             room_id="test_room",
             thread_id=None,
             scheduled_by="@user:localhost",
             full_text="in 5 minutes ask imaginary agent",
             config=config,
+            runtime_paths=runtime_paths_for(config),
             room=room,
         )
 

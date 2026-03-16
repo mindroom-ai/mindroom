@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.memory.auto_flush import (
     MemoryAutoFlushWorker,
     _build_existing_memory_context,
@@ -21,6 +23,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     tool_execution_identity,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,9 +45,28 @@ class _FakeSession:
 
 
 @pytest.fixture
-def config() -> Config:
+def config(tmp_path: Path) -> Config:
     """Return a file-memory config with deterministic auto-flush limits."""
-    cfg = Config.from_yaml()
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_NAMESPACE": "",
+        },
+    )
+    cfg = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    role="General assistant",
+                    rooms=[],
+                ),
+            },
+        ),
+        runtime_paths,
+    )
     cfg.memory.backend = "file"
     cfg.memory.auto_flush.enabled = True
     cfg.memory.auto_flush.flush_interval_seconds = 1
@@ -167,7 +189,11 @@ async def test_worker_respects_batch_limits(
 
     monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
 
-    worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
     await worker._run_cycle(config)
 
     assert len(writes) == 1
@@ -215,7 +241,11 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
         _fake_extract_memory_summary,
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
     await worker._run_cycle(config)
 
     worker_daily_files = list(
@@ -251,7 +281,11 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
         _fake_extract_memory_summary,
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=tmp_path, config_provider=lambda: config)
+    worker = MemoryAutoFlushWorker(
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
     wrote_memory = await worker._flush_session(
         config,
         agent_name="general",
@@ -289,14 +323,15 @@ async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
         session_id="session-alice",
     )
     with tool_execution_identity(alice_identity):
-        await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config)
+        await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config, runtime_paths_for(config))
 
-    append_agent_daily_memory("Shared daily memory", "general", tmp_path, config)
+    append_agent_daily_memory("Shared daily memory", "general", tmp_path, config, runtime_paths_for(config))
 
     worker_context = await _build_existing_memory_context(
         agent_name="general",
         storage_path=tmp_path,
         config=config,
+        runtime_paths=runtime_paths_for(config),
     )
 
     assert "Alice-authored shared memory" in worker_context
@@ -344,7 +379,11 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         },
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
 
     async def _fake_flush(config: Config, *, agent_name: str, session_id: str) -> bool:
         nonlocal session_updated_at
@@ -406,7 +445,11 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
         lambda *_args, **_kwargs: append_calls.append("called"),
     )
 
-    worker = MemoryAutoFlushWorker(storage_path=storage_path, config_provider=lambda: config)
+    worker = MemoryAutoFlushWorker(
+        storage_path=storage_path,
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+    )
     await worker._run_cycle(config)
 
     payload = json.loads((storage_path / "memory_flush_state.json").read_text(encoding="utf-8"))

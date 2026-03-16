@@ -2086,23 +2086,23 @@ Or use the Dashboard's Agents tab to enable tools visually.
 
 ## Environment Variables
 
-Most tools require API keys or credentials. Set them in your `.env` file:
+MindRoom still supports a config-adjacent `.env` file for provider and bootstrap settings such as model API keys:
 
 ```
-# Search
-TAVILY_API_KEY=tvly-...
-EXA_API_KEY=...
-
-# Communication
-SLACK_BOT_TOKEN=xoxb-...
-GITHUB_TOKEN=ghp_...
-
-# AI Services
+# AI providers
 OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+GOOGLE_API_KEY=...
 REPLICATE_API_TOKEN=r8_...
 ```
 
-MindRoom automatically loads `.env` files from the working directory.
+That `.env` file is resolved next to the active `config.yaml`, not from an arbitrary working directory.
+
+Tool integrations should not rely on tool-specific env vars such as `CLICKUP_API_KEY` or `DAYTONA_API_KEY`.
+
+Configure tools through the dashboard credentials store, persisted tool configuration, or explicit runtime overrides instead.
+
+Execution tools do not use env vars as constructor-time configuration. `shell` still receives the committed runtime env as explicit execution context. `python` should not rely on in-process runtime env emulation. If Python code needs runtime-scoped env, run it through sandbox/worker subprocess execution instead.
 
 # MCP (Planned)
 
@@ -4125,8 +4125,11 @@ main() entry
        │
        ▼
 ┌──────────────────┐
-│ Sync Credentials │
-│ (.env → vault)   │
+│ Sync Provider    │
+│ Credentials      │
+│ (.env/bootstrap  │
+│ env → shared     │
+│ credentials)     │
 └────────┬─────────┘
          │
          ▼

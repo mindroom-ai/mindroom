@@ -19,10 +19,15 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
+    """Return a runtime-bound config for routing regression tests."""
+    return bind_runtime_paths(config, test_runtime_paths(runtime_root))
 
 
 def setup_test_bot(
@@ -34,9 +39,35 @@ def setup_test_bot(
 ) -> AgentBot:
     """Set up a test bot with all required mocks."""
     if config is None:
-        config = Config.from_yaml()
+        agents: dict[str, AgentConfig] = {}
+        if agent.agent_name != "router":
+            agents[agent.agent_name] = AgentConfig(
+                display_name=agent.display_name,
+                rooms=[room_id],
+            )
+        config = _runtime_bound_config(
+            Config(
+                agents=agents,
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={"default_room_access": True},
+            ),
+            storage_path,
+        )
+    else:
+        try:
+            runtime_paths_for(config)
+        except KeyError:
+            config = _runtime_bound_config(config, storage_path)
 
-    bot = AgentBot(agent, storage_path, rooms=[room_id], enable_streaming=enable_streaming, config=config)
+    bot = AgentBot(
+        agent,
+        storage_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=[room_id],
+        enable_streaming=enable_streaming,
+    )
     bot.client = AsyncMock()
     return bot
 
@@ -152,21 +183,24 @@ class TestRoutingRegression:
         test_room_id = "!research:localhost"
 
         # Create test config with agents configured for the test room
-        test_config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="MindRoomResearch",
-                    rooms=[test_room_id],  # Configured for test room
-                ),
-                "news": AgentConfig(
-                    display_name="MindRoomNews",
-                    rooms=[test_room_id],  # Configured for test room
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            router=RouterConfig(model="default"),
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="MindRoomResearch",
+                        rooms=[test_room_id],  # Configured for test room
+                    ),
+                    "news": AgentConfig(
+                        display_name="MindRoomNews",
+                        rooms=[test_room_id],  # Configured for test room
+                    ),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
         )
 
         # Create router agent
@@ -243,27 +277,30 @@ class TestRoutingRegression:
     ) -> None:
         """Router should only route to agents that may reply to the current sender."""
         test_room_id = "!research:localhost"
-        test_config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="MindRoomResearch",
-                    rooms=[test_room_id],
-                ),
-                "news": AgentConfig(
-                    display_name="MindRoomNews",
-                    rooms=[test_room_id],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "research": ["@alice:localhost"],
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="MindRoomResearch",
+                        rooms=[test_room_id],
+                    ),
+                    "news": AgentConfig(
+                        display_name="MindRoomNews",
+                        rooms=[test_room_id],
+                    ),
                 },
-            },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "research": ["@alice:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
         )
 
         router_agent = AgentMatrixUser(
@@ -307,7 +344,8 @@ class TestRoutingRegression:
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
-        assert [agent.agent_name(test_config) for agent in available_agents] == ["news"]
+        runtime_paths = runtime_paths_for(test_config)
+        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["news"]
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.suggest_agent_for_message")
@@ -320,32 +358,35 @@ class TestRoutingRegression:
     ) -> None:
         """Router should pass all sender-allowed agents to routing when multiple are eligible."""
         test_room_id = "!research:localhost"
-        test_config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="MindRoomResearch",
-                    rooms=[test_room_id],
-                ),
-                "news": AgentConfig(
-                    display_name="MindRoomNews",
-                    rooms=[test_room_id],
-                ),
-                "facts": AgentConfig(
-                    display_name="MindRoomFacts",
-                    rooms=[test_room_id],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "research": ["@alice:localhost"],
-                    "facts": ["@bob:localhost"],
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="MindRoomResearch",
+                        rooms=[test_room_id],
+                    ),
+                    "news": AgentConfig(
+                        display_name="MindRoomNews",
+                        rooms=[test_room_id],
+                    ),
+                    "facts": AgentConfig(
+                        display_name="MindRoomFacts",
+                        rooms=[test_room_id],
+                    ),
                 },
-            },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "research": ["@alice:localhost"],
+                        "facts": ["@bob:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
         )
 
         router_agent = AgentMatrixUser(
@@ -385,7 +426,8 @@ class TestRoutingRegression:
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
-        assert [agent.agent_name(test_config) for agent in available_agents] == ["facts", "news"]
+        runtime_paths = runtime_paths_for(test_config)
+        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "news"]
 
     @pytest.mark.asyncio
     @patch("mindroom.bot.suggest_agent_for_message")
@@ -398,29 +440,32 @@ class TestRoutingRegression:
     ) -> None:
         """Router should not respond when sender is disallowed for router replies."""
         test_room_id = "!research:localhost"
-        test_config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="MindRoomResearch",
-                    rooms=[test_room_id],
-                ),
-                "news": AgentConfig(
-                    display_name="MindRoomNews",
-                    rooms=[test_room_id],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "router": ["@alice:localhost"],
-                    "research": ["*"],
-                    "news": ["*"],
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="MindRoomResearch",
+                        rooms=[test_room_id],
+                    ),
+                    "news": AgentConfig(
+                        display_name="MindRoomNews",
+                        rooms=[test_room_id],
+                    ),
                 },
-            },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "router": ["@alice:localhost"],
+                        "research": ["*"],
+                        "news": ["*"],
+                    },
+                },
+            ),
+            tmp_path,
         )
 
         router_agent = AgentMatrixUser(
@@ -471,33 +516,36 @@ class TestRoutingRegression:
     ) -> None:
         """Router should still route in threads when prior agents cannot reply to this sender."""
         test_room_id = "!research:localhost"
-        test_config = Config(
-            agents={
-                "research": AgentConfig(
-                    display_name="MindRoomResearch",
-                    rooms=[test_room_id],
-                ),
-                "news": AgentConfig(
-                    display_name="MindRoomNews",
-                    rooms=[test_room_id],
-                ),
-                "facts": AgentConfig(
-                    display_name="MindRoomFacts",
-                    rooms=[test_room_id],
-                ),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="test", id="test-model")},
-            router=RouterConfig(model="default"),
-            authorization={
-                "default_room_access": True,
-                "agent_reply_permissions": {
-                    "research": ["@alice:localhost"],
-                    "news": ["@bob:localhost"],
-                    "facts": ["@alice:localhost"],
+        test_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(
+                        display_name="MindRoomResearch",
+                        rooms=[test_room_id],
+                    ),
+                    "news": AgentConfig(
+                        display_name="MindRoomNews",
+                        rooms=[test_room_id],
+                    ),
+                    "facts": AgentConfig(
+                        display_name="MindRoomFacts",
+                        rooms=[test_room_id],
+                    ),
                 },
-            },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="test", id="test-model")},
+                router=RouterConfig(model="default"),
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "research": ["@alice:localhost"],
+                        "news": ["@bob:localhost"],
+                        "facts": ["@alice:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
         )
 
         router_agent = AgentMatrixUser(
@@ -556,7 +604,8 @@ class TestRoutingRegression:
 
         mock_suggest_agent.assert_called_once()
         available_agents = mock_suggest_agent.call_args.args[1]
-        assert [agent.agent_name(test_config) for agent in available_agents] == ["facts", "research"]
+        runtime_paths = runtime_paths_for(test_config)
+        assert [agent.agent_name(test_config, runtime_paths) for agent in available_agents] == ["facts", "research"]
 
     @pytest.mark.asyncio
     @patch("mindroom.teams.Team.arun")
@@ -575,19 +624,22 @@ class TestRoutingRegression:
     ) -> None:
         """Test that when multiple agents are mentioned, each responds exactly once."""
         # Create a mock config with proper models
-        mock_config = Config(
-            agents={
-                "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),
-                "news": AgentConfig(display_name="NewsAgent", rooms=["!research:localhost"]),
-            },
-            teams={},
-            room_models={},
-            models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+        mock_config = _runtime_bound_config(
+            Config(
+                agents={
+                    "research": AgentConfig(display_name="ResearchAgent", rooms=["!research:localhost"]),
+                    "news": AgentConfig(display_name="NewsAgent", rooms=["!research:localhost"]),
+                },
+                teams={},
+                room_models={},
+                models={"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")},
+            ),
+            tmp_path,
         )
         mock_from_yaml.return_value = mock_config
 
         # Get the actual domain from config
-        domain = mock_config.domain
+        domain = mock_config.get_domain(runtime_paths_for(mock_config))
 
         # Update mock agents to use the correct domain
         mock_research_agent.user_id = f"@mindroom_research:{domain}"

@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import nio
@@ -9,7 +10,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
-from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.client import edit_message, send_message
 from mindroom.matrix.large_messages import _NORMAL_MESSAGE_LIMIT, prepare_large_message
 from mindroom.streaming import (
@@ -60,6 +61,11 @@ class MockConfig:
 
     def __init__(self) -> None:
         self.agents = {}
+
+
+def _runtime_paths() -> RuntimePaths:
+    """Create an explicit runtime context for streaming tests."""
+    return resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
 
 
 # ============================================================================
@@ -155,6 +161,7 @@ async def test_streaming_initial_message_under_limit() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Small initial content
@@ -179,6 +186,7 @@ async def test_streaming_initial_message_over_limit() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Large initial content (60KB - over normal limit)
@@ -208,6 +216,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Start with small message
@@ -249,6 +258,7 @@ async def test_streaming_multiple_edits_with_growth() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Simulate progressive growth
@@ -299,6 +309,7 @@ async def test_streaming_with_thread_context() -> None:
         thread_id="$thread_root",
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Large message
@@ -452,6 +463,7 @@ async def test_streaming_finalize() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
     )
 
     # Large content
@@ -486,6 +498,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
     )
@@ -516,6 +529,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
         extra_content=extra_content,
@@ -549,6 +563,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
     )
@@ -578,6 +593,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
     )
@@ -606,6 +622,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         thread_id=None,
         sender_domain="example.com",
         config=config,
+        runtime_paths=_runtime_paths(),
         response_stream=stream(),
         show_tool_calls=False,
     )

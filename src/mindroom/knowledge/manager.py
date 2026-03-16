@@ -25,8 +25,8 @@ from agno.knowledge.reader.text_reader import TextReader
 from agno.vectordb.chroma import ChromaDb
 from watchfiles import Change, awatch
 
-from mindroom.constants import RuntimePaths, get_runtime_paths, resolve_config_relative_path
-from mindroom.credentials import get_credentials_manager
+from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.credentials import get_runtime_shared_credentials_manager
 from mindroom.credentials_sync import get_api_key_for_provider, get_ollama_host
 from mindroom.embeddings import (
     MindRoomOpenAIEmbedder,
@@ -59,11 +59,14 @@ def _resolve_knowledge_path(
     path: str,
     runtime_paths: RuntimePaths,
 ) -> Path:
-    return resolve_config_relative_path(path, config_path=runtime_paths.config_path)
+    return resolve_config_relative_path(path, runtime_paths=runtime_paths)
 
 
 def _runtime_paths_with_storage_root(config: Config, storage_path: Path) -> RuntimePaths:
-    base_runtime_paths = config._runtime_paths or get_runtime_paths(storage_path=storage_path)
+    if config._runtime_paths is None:
+        msg = "Knowledge manager requires a runtime-bound config"
+        raise ValueError(msg)
+    base_runtime_paths = config._runtime_paths
     return RuntimePaths(
         config_path=base_runtime_paths.config_path,
         config_dir=base_runtime_paths.config_dir,
@@ -172,24 +175,25 @@ def _settings_key(config: Config, storage_path: Path, base_id: str, knowledge_pa
     )
 
 
-def _create_embedder(config: Config) -> Embedder:
+def _create_embedder(config: Config, runtime_paths: RuntimePaths) -> Embedder:
     provider = config.memory.embedder.provider
     embedder_config = config.memory.embedder.config
 
     if provider == "openai":
         return MindRoomOpenAIEmbedder(
             id=embedder_config.model,
-            api_key=get_api_key_for_provider("openai"),
+            api_key=get_api_key_for_provider("openai", runtime_paths=runtime_paths),
             base_url=embedder_config.host,
             dimensions=embedder_config.dimensions,
         )
 
     if provider == "ollama":
-        host = get_ollama_host() or embedder_config.host or "http://localhost:11434"
+        host = get_ollama_host(runtime_paths=runtime_paths) or embedder_config.host or "http://localhost:11434"
         return OllamaEmbedder(id=embedder_config.model, host=host)
 
     if provider == "sentence_transformers":
         return create_sentence_transformers_embedder(
+            runtime_paths,
             embedder_config.model,
             dimensions=embedder_config.dimensions,
         )
@@ -215,12 +219,16 @@ def _coerce_int(value: object) -> int | None:
     return None
 
 
-def _authenticated_repo_url(repo_url: str, credentials_service: str | None) -> str:
+def _authenticated_repo_url(
+    repo_url: str,
+    credentials_service: str | None,
+    runtime_paths: RuntimePaths,
+) -> str:
     """Inject HTTPS credentials from CredentialsManager into a repository URL."""
     if not credentials_service:
         return repo_url
 
-    credentials = get_credentials_manager().load_credentials(credentials_service) or {}
+    credentials = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(credentials_service) or {}
     username = credentials.get("username")
     token = credentials.get("token") or credentials.get("api_key")
     password = credentials.get("password")
@@ -405,10 +413,9 @@ def _resolve_effective_knowledge_path(
     workspace = resolve_agent_workspace(
         effective_agent_name,
         config,
-        base_storage_path=runtime_paths.storage_root,
+        runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         create=create,
-        config_path=runtime_paths.config_path,
     )
     if workspace is None:
         msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
@@ -456,9 +463,9 @@ class KnowledgeManager:
 
     base_id: str
     config: Config
+    runtime_paths: RuntimePaths
     storage_path: Path | None = None
     knowledge_path: Path | None = None
-    runtime_paths: RuntimePaths | None = None
     _settings: tuple[str, ...] = field(init=False)
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
@@ -476,16 +483,10 @@ class KnowledgeManager:
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
         base_config = self.config.get_knowledge_base_config(self.base_id)
-        if self.runtime_paths is not None:
-            if self.storage_path is None:
-                self.storage_path = self.runtime_paths.storage_root
-            if self.knowledge_path is None:
-                self.knowledge_path = _resolve_knowledge_path(base_config.path, self.runtime_paths)
-        elif self.storage_path is not None and self.knowledge_path is None:
-            self.knowledge_path = _resolve_knowledge_path(
-                base_config.path,
-                _runtime_paths_with_storage_root(self.config, self.storage_path),
-            )
+        if self.storage_path is None:
+            self.storage_path = self.runtime_paths.storage_root
+        if self.knowledge_path is None:
+            self.knowledge_path = _resolve_knowledge_path(base_config.path, self.runtime_paths)
         if self.storage_path is None or self.knowledge_path is None:
             msg = f"Knowledge manager '{self.base_id}' requires storage_path and knowledge_path"
             raise ValueError(msg)
@@ -510,7 +511,7 @@ class KnowledgeManager:
             collection=_collection_name(self.base_id, self.knowledge_path),
             path=str(self._base_storage_path),
             persistent_client=True,
-            embedder=_create_embedder(self.config),
+            embedder=_create_embedder(self.config, self.runtime_paths),
         )
         self._knowledge = Knowledge(vector_db=vector_db)
 
@@ -677,10 +678,15 @@ class KnowledgeManager:
 
     async def _ensure_git_repository(self, git_config: KnowledgeGitConfig) -> bool:
         knowledge_root = self._knowledge_root()
+        runtime_paths = self.runtime_paths
         git_dir = knowledge_root / ".git"
         if git_dir.is_dir():
             current_remote = (await self._run_git(["remote", "get-url", "origin"])).strip()
-            expected_remote = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+            expected_remote = _authenticated_repo_url(
+                git_config.repo_url,
+                git_config.credentials_service,
+                runtime_paths,
+            )
             if current_remote != expected_remote:
                 await self._run_git(["remote", "set-url", "origin", expected_remote])
             await self._run_git(["checkout", git_config.branch])
@@ -694,7 +700,11 @@ class KnowledgeManager:
             raise RuntimeError(msg)
 
         knowledge_root.parent.mkdir(parents=True, exist_ok=True)
-        clone_url = _authenticated_repo_url(git_config.repo_url, git_config.credentials_service)
+        clone_url = _authenticated_repo_url(
+            git_config.repo_url,
+            git_config.credentials_service,
+            runtime_paths,
+        )
         await self._run_git(
             [
                 "clone",
@@ -1259,6 +1269,7 @@ async def _ensure_knowledge_manager(
     key: KnowledgeManagerKey,
     base_id: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     storage_path: Path,
     knowledge_path: Path,
     start_background_watchers: bool,
@@ -1284,6 +1295,7 @@ async def _ensure_knowledge_manager(
     manager = KnowledgeManager(
         base_id=base_id,
         config=config,
+        runtime_paths=runtime_paths,
         storage_path=storage_path,
         knowledge_path=knowledge_path,
     )
@@ -1339,6 +1351,7 @@ async def ensure_agent_knowledge_managers(
         return {}
 
     runtime_paths = _runtime_paths_with_storage_root(config, storage_path)
+    config._runtime_paths = runtime_paths
     managers: dict[str, KnowledgeManager] = {}
     for base_id in base_ids:
         start_background_watchers = _should_start_background_watchers(
@@ -1357,6 +1370,7 @@ async def ensure_agent_knowledge_managers(
             key=key,
             base_id=base_id,
             config=config,
+            runtime_paths=runtime_paths,
             storage_path=resolved_storage_path,
             knowledge_path=knowledge_path,
             start_background_watchers=start_background_watchers,
@@ -1377,6 +1391,7 @@ async def initialize_knowledge_managers(
     reindex_on_create: bool = True,
 ) -> dict[str, KnowledgeManager]:
     """Initialize process-wide knowledge managers for all configured knowledge bases."""
+    config._runtime_paths = runtime_paths
     configured_base_ids = set(config.knowledge_bases)
     for key in list(_knowledge_managers):
         if key.base_id not in configured_base_ids and config.get_private_knowledge_base_agent(key.base_id) is None:
@@ -1404,6 +1419,7 @@ async def initialize_knowledge_managers(
             key=key,
             base_id=base_id,
             config=config,
+            runtime_paths=runtime_paths,
             storage_path=resolved_storage_path,
             knowledge_path=knowledge_path,
             start_background_watchers=_should_start_background_watchers(

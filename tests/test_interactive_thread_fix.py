@@ -17,8 +17,10 @@ import nio
 import pytest
 
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 
 @pytest.mark.asyncio
@@ -32,7 +34,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         patch("mindroom.bot.interactive.should_create_interactive_question") as mock_should_create,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons"),
+        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
         patch("mindroom.streaming.ReplacementStreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
@@ -58,7 +60,10 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
         mock_parse.return_value = mock_response
 
         # Create bot
-        config = Config.from_yaml()
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            test_runtime_paths(tmp_path),
+        )
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -70,6 +75,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!test:localhost"],
         )
 
@@ -122,7 +128,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         patch("mindroom.bot.ai_response") as mock_ai_response,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons"),
+        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
     ):
         # Setup mocks
         mock_ai_response.return_value = "Test interactive response"
@@ -140,7 +146,10 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
         mock_parse.return_value = mock_response_with_interactive
 
         # Create bot
-        config = Config.from_yaml()
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            test_runtime_paths(tmp_path),
+        )
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -152,6 +161,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!test:localhost"],
         )
 
@@ -210,7 +220,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         patch("mindroom.bot.interactive.should_create_interactive_question") as mock_should_create,
         patch("mindroom.bot.interactive.parse_and_format_interactive") as mock_parse,
         patch("mindroom.bot.interactive.register_interactive_question") as mock_register,
-        patch("mindroom.bot.interactive.add_reaction_buttons"),
+        patch("mindroom.bot.interactive.add_reaction_buttons", new_callable=AsyncMock),
         patch("mindroom.streaming.ReplacementStreamingResponse") as mock_streaming_class,
     ):
         # Setup mock streaming response
@@ -236,7 +246,10 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
         mock_parse.return_value = mock_response
 
         # Create bot
-        config = Config.from_yaml()
+        config = bind_runtime_paths(
+            Config(agents={"general": AgentConfig(display_name="General")}),
+            test_runtime_paths(tmp_path),
+        )
         agent_user = AgentMatrixUser(
             agent_name="general",
             user_id="@mindroom_general:localhost",
@@ -248,6 +261,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
             agent_user=agent_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!test:localhost"],
         )
 

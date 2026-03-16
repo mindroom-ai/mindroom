@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
+    from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
 
@@ -319,6 +320,7 @@ async def _build_existing_memory_context(
     agent_name: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     preserve_resolved_storage_path: bool = False,
 ) -> str:
     context_config = config.memory.auto_flush.extractor.include_memory_context
@@ -330,6 +332,7 @@ async def _build_existing_memory_context(
         agent_name,
         storage_path,
         config,
+        runtime_paths,
         limit=max_memories,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
@@ -354,6 +357,7 @@ async def _build_existing_memory_context(
 async def _extract_memory_summary(
     *,
     config: Config,
+    runtime_paths: RuntimePaths,
     storage_path: Path,
     agent_name: str,
     session_id: str,
@@ -368,6 +372,7 @@ async def _extract_memory_summary(
         agent_name=agent_name,
         storage_path=storage_path,
         config=config,
+        runtime_paths=runtime_paths,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
@@ -388,7 +393,7 @@ async def _extract_memory_summary(
     )
 
     model_name = config.get_entity_model_name(agent_name)
-    model = get_model_instance(config, model_name)
+    model = get_model_instance(config, runtime_paths, model_name)
     extractor_agent = Agent(
         name="MemoryAutoFlushExtractor",
         role="Extract durable memory statements for long-term memory storage.",
@@ -415,6 +420,7 @@ class MemoryAutoFlushWorker:
     """Background worker that flushes dirty sessions to file memory."""
 
     storage_path: Path
+    runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -668,6 +674,7 @@ class MemoryAutoFlushWorker:
         )
         memory_summary = await _extract_memory_summary(
             config=config,
+            runtime_paths=self.runtime_paths,
             storage_path=effective_storage_path,
             agent_name=agent_name,
             session_id=session_id,
@@ -686,6 +693,7 @@ class MemoryAutoFlushWorker:
             agent_name=agent_name,
             storage_path=effective_storage_path,
             config=config,
+            runtime_paths=self.runtime_paths,
             preserve_resolved_storage_path=False,
         )
         return True

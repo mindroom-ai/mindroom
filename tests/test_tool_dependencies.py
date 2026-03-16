@@ -9,11 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
     _install_optional_extras,
     _install_via_uv_sync,
     _pip_name_to_import,
+    auto_install_enabled,
     auto_install_optional_extra,
     check_deps_installed,
     install_command_for_current_python,
@@ -29,6 +31,7 @@ from mindroom.tool_system.metadata import (
 )
 
 HOOK_SCRIPT = Path(__file__).parent.parent / ".github" / "scripts" / "check_tool_extras_sync.py"
+TEST_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"))
 
 
 def test_all_tools_can_be_imported() -> None:
@@ -45,7 +48,7 @@ def test_all_tools_can_be_imported() -> None:
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
         try:
-            tool_instance = get_tool_by_name(tool_name)
+            tool_instance = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
             assert tool_instance is not None
             assert hasattr(tool_instance, "name")
         except Exception as e:
@@ -154,11 +157,12 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         dependencies=[],
     )
 
-    monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda name: name == tool_name)
-    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
-
+    monkeypatch.setattr(
+        "mindroom.tool_system.metadata.auto_install_tool_extra",
+        lambda name, runtime_paths: name == tool_name and runtime_paths == TEST_RUNTIME_PATHS,
+    )
     try:
-        tool = get_tool_by_name(tool_name)
+        tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
         assert isinstance(tool, DummyToolkit)
         assert calls["count"] == 2
     finally:
@@ -197,12 +201,13 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         dependencies=[],
     )
 
-    monkeypatch.setattr("mindroom.tool_system.metadata.auto_install_tool_extra", lambda _name: False)
-    monkeypatch.setattr("mindroom.tool_system.metadata.get_credentials_manager", lambda: DummyCredentialsManager())
-
+    monkeypatch.setattr(
+        "mindroom.tool_system.metadata.auto_install_tool_extra",
+        lambda _name, _runtime_paths: False,
+    )
     try:
         with pytest.raises(ImportError, match="dependency missing forever"):
-            get_tool_by_name(tool_name)
+            get_tool_by_name(tool_name, TEST_RUNTIME_PATHS)
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)
@@ -342,7 +347,7 @@ def test_install_command_for_current_python_uses_pip_user_outside_virtualenv(
 
 def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     """Non-tool optional extras should use the same runtime install path."""
-    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda: True)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda _runtime_paths: True)
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._available_optional_extras",
         lambda: {"sentence_transformers"},
@@ -352,14 +357,14 @@ def test_auto_install_optional_extra_supports_non_tool_groups(monkeypatch: pytes
         lambda extras, *, quiet=False: extras == ["sentence_transformers"] and quiet,
     )
 
-    assert auto_install_optional_extra("sentence_transformers")
+    assert auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
 
 
 def test_auto_install_optional_extra_matches_installed_metadata_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Normalized extra names should resolve when installed metadata uses hyphens."""
-    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda: True)
+    monkeypatch.setattr("mindroom.tool_system.dependencies.auto_install_enabled", lambda _runtime_paths: True)
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._available_optional_extras",
         lambda: {"sentence-transformers"},
@@ -369,7 +374,18 @@ def test_auto_install_optional_extra_matches_installed_metadata_names(
         lambda extras, *, quiet=False: extras == ["sentence-transformers"] and quiet,
     )
 
-    assert auto_install_optional_extra("sentence_transformers")
+    assert auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
+
+
+def test_auto_install_enabled_uses_runtime_env(tmp_path: Path) -> None:
+    """Auto-install disable flags should come from the explicit runtime context."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+    )
+
+    assert auto_install_enabled(runtime_paths) is False
 
 
 def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: pytest.MonkeyPatch) -> None:

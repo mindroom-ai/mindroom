@@ -13,6 +13,7 @@ from mindroom.bot import AgentBot, create_bot_for_entity
 from mindroom.config.main import Config
 from mindroom.matrix.presence import is_user_online, should_use_streaming
 from mindroom.matrix.users import AgentMatrixUser
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -209,14 +210,17 @@ class TestBotIntegration:
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                    model="gpt-4",
-                    rooms=["#test:localhost"],
-                ),
-            },
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        model="gpt-4",
+                        rooms=["#test:localhost"],
+                    ),
+                },
+            ),
+            test_runtime_paths(tmp_path),
         )
 
         agent_user = AgentMatrixUser(
@@ -227,7 +231,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
+        bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
         bot.client = AsyncMock(spec=nio.AsyncClient)
         bot.client.rooms = {}
@@ -271,14 +275,17 @@ class TestBotIntegration:
         # Create bot with streaming enabled
         from mindroom.config.agent import AgentConfig  # noqa: PLC0415
 
-        config = Config(
-            agents={
-                "test_agent": AgentConfig(
-                    display_name="Test Agent",
-                    model="gpt-4",
-                    rooms=["#test:localhost"],
-                ),
-            },
+        config = bind_runtime_paths(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        model="gpt-4",
+                        rooms=["#test:localhost"],
+                    ),
+                },
+            ),
+            test_runtime_paths(tmp_path),
         )
 
         agent_user = AgentMatrixUser(
@@ -289,7 +296,7 @@ class TestBotIntegration:
             access_token="test_token",  # noqa: S106
         )
 
-        bot = create_bot_for_entity("test_agent", agent_user, config, tmp_path)
+        bot = create_bot_for_entity("test_agent", agent_user, config, runtime_paths_for(config), tmp_path)
         assert isinstance(bot, AgentBot)
         bot.client = AsyncMock(spec=nio.AsyncClient)
         bot.client.rooms = {}

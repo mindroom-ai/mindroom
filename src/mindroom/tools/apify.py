@@ -27,7 +27,7 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             placeholder="apify_api_...",
-            description="Apify API token for authentication (can also be set via APIFY_API_TOKEN env var)",
+            description="Apify API token for authentication",
         ),
         # Configuration
         ConfigField(

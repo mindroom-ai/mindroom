@@ -18,7 +18,11 @@ from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from tests.conftest import TEST_PASSWORD
+from tests.conftest import TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+
+def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
 
 @pytest.fixture
@@ -58,13 +62,16 @@ class TestTeamRoomMembership:
         )
 
         # Create the team bot with configured rooms
-        config = Config(router=RouterConfig(model="default"))
+        config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain)]
+        team_matrix_ids = [
+            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
             team_agents=team_matrix_ids,
             team_mode="round_robin",
@@ -110,13 +117,16 @@ class TestTeamRoomMembership:
         )
 
         # Create the team bot with no configured rooms
-        config = Config(router=RouterConfig(model="default"))
+        config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
         # Convert agent names to MatrixID objects
-        team_matrix_ids = [MatrixID.from_agent("agent1", config.domain)]
+        team_matrix_ids = [
+            MatrixID.from_agent("agent1", config.get_domain(runtime_paths_for(config)), runtime_paths_for(config)),
+        ]
         bot = TeamBot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
+            runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
             team_agents=team_matrix_ids,
             team_mode="round_robin",

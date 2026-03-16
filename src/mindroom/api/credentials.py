@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import threading
 import time
@@ -14,7 +13,7 @@ from pydantic import BaseModel
 
 from mindroom.credentials import (
     CredentialsManager,
-    get_credentials_manager,
+    get_runtime_credentials_manager,
     merge_scoped_credentials,
     validate_service_name,
 )
@@ -144,11 +143,14 @@ def consume_pending_oauth_request(
 
 
 def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
     auth_user = _request_auth_user(request) or {}
     user_id = auth_user.get("user_id")
     requester_id = user_id if isinstance(user_id, str) and user_id else None
-    tenant_id = os.getenv("CUSTOMER_ID")
-    account_id = os.getenv("ACCOUNT_ID")
+    runtime_paths = api_runtime_paths(request)
+    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
+    account_id = runtime_paths.env_value("ACCOUNT_ID")
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,
@@ -187,9 +189,12 @@ def resolve_request_credentials_target(
     service_names: tuple[str, ...] = (),
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    _reject_raw_worker_targeting(request)
+    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
 
-    base_manager = credentials_manager or get_credentials_manager()
+    _reject_raw_worker_targeting(request)
+    runtime_paths = api_runtime_paths(request)
+
+    base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
 
     if not agent_name:
         return RequestCredentialsTarget(
@@ -200,9 +205,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    from mindroom.api.main import load_runtime_config  # noqa: PLC0415
-
-    config, _ = load_runtime_config()
+    config, _ = load_runtime_config(runtime_paths)
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
