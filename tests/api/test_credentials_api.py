@@ -148,7 +148,7 @@ class TestCredentialsAPI:
         """Dashboard credential management should reject user-scoped agents."""
         config = _config_with_worker_scope("user")
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 400
@@ -161,7 +161,7 @@ class TestCredentialsAPI:
         """Dashboard credential management should reject user-agent scoped agents."""
         config = _config_with_worker_scope("user_agent")
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 400
@@ -215,7 +215,7 @@ class TestCredentialsAPI:
         )
         assert expected_worker_key is not None
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
@@ -228,7 +228,7 @@ class TestCredentialsAPI:
         """Dashboard credential management should fail early for unsupported worker scopes."""
         config = _config_with_worker_scope("user")
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/google?agent_name=general")
 
         assert response.status_code == 400
@@ -241,7 +241,7 @@ class TestCredentialsAPI:
         """Dashboard service listing should reject unsupported worker scopes."""
         config = _config_with_worker_scope("user")
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/list?agent_name=general")
 
         assert response.status_code == 400
@@ -262,7 +262,7 @@ class TestCredentialsAPI:
             "_source": "ui",
         }
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
@@ -283,7 +283,7 @@ class TestCredentialsAPI:
             "_source": "env",
         }
 
-        with patch("mindroom.api.main.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200

@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -189,7 +190,7 @@ def resolve_request_credentials_target(
     service_names: tuple[str, ...] = (),
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     _reject_raw_worker_targeting(request)
     runtime_paths = api_runtime_paths(request)
@@ -205,7 +206,7 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    config, _ = load_runtime_config(runtime_paths)
+    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 

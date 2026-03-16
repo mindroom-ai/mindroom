@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
+from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -416,9 +417,9 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             api_runtime_paths(request),
             project_id,
         )
-        from mindroom.api.main import _load_config_from_file, initialize_api_app, load_runtime_config  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
-        load_runtime_config(runtime_paths)
+        config_lifecycle.load_runtime_config(runtime_paths)
         initialize_api_app(request.app, runtime_paths)
         config_reloaded = _load_config_from_file(runtime_paths, request.app)
     except Exception as e:
@@ -457,9 +458,9 @@ async def reset(request: Request) -> dict[str, Any]:
             with env_path.open("w", encoding="utf-8") as f:
                 f.writelines(filtered_lines)
         refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
-        from mindroom.api.main import _load_config_from_file, initialize_api_app, load_runtime_config  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
-        load_runtime_config(refreshed_runtime_paths)
+        config_lifecycle.load_runtime_config(refreshed_runtime_paths)
         initialize_api_app(request.app, refreshed_runtime_paths)
         config_reloaded = _load_config_from_file(refreshed_runtime_paths, request.app)
     except Exception as e:
