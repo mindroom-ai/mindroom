@@ -62,29 +62,6 @@ def _resolve_knowledge_path(
     return resolve_config_relative_path(path, runtime_paths=runtime_paths)
 
 
-def _match_paths(
-    config: Config,
-    base_id: str,
-    storage_path: Path | RuntimePaths,
-    knowledge_path: Path | None,
-) -> tuple[Path, Path]:
-    if isinstance(storage_path, RuntimePaths):
-        runtime_paths = storage_path
-        if knowledge_path is None:
-            target = _resolve_knowledge_manager_target(
-                config,
-                runtime_paths,
-                base_id,
-                start_watchers=True,
-            )
-            return target.binding.storage_root, target.binding.knowledge_path
-        return runtime_paths.storage_root, knowledge_path
-    if knowledge_path is None:
-        msg = f"Knowledge path is required when matching manager '{base_id}' against a storage root"
-        raise ValueError(msg)
-    return storage_path, knowledge_path
-
-
 def _ensure_knowledge_directory_ready(knowledge_path: Path) -> None:
     if knowledge_path.exists() and not knowledge_path.is_dir():
         msg = f"Knowledge path {knowledge_path} must be a directory"
@@ -449,36 +426,24 @@ class KnowledgeManager:
     def matches(
         self,
         config: Config,
-        storage_path: Path | RuntimePaths,
-        knowledge_path: Path | None = None,
+        storage_path: Path,
+        knowledge_path: Path,
     ) -> bool:
         """Return True when manager settings match the provided config."""
-        resolved_storage_path, resolved_knowledge_path = _match_paths(
-            config,
-            self.base_id,
-            storage_path,
-            knowledge_path,
-        )
-        return self._settings == _settings_key(config, resolved_storage_path, self.base_id, resolved_knowledge_path)
+        return self._settings == _settings_key(config, storage_path, self.base_id, knowledge_path)
 
     def needs_full_reindex(
         self,
         config: Config,
-        storage_path: Path | RuntimePaths,
-        knowledge_path: Path | None = None,
+        storage_path: Path,
+        knowledge_path: Path,
     ) -> bool:
         """Return True when index-affecting settings changed."""
-        resolved_storage_path, resolved_knowledge_path = _match_paths(
-            config,
-            self.base_id,
-            storage_path,
-            knowledge_path,
-        )
         return self._indexing_settings != _indexing_settings_key(
             config,
-            resolved_storage_path,
+            storage_path,
             self.base_id,
-            resolved_knowledge_path,
+            knowledge_path,
         )
 
     def get_knowledge(self) -> Knowledge:
