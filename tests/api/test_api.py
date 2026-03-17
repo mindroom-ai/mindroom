@@ -735,6 +735,45 @@ def test_get_tools_execution_scope_override_filters_backend_tools(test_client: T
     assert "calculator" in tools_by_name
 
 
+def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
+    test_client: TestClient,
+) -> None:
+    """An explicit unscoped draft must not fall back to the persisted agent scope."""
+    config = _config_with_worker_scope("user")
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "HA",
+            "category": "automation",
+            "status": "requires_config",
+            "setup_type": "special",
+            "config_fields": None,
+        },
+        {
+            "name": "calculator",
+            "display_name": "Calculator",
+            "description": "Calc",
+            "category": "utility",
+            "status": "available",
+            "setup_type": "none",
+            "config_fields": None,
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
+
+    assert response.status_code == 200
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert "homeassistant" in tools_by_name
+    assert "calculator" in tools_by_name
+
+
 def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
     """Supported scoped tools should report runtime env credentials as available."""
     config = _config_with_worker_scope("shared")

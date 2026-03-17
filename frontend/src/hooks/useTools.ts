@@ -29,10 +29,12 @@ const DEFAULT: ToolInfo[] = [];
 export function useTools(agentName?: string | null, executionScope?: WorkerScope | null) {
   const fetcher = useMemo(
     () => async () => {
+      const executionScopeQuery =
+        agentName != null && executionScope === null ? 'unscoped' : executionScope ?? null;
       const response = (await fetchJSON<ToolsResponse>(
         withQueryParams(API_ENDPOINTS.tools, {
           agent_name: agentName,
-          execution_scope: executionScope ?? null,
+          execution_scope: executionScopeQuery,
         })
       )) as ToolsResponse;
       return response.tools;
