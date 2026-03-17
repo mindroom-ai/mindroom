@@ -31,8 +31,9 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { useConfigStore } from '@/store/configStore';
+import { getAgentExecutionScope, getAgentScopeLabel } from '@/types/config';
 import { getIconForTool } from './iconMapping';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
@@ -43,31 +44,29 @@ import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
-const SHARED_ONLY_BACKEND_TOOL_IDS = new Set([
-  'spotify',
-  'homeassistant',
-  'gmail',
-  'google_calendar',
-  'google_sheets',
-]);
 
 export function Integrations() {
-  const { agents } = useConfigStore();
+  const { agents, config } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => agent.worker_scope != null)
+        .filter(agent => getAgentExecutionScope(config, agent) != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [agents]
+    [agents, config]
   );
   const selectedScopeAgent = useMemo(
     () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
     [scopedAgents, scopeAgentName]
   );
-  const selectedWorkerScope = selectedScopeAgent?.worker_scope ?? null;
+  const selectedExecutionScope =
+    selectedScopeAgent != null ? getAgentExecutionScope(config, selectedScopeAgent) : null;
+  const selectedScopeLabel =
+    selectedScopeAgent != null ? getAgentScopeLabel(config, selectedScopeAgent) : null;
   const hidesSharedOnlyIntegrations =
-    selectedScopeAgent !== null && selectedWorkerScope !== null && selectedWorkerScope !== 'shared';
+    selectedScopeAgent !== null &&
+    selectedExecutionScope !== null &&
+    selectedExecutionScope !== 'shared';
   const disablesDashboardCredentialManagement = hidesSharedOnlyIntegrations;
 
   // Fetch tools from backend
@@ -75,7 +74,8 @@ export function Integrations() {
     tools: backendTools,
     loading: toolsLoading,
     refetch: refetchTools,
-  } = useTools(scopeAgentName);
+    statusAuthoritative,
+  } = useTools(scopeAgentName, selectedExecutionScope);
 
   // State
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -110,7 +110,7 @@ export function Integrations() {
   // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
-  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName]);
+  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName, selectedExecutionScope]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
@@ -125,7 +125,7 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
-      const scope = { agentName: scopeAgentName };
+      const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
@@ -146,9 +146,7 @@ export function Integrations() {
 
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
-        .filter(
-          tool => !hidesSharedOnlyIntegrations || !SHARED_ONLY_BACKEND_TOOL_IDS.has(tool.name)
-        )
+        .filter(tool => !hidesSharedOnlyIntegrations || tool.execution_scope_supported !== false)
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
           return {
@@ -201,7 +199,7 @@ export function Integrations() {
 
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName };
+    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
     if (provider) {
       const config = provider.getConfig(scope);
@@ -280,7 +278,7 @@ export function Integrations() {
     }
 
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName };
+    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
     setLoading(true);
     try {
@@ -290,7 +288,11 @@ export function Integrations() {
       } else {
         // For generic tools, delete credentials via API
         const response = await fetch(
-          withAgentName(`${API_BASE_URL}/api/credentials/${integration.id}`, scopeAgentName),
+          withAgentExecutionScope(
+            `${API_BASE_URL}/api/credentials/${integration.id}`,
+            scopeAgentName,
+            selectedExecutionScope
+          ),
           {
             method: 'DELETE',
           }
@@ -333,7 +335,10 @@ export function Integrations() {
 
     // Check if there's a custom action button
     const provider = integrationProviders[integration.id];
-    const config = provider?.getConfig({ agentName: scopeAgentName });
+    const config = provider?.getConfig({
+      agentName: scopeAgentName,
+      executionScope: selectedExecutionScope,
+    });
 
     if (config?.ActionButton) {
       const ActionButton = config.ActionButton;
@@ -722,8 +727,8 @@ export function Integrations() {
           <p className="text-gray-600 dark:text-gray-400">
             {selectedScopeAgent
               ? `Configuring tools for ${selectedScopeAgent.display_name} (${
-                  selectedWorkerScope ?? 'shared'
-                } worker scope).`
+                  selectedScopeLabel ?? 'unscoped'
+                }).`
               : 'Connect external services to enable agent capabilities'}
           </p>
           {hidesSharedOnlyIntegrations && (
@@ -734,8 +739,17 @@ export function Integrations() {
               </AlertDescription>
               <AlertDescription className="mt-2">
                 Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
-                are only supported for shared deployment credentials or agents with
-                <code>worker_scope=shared</code>.
+                are only supported for shared deployment credentials or agents with an effective
+                shared runtime scope (<code>worker_scope=shared</code>).
+              </AlertDescription>
+            </Alert>
+          )}
+          {selectedScopeAgent && statusAuthoritative === false && (
+            <Alert className="mt-3">
+              <AlertDescription>
+                Requester-scoped tool status is preview only. The dashboard can show scope support
+                rules and shared env-backed availability, but it cannot inspect live requester-owned
+                scoped credentials.
               </AlertDescription>
             </Alert>
           )}
@@ -788,6 +802,7 @@ export function Integrations() {
               <activeDialog.config.ConfigComponent
                 onClose={() => setActiveDialog(null)}
                 agentName={scopeAgentName}
+                executionScope={selectedExecutionScope}
                 onSuccess={async () => {
                   setActiveDialog(null);
                   // Force refresh to get updated Google tools status
@@ -814,6 +829,7 @@ export function Integrations() {
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
           agentName={scopeAgentName}
+          executionScope={selectedExecutionScope}
           onSuccess={async () => {
             setConfigDialog(null);
             // Refetch tools to get updated status

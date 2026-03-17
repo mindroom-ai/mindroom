@@ -6,7 +6,7 @@ import importlib
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -36,13 +36,13 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,14 @@ def _load_default_config() -> Config:
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
     """Create an agent with the test config's bound runtime context."""
-    return mindroom.agents.create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
+    execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    return mindroom.agents.create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        execution_identity=execution_identity,
+        **kwargs,
+    )
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -646,14 +653,13 @@ class TestPrepareAgentAndPrompt:
         tmp_path: Path,
     ) -> None:
         """Editing a context file should affect the next reply preparation without restart."""
-        config._runtime_paths = _runtime_paths(tmp_path)
+        config = bind_runtime_paths(config, _runtime_paths(tmp_path))
         config.agents["general"].memory_backend = "file"
-        config.agents["general"].memory_file_path = "mind_data"
-        config.agents["general"].context_files = ["mind_data/SOUL.md"]
+        config.agents["general"].context_files = ["SOUL.md"]
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
 
-        workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+        workspace = agent_workspace_root_path(tmp_path, "general")
         workspace.mkdir(parents=True, exist_ok=True)
         soul_path = workspace / "SOUL.md"
         soul_path.write_text("First context version.", encoding="utf-8")
@@ -1193,6 +1199,53 @@ class TestApplyContextWindowLimit:
         ):
             _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
         assert agent.num_history_runs == 5
+
+    def test_passes_execution_identity_when_loading_private_session_storage(self, tmp_path: Path) -> None:
+        """Private-agent history budgeting should keep explicit execution identity when loading sessions."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
+            ),
+            tmp_path,
+        )
+        agent = self._make_agent(num_history_runs=5)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="test_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="sid",
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+
+        with (
+            patch("mindroom.ai.create_session_storage") as mock_create_storage,
+            patch("mindroom.ai._get_agent_session", return_value=None),
+        ):
+            _apply_context_window_limit(
+                agent,
+                "test_agent",
+                config,
+                "Hello",
+                "sid",
+                runtime_paths,
+                execution_identity=execution_identity,
+            )
+
+        mock_create_storage.assert_called_once_with(
+            "test_agent",
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
 
     def test_within_budget_no_change(self, tmp_path: object) -> None:
         """Under threshold -> num_history_runs unchanged."""

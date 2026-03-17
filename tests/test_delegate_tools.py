@@ -9,12 +9,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent, describe_agent
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -143,7 +144,8 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 tools._config,
-                tools._runtime_paths,
+                runtime_paths=tools._runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -200,7 +202,8 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
-                runtime_paths,
+                runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=2,
@@ -235,7 +238,8 @@ class TestDelegateTools:
             mock_create.assert_called_once_with(
                 "code",
                 config,
-                runtime_paths,
+                runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -275,25 +279,27 @@ class TestDelegateKnowledge:
         )
 
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-
         mock_response = MagicMock()
         mock_response.content = "Found relevant docs"
         mock_agent = AsyncMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
 
         with (
-            patch("mindroom.custom_tools.delegate.get_knowledge_manager", return_value=mock_manager) as mock_get_km,
+            patch("mindroom.custom_tools.delegate.get_agent_knowledge", return_value=mock_knowledge) as mock_get,
             patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create,
         ):
             result = await tools.delegate_task("researcher", "Find info about X")
 
-            mock_get_km.assert_called_with("docs")
+            mock_get.assert_called_once()
+            args, kwargs = mock_get.call_args
+            assert args == ("researcher", config, runtime_paths)
+            assert set(kwargs["request_knowledge_managers"]) == {"docs"}
+            assert "execution_identity" not in kwargs
             mock_create.assert_called_once_with(
                 "researcher",
                 config,
-                runtime_paths,
+                runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=mock_knowledge,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -313,6 +319,7 @@ class TestDelegateKnowledge:
                 "worker": AgentConfig(display_name="Worker", role="Work"),
             },
         )
+        config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
@@ -332,11 +339,66 @@ class TestDelegateKnowledge:
             mock_create.assert_called_once_with(
                 "worker",
                 config,
-                runtime_paths,
+                runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
             )
+
+    @pytest.mark.asyncio
+    async def test_delegation_uses_stored_execution_identity_for_private_target(self, tmp_path: Path) -> None:
+        """Delegation should use the constructor-bound execution identity for private targets."""
+        config = _make_config(
+            {
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["worker"],
+                ),
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    role="Work",
+                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                ),
+            },
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="leader",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            delegation_depth=0,
+        )
+        mock_response = MagicMock()
+        mock_response.content = "done"
+        mock_agent = AsyncMock()
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+
+        with patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create:
+            await tools.delegate_task("worker", "do work")
+
+        mock_create.assert_called_once_with(
+            "worker",
+            config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=None,
+            include_interactive_questions=False,
+            delegation_depth=1,
+        )
 
 
 class TestDelegateToolRegistration:
@@ -426,6 +488,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -444,6 +507,7 @@ class TestDelegateAutoInjection:
             "worker",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -467,6 +531,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -490,6 +555,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -519,6 +585,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -550,6 +617,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )

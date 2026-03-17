@@ -1,6 +1,40 @@
-import { Config } from '@/types/config';
+import { Agent, Config, TeamEligibilityByAgent } from '@/types/config';
+import { ConfigValidationIssue } from '@/lib/configValidation';
 
 const API_BASE = '/api';
+
+function isConfigValidationIssue(detail: unknown): detail is ConfigValidationIssue {
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    Array.isArray((detail as ConfigValidationIssue).loc) &&
+    typeof (detail as ConfigValidationIssue).msg === 'string' &&
+    typeof (detail as ConfigValidationIssue).type === 'string'
+  );
+}
+
+function isConfigValidationIssueList(detail: unknown): detail is ConfigValidationIssue[] {
+  return Array.isArray(detail) && detail.every(isConfigValidationIssue);
+}
+
+export class ConfigValidationError extends Error {
+  readonly issues: ConfigValidationIssue[];
+
+  constructor(issues: ConfigValidationIssue[]) {
+    super('Configuration validation failed');
+    this.name = 'ConfigValidationError';
+    this.issues = issues;
+  }
+}
+
+async function responseDetail(response: Response): Promise<unknown> {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    return payload.detail;
+  } catch {
+    return null;
+  }
+}
 
 export async function loadConfig(): Promise<Config> {
   const response = await fetch(`${API_BASE}/config/load`, {
@@ -23,6 +57,32 @@ export async function loadConfig(): Promise<Config> {
   return response.json();
 }
 
+export async function getTeamEligibility(agents: Agent[]): Promise<TeamEligibilityByAgent> {
+  const agentsObject = agents.reduce(
+    (acc, agent) => {
+      const { id, ...rest } = agent;
+      acc[id] = rest;
+      return acc;
+    },
+    {} as Record<string, Omit<Agent, 'id'>>
+  );
+
+  const response = await fetch(`${API_BASE}/config/team-eligibility`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ agents: agentsObject }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to derive team eligibility');
+  }
+
+  const payload = (await response.json()) as { team_eligibility: TeamEligibilityByAgent };
+  return payload.team_eligibility;
+}
+
 export async function saveConfig(config: Config): Promise<void> {
   const response = await fetch(`${API_BASE}/config/save`, {
     method: 'PUT',
@@ -33,7 +93,14 @@ export async function saveConfig(config: Config): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error('Failed to save configuration');
+    const detail = await responseDetail(response);
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to save configuration (Error ${response.status})`);
   }
 }
 

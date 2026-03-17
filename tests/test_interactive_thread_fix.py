@@ -61,13 +61,13 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
 
         # Create bot
         config = bind_runtime_paths(
-            Config(agents={"test": AgentConfig(display_name="Test")}),
+            Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
         agent_user = AgentMatrixUser(
-            agent_name="test",
-            user_id="@mindroom_test:localhost",
-            display_name="TestAgent",
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
             password="test_password",  # noqa: S106
         )
 
@@ -81,7 +81,7 @@ async def test_interactive_question_preserves_thread_root_in_streaming(tmp_path:
 
         # Mock client
         client = AsyncMock()
-        client.user_id = "@mindroom_test:localhost"
+        client.user_id = "@mindroom_general:localhost"
         # Mock room_send to return a proper response
         mock_send_response = MagicMock(spec=nio.RoomSendResponse)
         mock_send_response.event_id = "$agent_message_id"
@@ -147,13 +147,13 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
 
         # Create bot
         config = bind_runtime_paths(
-            Config(agents={"test": AgentConfig(display_name="Test")}),
+            Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
         agent_user = AgentMatrixUser(
-            agent_name="test",
-            user_id="@mindroom_test:localhost",
-            display_name="TestAgent",
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
             password="test_password",  # noqa: S106
         )
 
@@ -167,7 +167,7 @@ async def test_interactive_question_preserves_thread_root_in_non_streaming(tmp_p
 
         # Mock client and make sure room_send returns a proper response
         client = AsyncMock()
-        client.user_id = "@mindroom_test:localhost"
+        client.user_id = "@mindroom_general:localhost"
 
         # Mock a successful send response with event_id
         mock_send_response = MagicMock()
@@ -247,13 +247,13 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
 
         # Create bot
         config = bind_runtime_paths(
-            Config(agents={"test": AgentConfig(display_name="Test")}),
+            Config(agents={"general": AgentConfig(display_name="General")}),
             test_runtime_paths(tmp_path),
         )
         agent_user = AgentMatrixUser(
-            agent_name="test",
-            user_id="@mindroom_test:localhost",
-            display_name="TestAgent",
+            agent_name="general",
+            user_id="@mindroom_general:localhost",
+            display_name="GeneralAgent",
             password="test_password",  # noqa: S106
         )
 
@@ -267,7 +267,7 @@ async def test_interactive_question_without_thread_streaming(tmp_path: Path) -> 
 
         # Mock client
         client = AsyncMock()
-        client.user_id = "@mindroom_test:localhost"
+        client.user_id = "@mindroom_general:localhost"
         # Mock room_send to return a proper response
         mock_send_response = MagicMock(spec=nio.RoomSendResponse)
         mock_send_response.event_id = "$standalone_message"

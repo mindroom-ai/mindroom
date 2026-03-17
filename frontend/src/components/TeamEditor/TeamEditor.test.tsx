@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TeamEditor } from './TeamEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Team, Agent, Config } from '@/types/config';
+import { Team, Agent, Config, TeamEligibilityByAgent } from '@/types/config';
 
 // Mock the store
 vi.mock('@/store/configStore');
@@ -46,6 +46,26 @@ describe('TeamEditor', () => {
       instructions: [],
       rooms: ['research'],
     },
+    {
+      id: 'leader',
+      display_name: 'Leader Agent',
+      role: 'Coordinates work',
+      tools: [],
+      skills: [],
+      instructions: [],
+      rooms: ['dev'],
+      delegate_to: ['mind'],
+    },
+    {
+      id: 'mind',
+      display_name: 'Mind Agent',
+      role: 'Private assistant',
+      tools: [],
+      skills: [],
+      instructions: [],
+      rooms: ['research'],
+      private: { per: 'user' },
+    },
   ];
 
   const mockConfig: Partial<Config> = {
@@ -59,6 +79,14 @@ describe('TeamEditor', () => {
   const mockUpdateTeam = vi.fn();
   const mockDeleteTeam = vi.fn();
   const mockSaveConfig = vi.fn();
+  const mockRefreshTeamEligibility = vi.fn().mockResolvedValue(undefined);
+  const mockTeamEligibilityByAgent: TeamEligibilityByAgent = {
+    code: null,
+    shell: null,
+    research: null,
+    leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+    mind: 'Private agents cannot participate in teams yet.',
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -84,8 +112,11 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: false,
+      diagnostics: [],
     });
   });
 
@@ -106,8 +137,11 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: {},
       config: mockConfig,
       isDirty: false,
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -170,6 +204,24 @@ describe('TeamEditor', () => {
     expect(codeCheckbox).toBeChecked();
     expect(shellCheckbox).toBeChecked();
     expect(researchCheckbox).not.toBeChecked();
+  });
+
+  it('disables private agents as team members', () => {
+    render(<TeamEditor />);
+
+    const mindCheckbox = screen.getByRole('checkbox', { name: /Mind Agent/i });
+    expect(mindCheckbox).toBeDisabled();
+    expect(screen.getByText('Private agents cannot participate in teams yet.')).toBeInTheDocument();
+  });
+
+  it('disables agents that delegate to private agents', () => {
+    render(<TeamEditor />);
+
+    const leaderCheckbox = screen.getByRole('checkbox', { name: /Leader Agent/i });
+    expect(leaderCheckbox).toBeDisabled();
+    expect(
+      screen.getByText("Delegates to private agent 'mind', so it cannot participate in teams yet.")
+    ).toBeInTheDocument();
   });
 
   it('adds agent to team when checkbox is checked', async () => {
@@ -300,8 +352,11 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -339,13 +394,53 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
 
     const saveButton = screen.getByRole('button', { name: /Save/i });
     expect(saveButton).not.toBeDisabled();
+  });
+
+  it('renders save diagnostics for team validation failures', () => {
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      config: mockConfig,
+      isDirty: true,
+      diagnostics: [
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['teams', 'dev_team', 'agents'],
+            msg: 'Team members cannot include private agents.',
+            type: 'value_error',
+          },
+        },
+      ],
+    });
+
+    render(<TeamEditor />);
+
+    expect(screen.getByText('Team members cannot include private agents.')).toBeInTheDocument();
   });
 });

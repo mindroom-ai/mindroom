@@ -104,6 +104,14 @@ class TestBuildAgentStatusMessage:
     def test_team_agent_status(self) -> None:
         """Test building status message for team agent."""
         config = Config(
+            agents={
+                "researcher": AgentConfig(display_name="Researcher"),
+                "analyst": AgentConfig(display_name="Analyst"),
+                "writer": AgentConfig(display_name="Writer"),
+                "reviewer": AgentConfig(display_name="Reviewer"),
+                "editor": AgentConfig(display_name="Editor"),
+                "fact_checker": AgentConfig(display_name="Fact Checker"),
+            },
             teams={
                 "research_team": TeamConfig(
                     display_name="Research Team",

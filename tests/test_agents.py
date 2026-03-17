@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -15,28 +16,40 @@ from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProf
 from pydantic import ValidationError
 
 from mindroom import agent_prompts
-from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config.agent import AgentConfig, CultureConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.agents import _CULTURE_MANAGER_CACHE, _PRIVATE_CULTURE_MANAGER_CACHE, create_agent
+from mindroom.config.agent import (
+    AgentConfig,
+    AgentPrivateConfig,
+    AgentPrivateKnowledgeConfig,
+    CultureConfig,
+    TeamConfig,
+)
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_state_root_path,
     agent_workspace_root_path,
+    private_instance_scope_root_path,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     shared_storage_root,
     tool_execution_identity,
-    visible_agent_state_roots_for_worker_key,
+    visible_state_roots_for_worker_key,
     worker_root_path,
 )
+from mindroom.workspaces import _copy_workspace_template
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -106,7 +119,14 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     """Create an agent with the test config's explicit runtime context."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
-    return create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
+    execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        execution_identity=execution_identity,
+        **kwargs,
+    )
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -279,8 +299,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -289,8 +308,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
-            worker_scope,
-            routing_agent_name,
+            worker_target,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -331,8 +349,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -341,8 +358,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
-            worker_scope,
-            routing_agent_name,
+            worker_target,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -390,15 +406,14 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Workspace-relative memory_file_path should point tools at the canonical workspace."""
+    """Shared file-backed agents should point tools at the canonical workspace root."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("Canonical workspace.\n", encoding="utf-8")
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
@@ -410,6 +425,393 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
+
+
+def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
+    """Shared file-backed agents should resolve to the canonical agent workspace root."""
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+
+    workspace = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    ).workspace
+
+    expected_workspace = agent_workspace_root_path(tmp_path, "general")
+    assert workspace is not None
+    assert workspace.root == expected_workspace
+    assert not (runtime_paths.config_dir / "workspace").exists()
+
+
+def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:
+    """Private roots must not resolve outside the canonical private-instance state root."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    state_root = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=identity,
+    ).state_root
+    state_root.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    (state_root / "mind_data").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match=re.escape("private.root must stay within the workspace root")):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_path: Path) -> None:
+    """Private state roots must not be symlinked outside their canonical scope root."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert worker_key is not None
+    canonical_state_root = _private_instance_state_root_path(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        agent_name="general",
+    )
+    canonical_state_root.parent.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    canonical_state_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Private state root must stay within the private scope root"):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_runtime_rejects_private_scope_root_symlink_escape(tmp_path: Path) -> None:
+    """Private state roots must stay under the resolved storage root even if the scope root is symlinked."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    scope_root.parent.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    scope_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Private scope root must stay within the canonical root"):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path: Path) -> None:
+    """Private context files must not resolve outside the private workspace root."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        context_files=["notes/SOUL.md"],
+    )
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    workspace = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    ).workspace
+    assert workspace is not None
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    notes_link = workspace.root / "notes"
+    notes_link.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape("private.context_files must stay within the workspace root"),
+    ):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_path: Path) -> None:
+    """Shared agents should resolve one canonical shared state root with no worker key."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.is_private is False
+    assert runtime.worker_key is None
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+    assert runtime.tool_base_dir is None
+    assert runtime.file_memory_root is None
+
+
+def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp_path: Path) -> None:
+    """Shared scoped agents should still resolve their worker key from execution identity."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].worker_scope = "user"
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.is_private is False
+    assert runtime.execution_scope == "user"
+    assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+    assert runtime.tool_base_dir is None
+    assert runtime.file_memory_root is None
+
+
+def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
+    """Shared worker scope should not infer worker keys from ambient runtime context."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"CUSTOMER_ID": "tenant-123"},
+    )
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].worker_scope = "shared"
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
+
+    assert runtime.is_private is False
+    assert runtime.execution_scope == "shared"
+    assert runtime.worker_key is None
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+
+
+def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private agents should resolve requester-local state, workspace, and worker key together."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    template_dir = build_private_template_dir("runtime_template")
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+        context_files=["USER.md"],
+    )
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert expected_worker_key is not None
+    assert runtime.is_private is True
+    assert runtime.worker_key == expected_worker_key
+    assert runtime.state_root == _private_instance_state_root_path(
+        tmp_path,
+        worker_key=expected_worker_key,
+        agent_name="general",
+    )
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == runtime.state_root / "mind_data"
+    assert runtime.tool_base_dir == runtime.workspace.root
+    assert runtime.file_memory_root == runtime.workspace.root
+
+
+def test_private_workspace_template_preserves_metadata_and_backfills_missing_files(tmp_path: Path) -> None:
+    """Private templates should preserve file metadata and backfill new files without overwriting edits."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    script_path = template_dir / "bootstrap.sh"
+    script_path.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    script_path.chmod(0o755)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    with patch("mindroom.workspaces._copy_workspace_template", wraps=_copy_workspace_template) as copy_template:
+        first_workspace = resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+            create=True,
+        ).workspace
+        assert first_workspace is not None
+        copied_script = first_workspace.root / "bootstrap.sh"
+        assert copied_script.exists()
+        assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
+        copied_script.write_text("#!/bin/sh\necho edited\n", encoding="utf-8")
+        later_file = template_dir / "LATER.md"
+        later_file.write_text("later\n", encoding="utf-8")
+        second_workspace = resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+            create=True,
+        ).workspace
+
+    assert second_workspace is not None
+    assert first_workspace.root == second_workspace.root
+    assert copy_template.call_count == 2
+    assert copied_script.read_text(encoding="utf-8") == "#!/bin/sh\necho edited\n"
+    assert (first_workspace.root / "LATER.md").read_text(encoding="utf-8") == "later\n"
+
+
+def test_private_workspace_template_initializes_missing_files_in_partially_populated_root(tmp_path: Path) -> None:
+    """First-use template initialization should fill missing files even if the root already exists."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "SOUL.md").write_text("soul\n", encoding="utf-8")
+    (template_dir / "USER.md").write_text("user\n", encoding="utf-8")
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+    runtime_paths = _runtime_paths(tmp_path / "storage", config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    state_root = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=identity,
+    ).state_root
+    workspace_root = state_root / "mind_data"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    existing_file = workspace_root / "existing.txt"
+    existing_file.write_text("keep\n", encoding="utf-8")
+
+    workspace = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    ).workspace
+
+    assert workspace is not None
+    assert existing_file.read_text(encoding="utf-8") == "keep\n"
+    assert (workspace.root / "SOUL.md").read_text(encoding="utf-8") == "soul\n"
+    assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -441,11 +843,10 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Agents without memory_file_path should not be forced into an auto-created workspace."""
+    """Agents without file-backed workspace semantics should keep tool defaults."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
-    config.agents["general"].memory_file_path = None
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
@@ -478,22 +879,18 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
 
 
-def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
-    """Absolute memory_file_path should fail fast instead of creating copied state."""
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-
-    with pytest.raises(ValidationError, match="workspace-relative"):
-        config.agents["general"].memory_file_path = str(tmp_path / "external" / "mind_data")
-
-
-def test_create_agent_rejects_env_var_memory_file_workspace() -> None:
-    """Env-var memory_file_path should fail fast instead of becoming a literal workspace subdir."""
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-
-    with pytest.raises(ValidationError, match="env-variable references"):
-        config.agents["general"].memory_file_path = "${MINDROOM_STORAGE_PATH}/mind_data"
+def test_config_rejects_removed_memory_file_path_field() -> None:
+    """Legacy memory_file_path should fail fast with a directed migration error."""
+    with pytest.raises(ValidationError, match="memory_file_path"):
+        Config(
+            agents={
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                    "memory_file_path": "mind_data",
+                },
+            },
+        )
 
 
 def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
@@ -530,10 +927,9 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     """Worker-routed scoped tools should receive the same workspace override as local tools."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general")
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
@@ -781,12 +1177,12 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
 
 
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execution_identity(
+def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shared worker credentials should be available during agent construction outside request context."""
+    """Shared worker credentials should be available when ingress passes explicit shared identity."""
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -826,17 +1222,13 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
             credentials_manager=cast("CredentialsManager", credentials_manager),
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            worker_target=worker_target,
         )
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
@@ -847,7 +1239,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
-    agent = _create_agent_for_test("general", config=config)
+    agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
 
     assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 
@@ -871,34 +1263,30 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
 def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Path) -> None:
     """Agent-owned paths should resolve directly inside the canonical workspace."""
     resolved = resolve_agent_owned_path(
-        "mind_data/SOUL.md",
+        "SOUL.md",
         agent_name="general",
         base_storage_path=tmp_path,
     )
 
     assert resolved.is_relative_to(agent_state_root_path(tmp_path, "general"))
-    assert resolved == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+    assert resolved == agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
 
 def test_agent_owned_validation_matches_runtime_resolution(tmp_path: Path) -> None:
     """Validation and runtime resolution should share the same normalization contract."""
     config = _test_config()
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
-    config.agents["general"].context_files = ["./mind_data/SOUL.md"]
+    config.agents["general"].context_files = ["./SOUL.md"]
 
-    validated_workspace = config.agents["general"].memory_file_path
     validated_context = config.agents["general"].context_files[0]
 
-    assert validated_workspace == "mind_data"
-    assert validated_context == "mind_data/SOUL.md"
+    assert validated_context == "SOUL.md"
     assert (
         resolve_agent_owned_path(
             validated_context,
             agent_name="general",
             base_storage_path=tmp_path,
         )
-        == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+        == agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
     )
 
 
@@ -918,9 +1306,52 @@ def test_resolve_worker_key_encodes_tenant_parts_that_would_break_round_tripping
     worker_key = resolve_worker_key("shared", execution_identity, agent_name="general")
 
     assert worker_key == "v1:tenant_west:shared:general"
-    assert visible_agent_state_roots_for_worker_key(tmp_path, worker_key) == (
-        agent_state_root_path(tmp_path, "general"),
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (agent_state_root_path(tmp_path, "general"),)
+
+
+def test_visible_state_roots_for_user_worker_include_private_instance_namespace(tmp_path: Path) -> None:
+    """User workers should see shared agent roots plus their own private-instance namespace."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
     )
+
+    worker_key = resolve_worker_key("user", identity)
+
+    assert worker_key is not None
+    assert visible_state_roots_for_worker_key(tmp_path, worker_key) == (
+        shared_storage_root(tmp_path) / "agents",
+        private_instance_scope_root_path(tmp_path, worker_key),
+    )
+
+
+def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(
+    tmp_path: Path,
+) -> None:
+    """Private requester-scoped workers should only see their addressed private state root."""
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="mind")
+
+    assert worker_key is not None
+    assert visible_state_roots_for_worker_key(
+        tmp_path,
+        worker_key,
+        private_agent_names=frozenset({"mind"}),
+    ) == (_private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
@@ -969,14 +1400,13 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
-    config.agents["general"].context_files = ["mind_data/SOUL.md"]
+    config.agents["general"].context_files = ["SOUL.md"]
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
     config.agents["general"].worker_tools = ["coding"]
 
-    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     canonical_soul = canonical_workspace / "SOUL.md"
     canonical_soul.write_text("Canonical soul context.", encoding="utf-8")
@@ -1033,21 +1463,20 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                 include_default_tools=False,
                 learning=False,
                 memory_backend="file",
-                memory_file_path="mind_data",
                 context_files=[
-                    "mind_data/SOUL.md",
-                    "mind_data/AGENTS.md",
-                    "mind_data/USER.md",
-                    "mind_data/IDENTITY.md",
-                    "mind_data/TOOLS.md",
-                    "mind_data/HEARTBEAT.md",
+                    "SOUL.md",
+                    "AGENTS.md",
+                    "USER.md",
+                    "IDENTITY.md",
+                    "TOOLS.md",
+                    "HEARTBEAT.md",
                 ],
                 knowledge_bases=["mind_memory"],
             ),
         },
         knowledge_bases={
             "mind_memory": KnowledgeBaseConfig(
-                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
                 watch=True,
             ),
         },
@@ -1056,7 +1485,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
 
     agent = _create_agent_for_test("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
 
-    workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+    workspace = runtime_storage / "agents" / "mind" / "workspace"
     assert (workspace / "SOUL.md").exists()
     assert (workspace / "AGENTS.md").exists()
     assert (workspace / "USER.md").exists()
@@ -1080,7 +1509,6 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
 
@@ -1093,7 +1521,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(tmp_path, "general")
-    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
     assert agent_root / "learning" / "general.db" in db_files
@@ -1114,7 +1542,6 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
 
@@ -1131,7 +1558,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(shared_root, "general")
-    canonical_workspace = agent_workspace_root_path(shared_root, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(shared_root, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
     assert agent_root / "learning" / "general.db" in db_files
@@ -1226,6 +1653,219 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
         os.chdir(original_cwd)
 
     assert "Relative soul context." in agent.role
+
+
+def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path) -> None:
+    """Runtime-bound config validation should reject missing private template directories."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./missing-template",
+    )
+
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+
+def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(tmp_path: Path) -> None:
+    """Private templates must reject symlinked content instead of copying host files."""
+    template_dir = tmp_path / "mind_template"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text("secret\n", encoding="utf-8")
+    (template_dir / "linked.txt").symlink_to(secret_file)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
+
+
+def test_copy_workspace_template_rejects_destination_symlink_escape(tmp_path: Path) -> None:
+    """Template backfill must refuse to write through symlinked workspace subdirectories."""
+    template_dir = tmp_path / "template"
+    (template_dir / "notes").mkdir(parents=True, exist_ok=True)
+    (template_dir / "notes" / "NEW.md").write_text("later\n", encoding="utf-8")
+
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    (workspace_root / "notes").symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="workspace template destination must stay within the workspace root"):
+        _copy_workspace_template(workspace_root, template_dir=template_dir)
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private per-user roots should copy their configured template and isolate private context files."""
+    config = _test_config()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    template_dir = build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+        context_files=["USER.md"],
+    )
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-bob",
+    )
+
+    runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
+    assert template_dir == (config_dir / "mind_template").resolve()
+
+    create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=alice_identity,
+    )
+    alice_worker_key = resolve_worker_key("user", alice_identity)
+    assert alice_worker_key is not None
+    alice_workspace = (
+        _private_instance_state_root_path(
+            tmp_path,
+            worker_key=alice_worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+    )
+    assert (alice_workspace / "USER.md").exists()
+    assert (alice_workspace / "MEMORY.md").exists()
+    (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
+    alice_agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=alice_identity,
+    )
+
+    bob_agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=bob_identity,
+    )
+    bob_worker_key = resolve_worker_key("user", bob_identity)
+    assert bob_worker_key is not None
+    bob_workspace = (
+        _private_instance_state_root_path(
+            tmp_path,
+            worker_key=bob_worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+    )
+
+    assert alice_workspace != bob_workspace
+    assert "Alice private root context." in alice_agent.role
+    assert (bob_workspace / "USER.md").exists()
+    assert "Alice private root context." not in bob_agent.role
+    assert alice_workspace.parent == private_instance_scope_root_path(tmp_path, alice_worker_key) / "general"
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_template_dir_does_not_imply_context_files(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private template directories should not implicitly load Mind-style context files."""
+    config = _test_config()
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    build_private_template_dir(
+        "cfg/mind_template",
+        files={
+            "USER.md": "Template user.\n",
+            "MEMORY.md": "# Memory\n",
+        },
+    )
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
+
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
+
+    assert "Template user." not in agent.role
+
+
+@patch("mindroom.agents.SqliteDb")
+def test_create_agent_private_root_requires_execution_identity(
+    mock_storage: MagicMock,  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Private agents should fail closed instead of falling back to shared config-relative state."""
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+    )
+
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path), execution_identity=None)
+
+    assert not (tmp_path / "mind_data").exists()
 
 
 def test_config_rejects_unknown_agent_knowledge_base_assignment() -> None:
@@ -1361,36 +2001,36 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     assert config.uses_mem0_memory() is True
 
 
-def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> None:
-    """memory_file_path should fail fast unless effective backend resolves to file."""
+def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
+    """memory_file_path should fail fast because the field was removed."""
     with pytest.raises(
         ValidationError,
-        match=re.escape(
-            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
-        ),
+        match="memory_file_path",
     ):
         Config(
             agents={
-                "general": AgentConfig(display_name="General", memory_file_path="./openclaw_data"),
+                "general": {
+                    "display_name": "General",
+                    "memory_file_path": "./openclaw_data",
+                },
             },
             memory={"backend": "mem0"},
         )
 
 
-def test_config_accepts_memory_file_path_with_file_backend_override() -> None:
-    """memory_file_path is valid when effective backend resolves to file."""
-    config = Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                memory_backend="file",
-                memory_file_path="./openclaw_data",
-            ),
-        },
-        memory={"backend": "mem0"},
-    )
-
-    assert config.agents["general"].memory_file_path == "openclaw_data"
+def test_config_rejects_memory_file_path_even_with_file_backend() -> None:
+    """memory_file_path should stay removed even when the agent uses file memory."""
+    with pytest.raises(ValidationError, match="memory_file_path"):
+        Config(
+            agents={
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                    "memory_file_path": "./openclaw_data",
+                },
+            },
+            memory={"backend": "mem0"},
+        )
 
 
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
@@ -1411,6 +2051,293 @@ def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:
     )
 
     assert config.agents["calculator"].knowledge_bases == ["research"]
+
+
+def test_config_rejects_reserved_private_knowledge_base_prefix() -> None:
+    """Top-level knowledge base IDs must not collide with synthetic private IDs."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "knowledge_bases keys must not use the reserved private prefix '__agent_private__:'; "
+            "invalid keys: __agent_private__:mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(display_name="Mind"),
+            },
+            knowledge_bases={
+                "__agent_private__:mind": KnowledgeBaseConfig(path="./company_docs"),
+            },
+        )
+
+
+def test_config_private_knowledge_requires_path_without_template_default() -> None:
+    """Private knowledge needs an explicit path whenever it is enabled."""
+    with pytest.raises(
+        ValidationError,
+        match=re.escape(
+            "agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: mind",
+        ),
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(watch=False),
+                    ),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("root", "expected_message"),
+    [
+        ("", "private.root must not be empty"),
+        ("   ", "private.root must not be empty"),
+        (".", "private.root must not be the workspace root"),
+        ("sessions", "private.root must not use reserved runtime directory 'sessions'"),
+        ("sessions/nested", "private.root must not use reserved runtime directory 'sessions'"),
+        ("learning", "private.root must not use reserved runtime directory 'learning'"),
+        ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
+        ("chroma", "private.root must not use reserved runtime directory 'chroma'"),
+        ("culture", "private.root must not use reserved runtime directory 'culture'"),
+    ],
+)
+def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
+    """Private roots must stay out of runtime-managed directories and the private-instance root itself."""
+    with pytest.raises(ValidationError, match=re.escape(expected_message)):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root=root,
+                    ),
+                ),
+            },
+        )
+
+
+def test_config_rejects_removed_room_thread_private_scope() -> None:
+    """Private requester scopes should no longer accept room-thread isolation."""
+    with pytest.raises(ValidationError, match="Input should be 'user' or 'user_agent'"):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=cast("AgentPrivateConfig", {"per": "room_thread"}),
+                ),
+            },
+        )
+
+
+def test_config_rejects_removed_room_thread_worker_scope() -> None:
+    """Worker scope should no longer accept room-thread reuse."""
+    with pytest.raises(ValidationError, match="Input should be 'shared', 'user' or 'user_agent'"):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    worker_scope=cast("WorkerScope", "room_thread"),
+                ),
+            },
+        )
+
+
+@pytest.mark.parametrize("path", ["", "   "])
+def test_config_rejects_blank_private_knowledge_path(path: str) -> None:
+    """Blank private knowledge paths should be rejected explicitly."""
+    with pytest.raises(ValidationError, match=re.escape("private.knowledge.path must not be empty")):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        knowledge=AgentPrivateKnowledgeConfig(path=path),
+                    ),
+                ),
+            },
+        )
+
+
+def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
+    """A dot path is allowed to index the entire private root explicitly."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    knowledge=AgentPrivateKnowledgeConfig(path="."),
+                ),
+            ),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_knowledge_base_config(private_base_id).path == "."
+
+
+def test_config_rejects_private_agents_in_teams() -> None:
+    """Configured teams must not include private agents."""
+    with pytest.raises(
+        ValidationError,
+        match="Team 'mixed_team' includes private agent 'mind'; private agents cannot participate in teams yet",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+            teams={
+                "mixed_team": TeamConfig(
+                    display_name="Mixed Team",
+                    role="Mixed team",
+                    agents=["mind", "calculator"],
+                ),
+            },
+        )
+
+
+def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> None:
+    """Configured teams must reject shared members that reach private agents via delegation."""
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "Team 'mixed_team' includes agent 'leader' which reaches private agent 'mind' "
+            "via delegation; private agents cannot participate in teams yet"
+        ),
+    ):
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
+                "helper": AgentConfig(display_name="Helper"),
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+            },
+            teams={
+                "mixed_team": TeamConfig(
+                    display_name="Mixed Team",
+                    role="Mixed team",
+                    agents=["leader", "helper"],
+                ),
+            },
+        )
+
+
+def test_config_rejects_shared_only_integrations_for_isolating_worker_scope() -> None:
+    """Agents with isolating worker scope must not use shared-only integrations."""
+    with pytest.raises(
+        ValidationError,
+        match=r"general -> gmail \(worker_scope=user\)",
+    ):
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["gmail"],
+                    worker_scope="user",
+                ),
+            },
+        )
+
+
+def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> None:
+    """Shared-only defaults.tools must still be rejected for isolating agents."""
+    with pytest.raises(
+        ValidationError,
+        match=r"mind -> homeassistant \(private\.per=user_agent\)",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                ),
+            },
+            defaults=DefaultsConfig(tools=["homeassistant"]),
+        )
+
+
+def test_config_private_and_shared_knowledge_coexist() -> None:
+    """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                ),
+                knowledge_bases=["company_docs"],
+            ),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    assert config.get_agent_knowledge_base_ids("mind") == ["company_docs", private_base_id]
+    private_config = config.get_knowledge_base_config(private_base_id)
+    assert private_config.path == "memory"
+
+
+def test_template_dir_does_not_imply_private_knowledge() -> None:
+    """Copying from a template directory alone should not create a private knowledge base."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                ),
+            ),
+        },
+    )
+
+    assert config.get_agent_private_knowledge_base_id("mind") is None
+    assert config.get_agent_knowledge_base_ids("mind") == []
+
+
+def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
+    """Synthetic private base IDs should resolve only while private knowledge is actually active."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                ),
+            ),
+            "assistant": AgentConfig(display_name="Assistant"),
+        },
+        knowledge_bases={
+            "company_docs": KnowledgeBaseConfig(path="./company_docs"),
+        },
+    )
+
+    assert config.get_private_knowledge_base_agent("__agent_private__:mind") == "mind"
+    assert config.get_private_knowledge_base_agent("__agent_private__:assistant") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:missing") is None
 
 
 def test_config_rejects_duplicate_default_tools() -> None:
@@ -1479,6 +2406,144 @@ def test_config_accepts_valid_culture_assignment() -> None:
     assert config.get_agent_culture("unknown") is None
 
 
+def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree() -> None:
+    """Git-backed private knowledge must use a dedicated subtree outside private writable content."""
+    with pytest.raises(
+        ValidationError,
+        match=r"git-backed private knowledge at 'memory'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        template_dir="./mind_template",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path="memory",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="file",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
+def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> None:
+    """Git-backed private knowledge must not target the file-memory entrypoint file."""
+    with pytest.raises(
+        ValidationError,
+        match=r"git-backed private knowledge at 'MEMORY.md'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        template_dir="./mind_template",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path="MEMORY.md",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="file",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
+def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> None:
+    """Dedicated private knowledge subtrees remain valid for git-backed sync."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(
+                        path="kb_repo",
+                        git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                    ),
+                ),
+                memory_backend="file",
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+    )
+
+    assert config.agents["mind"].private is not None
+    assert config.agents["mind"].private.knowledge is not None
+    assert config.agents["mind"].private.knowledge.path == "kb_repo"
+
+
+def test_config_rejects_git_backed_private_knowledge_at_private_root() -> None:
+    """Git-backed private knowledge must never target the private root itself."""
+    with pytest.raises(
+        ValidationError,
+        match=r"git-backed private knowledge at '\.'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path=".",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="mem0",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
+def test_config_rejects_git_backed_private_knowledge_overlapping_template_content(tmp_path: Path) -> None:
+    """Git-backed private knowledge must not overlap any template-seeded subtree."""
+    from tests.conftest import bind_runtime_paths  # noqa: PLC0415
+
+    template_dir = tmp_path / "mind_template"
+    (template_dir / "docs").mkdir(parents=True)
+    (template_dir / "docs" / "README.md").write_text("seeded\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValidationError,
+        match=r"git-backed private knowledge at 'docs'.*scaffolded private workspace content",
+    ):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        private=AgentPrivateConfig(
+                            per="user",
+                            root="mind_data",
+                            template_dir="./mind_template",
+                            knowledge=AgentPrivateKnowledgeConfig(
+                                path="docs",
+                                git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                            ),
+                        ),
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            ),
+            runtime_paths,
+        )
+
+
 @patch("mindroom.agents.SqliteDb")
 @patch("mindroom.agents.CultureManager")
 @patch("mindroom.agents.Agent")
@@ -1534,6 +2599,7 @@ def test_create_agent_shares_culture_manager_for_same_culture(
         )
 
     assert mock_culture_manager_class.call_count == 1
+    assert len(_CULTURE_MANAGER_CACHE) == 1
     first_kwargs = mock_agent_class.call_args_list[0].kwargs
     second_kwargs = mock_agent_class.call_args_list[1].kwargs
 
@@ -1600,3 +2666,283 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     assert mock_storage.call_count >= 2
     assert mock_culture_manager_class.call_args is not None
     assert mock_culture_manager_class.call_args.kwargs["model"] is model
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_create_private_agent_scopes_culture_storage_per_requester(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Private agents should not share culture storage across requester instances."""
+    _CULTURE_MANAGER_CACHE.clear()
+    _PRIVATE_CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "general": AgentConfig(
+                display_name="GeneralAgent",
+                role="General assistant",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user", root="mind_data"),
+            ),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["general"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    created_culture_managers = [MagicMock(name="alice_culture_manager"), MagicMock(name="bob_culture_manager")]
+    mock_culture_manager_class.side_effect = created_culture_managers
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        _create_agent_for_test(
+            "general",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=alice_identity,
+        )
+        _create_agent_for_test(
+            "general",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=bob_identity,
+        )
+
+    assert mock_culture_manager_class.call_count == 2
+    culture_db_calls = [
+        str(call.kwargs.get("db_file", ""))
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 2
+    assert culture_db_calls[0] != culture_db_calls[1]
+    assert "/private_instances/" in culture_db_calls[0]
+    assert "/private_instances/" in culture_db_calls[1]
+    assert _CULTURE_MANAGER_CACHE == {}
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+    assert first_kwargs["culture_manager"] is created_culture_managers[0]
+    assert second_kwargs["culture_manager"] is created_culture_managers[1]
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_private_agents_share_culture_manager_within_same_requester_scope(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Private agents in the same culture should share one requester-scoped culture manager."""
+    _CULTURE_MANAGER_CACHE.clear()
+    _PRIVATE_CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "agent_one": AgentConfig(
+                display_name="Agent One",
+                role="First",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user", root="mind_data"),
+            ),
+            "agent_two": AgentConfig(
+                display_name="Agent Two",
+                role="Second",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user", root="mind_data"),
+            ),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["agent_one", "agent_two"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="agent_one",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    created_culture_manager = MagicMock(name="shared_private_culture_manager")
+    mock_culture_manager_class.return_value = created_culture_manager
+
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        _create_agent_for_test(
+            "agent_one",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=execution_identity,
+        )
+        _create_agent_for_test(
+            "agent_two",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="agent_two",
+                requester_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+
+    assert mock_culture_manager_class.call_count == 1
+    culture_db_calls = [
+        str(call.kwargs.get("db_file", ""))
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 1
+    assert "/private_instances/" in culture_db_calls[0]
+    assert "/agent_one/" not in culture_db_calls[0]
+    assert "/agent_two/" not in culture_db_calls[0]
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+    assert first_kwargs["culture_manager"] is created_culture_manager
+    assert second_kwargs["culture_manager"] is created_culture_manager
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_private_user_agent_agents_share_culture_manager_within_same_requester_scope(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Private user_agent cultures should share one requester-scoped culture manager."""
+    _CULTURE_MANAGER_CACHE.clear()
+    _PRIVATE_CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "agent_one": AgentConfig(
+                display_name="Agent One",
+                role="First",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+            ),
+            "agent_two": AgentConfig(
+                display_name="Agent Two",
+                role="Second",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+            ),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["agent_one", "agent_two"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    created_culture_manager = MagicMock(name="shared_private_culture_manager")
+    mock_culture_manager_class.return_value = created_culture_manager
+
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        _create_agent_for_test(
+            "agent_one",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="agent_one",
+                requester_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+        _create_agent_for_test(
+            "agent_two",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="agent_two",
+                requester_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+
+    assert mock_culture_manager_class.call_count == 1
+    culture_db_calls = [
+        str(call.kwargs.get("db_file", ""))
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 1
+    assert "/private_instances/" in culture_db_calls[0]
+    assert "/agent_one/" not in culture_db_calls[0]
+    assert "/agent_two/" not in culture_db_calls[0]
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+    assert first_kwargs["culture_manager"] is created_culture_manager
+    assert second_kwargs["culture_manager"] is created_culture_manager

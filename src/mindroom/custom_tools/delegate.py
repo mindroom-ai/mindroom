@@ -12,13 +12,14 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge.manager import get_knowledge_manager
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -34,12 +35,14 @@ class DelegateTools(Toolkit):
         delegate_to: list[str],
         runtime_paths: RuntimePaths,
         config: Config,
+        execution_identity: ToolExecutionIdentity | None = None,
         delegation_depth: int = 0,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = delegate_to
         self._runtime_paths = runtime_paths
         self._config = config
+        self._execution_identity = execution_identity
         self._delegation_depth = delegation_depth
 
         super().__init__(
@@ -82,17 +85,24 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
-            knowledge = resolve_agent_knowledge(
+            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_request_knowledge_managers(
+                [agent_name],
+                config=self._config,
+                runtime_paths=self._runtime_paths,
+                execution_identity=self._execution_identity,
+            )
+
+            knowledge = get_agent_knowledge(
                 agent_name,
                 self._config,
-                lambda base_id: (
-                    manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None
-                ),
+                self._runtime_paths,
+                request_knowledge_managers=request_knowledge_managers,
             )
             agent = create_agent(
                 agent_name,
                 self._config,
-                self._runtime_paths,
+                runtime_paths=self._runtime_paths,
+                execution_identity=self._execution_identity,
                 knowledge=knowledge,
                 include_interactive_questions=False,
                 delegation_depth=self._delegation_depth + 1,

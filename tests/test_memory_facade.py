@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._prompting import _format_memories_as_context
-from mindroom.tool_system.worker_routing import agent_state_root_path
+from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
@@ -645,7 +645,7 @@ class TestMemoryFacade:
             await add_agent_memory("Remember this", "general", storage_path, config)
 
         mock_create.assert_not_called()
-        memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
+        memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
         assert memory_file.exists()
         assert "Remember this" in memory_file.read_text(encoding="utf-8")
 

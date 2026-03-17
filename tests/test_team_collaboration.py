@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.matrix.users import AgentMatrixUser
@@ -513,7 +513,7 @@ class TestRouterTeamFormation:
         )
 
         # Should form a team with both agents
-        assert result.should_form_team is True
+        assert result.kind == "team"
         agent_names = sorted(_agent_names(result.agents, config))
         assert agent_names == ["agent1", "agent2"]
 
@@ -533,7 +533,7 @@ class TestRouterTeamFormation:
         )
 
         # Should not form a team with single agent
-        assert result.should_form_team is False
+        assert result.kind == "none"
 
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
@@ -583,4 +583,336 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is False
+        assert result.kind == "none"
+
+    @pytest.mark.asyncio
+    async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
+        """DM fallback should degrade to the remaining supported single agent."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!dm:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["mind"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="Hello",
+            config=config,
+            is_dm_room=True,
+            room=room,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "individual"
+        assert _agent_names(result.agents, config) == ["calculator"]
+
+    @pytest.mark.asyncio
+    async def test_thread_history_unavailable_agents_degrade_to_individual(self) -> None:
+        """Implicit thread continuation should not reject when one historical agent is off-room."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!thread:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[],
+            agents_in_thread=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="continue the thread",
+            config=config,
+            room=room,
+            is_thread=True,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "individual"
+        assert _agent_names(result.agents, config) == ["calculator"]
+
+    @pytest.mark.asyncio
+    async def test_previously_mentioned_off_room_agents_degrade_to_individual(self) -> None:
+        """Implicit thread mentions should degrade instead of surfacing explicit-request rejection."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!thread:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            runtime_paths=runtime_paths_for(config),
+            message="continue the thread",
+            config=config,
+            room=room,
+            is_thread=True,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "individual"
+        assert _agent_names(result.agents, config) == ["calculator"]
+
+    @pytest.mark.asyncio
+    async def test_tagged_off_room_agents_reject_the_entire_team_request(self) -> None:
+        """Explicit team requests must reject members that are not available in the room."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="calculator and general, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "reject"
+        assert _agent_names(result.agents, config) == ["calculator"]
+        assert result.rejection_message == ("Team request includes agent 'general' that is not available in this room.")
+
+    @pytest.mark.asyncio
+    async def test_tagged_agents_reject_when_sender_can_talk_to_zero_agents(self) -> None:
+        """Explicit sender visibility of [] must not fall back to room-visible agents."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="calculator and general, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[],
+        )
+
+        assert result.kind == "reject"
+        assert result.agents == []
+        assert result.rejection_message == (
+            "Team request includes agents 'calculator', 'general' that are not available to you in this room."
+        )
+
+    @pytest.mark.asyncio
+    async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
+        """Mixed shared/private mentions should reject the whole ad hoc team request."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["mind"].full_id: None,
+        }
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["mind"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="calculator, general, and mind, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "reject"
+
+    @pytest.mark.asyncio
+    async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
+        self,
+    ) -> None:
+        """Ad hoc team formation must reject explicit member sets that reach private agents."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "general": AgentConfig(
+                        display_name="General",
+                        role="Coordinator",
+                        delegate_to=["research"],
+                    ),
+                    "code": AgentConfig(display_name="Code", role="Coder"),
+                    "analyst": AgentConfig(display_name="Analyst", role="Analyst"),
+                    "research": AgentConfig(
+                        display_name="Research",
+                        role="Private researcher",
+                        private=AgentPrivateConfig(per="user", root="research_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["general"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["code"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["analyst"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["research"].full_id: None,
+        }
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["general"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["general"],
+                config.get_ids(runtime_paths_for(config))["code"],
+                config.get_ids(runtime_paths_for(config))["analyst"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="general, code, and analyst, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+        )
+
+        assert result.kind == "reject"

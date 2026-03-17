@@ -8,14 +8,21 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
+from mindroom.knowledge.manager import (
+    ensure_agent_knowledge_managers,
+    get_shared_knowledge_manager_for_config,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from agno.knowledge.document import Document
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -30,6 +37,74 @@ class _KnowledgeVectorDb(Protocol):
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]: ...
+
+
+async def ensure_request_knowledge_managers(
+    agent_names: list[str],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> dict[str, KnowledgeManager]:
+    """Ensure and collect request-scoped knowledge managers for one agent set."""
+    managers: dict[str, KnowledgeManager] = {}
+    for agent_name in agent_names:
+        managers.update(
+            await ensure_agent_knowledge_managers(
+                agent_name,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            ),
+        )
+    return managers
+
+
+def _get_knowledge_for_base(
+    base_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+) -> Knowledge | None:
+    """Resolve one configured base ID to its current Knowledge instance."""
+    request_manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
+    if request_manager is not None:
+        return request_manager.get_knowledge()
+    if config.get_private_knowledge_base_agent(base_id):
+        return None
+
+    manager = get_shared_knowledge_manager_for_config(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        candidate_manager=shared_manager_lookup(base_id) if shared_manager_lookup is not None else None,
+    )
+    return manager.get_knowledge() if manager is not None else None
+
+
+def get_agent_knowledge(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    on_missing_bases: Callable[[list[str]], None] | None = None,
+) -> Knowledge | None:
+    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
+    return resolve_agent_knowledge(
+        agent_name,
+        config,
+        lambda base_id: _get_knowledge_for_base(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=shared_manager_lookup,
+        ),
+        on_missing_bases=on_missing_bases,
+    )
 
 
 @dataclass
@@ -148,13 +223,13 @@ def resolve_agent_knowledge(
     on_missing_bases: Callable[[list[str]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for an agent into one Knowledge instance."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or not agent_config.knowledge_bases:
+    base_ids = config.get_agent_knowledge_base_ids(agent_name)
+    if not base_ids:
         return None
 
     missing_base_ids: list[str] = []
     knowledges: list[Knowledge] = []
-    for base_id in agent_config.knowledge_bases:
+    for base_id in base_ids:
         knowledge = get_knowledge(base_id)
         if knowledge is None:
             missing_base_ids.append(base_id)

@@ -5,14 +5,14 @@ from __future__ import annotations
 import re
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: TC001
+from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
 from mindroom.config.memory import MemoryBackend, MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
@@ -20,6 +20,7 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    resolve_config_relative_path,
     resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
@@ -30,10 +31,14 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
-from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
+from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
+from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.matrix.identity import MatrixID
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 _AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
@@ -121,6 +126,179 @@ def _normalized_config_data(data: object) -> object:
     return normalized_data
 
 
+def _agent_delegation_targets(agent_data: AgentConfig | Mapping[str, Any] | None) -> tuple[str, ...]:
+    if agent_data is None:
+        return ()
+    if isinstance(agent_data, AgentConfig):
+        return tuple(agent_data.delegate_to)
+    raw_delegate_to = agent_data.get("delegate_to")
+    if not isinstance(raw_delegate_to, list | tuple):
+        return ()
+    return tuple(target for target in raw_delegate_to if isinstance(target, str))
+
+
+def _agent_is_private(agent_data: AgentConfig | Mapping[str, Any] | None) -> bool:
+    if agent_data is None:
+        return False
+    if isinstance(agent_data, AgentConfig):
+        return agent_data.private is not None
+    return agent_data.get("private") is not None
+
+
+def _get_agent_delegation_closure_for_agents(
+    agent_name: str,
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+    visiting: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """Return one agent plus all agents reachable through transitive delegation."""
+    if closures is None:
+        closures = {}
+    if agent_name in closures:
+        return closures[agent_name]
+    if agent_name in visiting:
+        return frozenset()
+
+    agent_data = agents.get(agent_name)
+    if agent_data is None or agent_name == ROUTER_AGENT_NAME:
+        result = frozenset({agent_name})
+        closures[agent_name] = result
+        return result
+
+    reachable = {agent_name}
+    next_visiting = visiting | {agent_name}
+    for target_name in _agent_delegation_targets(agent_data):
+        reachable.update(
+            _get_agent_delegation_closure_for_agents(
+                target_name,
+                agents,
+                closures=closures,
+                visiting=next_visiting,
+            ),
+        )
+
+    result = frozenset(reachable)
+    closures[agent_name] = result
+    return result
+
+
+def _get_private_team_targets_for_agents(
+    agent_name: str,
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+) -> tuple[str, ...]:
+    """Return private agents reachable from one team member, including itself."""
+    closure_cache = closures if closures is not None else {}
+    return tuple(
+        sorted(
+            target_name
+            for target_name in _get_agent_delegation_closure_for_agents(
+                agent_name,
+                agents,
+                closures=closure_cache,
+            )
+            if _agent_is_private(agents.get(target_name))
+        ),
+    )
+
+
+def _get_unsupported_team_agents_for_agents(
+    agent_names: list[str],
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+) -> dict[str, tuple[str, ...] | None]:
+    """Return unsupported team members keyed by agent name."""
+    closure_cache = closures if closures is not None else {}
+    unsupported_agents: dict[str, tuple[str, ...] | None] = {}
+    for agent_name in agent_names:
+        if agent_name not in agents:
+            unsupported_agents[agent_name] = None
+            continue
+        private_targets = _get_private_team_targets_for_agents(agent_name, agents, closures=closure_cache)
+        if private_targets:
+            unsupported_agents[agent_name] = private_targets
+    return unsupported_agents
+
+
+def _team_agent_eligibility_reason(
+    agent_name: str,
+    *,
+    private_targets: tuple[str, ...] | None,
+) -> str | None:
+    """Return the concise editor-facing team-eligibility reason for one agent."""
+    if private_targets is None:
+        return f"Unknown agent '{agent_name}'."
+    if not private_targets:
+        return None
+    if agent_name in private_targets:
+        return "Private agents cannot participate in teams yet."
+    if len(private_targets) == 1:
+        return f"Delegates to private agent '{private_targets[0]}', so it cannot participate in teams yet."
+    return (
+        "Delegates to private agents "
+        f"{', '.join(repr(target) for target in private_targets)}, so it cannot participate in teams yet."
+    )
+
+
+def _format_unsupported_team_agent_message(
+    agent_name: str,
+    *,
+    prefix: str,
+    private_targets: tuple[str, ...] | None,
+) -> str:
+    """Return the user-facing error for one unsupported team member."""
+    if private_targets is None:
+        return f"{prefix} references unknown agent '{agent_name}'"
+    if agent_name in private_targets:
+        return f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
+    if len(private_targets) == 1:
+        return (
+            f"{prefix} includes agent '{agent_name}' which reaches private agent "
+            f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
+        )
+    return (
+        f"{prefix} includes agent '{agent_name}' which reaches private agents "
+        f"{', '.join(repr(target) for target in private_targets)} via delegation; "
+        "private agents cannot participate in teams yet"
+    )
+
+
+def team_eligibility_reasons_for_agents(
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Return editor-facing team-eligibility reasons for all configured agents."""
+    closure_cache: dict[str, frozenset[str]] = {}
+    return {
+        agent_name: _team_agent_eligibility_reason(
+            agent_name,
+            private_targets=_get_private_team_targets_for_agents(
+                agent_name,
+                agents,
+                closures=closure_cache,
+            ),
+        )
+        for agent_name in agents
+    }
+
+
+def _relative_paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether two relative paths overlap by equality, ancestry, or descent."""
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path) -> bool:
+    """Return whether a template already seeds content at or around one target subtree."""
+    if not template_dir.is_dir():
+        return False
+    return any(
+        _relative_paths_overlap(source_path.relative_to(template_dir), target_path)
+        for source_path in template_dir.rglob("*")
+    )
+
+
 def _router_agents_for_room(
     agents: dict[str, AgentConfig],
     teams: dict[str, TeamConfig],
@@ -155,6 +333,7 @@ def _router_agents_for_room(
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
+    PRIVATE_KNOWLEDGE_BASE_ID_PREFIX: ClassVar[str] = "__agent_private__:"
     TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
         "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
     }
@@ -241,6 +420,37 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_team_agents(self) -> Config:
+        """Ensure team members exist and do not use private requester-local state."""
+        for team_name, team_config in self.teams.items():
+            self.assert_team_agents_supported(team_config.agents, team_name=team_name)
+        return self
+
+    @model_validator(mode="after")
+    def validate_shared_only_integration_assignments(self) -> Config:
+        """Reject shared-only integrations on isolating worker scopes at config-validation time."""
+        invalid_assignments: list[str] = []
+        for agent_name in sorted(self.agents):
+            execution_scope = self.get_agent_execution_scope(agent_name)
+            unsupported_tools = unsupported_shared_only_integration_names(
+                self.get_agent_tools(agent_name),
+                execution_scope,
+            )
+            if not unsupported_tools:
+                continue
+            scope_label = self.get_agent_scope_label(agent_name)
+            invalid_assignments.extend(
+                f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
+            )
+        if invalid_assignments:
+            msg = (
+                "Shared-only integrations are supported only for unscoped agents or worker_scope=shared. "
+                f"Invalid assignments: {', '.join(invalid_assignments)}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_knowledge_base_assignments(self) -> Config:
         """Ensure agents only reference configured knowledge base IDs."""
         invalid_assignments = [
@@ -259,17 +469,103 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_memory_file_path_overrides(self) -> Config:
-        """Ensure memory_file_path is only configured for effective file-backed agents."""
-        invalid_overrides = [
+    def validate_reserved_knowledge_base_ids(self) -> Config:
+        """Reject top-level knowledge base IDs that collide with synthetic private IDs."""
+        reserved_ids = sorted(
+            base_id for base_id in self.knowledge_bases if base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        )
+        if reserved_ids:
+            formatted = ", ".join(reserved_ids)
+            msg = (
+                "knowledge_bases keys must not use the reserved private prefix "
+                f"'{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}'; invalid keys: {formatted}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_knowledge(self) -> Config:
+        """Ensure enabled private knowledge declares an explicit path."""
+        invalid_private_knowledge = [
             agent_name
             for agent_name, agent_config in self.agents.items()
-            if agent_config.memory_file_path is not None and self.get_agent_memory_backend(agent_name) != "file"
+            if (
+                agent_config.private is not None
+                and agent_config.private.knowledge is not None
+                and agent_config.private.knowledge.enabled
+                and agent_config.private.knowledge.path is None
+            )
         ]
-        if invalid_overrides:
-            formatted = ", ".join(sorted(invalid_overrides))
-            msg = f"agents.<name>.memory_file_path requires effective file memory backend; invalid agents: {formatted}"
+        if invalid_private_knowledge:
+            formatted = ", ".join(sorted(invalid_private_knowledge))
+            msg = f"agents.<name>.private.knowledge.path is required when private.knowledge is enabled; invalid agents: {formatted}"
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_git_knowledge_paths(self, info: ValidationInfo) -> Config:
+        """Ensure git-backed private knowledge uses a dedicated subtree."""
+        memory_notes_dir = Path("memory")
+        memory_notes_entrypoint = Path("MEMORY.md")
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        for agent_name, agent_config in self.agents.items():
+            private_config = agent_config.private
+            if private_config is None or private_config.knowledge is None:
+                continue
+            private_knowledge = private_config.knowledge
+            if private_knowledge.git is None or private_knowledge.path is None:
+                continue
+            knowledge_path = Path(private_knowledge.path)
+            if knowledge_path == Path():
+                msg = (
+                    f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
+                    "but git-backed private knowledge must use a dedicated subtree outside the private root "
+                    "and outside scaffolded private workspace content"
+                )
+                raise ValueError(msg)
+            overlaps_private_file_memory = self.get_agent_memory_backend(
+                agent_name,
+            ) == "file" and _relative_paths_overlap(
+                knowledge_path,
+                memory_notes_dir,
+            )
+            if self.get_agent_memory_backend(agent_name) == "file" and _relative_paths_overlap(
+                knowledge_path,
+                memory_notes_entrypoint,
+            ):
+                overlaps_private_file_memory = True
+            overlaps_template_scaffold = False
+            if private_config.template_dir is not None:
+                if _relative_paths_overlap(knowledge_path, memory_notes_dir):
+                    overlaps_template_scaffold = True
+                elif runtime_paths is not None:
+                    template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+                    overlaps_template_scaffold = _template_contains_overlapping_subtree(template_dir, knowledge_path)
+            if overlaps_private_file_memory or overlaps_template_scaffold:
+                msg = (
+                    f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
+                    "but git-backed private knowledge must use a dedicated subtree outside the private root "
+                    "and outside scaffolded private workspace content"
+                )
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
+        """Ensure private template directories exist when runtime path resolution is available."""
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
+        for agent_name, agent_config in self.agents.items():
+            private_config = agent_config.private
+            if private_config is None or private_config.template_dir is None:
+                continue
+            template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+            try:
+                validate_workspace_template_dir(template_dir)
+            except ValueError as exc:
+                msg = f"Agent '{agent_name}' has invalid private.template_dir: {exc}"
+                raise ValueError(msg) from exc
         return self
 
     @model_validator(mode="after")
@@ -475,12 +771,99 @@ class Config(BaseModel):
             return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
 
-    def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:
-        """Get the effective worker scope for an agent."""
+    def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
+        """Return the internal derived execution scope for one agent.
+
+        This is not the authored config field.
+        Shared agents derive it from `worker_scope` (or defaults), while private agents
+        derive the same runtime concept from `private.per`.
+        """
         agent_config = self.get_agent(agent_name)
+        if agent_config.private is not None:
+            return agent_config.private.per
         if agent_config.worker_scope is not None:
             return agent_config.worker_scope
         return self.defaults.worker_scope
+
+    def get_agent_scope_label(self, agent_name: str) -> str:
+        """Return the user-facing authored scope label for one agent.
+
+        Keep this separate from `get_agent_execution_scope()`: the internal runtime uses
+        one derived execution scope, but user-facing messages should still distinguish
+        authored `worker_scope=...` from private `private.per=...`.
+        """
+        agent_config = self.get_agent(agent_name)
+        if agent_config.private is not None:
+            return f"private.per={agent_config.private.per}"
+        execution_scope = self.get_agent_execution_scope(agent_name)
+        if execution_scope is None:
+            return "unscoped"
+        return f"worker_scope={execution_scope}"
+
+    def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
+        """Return the synthetic knowledge base ID for one agent's private knowledge."""
+        agent_config = self.get_agent(agent_name)
+        if agent_config.private is None:
+            return None
+        private_knowledge = agent_config.private.knowledge
+        if private_knowledge is None or not private_knowledge.enabled or private_knowledge.path is None:
+            return None
+        return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
+
+    def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
+        """Return the owning agent for a synthetic private knowledge base ID."""
+        if not base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX):
+            return None
+        agent_name = base_id.removeprefix(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        if agent_name not in self.agents:
+            return None
+        if self.get_agent_private_knowledge_base_id(agent_name) != base_id:
+            return None
+        return agent_name
+
+    def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
+        """Return shared and private knowledge base IDs assigned to one agent."""
+        agent_config = self.get_agent(agent_name)
+        base_ids = list(agent_config.knowledge_bases)
+        private_base_id = self.get_agent_private_knowledge_base_id(agent_name)
+        if private_base_id is not None:
+            base_ids.append(private_base_id)
+        return base_ids
+
+    def get_knowledge_base_config(self, base_id: str) -> KnowledgeBaseConfig:
+        """Return one effective knowledge base config, including synthetic private bases."""
+        configured = self.knowledge_bases.get(base_id)
+        if configured is not None:
+            return configured
+
+        agent_name = self.get_private_knowledge_base_agent(base_id)
+        if agent_name is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        agent_config = self.get_agent(agent_name)
+        private_config = agent_config.private
+        if private_config is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        private_knowledge = private_config.knowledge
+        if private_knowledge is None or not private_knowledge.enabled:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        knowledge_path = private_knowledge.path
+        if knowledge_path is None:
+            msg = f"Knowledge base '{base_id}' is not configured"
+            raise ValueError(msg)
+
+        return KnowledgeBaseConfig(
+            path=knowledge_path,
+            watch=private_knowledge.watch,
+            chunk_size=private_knowledge.chunk_size,
+            chunk_overlap=private_knowledge.chunk_overlap,
+            git=private_knowledge.git,
+        )
 
     def get_agent_tools(self, agent_name: str) -> list[str]:
         """Get effective tools for an agent.
@@ -500,6 +883,85 @@ class Config(BaseModel):
         if agent_config.include_default_tools:
             tool_names.extend(self.defaults.tools)
         return self.expand_tool_names(tool_names)
+
+    def get_private_agent_names(self) -> frozenset[str]:
+        """Return agent names that materialize requester-private state."""
+        return frozenset(
+            agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
+        )
+
+    def get_agent_delegation_closure(
+        self,
+        agent_name: str,
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+        visiting: frozenset[str] = frozenset(),
+    ) -> frozenset[str]:
+        """Return one agent plus all agents reachable through transitive delegation."""
+        return _get_agent_delegation_closure_for_agents(
+            agent_name,
+            self.agents,
+            closures=closures,
+            visiting=visiting,
+        )
+
+    def get_private_team_targets(
+        self,
+        agent_name: str,
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+    ) -> tuple[str, ...]:
+        """Return private agents reachable from one team member, including itself."""
+        return _get_private_team_targets_for_agents(agent_name, self.agents, closures=closures)
+
+    def get_unsupported_team_agents(
+        self,
+        agent_names: list[str],
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+    ) -> dict[str, tuple[str, ...] | None]:
+        """Return unsupported team members keyed by agent name.
+
+        Unknown agents map to `None`.
+        Supported known agents are omitted.
+        Private or transitively private members map to their reachable private targets.
+        """
+        return _get_unsupported_team_agents_for_agents(agent_names, self.agents, closures=closures)
+
+    @staticmethod
+    def unsupported_team_agent_message(
+        agent_name: str,
+        *,
+        prefix: str,
+        private_targets: tuple[str, ...] | None,
+    ) -> str:
+        """Return the user-facing error for one unsupported team member."""
+        return _format_unsupported_team_agent_message(
+            agent_name,
+            prefix=prefix,
+            private_targets=private_targets,
+        )
+
+    def assert_team_agents_supported(
+        self,
+        agent_names: list[str],
+        *,
+        team_name: str | None = None,
+    ) -> None:
+        """Reject unknown or currently unsupported team members."""
+        prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
+        closure_cache: dict[str, frozenset[str]] = {}
+        unsupported_agents = self.get_unsupported_team_agents(agent_names, closures=closure_cache)
+        if not unsupported_agents:
+            return
+        first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
+        raise ValueError(
+            self.unsupported_team_agent_message(
+                first_unsupported_agent,
+                prefix=prefix,
+                private_targets=private_targets,
+            ),
+        )
 
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:

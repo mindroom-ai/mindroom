@@ -14,7 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory.functions import search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.worker_routing import agent_state_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -73,9 +73,35 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 metadata={"source": "explicit_tool"},
+                execution_identity=None,
             )
             assert "Memorized" in result
             assert "dark mode" in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_uses_stored_execution_identity(self, storage_path: Path, config: Config) -> None:
+        """MemoryTools should forward the constructor-bound execution identity without ambient context."""
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="test_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        tools = MemoryTools(
+            agent_name="test_agent",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+
+        with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
+            await tools.add_memory("Remember this")
+
+        assert mock_add.await_args.kwargs["execution_identity"] == execution_identity
 
     @pytest.mark.asyncio
     async def test_add_memory_error(self, tools: MemoryTools) -> None:
@@ -121,9 +147,7 @@ class TestMemoryTools:
         assert result == "Memorized: Tool memory stays canonical"
         assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
         assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
-        assert (
-            agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
-        ).exists()
+        assert (agent_workspace_root_path(storage_path, "general") / "MEMORY.md").exists()
 
     @pytest.mark.asyncio
     async def test_search_memories(self, tools: MemoryTools) -> None:
@@ -147,6 +171,7 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 limit=3,
+                execution_identity=None,
             )
             assert "Found 2 memory(ies)" in result
             assert "[id=abc-1]" in result
@@ -215,6 +240,7 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 limit=10,
+                execution_identity=None,
             )
             assert "All memories (3)" in result
             assert "[id=m1]" in result
@@ -267,6 +293,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "[id=abc-123]" in result
             assert "User likes Python" in result
@@ -312,6 +339,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "Updated memory" in result
             assert "[id=abc-123]" in result
@@ -345,6 +373,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "Deleted memory" in result
             assert "[id=abc-123]" in result

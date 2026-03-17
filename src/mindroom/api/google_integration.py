@@ -29,6 +29,7 @@ from mindroom.api.credentials import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
@@ -167,10 +168,12 @@ def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> N
     save_scoped_credentials(
         "google",
         _build_google_token_data(creds),
-        worker_scope=target.worker_scope,
-        routing_agent_name=target.agent_name,
         credentials_manager=target.base_manager,
-        execution_identity=target.execution_identity,
+        worker_target=resolve_worker_target(
+            target.worker_scope,
+            target.agent_name,
+            execution_identity=target.execution_identity,
+        ),
     )
 
 
@@ -357,7 +360,13 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=("google",),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect

@@ -274,8 +274,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     setup_type=SetupType.SPECIAL,
     managed_init_args=(
         ToolManagedInitArg.CREDENTIALS_MANAGER,
-        ToolManagedInitArg.WORKER_SCOPE,
-        ToolManagedInitArg.ROUTING_AGENT_NAME,
+        ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[
         ConfigField(

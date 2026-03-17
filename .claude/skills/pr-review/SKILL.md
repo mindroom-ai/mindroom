@@ -27,6 +27,7 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 
 - **Code cleanliness**: Is the implementation clean and well-structured?
 - **DRY principle**: Does it avoid duplication?
+- **Architectural smells**: Identify scattered logic or the same policy/resolution logic being defined in multiple places instead of one source of truth.
 - **Code reuse**: Are there parts that should be reused from other places?
 - **Organization**: Is everything in the right place?
 - **Consistency**: Is it in the same style as other parts of the codebase?

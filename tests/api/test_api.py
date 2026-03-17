@@ -681,8 +681,10 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "icon_color" in first_tool  # New field we added
 
 
-def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(test_client: TestClient) -> None:
-    """Shared-only integrations should be hidden for isolating worker scopes."""
+def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
+    test_client: TestClient,
+) -> None:
+    """Shared-only integrations should stay visible but be marked unsupported."""
     config = _config_with_worker_scope("user")
 
     with (
@@ -692,10 +694,184 @@ def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(tes
 
     assert response.status_code == 200
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
-    assert "homeassistant" not in tools_by_name
-    assert "gmail" not in tools_by_name
-    assert "spotify" not in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["gmail"]["execution_scope_supported"] is False
+    assert tools_by_name["spotify"]["execution_scope_supported"] is False
     assert "calculator" in tools_by_name
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
+
+
+def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
+    test_client: TestClient,
+) -> None:
+    """Draft execution-scope overrides should drive shared-only tool support flags."""
+    config = _config_with_worker_scope("shared")
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "HA",
+            "category": "automation",
+            "status": "requires_config",
+            "setup_type": "special",
+            "config_fields": None,
+        },
+        {
+            "name": "calculator",
+            "display_name": "Calculator",
+            "description": "Calc",
+            "category": "utility",
+            "status": "available",
+            "setup_type": "none",
+            "config_fields": None,
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
+    assert "calculator" in tools_by_name
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
+
+
+def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
+    test_client: TestClient,
+) -> None:
+    """An explicit unscoped draft must not fall back to the persisted agent scope."""
+    config = _config_with_worker_scope("user")
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "HA",
+            "category": "automation",
+            "status": "requires_config",
+            "setup_type": "special",
+            "config_fields": None,
+        },
+        {
+            "name": "calculator",
+            "display_name": "Calculator",
+            "description": "Calc",
+            "category": "utility",
+            "status": "available",
+            "setup_type": "none",
+            "config_fields": None,
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert "homeassistant" in tools_by_name
+    assert "calculator" in tools_by_name
+    assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
+    """Tool preview should reject unknown agents instead of falling back to shared state."""
+    config = _config_with_worker_scope("shared")
+
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = test_client.get("/api/tools/?agent_name=missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Unknown agent: missing"
+
+
+def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
+    """Supported scoped tools should report runtime env credentials as available."""
+    config = _config_with_worker_scope("shared")
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch(
+            "mindroom.api.tools._load_env_shared_preview_credentials",
+            return_value={"WEATHER_API_KEY": "secret", "_source": "env"},
+        ),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "available"
+    assert tool["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
+    test_client: TestClient,
+) -> None:
+    """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
+    config = _config_with_worker_scope("user")
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status_authoritative"] is False
+    tool = body["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "requires_config"
+    assert tool["dashboard_configuration_supported"] is False
+    mock_load_scoped_credentials.assert_not_called()
 
 
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
@@ -784,6 +960,25 @@ def test_google_connect_uses_pending_oauth_state(
     assert response.json()["auth_url"] == "https://accounts.google.test/o/oauth2/auth"
     assert issued_state["state"]
     assert issued_state["state"] != "general"
+
+
+def test_google_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
+    """Google connect must reject draft-only execution-scope overrides."""
+    config = _config_with_worker_scope("user")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with (
+        patch(
+            "mindroom.api.google_integration._get_oauth_credentials",
+            return_value={"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+        ),
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        connect_response = api_key_client.post("/api/google/connect?agent_name=general&execution_scope=shared")
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
 def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
@@ -1076,6 +1271,29 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     )
 
 
+def test_homeassistant_connect_rejects_draft_execution_scope_override(
+    api_key_client: TestClient,
+) -> None:
+    """Home Assistant connect must reject draft-only execution-scope overrides."""
+    config = _config_with_worker_scope("user")
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        connect_response = api_key_client.post(
+            "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
+            json={
+                "instance_url": "homeassistant.local:8123",
+                "client_id": "client-id",
+            },
+        )
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
+
+
 def test_spotify_connect_uses_pending_oauth_state(
     api_key_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1130,6 +1348,47 @@ def test_spotify_connect_uses_pending_oauth_state(
     assert response.json()["auth_url"] == "https://accounts.spotify.test/authorize"
     assert issued_state["state"]
     assert issued_state["state"] != "general"
+
+
+def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
+    """Spotify connect must reject draft-only execution-scope overrides."""
+    config = _config_with_worker_scope("user")
+
+    main.initialize_api_app(
+        main.app,
+        constants.resolve_primary_runtime_paths(
+            config_path=main._app_runtime_paths(main.app).config_path,
+            storage_path=main._app_runtime_paths(main.app).storage_root,
+            process_env={
+                **dict(main._app_runtime_paths(main.app).process_env),
+                "SPOTIFY_CLIENT_ID": "client-id",
+                "SPOTIFY_CLIENT_SECRET": "client-secret",
+            },
+        ),
+    )
+    main._app_context(main.app).auth_state = main._ApiAuthState(
+        runtime_paths=main._app_runtime_paths(main.app),
+        settings=main._ApiAuthSettings(
+            platform_login_url=None,
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+        ),
+        supabase_auth=None,
+    )
+    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+    assert login_response.status_code == 200
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+    ):
+        connect_response = api_key_client.post(
+            "/api/integrations/spotify/connect?agent_name=general&execution_scope=shared",
+        )
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:
@@ -1532,6 +1791,48 @@ def test_get_teams_empty(test_client: TestClient) -> None:
     assert len(teams) == 0
 
 
+def test_team_eligibility_endpoint_uses_backend_policy(test_client: TestClient) -> None:
+    """Draft team eligibility should come from the backend delegation/private policy."""
+    response = test_client.post(
+        "/api/config/team-eligibility",
+        json={
+            "agents": {
+                "helper": {
+                    "display_name": "Helper",
+                    "role": "Helps",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                },
+                "leader": {
+                    "display_name": "Leader",
+                    "role": "Leads",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                    "delegate_to": ["mind"],
+                },
+                "mind": {
+                    "display_name": "Mind",
+                    "role": "Private",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                    "private": {"per": "user"},
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "team_eligibility": {
+            "helper": None,
+            "leader": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+            "mind": "Private agents cannot participate in teams yet.",
+        },
+    }
+
+
 def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")
@@ -1596,6 +1897,16 @@ def test_get_teams_with_data(test_client: TestClient) -> None:
 def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating an existing team."""
     test_client.post("/api/config/load")
+
+    new_agent_data = {
+        "display_name": "New Agent",
+        "role": "Another test agent",
+        "tools": ["calculator"],
+        "instructions": ["Test instruction"],
+        "rooms": ["test_room"],
+    }
+    create_agent_response = test_client.post("/api/config/agents", json=new_agent_data)
+    assert create_agent_response.status_code == 200
 
     # Create a team first
     team_data = {

@@ -13,12 +13,15 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from mindroom.constants import RuntimePaths
+
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _AGENT_WORKSPACE_DIRNAME = "workspace"
+_PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_ONLY_INTEGRATION_NAMES = frozenset(
     {
         "google",
@@ -44,6 +47,33 @@ class ToolExecutionIdentity:
     session_id: str | None
     tenant_id: str | None = None
     account_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _ResolvedWorkerExecution:
+    """Resolved worker execution scope from explicit worker-scope policy."""
+
+    worker_scope: WorkerScope | None
+    execution_identity: ToolExecutionIdentity | None
+    worker_key: str | None
+
+
+@dataclass(frozen=True)
+class ResolvedWorkerTarget:
+    """Resolved worker target carried through tool construction and sandbox routing.
+
+    This layer still uses `worker_scope` because it is about worker reuse/routing.
+    Private agents reach this seam through the already-derived execution scope from
+    `private.per`; do not read this field as the raw authored agent config.
+    """
+
+    worker_scope: WorkerScope | None
+    routing_agent_name: str | None
+    execution_identity: ToolExecutionIdentity | None
+    tenant_id: str | None
+    account_id: str | None
+    worker_key: str | None
+    private_agent_names: frozenset[str] | None = None
 
 
 _TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
@@ -88,6 +118,127 @@ def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     return None
 
 
+def build_tool_execution_identity(
+    *,
+    channel: _ExecutionChannel,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    resolved_thread_id: str | None,
+    session_id: str | None,
+) -> ToolExecutionIdentity:
+    """Build the ingress execution identity for one request or shared materialization."""
+    return ToolExecutionIdentity(
+        channel=channel,
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        resolved_thread_id=resolved_thread_id,
+        session_id=session_id,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
+
+
+def resolve_worker_execution_scope(
+    worker_scope: WorkerScope | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    agent_name: str | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+) -> _ResolvedWorkerExecution:
+    """Resolve worker execution identity and key from explicit scope inputs."""
+    resolved_execution_identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
+    worker_key: str | None = None
+    if worker_scope is not None and resolved_execution_identity is not None:
+        worker_key = resolve_worker_key(
+            worker_scope,
+            resolved_execution_identity,
+            agent_name=agent_name,
+        )
+    return _ResolvedWorkerExecution(
+        worker_scope=worker_scope,
+        execution_identity=resolved_execution_identity,
+        worker_key=worker_key,
+    )
+
+
+def resolve_worker_target(
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+    private_agent_names: frozenset[str] | None = None,
+) -> ResolvedWorkerTarget:
+    """Resolve one explicit worker target for tool construction and sandbox routing."""
+    effective_agent_name = routing_agent_name
+    if effective_agent_name is None and execution_identity is not None:
+        effective_agent_name = execution_identity.agent_name
+
+    resolved_worker_execution = resolve_worker_execution_scope(
+        worker_scope,
+        execution_identity=execution_identity,
+        agent_name=effective_agent_name,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
+    resolved_execution_identity = resolved_worker_execution.execution_identity
+    return ResolvedWorkerTarget(
+        worker_scope=worker_scope,
+        routing_agent_name=effective_agent_name,
+        execution_identity=resolved_execution_identity,
+        tenant_id=(
+            tenant_id
+            or (
+                resolved_execution_identity.tenant_id
+                if resolved_execution_identity is not None and resolved_execution_identity.tenant_id is not None
+                else None
+            )
+        ),
+        account_id=(
+            account_id
+            or (
+                resolved_execution_identity.account_id
+                if resolved_execution_identity is not None and resolved_execution_identity.account_id is not None
+                else None
+            )
+        ),
+        worker_key=resolved_worker_execution.worker_key,
+        private_agent_names=private_agent_names,
+    )
+
+
+def build_worker_target_from_runtime_env(
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+    *,
+    private_agent_names: frozenset[str] | None = None,
+) -> ResolvedWorkerTarget:
+    """Build one worker target at the ingress boundary from runtime tenant/account env."""
+    return resolve_worker_target(
+        worker_scope,
+        routing_agent_name,
+        execution_identity=execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        private_agent_names=private_agent_names,
+    )
+
+
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
     """Return whether a worker scope can use shared-only dashboard integrations."""
     return worker_scope in (None, "shared")
@@ -98,19 +249,39 @@ def requires_shared_only_integration_scope(name: str) -> bool:
     return name in SHARED_ONLY_INTEGRATION_NAMES
 
 
+def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
+    """Return whether one tool/integration name is supported for the effective execution scope."""
+    return not requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
+        worker_scope,
+    )
+
+
+def unsupported_shared_only_integration_names(
+    names: list[str],
+    worker_scope: WorkerScope | None,
+) -> list[str]:
+    """Return shared-only integration names that are invalid for the effective execution scope."""
+    if worker_scope_allows_shared_only_integrations(worker_scope):
+        return []
+    return [name for name in names if requires_shared_only_integration_scope(name)]
+
+
 def unsupported_shared_only_integration_message(
     name: str,
     worker_scope: WorkerScope | None,
     *,
     agent_name: str | None = None,
     subject: str = "Integration",
+    scope_label: str | None = None,
 ) -> str:
     """Return the user-facing error for shared-only integrations on isolating scopes."""
-    scope_label = worker_scope or "unscoped"
+    resolved_scope_label = scope_label or (
+        f"execution_scope={worker_scope}" if worker_scope is not None else "unscoped"
+    )
     agent_detail = f"Agent '{agent_name}' uses " if agent_name else "This request uses "
     return (
         f"{subject} '{name}' is only supported for shared deployment credentials or agents with "
-        f"worker_scope=shared. {agent_detail}worker_scope={scope_label}."
+        f"worker_scope=shared. {agent_detail}{resolved_scope_label}."
     )
 
 
@@ -145,14 +316,14 @@ def resolve_worker_key(
 
 
 def resolve_unscoped_worker_key(
-    *,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
     """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity or get_tool_execution_identity()
+    identity = execution_identity
     tenant_key = _normalize_worker_key_part(
         tenant_id
         or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
@@ -162,6 +333,28 @@ def resolve_unscoped_worker_key(
     )
     effective_agent_name = _normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
+
+
+def require_worker_key_for_scope(
+    worker_scope: WorkerScope,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    agent_name: str | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+    failure_message: str,
+) -> str:
+    """Resolve one worker key from explicit inputs or raise with a caller-owned message."""
+    worker_key = resolve_worker_execution_scope(
+        worker_scope,
+        execution_identity=execution_identity,
+        agent_name=agent_name,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    ).worker_key
+    if worker_key is None:
+        raise ValueError(failure_message)
+    return worker_key
 
 
 def is_unscoped_worker_key(worker_key: str) -> bool:
@@ -188,21 +381,22 @@ def worker_key_agent_name(worker_key: str) -> str | None:
         return None
 
     parts = worker_key.split(":")
-    if scope in {"shared", "unscoped"}:
-        if len(parts) < 4:
-            return None
-        return parts[3]
-
-    if len(parts) < 5:
+    min_parts_by_scope = {
+        "shared": 4,
+        "unscoped": 4,
+        "user_agent": 5,
+    }
+    min_parts = min_parts_by_scope.get(scope)
+    if min_parts is None or len(parts) < min_parts:
         return None
-    return parts[-1]
+    return parts[3] if scope in {"shared", "unscoped"} else parts[-1]
 
 
 def resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     agent_name: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> ToolExecutionIdentity | None:
@@ -210,16 +404,15 @@ def resolve_execution_identity_for_worker_scope(
 
     Shared-scope state can be resolved from agent identity plus tenant/account
     even when no live request context exists yet. Isolating scopes still
-    require an active execution identity.
+    require an explicit execution identity.
     """
     if execution_identity is not None:
         return execution_identity
 
-    current_identity = get_tool_execution_identity()
-    if current_identity is not None:
-        return current_identity
-
     if worker_scope != "shared" or agent_name is None:
+        return None
+
+    if tenant_id is None and account_id is None:
         return None
 
     return ToolExecutionIdentity(
@@ -246,7 +439,7 @@ def worker_dir_name(worker_key: str) -> str:
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
-    """Return the persistent state root path for a worker key."""
+    """Return the persistent runtime root path for a worker key."""
     resolved_base_path = shared_storage_root(base_storage_path)
     if _is_resolved_worker_root(resolved_base_path, worker_key):
         return resolved_base_path
@@ -275,9 +468,34 @@ def agent_state_root_path(base_storage_path: Path, agent_name: str) -> Path:
     return resolved_base_path / "agents" / _normalize_worker_dir_part(agent_name)
 
 
+def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -> Path:
+    """Return the canonical shared root for one worker-scoped private-instance namespace."""
+    resolved_base_path = shared_storage_root(base_storage_path)
+    if _is_resolved_private_instance_scope_root(resolved_base_path, worker_key):
+        return resolved_base_path
+    return resolved_base_path / _PRIVATE_INSTANCE_ROOT_DIRNAME / worker_dir_name(worker_key)
+
+
+def _private_instance_state_root_path(
+    base_storage_path: Path,
+    *,
+    worker_key: str,
+    agent_name: str,
+) -> Path:
+    """Return the canonical durable state root for one private agent instance."""
+    return private_instance_scope_root_path(base_storage_path, worker_key) / _normalize_worker_dir_part(agent_name)
+
+
 def _is_resolved_agent_state_root(path: Path, agent_name: str) -> bool:
     resolved_path = path.expanduser().resolve()
     return resolved_path.parent.name == "agents" and resolved_path.name == _normalize_worker_dir_part(agent_name)
+
+
+def _is_resolved_private_instance_scope_root(path: Path, worker_key: str) -> bool:
+    resolved_path = path.expanduser().resolve()
+    return resolved_path.parent.name == _PRIVATE_INSTANCE_ROOT_DIRNAME and resolved_path.name == worker_dir_name(
+        worker_key,
+    )
 
 
 def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
@@ -285,23 +503,41 @@ def _is_resolved_worker_root(path: Path, worker_key: str) -> bool:
     return resolved_path.parent.name == "workers" and resolved_path.name == worker_dir_name(worker_key)
 
 
-def visible_agent_state_roots_for_worker_key(base_storage_path: Path, worker_key: str) -> tuple[Path, ...]:
-    """Return the canonical agent-state roots a worker key is allowed to see by default.
+def visible_state_roots_for_worker_key(
+    base_storage_path: Path,
+    worker_key: str,
+    *,
+    private_agent_names: frozenset[str] = frozenset(),
+) -> tuple[Path, ...]:
+    """Return the canonical durable state roots a worker key is allowed to see by default.
 
-    `shared`, `user_agent`, and unscoped dedicated workers are agent-isolated and
-    therefore only see the addressed agent root.
-    `user` is intentionally broader and sees the shared `agents/` tree because it
-    acts as a per-requester multi-agent workstation.
+    Shared agent roots remain canonical for normal agents.
+    Private-instance roots live under a separate shared-storage namespace keyed by
+    worker scope so they are durable without becoming worker-owned state.
+    `user` intentionally sees the shared `agents/` tree plus its own
+    private-instance namespace because it acts as a per-requester multi-agent
+    workstation.
     """
     scope = resolved_worker_key_scope(worker_key)
     if scope is None:
         return ()
     if scope == "user":
-        return (shared_storage_root(base_storage_path) / "agents",)
+        return (
+            shared_storage_root(base_storage_path) / "agents",
+            private_instance_scope_root_path(base_storage_path, worker_key),
+        )
 
     agent_name = worker_key_agent_name(worker_key)
     if agent_name is None:
         return ()
+    if scope == "user_agent" and agent_name in private_agent_names:
+        return (
+            _private_instance_state_root_path(
+                base_storage_path,
+                worker_key=worker_key,
+                agent_name=agent_name,
+            ),
+        )
     return (agent_state_root_path(base_storage_path, agent_name),)
 
 

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from mindroom import constants
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import visible_agent_state_roots_for_worker_key
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
 _DEFAULT_RESOURCE_LIMITS = {"memory": "1Gi", "cpu": "500m"}
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
 
 ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
@@ -40,6 +41,7 @@ ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
 ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
 ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
+ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -196,6 +198,12 @@ def metadata_annotations(
     return annotations
 
 
+def _template_hash(template: dict[str, object]) -> str:
+    """Return a stable hash for one Deployment pod template."""
+    payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -294,20 +302,31 @@ class KubernetesResourceManager:
         state_subpath: str,
         annotations: dict[str, str],
         replicas: int,
+        private_agent_names: frozenset[str] | None = None,
     ) -> None:
         """Create-or-patch one worker Deployment."""
+        manifest = self._deployment_manifest(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            annotations=annotations,
+            replicas=replicas,
+            private_agent_names=private_agent_names,
+        )
+        existing = self.read_deployment(worker_id)
+        if existing is not None:
+            existing_annotations = existing.metadata.annotations or {}
+            desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
+            desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
+            if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
+                self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
+                return
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
             patch_fn=self._apps.patch_namespaced_deployment,
             resource_name=worker_id,
-            manifest=self._deployment_manifest(
-                worker_key=worker_key,
-                worker_id=worker_id,
-                state_subpath=state_subpath,
-                annotations=annotations,
-                replicas=replicas,
-            ),
+            manifest=manifest,
         )
 
     def patch_deployment(
@@ -320,7 +339,10 @@ class KubernetesResourceManager:
         """Patch Deployment metadata and/or scale."""
         body: dict[str, object] = {}
         if annotations is not None:
-            body["metadata"] = {"annotations": annotations}
+            existing = self.read_deployment(deployment_name)
+            merged_annotations = dict(existing.metadata.annotations or {}) if existing is not None else {}
+            merged_annotations.update(annotations)
+            body["metadata"] = {"annotations": merged_annotations}
         if replicas is not None:
             body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
@@ -332,6 +354,47 @@ class KubernetesResourceManager:
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""
         self._delete_object(self._core.delete_namespaced_service, service_name)
+
+    def _recreate_deployment(
+        self,
+        deployment_name: str,
+        manifest: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Replace one Deployment when pod-template drift requires a full recreate."""
+        self.delete_deployment(deployment_name)
+        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+        deadline = time.time() + timeout_seconds
+        while True:
+            try:
+                self._apps.create_namespaced_deployment(self.config.namespace, manifest)
+            except self._api_exception as exc:
+                if exc.status != 409:
+                    raise
+                if time.time() >= deadline:
+                    msg = (
+                        f"Kubernetes worker deployment '{deployment_name}' did not finish deleting "
+                        f"within {timeout_seconds:.0f}s before recreate."
+                    )
+                    raise WorkerBackendError(msg) from exc
+                time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
+            else:
+                return
+
+    def _wait_for_deployment_absent(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Poll until one Deployment is fully gone after delete has been requested."""
+        deadline = time.time() + timeout_seconds
+        while True:
+            if self.read_deployment(deployment_name) is None:
+                return
+            if time.time() >= deadline:
+                msg = (
+                    f"Kubernetes worker deployment '{deployment_name}' did not finish deleting "
+                    f"within {timeout_seconds:.0f}s."
+                )
+                raise WorkerBackendError(msg)
+            time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
 
     def wait_for_ready(
         self,
@@ -438,19 +501,11 @@ class KubernetesResourceManager:
         state_subpath: str,
         annotations: dict[str, str],
         replicas: int,
+        private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        metadata: dict[str, object] = {
-            "name": worker_id,
-            "namespace": self.config.namespace,
-            "labels": worker_labels,
-            "annotations": annotations,
-        }
-        owner_reference = self._owner_reference_or_none()
-        if owner_reference is not None:
-            metadata["ownerReferences"] = [owner_reference]
-
-        pod_spec: dict[str, object] = {
+        template_metadata = {"labels": worker_labels}
+        template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "securityContext": {
                 "runAsUser": 1000,
@@ -468,7 +523,7 @@ class KubernetesResourceManager:
                     "command": ["/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
                     "env": self._worker_env(worker_key, state_subpath),
-                    "volumeMounts": self._volume_mounts(worker_key, state_subpath),
+                    "volumeMounts": self._volume_mounts(worker_key, state_subpath, private_agent_names),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
                         "periodSeconds": 5,
@@ -496,9 +551,24 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        template: dict[str, object] = {
+            "metadata": template_metadata,
+            "spec": template_spec,
+        }
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": worker_labels,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
         node_name = self._worker_node_name_or_none()
         if node_name is not None:
-            pod_spec["nodeName"] = node_name
+            template_spec["nodeName"] = node_name
+        desired_annotations = dict(annotations)
+        desired_annotations[ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        metadata["annotations"] = desired_annotations
 
         return {
             "apiVersion": "apps/v1",
@@ -507,10 +577,7 @@ class KubernetesResourceManager:
             "spec": {
                 "replicas": replicas,
                 "selector": {"matchLabels": worker_labels},
-                "template": {
-                    "metadata": {"labels": worker_labels},
-                    "spec": pod_spec,
-                },
+                "template": template,
             },
         }
 
@@ -639,8 +706,17 @@ class KubernetesResourceManager:
             env_file_values=MappingProxyType(env_file_values),
         )
 
-    def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
-        mounts = self._scoped_storage_mounts(worker_key, state_subpath)
+    def _volume_mounts(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        private_agent_names: frozenset[str] | None,
+    ) -> list[dict[str, object]]:
+        mounts = self._scoped_storage_mounts(
+            worker_key,
+            state_subpath,
+            private_agent_names=private_agent_names,
+        )
         if self.config.config_map_name is not None:
             mounts.append(
                 {
@@ -720,20 +796,41 @@ class KubernetesResourceManager:
         self._owner_reference_loaded = True
         return self._owner_reference
 
-    def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
-        storage_root = Path(self.config.storage_mount_path)
-        visible_agent_roots = visible_agent_state_roots_for_worker_key(storage_root, worker_key)
-        if not visible_agent_roots:
+    def _scoped_storage_mounts(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        *,
+        private_agent_names: frozenset[str] | None,
+    ) -> list[dict[str, object]]:
+        mounted_storage_root = Path(self.config.storage_mount_path)
+        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
+            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
+            raise WorkerBackendError(msg)
+        effective_private_agent_names = private_agent_names or frozenset()
+        visible_state_roots = visible_state_roots_for_worker_key(
+            mounted_storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
+        local_visible_state_roots = visible_state_roots_for_worker_key(
+            self.storage_root,
+            worker_key,
+            private_agent_names=effective_private_agent_names,
+        )
+        if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
             msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
             raise WorkerBackendError(msg)
+        for local_state_root in local_visible_state_roots:
+            local_state_root.mkdir(parents=True, exist_ok=True)
 
         mounts: list[dict[str, object]] = [
             {
                 "name": "worker-storage",
-                "mountPath": str(agent_root),
-                "subPath": str(agent_root.relative_to(storage_root)),
+                "mountPath": str(state_root),
+                "subPath": str(state_root.relative_to(mounted_storage_root)),
             }
-            for agent_root in visible_agent_roots
+            for state_root in visible_state_roots
         ]
         mounts.append(
             {

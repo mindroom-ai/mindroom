@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
@@ -21,15 +22,21 @@ from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import (
+    ResolvedAgentRuntime,
+    resolve_agent_runtime,
+    resolve_private_requester_scope_root,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
+    build_worker_target_from_runtime_env,
     resolve_agent_owned_path,
-    resolve_agent_state_storage_path,
     shared_storage_root,
 )
+from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -39,23 +46,15 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
 
 # Maximum length for instruction descriptions to include in agent summary
 _MAX_INSTRUCTION_LENGTH = 100
 _DEFAULT_MIND_AGENT_NAME = "mind"
-_DEFAULT_MIND_WORKSPACE_DIRNAME = "mind_data"
 _DEFAULT_MIND_CONTEXT_FILES = (
-    "mind_data/SOUL.md",
-    "mind_data/AGENTS.md",
-    "mind_data/USER.md",
-    "mind_data/IDENTITY.md",
-    "mind_data/TOOLS.md",
-    "mind_data/HEARTBEAT.md",
-)
-_DEFAULT_MIND_TEMPLATE_FILENAMES = (
     "SOUL.md",
     "AGENTS.md",
     "USER.md",
@@ -63,8 +62,6 @@ _DEFAULT_MIND_TEMPLATE_FILENAMES = (
     "TOOLS.md",
     "HEARTBEAT.md",
 )
-_DEFAULT_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
-_DEFAULT_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
 @dataclass
@@ -98,36 +95,29 @@ class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
-    worker_scope: WorkerScope | None
+    execution_scope: WorkerScope | None
+    routing_agent_is_private: bool
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
+_PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
+    tuple[str, str, tuple[str, str]],
+    CultureManager,
+] = WeakValueDictionary()
 
 
 def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
     return (
         agent_name == _DEFAULT_MIND_AGENT_NAME
+        and agent_config.private is None
         and agent_config.memory_backend == "file"
-        and agent_config.memory_file_path == _DEFAULT_MIND_WORKSPACE_DIRNAME
         and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
     )
 
 
 def _ensure_default_mind_workspace(storage_path: Path) -> None:
-    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME) / _DEFAULT_MIND_WORKSPACE_DIRNAME
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
-
-    for filename in _DEFAULT_MIND_TEMPLATE_FILENAMES:
-        source_path = _DEFAULT_MIND_TEMPLATE_DIR / filename
-        target_path = workspace_path / filename
-        if target_path.exists():
-            continue
-        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    memory_path = workspace_path / "MEMORY.md"
-    if not memory_path.exists():
-        memory_path.write_text(_DEFAULT_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
+    ensure_workspace_template(workspace_path, template="mind")
 
 
 def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
@@ -162,19 +152,24 @@ The current time is {time_str} ({timezone_str} timezone).
 
 
 def _load_context_files(
-    context_files: list[str],
-    *,
-    agent_name: str,
-    storage_path: Path,
+    context_files: list[Path | str],
+    runtime_paths: constants.RuntimePaths,
+    agent_name: str | None = None,
+    storage_path: Path | None = None,
 ) -> list[_AdditionalContextChunk]:
     """Load configured context files."""
     loaded_parts: list[_AdditionalContextChunk] = []
     for raw_path in context_files:
-        resolved_path = resolve_agent_owned_path(
-            raw_path,
-            agent_name=agent_name,
-            base_storage_path=storage_path,
-        )
+        if isinstance(raw_path, Path):
+            resolved_path = raw_path
+        elif agent_name is not None and storage_path is not None:
+            resolved_path = resolve_agent_owned_path(
+                raw_path,
+                agent_name=agent_name,
+                base_storage_path=storage_path,
+            )
+        else:
+            resolved_path = constants.resolve_config_relative_path(raw_path, runtime_paths)
         if resolved_path.is_file():
             loaded_parts.append(
                 _AdditionalContextChunk(
@@ -279,7 +274,9 @@ def _build_additional_context(
     agent_config: AgentConfig,
     max_preload_chars: int,
     *,
+    workspace_context_files: tuple[Path, ...] = (),
     storage_path: Path,
+    runtime_paths: constants.RuntimePaths,
 ) -> str:
     """Build additional role context from configured files/directories.
 
@@ -289,11 +286,13 @@ def _build_additional_context(
     reflected on the next reply without a process restart.
     """
     personality_chunks: list[_AdditionalContextChunk] = []
-    if agent_config.context_files:
+    context_files: list[Path | str] = [*agent_config.context_files, *workspace_context_files]
+    if context_files:
         personality_chunks = _load_context_files(
-            agent_config.context_files,
-            agent_name=agent_name,
-            storage_path=storage_path,
+            context_files,
+            runtime_paths,
+            agent_name,
+            storage_path,
         )
 
     additional_context, omitted_chars = _apply_preload_cap(personality_chunks, max_preload_chars)
@@ -304,27 +303,6 @@ def _build_additional_context(
             max_preload_chars=max_preload_chars,
         )
     return additional_context
-
-
-def _resolve_agent_workspace_path(
-    agent_name: str,
-    agent_config: AgentConfig,
-    *,
-    storage_path: Path,
-) -> Path:
-    """Return the canonical workspace path for one agent."""
-    if agent_config.memory_file_path is None:
-        workspace_path = agent_workspace_root_path(storage_path, agent_name)
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        return workspace_path
-
-    workspace_path = resolve_agent_owned_path(
-        agent_config.memory_file_path,
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    return workspace_path
 
 
 def _tool_supports_base_dir(tool_name: str) -> bool:
@@ -346,24 +324,69 @@ def _tool_base_dir_override(
     return {"base_dir": str(workspace_path)}
 
 
+def _build_registered_agent_tool(
+    tool_name: str,
+    runtime_paths: constants.RuntimePaths,
+    credentials_manager: CredentialsManager,
+    shared_storage_path: Path,
+    worker_tools: list[str],
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    workspace_path: Path | None,
+    routing_agent_is_private: bool,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Toolkit:
+    """Build one registered toolkit using the resolved routing inputs for this agent."""
+    worker_target = build_worker_target_from_runtime_env(
+        worker_scope,
+        agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=(
+            frozenset({agent_name})
+            if worker_scope == "user_agent" and routing_agent_is_private
+            else (frozenset() if worker_scope == "user_agent" else None)
+        ),
+    )
+
+    return get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        tool_init_overrides=_tool_base_dir_override(
+            tool_name,
+            workspace_path=workspace_path,
+        ),
+        shared_storage_root_path=shared_storage_path,
+        worker_tools_override=worker_tools,
+        worker_target=worker_target,
+    )
+
+
 def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
-    *,
-    storage_path: Path,
+    runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
-    agent_config = config.get_agent(agent_name)
-    workspace_path = None
-    if agent_config.memory_file_path is not None:
-        workspace_path = _resolve_agent_workspace_path(
-            agent_name,
-            agent_config,
-            storage_path=storage_path,
-        )
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
+    return _tool_init_context_from_runtime(agent_runtime)
+
+
+def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> AgentToolInitContext:
+    """Build tool-init settings from an already-resolved agent runtime."""
+    workspace_path = agent_runtime.tool_base_dir
     return AgentToolInitContext(
         workspace_path=workspace_path,
-        worker_scope=config.get_agent_worker_scope(agent_name),
+        execution_scope=agent_runtime.execution_scope,
+        routing_agent_is_private=agent_runtime.is_private,
     )
 
 
@@ -375,6 +398,7 @@ def build_agent_toolkit(
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_init_context: AgentToolInitContext,
+    execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
@@ -397,6 +421,7 @@ def build_agent_toolkit(
             storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
         )
 
     if tool_name == "delegate":
@@ -419,6 +444,7 @@ def build_agent_toolkit(
             delegate_to=agent_config.delegate_to,
             runtime_paths=runtime_paths,
             config=config,
+            execution_identity=execution_identity,
             delegation_depth=delegation_depth,
         )
 
@@ -427,18 +453,17 @@ def build_agent_toolkit(
 
         return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
 
-    return get_tool_by_name(
+    return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
-        credentials_manager=credentials_manager,
-        tool_init_overrides=_tool_base_dir_override(
-            tool_name,
-            workspace_path=tool_init_context.workspace_path,
-        ),
-        shared_storage_root_path=shared_storage_path,
-        worker_tools_override=worker_tools,
-        worker_scope=tool_init_context.worker_scope,
-        routing_agent_name=agent_name,
+        credentials_manager,
+        shared_storage_path,
+        worker_tools,
+        tool_init_context.execution_scope,
+        agent_name,
+        tool_init_context.workspace_path,
+        tool_init_context.routing_agent_is_private,
+        execution_identity,
     )
 
 
@@ -510,42 +535,53 @@ def _resolve_agent_learning(
 
 def create_session_storage(
     agent_name: str,
-    storage_path: Path,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
     return _create_agent_state_db(
         agent_name,
-        storage_path,
+        config,
+        runtime_paths,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
-    )
-
-
-def _create_learning_storage(
-    agent_name: str,
-    storage_path: Path,
-) -> SqliteDb:
-    """Create persistent learning storage for an agent."""
-    return _create_agent_state_db(
-        agent_name,
-        storage_path,
-        subdir="learning",
-        session_table=f"{agent_name}_learning_sessions",
+        execution_identity=execution_identity,
     )
 
 
 def _create_agent_state_db(
     agent_name: str,
-    storage_path: Path,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     subdir: str,
     session_table: str,
 ) -> SqliteDb:
     """Create a persistent SQLite database for one agent state category."""
-    state_storage_path = resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
+    state_storage_path = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).state_root
+    return _create_agent_state_db_from_state_root(
+        agent_name,
+        state_storage_path,
+        subdir=subdir,
+        session_table=session_table,
     )
+
+
+def _create_agent_state_db_from_state_root(
+    agent_name: str,
+    state_storage_path: Path,
+    *,
+    subdir: str,
+    session_table: str,
+) -> SqliteDb:
+    """Create a persistent SQLite database from an already-resolved agent state root."""
     db_dir = state_storage_path / subdir
     db_dir.mkdir(parents=True, exist_ok=True)
     return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
@@ -633,6 +669,8 @@ def _resolve_agent_culture(
     config: Config,
     storage_path: Path,
     model: Model,
+    *,
+    cache_private: bool = False,
 ) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
     """Resolve shared culture manager and feature flags for an agent."""
     culture_assignment = config.get_agent_culture(agent_name)
@@ -643,10 +681,17 @@ def _resolve_agent_culture(
     settings = _resolve_culture_settings(culture_config.mode)
     cache_key = (str(storage_path.resolve()), culture_name)
     signature = _culture_signature(culture_config)
-    cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
-    if cached_manager is not None and cached_manager.signature == signature:
-        cached_manager.manager.model = model
-        return cached_manager.manager, settings
+    if cache_private:
+        private_cache_key = (*cache_key, signature)
+        cached_private_manager = _PRIVATE_CULTURE_MANAGER_CACHE.get(private_cache_key)
+        if cached_private_manager is not None:
+            cached_private_manager.model = model
+            return cached_private_manager, settings
+    else:
+        cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
+        if cached_manager is not None and cached_manager.signature == signature:
+            cached_manager.manager.model = model
+            return cached_manager.manager, settings
 
     culture_scope = culture_config.description.strip() or "Shared best practices and principles."
     culture_manager = CultureManager(
@@ -658,10 +703,13 @@ def _resolve_agent_culture(
         delete_knowledge=False,
         clear_knowledge=False,
     )
-    _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
-        signature=signature,
-        manager=culture_manager,
-    )
+    if cache_private:
+        _PRIVATE_CULTURE_MANAGER_CACHE[private_cache_key] = culture_manager
+    else:
+        _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
+            signature=signature,
+            manager=culture_manager,
+        )
     return culture_manager, settings
 
 
@@ -669,6 +717,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
@@ -680,6 +729,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name: Name of the agent to create
         config: Application configuration
         runtime_paths: Explicit runtime context for paths, env, and credentials.
+        execution_identity: Request execution identity used to resolve scoped
+            state, workspaces, worker routing, and requester-local storage.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -697,6 +748,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
     resolved_storage_path = runtime_paths.storage_root
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=True,
+    )
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
@@ -710,12 +768,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         delegation_depth=delegation_depth,
     )
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    tool_init_context = build_agent_tool_init_context(
-        config,
-        agent_name,
-        storage_path=resolved_storage_path,
-    )
-    # Create tools
+    tool_init_context = _tool_init_context_from_runtime(agent_runtime)
+    workspace = agent_runtime.workspace
     tools: list[Toolkit] = []
     for tool_name in tool_names:
         try:
@@ -726,15 +780,31 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
+                execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
             ):
                 tools.append(toolkit)
-        except (ValueError, ImportError) as e:
-            logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
+        except (ValueError, ImportError) as exc:
+            logger.warning(
+                "Could not load tool for agent construction",
+                tool=tool_name,
+                agent=agent_name,
+                error=str(exc),
+            )
 
-    storage = create_session_storage(agent_name, resolved_storage_path)
+    storage = _create_agent_state_db_from_state_root(
+        agent_name,
+        agent_runtime.state_root,
+        subdir="sessions",
+        session_table=f"{agent_name}_sessions",
+    )
     learning_storage = (
-        _create_learning_storage(agent_name, resolved_storage_path)
+        _create_agent_state_db_from_state_root(
+            agent_name,
+            agent_runtime.state_root,
+            subdir="learning",
+            session_table=f"{agent_name}_learning_sessions",
+        )
         if _is_learning_enabled(agent_config, defaults)
         else None
     )
@@ -768,7 +838,9 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name,
         agent_config,
         config.defaults.max_preload_chars,
+        workspace_context_files=workspace.context_files if workspace is not None else (),
         storage_path=resolved_storage_path,
+        runtime_paths=runtime_paths,
     )
 
     # Use rich prompt if available, otherwise use YAML config
@@ -800,12 +872,32 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     if include_interactive_questions:
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
-    knowledge_enabled = bool(agent_config.knowledge_bases) and knowledge is not None
+    knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    culture_storage_root = resolved_storage_path
+    cache_private_culture = False
+    if agent_runtime.is_private:
+        worker_key = agent_runtime.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
+            raise ValueError(msg)
+        execution_scope = agent_runtime.execution_scope
+        execution_identity = agent_runtime.execution_identity
+        if execution_scope is None or execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
+            raise ValueError(msg)
+        culture_storage_root = resolve_private_requester_scope_root(
+            runtime_paths=runtime_paths,
+            execution_scope=execution_scope,
+            execution_identity=execution_identity,
+            worker_key=worker_key,
+        )
+        cache_private_culture = True
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,
-        resolved_storage_path,
+        culture_storage_root,
         model,
+        cache_private=cache_private_culture,
     )
 
     add_culture_to_context: bool | None = None

@@ -35,6 +35,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.skills import router as skills_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.workers import router as workers_router
+from mindroom.config.main import team_eligibility_reasons_for_agents
 from mindroom.credentials_sync import sync_env_to_credentials
 from mindroom.file_watcher import watch_file
 from mindroom.frontend_assets import ensure_frontend_dist_dir
@@ -73,6 +74,12 @@ class _ApiContext:
     config_data: dict[str, Any]
     config_lock: ApiConfigLock
     auth_state: _ApiAuthState | None = None
+
+
+class TeamEligibilityRequest(BaseModel):
+    """Payload for deriving editor-facing team eligibility from draft agent config."""
+
+    agents: dict[str, dict[str, Any]]
 
 
 def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> float:
@@ -753,6 +760,15 @@ async def save_config(
         error_prefix="Failed to save configuration",
     )
     return {"success": True}
+
+
+@app.post("/api/config/team-eligibility")
+async def get_team_eligibility(
+    payload: TeamEligibilityRequest,
+    _user: Annotated[dict, Depends(verify_user)],
+) -> dict[str, dict[str, str | None]]:
+    """Return backend-derived team-eligibility reasons for the current draft agents."""
+    return {"team_eligibility": team_eligibility_reasons_for_agents(payload.agents)}
 
 
 @app.get("/api/config/agents")

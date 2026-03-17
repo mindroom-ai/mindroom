@@ -7,8 +7,12 @@ import {
   ModelConfig,
   KnowledgeBaseConfig,
   Culture,
+  TeamEligibilityByAgent,
+  getDefaultPrivateConfig,
+  normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
+import type { ConfigDiagnostic } from '@/lib/configValidation';
 
 function unassignAgentsFromOtherCultures(
   cultures: Culture[],
@@ -25,6 +29,33 @@ function unassignAgentsFromOtherCultures(
       agents: culture.agents.filter(agentId => !assignedAgents.has(agentId)),
     };
   });
+}
+
+function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
+  const knownAgents = new Set(agents.map(agent => agent.id));
+  return teams.map(team => ({
+    ...team,
+    agents: team.agents.filter(agentId => knownAgents.has(agentId)),
+  }));
+}
+
+function normalizeAgentDelegates(delegateTo: string[] | undefined): string {
+  return [...new Set(delegateTo ?? [])].sort().join('\0');
+}
+
+function teamEligibilityChanged(
+  currentAgent: Pick<Agent, 'private' | 'delegate_to'>,
+  nextAgent: Pick<Agent, 'private' | 'delegate_to'>
+): boolean {
+  return (
+    (currentAgent.private != null) !== (nextAgent.private != null) ||
+    normalizeAgentDelegates(currentAgent.delegate_to) !==
+      normalizeAgentDelegates(nextAgent.delegate_to)
+  );
+}
+
+function agentCanAffectTeamEligibility(agent: Pick<Agent, 'private' | 'delegate_to'>): boolean {
+  return agent.private != null || normalizeAgentDelegates(agent.delegate_to).length > 0;
 }
 
 type MemoryEmbedderUpdate = {
@@ -44,20 +75,27 @@ interface ConfigState {
   teams: Team[];
   cultures: Culture[];
   rooms: Room[];
+  teamEligibilityByAgent: TeamEligibilityByAgent;
+  teamEligibilityRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
   selectedRoomId: string | null;
   isDirty: boolean;
   isLoading: boolean;
-  error: string | null;
+  diagnostics: ConfigDiagnostic[];
   syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
+  // UI-only backup so a draft private toggle can restore the prior explicit worker_scope
+  // until the draft is either saved successfully or toggled back off.
+  privateWorkerScopeBackups: Record<string, Agent['worker_scope'] | null>;
 
   // Actions
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<void>;
+  refreshTeamEligibility: (agents: Agent[]) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
+  setAgentPrivateEnabled: (agentId: string, enabled: boolean) => void;
   createAgent: (agent: Omit<Agent, 'id'>) => void;
   deleteAgent: (agentId: string) => void;
   selectTeam: (teamId: string | null) => void;
@@ -82,7 +120,6 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: unknown) => void;
   markDirty: () => void;
-  clearError: () => void;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -92,18 +129,21 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   teams: [],
   cultures: [],
   rooms: [],
+  teamEligibilityByAgent: {},
+  teamEligibilityRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
   selectedRoomId: null,
   isDirty: false,
   isLoading: false,
-  error: null,
+  diagnostics: [],
   syncStatus: 'disconnected',
+  privateWorkerScopeBackups: {},
 
   // Load configuration from backend
   loadConfig: async () => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, diagnostics: [] });
     try {
       const config = await configService.loadConfig();
       const normalizedConfig: Config = {
@@ -156,6 +196,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           model: roomModel,
         };
       });
+      let teamEligibilityByAgent: TeamEligibilityByAgent = {};
+      const diagnostics: ConfigDiagnostic[] = [];
+      try {
+        teamEligibilityByAgent = await configService.getTeamEligibility(agents);
+      } catch (error) {
+        diagnostics.push({
+          kind: 'global',
+          message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+          blocking: false,
+        });
+      }
 
       set({
         config: normalizedConfig,
@@ -163,15 +214,54 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         teams,
         cultures,
         rooms,
+        teamEligibilityByAgent,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        diagnostics,
+        privateWorkerScopeBackups: {},
       });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : 'Failed to load config',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to load config',
+            blocking: true,
+          },
+        ],
         isLoading: false,
         syncStatus: 'error',
+      });
+    }
+  },
+
+  refreshTeamEligibility: async agents => {
+    const teamEligibilityRequestId = get().teamEligibilityRequestId + 1;
+    set({ teamEligibilityRequestId });
+    try {
+      const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
+      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+        return;
+      }
+      set({
+        teamEligibilityByAgent,
+        diagnostics: get().diagnostics.filter(diagnostic => diagnostic.kind !== 'global'),
+      });
+    } catch (error) {
+      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+        return;
+      }
+      set({
+        teamEligibilityByAgent: {},
+        diagnostics: [
+          ...get().diagnostics.filter(diagnostic => diagnostic.kind === 'validation'),
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+            blocking: false,
+          },
+        ],
       });
     }
   },
@@ -181,7 +271,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const { config, agents, teams, cultures, rooms } = get();
     if (!config) return;
 
-    set({ isLoading: true, error: null, syncStatus: 'syncing' });
+    set({
+      isLoading: true,
+      diagnostics: [],
+      syncStatus: 'syncing',
+    });
     try {
       // Convert agents array back to object format
       const agentsObject = agents.reduce(
@@ -193,15 +287,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Agent, 'id'>>
       );
 
-      // Convert teams array back to object format
-      const teamsObject = teams.reduce(
-        (acc, team) => {
-          const { id, ...rest } = team;
-          acc[id] = rest;
-          return acc;
-        },
-        {} as Record<string, Omit<Team, 'id'>>
-      );
       const culturesObject = cultures.reduce(
         (acc, culture) => {
           const { id, ...rest } = culture;
@@ -222,7 +307,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const updatedConfig: Config = {
         ...config,
         agents: agentsObject,
-        teams: teamsObject,
+        teams: teams.reduce(
+          (acc, team) => {
+            const { id, ...rest } = team;
+            acc[id] = rest;
+            return acc;
+          },
+          {} as Record<string, Omit<Team, 'id'>>
+        ),
         cultures: culturesObject,
         room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
       };
@@ -232,10 +324,36 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        diagnostics: [],
+        privateWorkerScopeBackups: {},
       });
     } catch (error) {
+      if (error instanceof configService.ConfigValidationError) {
+        set({
+          diagnostics: [
+            {
+              kind: 'global',
+              message: 'Configuration validation failed',
+              blocking: false,
+            },
+            ...error.issues.map(issue => ({
+              kind: 'validation' as const,
+              issue,
+            })),
+          ],
+          isLoading: false,
+          syncStatus: 'error',
+        });
+        return;
+      }
       set({
-        error: error instanceof Error ? error.message : 'Failed to save config',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to save config',
+            blocking: false,
+          },
+        ],
         isLoading: false,
         syncStatus: 'error',
       });
@@ -249,10 +367,74 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update an existing agent
   updateAgent: (agentId, updates) => {
-    set(state => ({
-      agents: state.agents.map(agent => (agent.id === agentId ? { ...agent, ...updates } : agent)),
-      isDirty: true,
-    }));
+    let nextAgents: Agent[] = [];
+    let shouldRefreshTeamEligibility = false;
+    set(state => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return state;
+      }
+
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      nextAgents = state.agents.map(agent =>
+        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
+      );
+      const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
+      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
+
+      return {
+        agents: nextAgents,
+        isDirty: true,
+        diagnostics: [],
+      };
+    });
+    if (shouldRefreshTeamEligibility && get().config != null) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
+  },
+
+  setAgentPrivateEnabled: (agentId, enabled) => {
+    let nextAgents: Agent[] = [];
+    let shouldRefreshTeamEligibility = false;
+    set(state => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return state;
+      }
+
+      const nextBackups = { ...state.privateWorkerScopeBackups };
+      const privateUpdates = enabled
+        ? (() => {
+            if (!(agentId in nextBackups)) {
+              nextBackups[agentId] = currentAgent.worker_scope ?? null;
+            }
+            return { private: getDefaultPrivateConfig(currentAgent) };
+          })()
+        : (() => {
+            const restoredWorkerScope = nextBackups[agentId];
+            delete nextBackups[agentId];
+            return restoredWorkerScope != null
+              ? { private: undefined, worker_scope: restoredWorkerScope }
+              : { private: undefined };
+          })();
+
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, privateUpdates);
+      nextAgents = state.agents.map(agent =>
+        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
+      );
+      const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
+      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
+
+      return {
+        agents: nextAgents,
+        isDirty: true,
+        diagnostics: [],
+        privateWorkerScopeBackups: nextBackups,
+      };
+    });
+    if (shouldRefreshTeamEligibility && get().config != null) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
   },
 
   // Create a new agent
@@ -272,30 +454,52 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agents: [...state.agents, newAgent],
       selectedAgentId: id,
       isDirty: true,
+      diagnostics: [],
     }));
+    if (get().config != null && agentCanAffectTeamEligibility(newAgent)) {
+      void get().refreshTeamEligibility([...get().agents]);
+    }
   },
 
   // Delete an agent
   deleteAgent: agentId => {
-    set(state => ({
-      agents: state.agents
-        .filter(agent => agent.id !== agentId)
-        .map(agent => {
-          if (!agent.delegate_to?.includes(agentId)) {
-            return agent;
-          }
-          return {
-            ...agent,
-            delegate_to: agent.delegate_to.filter(id => id !== agentId),
-          };
-        }),
+    const state = get();
+    const deletedAgent = state.agents.find(agent => agent.id === agentId);
+    const nextAgents = state.agents
+      .filter(agent => agent.id !== agentId)
+      .map(agent => {
+        if (!agent.delegate_to?.includes(agentId)) {
+          return agent;
+        }
+        return {
+          ...agent,
+          delegate_to: agent.delegate_to.filter(id => id !== agentId),
+        };
+      });
+    const nextTeamEligibilityByAgent = Object.fromEntries(
+      Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
+    );
+    const { [agentId]: _removedBackup, ...remainingBackups } = state.privateWorkerScopeBackups;
+    set({
+      agents: nextAgents,
+      teams: removeMissingTeamMembers(state.teams, nextAgents),
       cultures: state.cultures.map(culture => ({
         ...culture,
         agents: culture.agents.filter(id => id !== agentId),
       })),
+      teamEligibilityByAgent: nextTeamEligibilityByAgent,
+      privateWorkerScopeBackups: remainingBackups,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
-    }));
+      diagnostics: [],
+    });
+    const shouldRefreshTeamEligibility =
+      deletedAgent != null &&
+      (agentCanAffectTeamEligibility(deletedAgent) ||
+        state.agents.some(agent => agent.id !== agentId && agent.delegate_to?.includes(agentId)));
+    if (get().config != null && shouldRefreshTeamEligibility) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
   },
 
   // Select a team for editing
@@ -308,6 +512,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       teams: state.teams.map(team => (team.id === teamId ? { ...team, ...updates } : team)),
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -322,6 +527,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teams: [...state.teams, newTeam],
       selectedTeamId: id,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -331,6 +537,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teams: state.teams.filter(team => team.id !== teamId),
       selectedTeamId: state.selectedTeamId === teamId ? null : state.selectedTeamId,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -349,7 +556,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (updates.agents) {
         const targetCulture = updatedCultures.find(culture => culture.id === cultureId);
         if (!targetCulture) {
-          return { cultures: updatedCultures, isDirty: true };
+          return { cultures: updatedCultures, isDirty: true, diagnostics: [] };
         }
         return {
           cultures: unassignAgentsFromOtherCultures(
@@ -358,12 +565,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             targetCulture.agents
           ),
           isDirty: true,
+          diagnostics: [],
         };
       }
 
       return {
         cultures: updatedCultures,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -395,6 +604,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         cultures: nextCultures,
         selectedCultureId: id,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -405,6 +615,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       cultures: state.cultures.filter(culture => culture.id !== cultureId),
       selectedCultureId: state.selectedCultureId === cultureId ? null : state.selectedCultureId,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -467,6 +678,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           rooms: updatedRooms,
           agents: updatedAgents,
           isDirty: true,
+          diagnostics: [],
         };
       }
 
@@ -474,6 +686,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         rooms: updatedRooms,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -500,6 +713,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agents: updatedAgents,
         selectedRoomId: id,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -536,6 +750,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         selectedRoomId: state.selectedRoomId === roomId ? null : state.selectedRoomId,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -561,6 +776,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms: updatedRooms,
         agents: updatedAgents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -586,6 +802,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms: updatedRooms,
         agents: updatedAgents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -600,6 +817,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           room_models: roomModels,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -624,6 +842,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             },
           },
           isDirty: true,
+          diagnostics: [],
         };
       }
 
@@ -633,6 +852,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           memory: memoryConfig,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -654,6 +874,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -688,6 +909,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
         agents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -708,6 +930,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -723,6 +946,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           models: remainingModels,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -740,17 +964,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
 
   // Mark configuration as dirty
   markDirty: () => {
-    set({ isDirty: true });
-  },
-
-  // Clear error
-  clearError: () => {
-    set({ error: null });
+    set({ isDirty: true, diagnostics: [] });
   },
 }));

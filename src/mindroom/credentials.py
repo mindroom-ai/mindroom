@@ -13,13 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    WorkerScope,
-    resolve_execution_identity_for_worker_scope,
-    resolve_worker_key,
-    worker_root_path,
-)
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -308,28 +302,14 @@ def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> Crede
 
 def _resolve_worker_credentials_manager(
     *,
-    worker_scope: WorkerScope | None,
-    routing_agent_name: str | None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> CredentialsManager | None:
     """Return the worker-scoped credentials manager for the current execution, if any."""
-    if worker_scope is None:
+    if worker_target is None or worker_target.worker_scope is None:
         return None
 
-    execution_identity = resolve_execution_identity_for_worker_scope(
-        worker_scope,
-        agent_name=routing_agent_name,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    )
-    if execution_identity is None:
-        return None
-
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    worker_key = worker_target.worker_key
     if worker_key is None:
         return None
 
@@ -425,33 +405,16 @@ def sync_shared_credentials_to_worker(
         worker_shared_manager.delete_credentials(service)
 
 
-def _sync_env_credentials_to_worker(
-    worker_key: str,
-    *,
-    credentials_manager: CredentialsManager,
-) -> None:
-    """Backward-compatible wrapper for syncing env-backed shared credentials."""
-    sync_shared_credentials_to_worker(
-        worker_key,
-        include_ui_credentials=False,
-        credentials_manager=credentials_manager,
-    )
-
-
 def load_scoped_credentials(
     service: str,
     *,
-    worker_scope: WorkerScope | None = None,
-    routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> dict[str, Any] | None:
     """Load credentials for a service, resolving worker-scoped overrides when available."""
     manager = credentials_manager
     shared_manager = manager.shared_manager()
-    if worker_scope is None:
+    if worker_target is None or worker_target.worker_scope is None:
         if manager.shared_base_path != manager.base_path:
             return _merge_unscoped_credentials(
                 service,
@@ -461,12 +424,8 @@ def load_scoped_credentials(
         return shared_manager.load_credentials(service)
 
     worker_manager = _resolve_worker_credentials_manager(
-        worker_scope=worker_scope,
-        routing_agent_name=routing_agent_name,
         credentials_manager=manager,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
+        worker_target=worker_target,
     )
     return merge_scoped_credentials(
         service,
@@ -479,27 +438,19 @@ def save_scoped_credentials(
     service: str,
     credentials: dict[str, Any],
     *,
-    worker_scope: WorkerScope | None = None,
-    routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> None:
     """Save credentials for a service to the current worker scope when available."""
     manager = credentials_manager
-    if worker_scope is None:
+    if worker_target is None or worker_target.worker_scope is None:
         target_manager = manager if manager.shared_base_path != manager.base_path else manager.shared_manager()
         target_manager.save_credentials(service, credentials)
         return
 
     worker_manager = _resolve_worker_credentials_manager(
-        worker_scope=worker_scope,
-        routing_agent_name=routing_agent_name,
         credentials_manager=manager,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
+        worker_target=worker_target,
     )
     target_manager = worker_manager or manager.shared_manager()
     target_manager.save_credentials(service, credentials)

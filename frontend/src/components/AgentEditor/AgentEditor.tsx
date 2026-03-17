@@ -21,12 +21,21 @@ import {
   CheckboxListItem,
 } from '@/components/shared';
 import { useForm, useWatch, Controller } from 'react-hook-form';
-import { Agent } from '@/types/config';
+import {
+  Agent,
+  getDefaultPrivateConfig,
+  AgentPrivateConfig,
+  AgentPrivateKnowledgeConfig,
+  getAgentExecutionScope,
+  SHARED_CONTEXT_FILE_PLACEHOLDER,
+} from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
+import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
 export function AgentEditor() {
   const {
@@ -34,6 +43,7 @@ export function AgentEditor() {
     rooms,
     selectedAgentId,
     updateAgent,
+    setAgentPrivateEnabled,
     deleteAgent,
     saveConfig,
     config,
@@ -56,33 +66,16 @@ export function AgentEditor() {
   );
 
   // Fetch tools and skills from backend
-  const { tools: backendTools, loading: toolsLoading } = useTools();
+  const selectedExecutionScope = useMemo(
+    () => (selectedAgent ? getAgentExecutionScope(config, selectedAgent) : null),
+    [config, selectedAgent]
+  );
+  const {
+    tools: backendTools,
+    loading: toolsLoading,
+    statusAuthoritative,
+  } = useTools(selectedAgentId, selectedExecutionScope);
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
-
-  // Split tools into configured and unconfigured (but usable) categories
-  const { configuredTools, unconfiguredTools } = useMemo(() => {
-    const configured: typeof backendTools = [];
-    const unconfigured: typeof backendTools = [];
-
-    backendTools.forEach(tool => {
-      // delegate is managed via delegate_to, not the tools picker
-      if (tool.name === 'delegate') return;
-      // Tools that don't require configuration are "unconfigured but usable"
-      if (tool.setup_type === 'none') {
-        unconfigured.push(tool);
-      }
-      // Tools that are configured
-      else if (tool.status === 'available') {
-        configured.push(tool);
-      }
-      // Exclude everything else (requires_config)
-    });
-
-    return {
-      configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-      unconfiguredTools: unconfigured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    };
-  }, [backendTools]);
 
   // Enable swipe back on mobile
   useSwipeBack({
@@ -102,10 +95,10 @@ export function AgentEditor() {
       knowledge_bases: [],
       delegate_to: [],
       context_files: [],
+      private: undefined,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
       memory_backend: undefined,
-      memory_file_path: undefined,
     },
   });
   const learningEnabled = useWatch({ name: 'learning', control });
@@ -114,9 +107,81 @@ export function AgentEditor() {
   const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
-  const memoryBackend = useWatch({ name: 'memory_backend', control });
-  const effectiveMemoryBackend = memoryBackend ?? globalMemoryBackend;
+  const privateConfig = useWatch({ name: 'private', control });
+  const privateKnowledge = privateConfig?.knowledge;
+  const validationPrefix = useMemo<Array<string | number> | null>(
+    () => (selectedAgentId == null ? null : ['agents', selectedAgentId]),
+    [selectedAgentId]
+  );
+  const validationErrorForPath = useScopedConfigValidation(validationPrefix);
+  const agentRootError = validationErrorForPath([], true);
+  const privateScopeError = validationErrorForPath(['private', 'per'], true);
+  const privateRootError = validationErrorForPath(['private', 'root'], true);
+  const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
+  const privateContextFilesError = validationErrorForPath(['private', 'context_files']);
+  const privateKnowledgeError = validationErrorForPath(['private', 'knowledge'], true);
+  const privateKnowledgePathError = validationErrorForPath(['private', 'knowledge', 'path'], true);
+  // Split tools into configured, default, and setup-required categories.
+  const { configuredTools, defaultTools, setupRequiredTools, selectedUnavailableTools } =
+    useMemo(() => {
+      const configured: typeof backendTools = [];
+      const defaults: typeof backendTools = [];
+      const setupRequired: typeof backendTools = [];
+      const selectedUnavailable: Array<{
+        name: string;
+        display_name: string;
+        reason: string;
+      }> = [];
+      const selectedToolNames = agentTools ?? [];
+      const backendToolNames = new Set<string>();
 
+      backendTools.forEach(tool => {
+        backendToolNames.add(tool.name);
+        // delegate is managed via delegate_to, not the tools picker
+        if (tool.name === 'delegate') return;
+        if (tool.execution_scope_supported === false) {
+          if (selectedToolNames.includes(tool.name)) {
+            selectedUnavailable.push({
+              name: tool.name,
+              display_name: tool.display_name,
+              reason: 'Not supported for this execution scope. Uncheck it to remove it.',
+            });
+          }
+          return;
+        }
+        // Tools that do not require configuration are default tools.
+        if (tool.setup_type === 'none') {
+          defaults.push(tool);
+        } else if (tool.status === 'available') {
+          configured.push(tool);
+        } else {
+          setupRequired.push(tool);
+        }
+      });
+
+      for (const toolName of selectedToolNames) {
+        if (toolName === 'delegate' || backendToolNames.has(toolName)) {
+          continue;
+        }
+        selectedUnavailable.push({
+          name: toolName,
+          display_name: toolName,
+          reason:
+            'This tool is no longer available in the current registry. Uncheck it to remove it.',
+        });
+      }
+
+      return {
+        configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+        defaultTools: defaults.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+        setupRequiredTools: setupRequired.sort((a, b) =>
+          a.display_name.localeCompare(b.display_name)
+        ),
+        selectedUnavailableTools: selectedUnavailable.sort((a, b) =>
+          a.display_name.localeCompare(b.display_name)
+        ),
+      };
+    }, [agentTools, backendTools]);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -184,14 +249,14 @@ export function AgentEditor() {
         knowledge_bases: selectedAgent.knowledge_bases ?? [],
         delegate_to: selectedAgent.delegate_to ?? [],
         context_files: selectedAgent.context_files ?? [],
+        private: selectedAgent.private ?? undefined,
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
-        memory_file_path: selectedAgent.memory_file_path ?? undefined,
       });
     }
   }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
-
-  // Create a debounced update function
+  // Let the store normalize against current state so sequential UI updates do not
+  // reuse stale render-time agent data.
   const handleFieldChange = useCallback(
     (fieldName: keyof Agent, value: any) => {
       if (selectedAgentId) {
@@ -199,6 +264,17 @@ export function AgentEditor() {
       }
     },
     [selectedAgentId, updateAgent]
+  );
+
+  const updateSelectedTools = useCallback(
+    (currentTools: string[], toolName: string, checked: boolean) => {
+      const nextTools = checked
+        ? [...new Set([...currentTools, toolName])]
+        : currentTools.filter(tool => tool !== toolName);
+      handleFieldChange('tools', nextTools);
+      return nextTools;
+    },
+    [handleFieldChange]
   );
 
   const handleDelete = () => {
@@ -239,6 +315,117 @@ export function AgentEditor() {
     handleFieldChange('context_files', updated);
   };
 
+  const updatePrivate = useCallback(
+    (nextPrivate: Agent['private']) => {
+      setValue('private', nextPrivate);
+      handleFieldChange('private', nextPrivate);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutatePrivate = useCallback(
+    (mutator: (current: Agent['private']) => Agent['private']) => {
+      updatePrivate(mutator(getValues('private')));
+    },
+    [getValues, updatePrivate]
+  );
+
+  const ensurePrivateConfig = (value: Agent['private']): AgentPrivateConfig =>
+    value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined });
+
+  const handleEnablePrivate = (enabled: boolean) => {
+    if (selectedAgentId) {
+      setAgentPrivateEnabled(selectedAgentId, enabled);
+    }
+  };
+
+  const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      per,
+    }));
+  };
+
+  const handlePrivateRootChange = (root: string) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      root: root.trim() === '' ? undefined : root,
+    }));
+  };
+
+  const handlePrivateTemplateDirChange = (templateDir: string) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      template_dir: templateDir.trim() === '' ? undefined : templateDir,
+    }));
+  };
+
+  const handleAddPrivateContextFile = () => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        context_files: [...(privateState.context_files ?? []), ''],
+      };
+    });
+  };
+
+  const handleRemovePrivateContextFile = (index: number) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        context_files: (privateState.context_files ?? []).filter((_, i) => i !== index),
+      };
+    });
+  };
+
+  const handleEnablePrivateKnowledge = (enabled: boolean) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      const currentKnowledge = privateState.knowledge;
+      const nextKnowledge: AgentPrivateKnowledgeConfig | undefined = enabled
+        ? {
+            ...(currentKnowledge ?? {}),
+            enabled: true,
+            watch: currentKnowledge?.watch ?? true,
+          }
+        : currentKnowledge == null
+          ? { enabled: false }
+          : { ...currentKnowledge, enabled: false };
+      return {
+        ...privateState,
+        knowledge: nextKnowledge,
+      };
+    });
+  };
+
+  const mutatePrivateKnowledge = (
+    mutator: (current: AgentPrivateKnowledgeConfig | undefined) => AgentPrivateKnowledgeConfig
+  ) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        knowledge: mutator(privateState.knowledge ?? undefined),
+      };
+    });
+  };
+
+  const handlePrivateKnowledgePathChange = (path: string) => {
+    mutatePrivateKnowledge(current => ({
+      ...(current ?? { enabled: true, watch: true }),
+      path: path.trim() === '' ? undefined : path,
+    }));
+  };
+
+  const handlePrivateKnowledgeWatchChange = (watch: boolean) => {
+    mutatePrivateKnowledge(current => ({
+      ...(current ?? { enabled: true }),
+      watch,
+    }));
+  };
+
   /** Parse a string to a non-negative integer or return null for empty/invalid input. */
   const parseOptionalInt = (raw: string): number | null => {
     if (raw.trim() === '') return null;
@@ -259,6 +446,12 @@ export function AgentEditor() {
       onDelete={handleDelete}
       onBack={() => selectAgent(null)}
     >
+      {agentRootError && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {agentRootError}
+        </div>
+      )}
+
       {/* Display Name */}
       <FieldGroup
         label="Display Name"
@@ -370,31 +563,6 @@ export function AgentEditor() {
         />
       </FieldGroup>
 
-      {/* Memory File Path */}
-      <FieldGroup
-        label="Memory File Path"
-        helperText="Optional workspace-relative directory for this agent's file memory. Used only when the effective backend is file."
-        htmlFor="memory_file_path"
-      >
-        <Controller
-          name="memory_file_path"
-          control={control}
-          render={({ field }) => (
-            <Input
-              id="memory_file_path"
-              value={field.value ?? ''}
-              placeholder="mind_data"
-              disabled={effectiveMemoryBackend !== 'file'}
-              onChange={e => {
-                const resolved = e.target.value === '' ? undefined : e.target.value;
-                field.onChange(resolved);
-                handleFieldChange('memory_file_path', resolved);
-              }}
-            />
-          )}
-        />
-      </FieldGroup>
-
       {/* Thread Mode */}
       <FieldGroup
         label="Thread Mode"
@@ -461,9 +629,19 @@ export function AgentEditor() {
       {/* Context Files */}
       <FieldGroup
         label="Context Files"
-        helperText="Workspace-relative files loaded into each freshly built agent instance and prepended to its role context."
+        helperText={
+          privateConfig != null
+            ? 'Shared workspace-relative files loaded into each agent instance. Use Private Context Files below for requester-local files.'
+            : 'Workspace-relative files loaded into each freshly built agent instance and prepended to its role context.'
+        }
         actions={
-          <Button variant="outline" size="sm" onClick={handleAddContextFile} className="h-9 px-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleAddContextFile}
+            className="h-9 px-3"
+            data-testid="add-context-file-button"
+          >
             <Plus className="h-4 w-4 sm:mr-1" />
             <span className="hidden sm:inline">Add</span>
           </Button>
@@ -484,7 +662,7 @@ export function AgentEditor() {
                       field.onChange(updated);
                       handleFieldChange('context_files', updated);
                     }}
-                    placeholder="mind_data/SOUL.md"
+                    placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
                     className="min-h-[40px]"
                   />
                   <Button
@@ -501,6 +679,192 @@ export function AgentEditor() {
           )}
         />
       </FieldGroup>
+
+      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
+        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+          Private Instance
+        </h3>
+
+        <FieldGroup
+          label="Requester-Private State"
+          helperText="Enable requester-local state for one shared agent definition. Private agents cannot participate in teams yet, including through delegation from shared team members."
+          htmlFor="private_enabled"
+        >
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="private_enabled"
+              checked={privateConfig != null}
+              onCheckedChange={checked => handleEnablePrivate(checked === true)}
+            />
+            <label
+              htmlFor="private_enabled"
+              className="text-sm font-medium cursor-pointer select-none"
+            >
+              Enable requester-private state
+            </label>
+          </div>
+        </FieldGroup>
+
+        {privateConfig != null && (
+          <>
+            <FieldGroup
+              label="Private Scope"
+              helperText="Requester boundary that gets its own private instance. Private agents derive their execution scope from this boundary."
+              htmlFor="private_per"
+              error={privateScopeError}
+            >
+              <Select
+                value={privateConfig.per}
+                onValueChange={value =>
+                  handlePrivateScopeChange(value as AgentPrivateConfig['per'])
+                }
+              >
+                <SelectTrigger id="private_per">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">user</SelectItem>
+                  <SelectItem value="user_agent">user_agent</SelectItem>
+                </SelectContent>
+              </Select>
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Root"
+              helperText="Optional requester-local root name under the canonical private-instance state root."
+              htmlFor="private_root"
+              error={privateRootError}
+            >
+              <Input
+                id="private_root"
+                value={privateConfig.root ?? ''}
+                placeholder="mind_data"
+                onChange={e => handlePrivateRootChange(e.target.value)}
+              />
+            </FieldGroup>
+
+            <FieldGroup
+              label="Template Directory"
+              helperText="Optional local directory copied into each requester root without overwriting existing files."
+              htmlFor="private_template_dir"
+              error={privateTemplateDirError}
+            >
+              <Input
+                id="private_template_dir"
+                value={privateConfig.template_dir ?? ''}
+                placeholder="./mind_template"
+                onChange={e => handlePrivateTemplateDirChange(e.target.value)}
+              />
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Context Files"
+              helperText="Private-root-relative files loaded into role context for each requester-private instance."
+              error={privateContextFilesError}
+              actions={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAddPrivateContextFile}
+                  className="h-9 px-3"
+                >
+                  <Plus className="h-4 w-4 sm:mr-1" />
+                  <span className="hidden sm:inline">Add</span>
+                </Button>
+              }
+            >
+              <div className="space-y-2">
+                {(privateConfig.context_files ?? []).map((filePath, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input
+                      value={filePath}
+                      onChange={e => {
+                        const updated = [...(privateConfig.context_files ?? [])];
+                        updated[index] = e.target.value;
+                        mutatePrivate(current => ({
+                          ...ensurePrivateConfig(current),
+                          context_files: updated,
+                        }));
+                      }}
+                      placeholder="SOUL.md"
+                      className="min-h-[40px]"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleRemovePrivateContextFile(index)}
+                      className="h-10 w-10 flex-shrink-0"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Knowledge"
+              helperText="Requester-local knowledge indexed from inside the private root."
+              htmlFor="private_knowledge_enabled"
+              error={privateKnowledgeError}
+            >
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="private_knowledge_enabled"
+                  checked={privateKnowledge?.enabled ?? false}
+                  onCheckedChange={checked => handleEnablePrivateKnowledge(checked === true)}
+                />
+                <label
+                  htmlFor="private_knowledge_enabled"
+                  className="text-sm font-medium cursor-pointer select-none"
+                >
+                  Enable private knowledge
+                </label>
+              </div>
+            </FieldGroup>
+
+            {privateKnowledge?.enabled === true && (
+              <>
+                <FieldGroup
+                  label="Private Knowledge Path"
+                  helperText="Private-root-relative path to index for requester-local knowledge."
+                  htmlFor="private_knowledge_path"
+                  error={privateKnowledgePathError}
+                >
+                  <Input
+                    id="private_knowledge_path"
+                    value={privateKnowledge.path ?? ''}
+                    placeholder="memory"
+                    onChange={e => handlePrivateKnowledgePathChange(e.target.value)}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Watch Private Knowledge"
+                  helperText="Watch the private knowledge path for changes."
+                  htmlFor="private_knowledge_watch"
+                >
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="private_knowledge_watch"
+                      checked={privateKnowledge.watch ?? true}
+                      onCheckedChange={checked =>
+                        handlePrivateKnowledgeWatchChange(checked === true)
+                      }
+                    />
+                    <label
+                      htmlFor="private_knowledge_watch"
+                      className="text-sm font-medium cursor-pointer select-none"
+                    >
+                      Watch for changes
+                    </label>
+                  </div>
+                </FieldGroup>
+              </>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Include Default Tools */}
       <FieldGroup
@@ -536,16 +900,88 @@ export function AgentEditor() {
       {/* Tools */}
       <FieldGroup label="Tools" helperText="Select tools this agent can use">
         <div className="space-y-4">
+          {selectedExecutionScope != null && statusAuthoritative === false && (
+            <Alert>
+              <AlertDescription>
+                Requester-scoped tool status is preview only. The dashboard can show scope support
+                rules and shared env-backed availability, but it cannot inspect live requester-owned
+                scoped credentials.
+              </AlertDescription>
+            </Alert>
+          )}
           {toolsLoading ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               Loading available tools...
             </div>
-          ) : configuredTools.length === 0 && unconfiguredTools.length === 0 ? (
+          ) : configuredTools.length === 0 &&
+            defaultTools.length === 0 &&
+            setupRequiredTools.length === 0 &&
+            selectedUnavailableTools.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               No tools are available. Please configure tools in the Tools tab first.
             </div>
           ) : (
             <>
+              {selectedUnavailableTools.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                      Selected But Unavailable
+                    </h4>
+                    <Badge variant="destructive" className="text-xs">
+                      {selectedUnavailableTools.length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      (uncheck to remove invalid tool assignments)
+                    </span>
+                  </div>
+                  <div className="pl-2 space-y-1">
+                    {selectedUnavailableTools.map(tool => (
+                      <Controller
+                        key={tool.name}
+                        name="tools"
+                        control={control}
+                        render={({ field }) => (
+                          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-3 sm:space-x-2">
+                                <Checkbox
+                                  id={`unavailable-${tool.name}`}
+                                  checked={field.value.includes(tool.name)}
+                                  onCheckedChange={checked => {
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
+                                  }}
+                                  className="h-5 w-5 sm:h-4 sm:w-4"
+                                />
+                                <label
+                                  htmlFor={`unavailable-${tool.name}`}
+                                  className="text-sm font-medium leading-none cursor-pointer select-none"
+                                >
+                                  {tool.display_name}
+                                </label>
+                              </div>
+                              <Badge variant="destructive" className="text-xs">
+                                Remove
+                              </Badge>
+                            </div>
+                            <p className="pl-8 pt-1 text-xs text-muted-foreground">{tool.reason}</p>
+                          </div>
+                        )}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedUnavailableTools.length > 0 &&
+                (configuredTools.length > 0 ||
+                  defaultTools.length > 0 ||
+                  setupRequiredTools.length > 0) && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
+
               {/* Configured Tools Section */}
               {configuredTools.length > 0 && (
                 <div className="space-y-2">
@@ -581,11 +1017,9 @@ export function AgentEditor() {
                                   id={`configured-${tool.name}`}
                                   checked={isChecked}
                                   onCheckedChange={checked => {
-                                    const newTools = checked
-                                      ? [...field.value, tool.name]
-                                      : field.value.filter(t => t !== tool.name);
-                                    field.onChange(newTools);
-                                    handleFieldChange('tools', newTools);
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
@@ -617,26 +1051,27 @@ export function AgentEditor() {
               )}
 
               {/* Divider if both sections have content */}
-              {configuredTools.length > 0 && unconfiguredTools.length > 0 && (
-                <div className="border-t border-gray-200 dark:border-gray-700" />
-              )}
+              {configuredTools.length > 0 &&
+                (defaultTools.length > 0 || setupRequiredTools.length > 0) && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
 
-              {/* Unconfigured but Usable Tools Section */}
-              {unconfiguredTools.length > 0 && (
+              {/* Default Tools Section */}
+              {defaultTools.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 mb-2">
                     <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
                       Default Tools
                     </h4>
                     <Badge variant="secondary" className="text-xs">
-                      {unconfiguredTools.length}
+                      {defaultTools.length}
                     </Badge>
                     <span className="text-xs text-muted-foreground">
                       (work without configuration)
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {unconfiguredTools.map(tool => (
+                    {defaultTools.map(tool => (
                       <Controller
                         key={tool.name}
                         name="tools"
@@ -651,11 +1086,9 @@ export function AgentEditor() {
                                   id={`default-${tool.name}`}
                                   checked={isChecked}
                                   onCheckedChange={checked => {
-                                    const newTools = checked
-                                      ? [...field.value, tool.name]
-                                      : field.value.filter(t => t !== tool.name);
-                                    field.onChange(newTools);
-                                    handleFieldChange('tools', newTools);
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
@@ -666,6 +1099,81 @@ export function AgentEditor() {
                                   {tool.display_name}
                                 </label>
                               </div>
+                            </div>
+                          );
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Divider if a setup-required section follows */}
+              {(configuredTools.length > 0 || defaultTools.length > 0) &&
+                setupRequiredTools.length > 0 && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
+
+              {/* Setup Required Tools Section */}
+              {setupRequiredTools.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                      Setup Required
+                    </h4>
+                    <Badge variant="outline" className="text-xs">
+                      {setupRequiredTools.length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      (selectable after credentials are configured)
+                    </span>
+                  </div>
+                  <div className="pl-2 space-y-1">
+                    {setupRequiredTools.map(tool => (
+                      <Controller
+                        key={tool.name}
+                        name="tools"
+                        control={control}
+                        render={({ field }) => {
+                          const isChecked = field.value.includes(tool.name);
+                          const setupBlocked = tool.dashboard_configuration_supported === false;
+
+                          return (
+                            <div className="rounded-lg p-2 transition-colors hover:bg-gray-50 dark:hover:bg-white/5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-3 sm:space-x-2">
+                                  <Checkbox
+                                    id={`setup-${tool.name}`}
+                                    checked={isChecked}
+                                    onCheckedChange={checked => {
+                                      field.onChange(
+                                        updateSelectedTools(
+                                          field.value,
+                                          tool.name,
+                                          checked === true
+                                        )
+                                      );
+                                    }}
+                                    className="h-5 w-5 sm:h-4 sm:w-4"
+                                  />
+                                  <label
+                                    htmlFor={`setup-${tool.name}`}
+                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                  >
+                                    {tool.display_name}
+                                  </label>
+                                </div>
+                                <Badge variant="secondary" className="text-xs">
+                                  Setup required
+                                </Badge>
+                              </div>
+                              {setupBlocked && (
+                                <p className="pl-8 pt-1 text-xs text-muted-foreground">
+                                  This scope can use runtime env credentials, but dashboard
+                                  credential setup is only supported for shared deployment
+                                  credentials.
+                                </p>
+                              )}
                             </div>
                           );
                         }}

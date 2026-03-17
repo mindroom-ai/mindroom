@@ -2,10 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/api', () => ({
   API_BASE_URL: 'https://backend.example.test',
-  withAgentName: (url: string, agentName?: string | null) => {
+  withAgentExecutionScope: (
+    url: string,
+    agentName?: string | null,
+    executionScope?: string | null
+  ) => {
     const parsed = new URL(url);
     if (agentName) {
       parsed.searchParams.set('agent_name', agentName);
+    }
+    if (executionScope) {
+      parsed.searchParams.set('execution_scope', executionScope);
     }
     return parsed.toString();
   },
@@ -76,29 +83,29 @@ describe('GoogleIntegrationProvider', () => {
       expect(status.connected).toBe(false);
     });
 
-    it('appends agent_name when checking scoped status', async () => {
+    it('appends agent_name and execution_scope when checking scoped status', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
 
-      await googleIntegration.loadStatus({ agentName: 'code' });
+      await googleIntegration.loadStatus({ agentName: 'code', executionScope: 'shared' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://backend.example.test/api/google/status?agent_name=code'
+        'https://backend.example.test/api/google/status?agent_name=code&execution_scope=shared'
       );
     });
   });
 
   describe('disconnect', () => {
-    it('appends agent_name for scoped disconnect', async () => {
+    it('appends agent_name and execution_scope for scoped disconnect', async () => {
       (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
-      const config = googleIntegration.getConfig({ agentName: 'code' });
+      const config = googleIntegration.getConfig({ agentName: 'code', executionScope: 'shared' });
       await config.onDisconnect!('google');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://backend.example.test/api/google/disconnect?agent_name=code',
+        'https://backend.example.test/api/google/disconnect?agent_name=code&execution_scope=shared',
         expect.objectContaining({ method: 'POST' })
       );
     });

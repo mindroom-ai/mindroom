@@ -20,7 +20,8 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
+import type { WorkerScope } from '@/types/config';
 
 interface HomeAssistantStatus {
   connected: boolean;
@@ -35,6 +36,7 @@ interface HomeAssistantStatus {
 interface HomeAssistantIntegrationProps {
   onSuccess?: () => void;
   agentName?: string | null;
+  executionScope?: WorkerScope | null;
 }
 
 function getHomeAssistantCallbackUrl(): string {
@@ -50,6 +52,7 @@ function getHomeAssistantCallbackUrl(): string {
 export function HomeAssistantIntegration({
   onSuccess,
   agentName,
+  executionScope,
 }: HomeAssistantIntegrationProps = {}) {
   const [status, setStatus] = useState<HomeAssistantStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,7 +72,11 @@ export function HomeAssistantIntegration({
     setLoading(true);
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/homeassistant/status`,
+          agentName,
+          executionScope
+        )
       );
       if (response.ok) {
         const data = await response.json();
@@ -104,7 +111,11 @@ export function HomeAssistantIntegration({
     setConnecting(true);
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/homeassistant/connect/oauth`, agentName),
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/homeassistant/connect/oauth`,
+          agentName,
+          executionScope
+        ),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -137,7 +148,11 @@ export function HomeAssistantIntegration({
 
           // Check the status again to see if we're now connected
           const statusResponse = await fetch(
-            withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+            withAgentExecutionScope(
+              `${API_BASE_URL}/api/homeassistant/status`,
+              agentName,
+              executionScope
+            )
           );
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
@@ -188,7 +203,11 @@ export function HomeAssistantIntegration({
     setConnecting(true);
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/homeassistant/connect/token`, agentName),
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/homeassistant/connect/token`,
+          agentName,
+          executionScope
+        ),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -235,7 +254,11 @@ export function HomeAssistantIntegration({
     setConnecting(true);
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/homeassistant/disconnect`, agentName),
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/homeassistant/disconnect`,
+          agentName,
+          executionScope
+        ),
         {
           method: 'POST',
         }

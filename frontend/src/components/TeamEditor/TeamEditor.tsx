@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
@@ -15,6 +15,7 @@ import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
+import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
 export function TeamEditor() {
   const {
@@ -25,12 +26,25 @@ export function TeamEditor() {
     updateTeam,
     deleteTeam,
     saveConfig,
+    teamEligibilityByAgent,
     config,
     isDirty,
     selectTeam,
   } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
+  const validationPrefix = useMemo<Array<string | number> | null>(
+    () => (selectedTeamId == null ? null : ['teams', selectedTeamId]),
+    [selectedTeamId]
+  );
+  const validationErrorForPath = useScopedConfigValidation(validationPrefix);
+  const teamRootError = validationErrorForPath([], true);
+  const displayNameError = validationErrorForPath(['display_name'], true);
+  const roleError = validationErrorForPath(['role'], true);
+  const modeError = validationErrorForPath(['mode'], true);
+  const modelError = validationErrorForPath(['model'], true);
+  const membersError = validationErrorForPath(['agents']);
+  const roomsError = validationErrorForPath(['rooms']);
 
   // Enable swipe back on mobile
   useSwipeBack({
@@ -55,7 +69,6 @@ export function TeamEditor() {
       reset(selectedTeam);
     }
   }, [selectedTeam, reset]);
-
   // Create a debounced update function
   const handleFieldChange = useCallback(
     (fieldName: keyof Team, value: any) => {
@@ -89,11 +102,18 @@ export function TeamEditor() {
       onDelete={handleDelete}
       onBack={() => selectTeam(null)}
     >
+      {teamRootError && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {teamRootError}
+        </div>
+      )}
+
       {/* Display Name */}
       <FieldGroup
         label="Display Name"
         helperText="Human-readable name for the team"
         htmlFor="display_name"
+        error={displayNameError}
       >
         <Controller
           name="display_name"
@@ -117,6 +137,7 @@ export function TeamEditor() {
         label="Team Purpose"
         helperText="Description of the team's purpose and what it does"
         htmlFor="role"
+        error={roleError}
       >
         <Controller
           name="role"
@@ -141,6 +162,7 @@ export function TeamEditor() {
         label="Collaboration Mode"
         helperText="How agents work together: sequential (coordinate) or parallel (collaborate)"
         htmlFor="mode"
+        error={modeError}
       >
         <Controller
           name="mode"
@@ -174,6 +196,7 @@ export function TeamEditor() {
         label="Team Model (Optional)"
         helperText="Override model for all agents in this team"
         htmlFor="model"
+        error={modelError}
       >
         <Controller
           name="model"
@@ -205,7 +228,11 @@ export function TeamEditor() {
       </FieldGroup>
 
       {/* Team Members (Agents) */}
-      <FieldGroup label="Team Members" helperText="Select agents that compose this team">
+      <FieldGroup
+        label="Team Members"
+        helperText="Select agents that compose this team"
+        error={membersError}
+      >
         <div className="space-y-2">
           {agents.map(agent => (
             <Controller
@@ -214,12 +241,18 @@ export function TeamEditor() {
               control={control}
               render={({ field }) => {
                 const isChecked = field.value.includes(agent.id);
+                const eligibilityReason = teamEligibilityByAgent[agent.id] ?? null;
+                const isSelectable = eligibilityReason == null;
                 return (
                   <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
+                      disabled={!isSelectable && !isChecked}
                       onCheckedChange={checked => {
+                        if (!isSelectable && checked === true) {
+                          return;
+                        }
                         const newAgents = checked
                           ? [...field.value, agent.id]
                           : field.value.filter(a => a !== agent.id);
@@ -234,6 +267,11 @@ export function TeamEditor() {
                     >
                       <div className="font-medium">{agent.display_name}</div>
                       <div className="text-sm text-gray-500 dark:text-gray-400">{agent.role}</div>
+                      {eligibilityReason != null && (
+                        <div className="text-xs text-amber-600 dark:text-amber-400">
+                          {eligibilityReason}
+                        </div>
+                      )}
                     </label>
                   </div>
                 );
@@ -244,7 +282,11 @@ export function TeamEditor() {
       </FieldGroup>
 
       {/* Rooms */}
-      <FieldGroup label="Team Rooms" helperText="Select rooms where this team can operate">
+      <FieldGroup
+        label="Team Rooms"
+        helperText="Select rooms where this team can operate"
+        error={roomsError}
+      >
         <Controller
           name="rooms"
           control={control}

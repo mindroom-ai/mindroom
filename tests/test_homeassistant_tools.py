@@ -11,6 +11,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.conftest import TEST_PASSWORD
 
 
@@ -77,13 +78,19 @@ class TestHomeAssistantTools:
             "homeassistant",
             runtime_paths,
             credentials_manager=mock_credentials_manager,
-            worker_scope="shared",
-            routing_agent_name="general",
+            worker_target=resolve_worker_target(
+                "shared",
+                "general",
+                execution_identity=None,
+                tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+                account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            ),
         )
 
         assert isinstance(tool, HomeAssistantTools)
-        assert tool._worker_scope == "shared"
-        assert tool._routing_agent_name == "general"
+        assert tool._worker_target is not None
+        assert tool._worker_target.worker_scope == "shared"
+        assert tool._worker_target.routing_agent_name == "general"
 
     def test_tool_metadata_rejects_isolating_worker_scope(
         self,
@@ -96,8 +103,13 @@ class TestHomeAssistantTools:
                 "homeassistant",
                 runtime_paths,
                 credentials_manager=mock_credentials_manager,
-                worker_scope="user",
-                routing_agent_name="general",
+                worker_target=resolve_worker_target(
+                    "user",
+                    "general",
+                    execution_identity=None,
+                    tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+                    account_id=runtime_paths.env_value("ACCOUNT_ID"),
+                ),
             )
 
     def test_load_config_with_stored_credentials(

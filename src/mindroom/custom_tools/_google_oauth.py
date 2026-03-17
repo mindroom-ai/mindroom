@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.credentials import load_scoped_credentials, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
 from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )
@@ -18,7 +19,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.worker_routing import WorkerScope
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
@@ -39,8 +39,7 @@ class ScopedGoogleOAuthMixin:
     _oauth_logger: Logger
     _runtime_paths: RuntimePaths
     _creds_manager: CredentialsManager
-    _worker_scope: WorkerScope | None
-    _routing_agent_name: str | None
+    _worker_target: ResolvedWorkerTarget | None
     _provided_creds: bool
     _original_auth: Callable[[], None]
     creds: Any | None
@@ -48,12 +47,13 @@ class ScopedGoogleOAuthMixin:
     def _initialize_google_oauth(
         self,
         *,
-        worker_scope: WorkerScope | None,
-        routing_agent_name: str | None,
+        worker_target: ResolvedWorkerTarget | None,
         provided_creds: Any,  # noqa: ANN401
         logger: Logger,
     ) -> Any:  # noqa: ANN401
         """Validate scope and prepare initial Google credentials for the tool."""
+        worker_scope = worker_target.worker_scope if worker_target is not None else None
+        routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
         if not worker_scope_allows_shared_only_integrations(worker_scope):
             msg = unsupported_shared_only_integration_message(
                 self._oauth_tool_name,
@@ -63,8 +63,7 @@ class ScopedGoogleOAuthMixin:
             )
             raise ValueError(msg)
 
-        self._worker_scope = worker_scope
-        self._routing_agent_name = routing_agent_name
+        self._worker_target = worker_target
         self._provided_creds = provided_creds is not None
         self._oauth_logger = logger
         return provided_creds or self._load_stored_credentials()
@@ -73,9 +72,8 @@ class ScopedGoogleOAuthMixin:
         """Load Google OAuth credentials for the current execution scope."""
         return load_scoped_credentials(
             "google",
-            worker_scope=self._worker_scope,
-            routing_agent_name=self._routing_agent_name,
             credentials_manager=self._creds_manager,
+            worker_target=self._worker_target,
         )
 
     def _save_token_data(self, token_data: dict[str, Any]) -> None:
@@ -83,9 +81,8 @@ class ScopedGoogleOAuthMixin:
         save_scoped_credentials(
             "google",
             token_data,
-            worker_scope=self._worker_scope,
-            routing_agent_name=self._routing_agent_name,
             credentials_manager=self._creds_manager,
+            worker_target=self._worker_target,
         )
 
     def _build_credentials(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401

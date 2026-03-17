@@ -13,6 +13,7 @@ class WorkerSpec:
     """Stable worker request resolved from worker-routing semantics."""
 
     worker_key: str
+    private_agent_names: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -39,6 +39,55 @@ _RUNTIME_ENV_ALLOWLIST = {
     "src/mindroom/api/sandbox_runner.py",
     "src/mindroom/workers/backends/local.py",
 }
+_EXECUTION_IDENTITY_ENV_ALLOWLIST = {
+    "src/mindroom/api/credentials.py",
+    "src/mindroom/api/main.py",
+    "src/mindroom/api/openai_compat.py",
+    "src/mindroom/bot.py",
+    "src/mindroom/commands/handler.py",
+    "src/mindroom/tool_system/worker_routing.py",
+}
+_AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
+    "src/mindroom/api/openai_compat.py",
+    "src/mindroom/api/sandbox_runner.py",
+    "src/mindroom/bot.py",
+    "src/mindroom/commands/handler.py",
+    "src/mindroom/tool_system/worker_routing.py",
+}
+_EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
+    "_build_tool_instance": "worker_target",
+    "build_agent_tool_init_context": "execution_identity",
+    "build_agent_toolkit": "execution_identity",
+    "build_worker_target_from_runtime_env": "execution_identity",
+    "create_agent": "execution_identity",
+    "create_session_storage": "execution_identity",
+    "get_tool_by_name": "worker_target",
+    "load_scoped_credentials": "worker_target",
+    "_resolve_worker_credentials_manager": "worker_target",
+    "resolve_knowledge_binding": "execution_identity",
+    "resolve_worker_execution_scope": "execution_identity",
+    "resolve_worker_target": "execution_identity",
+    "resolve_agent_execution": "execution_identity",
+    "resolve_agent_runtime": "execution_identity",
+    "save_scoped_credentials": "worker_target",
+}
+_EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
+    ("src/mindroom/agents.py", "build_agent_tool_init_context", "execution_identity"),
+    ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
+    ("src/mindroom/agents.py", "create_session_storage", "execution_identity"),
+    ("src/mindroom/agents.py", "create_agent", "execution_identity"),
+    ("src/mindroom/credentials.py", "load_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager", "worker_target"),
+    ("src/mindroom/credentials.py", "save_scoped_credentials", "worker_target"),
+    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
+    ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "build_worker_target_from_runtime_env", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_execution_scope", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_target", "execution_identity"),
+    ("src/mindroom/tool_system/metadata.py", "get_tool_by_name", "worker_target"),
+}
 
 
 def _repo_root() -> Path:
@@ -151,6 +200,115 @@ def _collect_runtime_env_violations() -> list[str]:
             ):
                 violations.append(f"{relative_path}:{node.lineno} reads os.environ.get({node.args[0].value!r})")
 
+    return sorted(set(violations))
+
+
+def _call_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _collect_execution_identity_keyword_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            call_name = _call_name(node)
+            required_keyword = _EXPLICIT_RUNTIME_SCOPE_KEYWORDS.get(call_name)
+            if required_keyword is None:
+                continue
+            keyword_names = {keyword.arg for keyword in node.keywords if keyword.arg is not None}
+            if required_keyword not in keyword_names:
+                violations.append(f"{relative_path}:{node.lineno} calls {call_name} without {required_keyword}=")
+    return sorted(set(violations))
+
+
+def _collect_execution_identity_default_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            positional_args = [*node.args.posonlyargs, *node.args.args]
+            positional_defaults = [None] * (len(positional_args) - len(node.args.defaults)) + list(node.args.defaults)
+            keyword_defaults = list(node.args.kw_defaults)
+            for argument, default in zip(positional_args, positional_defaults, strict=False):
+                if (relative_path, node.name, argument.arg) not in _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS:
+                    continue
+                if default is not None:
+                    violations.append(
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for {argument.arg}",
+                    )
+            for argument, default in zip(node.args.kwonlyargs, keyword_defaults, strict=False):
+                if (relative_path, node.name, argument.arg) not in _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS:
+                    continue
+                if default is not None:
+                    violations.append(
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for {argument.arg}",
+                    )
+    return sorted(set(violations))
+
+
+def _collect_ambient_execution_identity_read_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _call_name(node) != "get_tool_execution_identity":
+                continue
+            violations.append(f"{relative_path}:{node.lineno} reads ambient execution identity")
+    return sorted(set(violations))
+
+
+def _collect_ambient_execution_identity_write_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
+            continue
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _call_name(node) != "tool_execution_identity":
+                continue
+            violations.append(f"{relative_path}:{node.lineno} binds ambient execution identity")
+    return sorted(set(violations))
+
+
+def _collect_execution_identity_env_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        if relative_path in _EXECUTION_IDENTITY_ENV_ALLOWLIST:
+            continue
+
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != "runtime_paths":
+                continue
+            if node.func.attr != "env_value" or not node.args:
+                continue
+            if not isinstance(node.args[0], ast.Constant) or node.args[0].value not in {"CUSTOMER_ID", "ACCOUNT_ID"}:
+                continue
+            violations.append(f"{relative_path}:{node.lineno} reads runtime_paths.env_value({node.args[0].value!r})")
     return sorted(set(violations))
 
 
@@ -303,11 +461,11 @@ class TestResolveConfigRelativePath:
         )
 
         resolved = constants_mod.resolve_config_relative_path(
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
             runtime_paths,
         )
 
-        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "memory"
 
     def test_rejects_non_runtime_placeholders(self, tmp_path: Path) -> None:
         """Config-relative paths should fail closed for unsupported env placeholders."""
@@ -889,6 +1047,31 @@ class TestRuntimeGuardrails:
     def test_no_new_direct_runtime_env_reads_outside_allowlist(self) -> None:
         """Prevent new direct runtime-varying env reads outside approved modules."""
         violations = _collect_runtime_env_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_feature_sensitive_helpers_require_explicit_execution_identity(self) -> None:
+        """Prevent feature-sensitive runtime helpers from silently omitting execution identity."""
+        violations = _collect_execution_identity_keyword_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_core_execution_identity_helpers_do_not_default_execution_identity(self) -> None:
+        """Prevent core execution seams from quietly reintroducing implicit execution identity."""
+        violations = _collect_execution_identity_default_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_production_code_does_not_read_ambient_execution_identity(self) -> None:
+        """Prevent production logic from reaching back into the execution ContextVar."""
+        violations = _collect_ambient_execution_identity_read_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_production_code_only_binds_ambient_execution_identity_at_boundaries(self) -> None:
+        """Prevent business logic from rebinding execution ContextVar state."""
+        violations = _collect_ambient_execution_identity_write_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_tenant_account_env_reads_stay_at_ingress(self) -> None:
+        """Prevent tenant/account attachment from drifting back into business logic."""
+        violations = _collect_execution_identity_env_violations()
         assert not violations, "\n".join(violations)
 
     def test_plain_config_remains_runtime_free(self) -> None:

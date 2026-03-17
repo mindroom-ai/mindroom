@@ -21,7 +21,7 @@ from mindroom.constants import (
 )
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.teams import TeamFormationDecision, TeamMode
+from mindroom.teams import TeamFormationDecision
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -49,6 +49,15 @@ def _extract_agent_side_effect(
     if user_id == "@mindroom_home:localhost":
         return "home"
     return None
+
+
+def _mock_voice_room(*member_ids: str) -> nio.MatrixRoom:
+    """Return a room fixture with explicit visible membership for team resolution."""
+    room = MagicMock(spec=nio.MatrixRoom)
+    room.room_id = "!test:server"
+    room.canonical_alias = None
+    room.users = {member_id: MagicMock() for member_id in member_ids}
+    return room
 
 
 @pytest.fixture
@@ -91,9 +100,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
     5. HomeAssistant should respond (as the only agent in thread)
     """
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     # Create a voice transcription message from the router
     voice_transcription_event = MagicMock(spec=nio.RoomMessageText)
@@ -151,13 +158,7 @@ async def test_agent_responds_to_voice_transcription_in_thread(mock_home_bot: Ag
 async def test_voice_transcription_permissions_use_original_sender(mock_home_bot: AgentBot) -> None:
     """Per-user reply permissions should apply to the original voice sender, not router."""
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
-    room.users = {
-        "@mindroom_home:localhost": MagicMock(),
-        f"@mindroom_{ROUTER_AGENT_NAME}:localhost": MagicMock(),
-    }
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     # Allow only Alice for this agent.
     bot.config.authorization.agent_reply_permissions = {"home": ["@alice:localhost"]}
@@ -196,11 +197,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
         patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide_team,
         patch("mindroom.bot.extract_agent_name") as mock_extract_agent,
     ):
-        mock_decide_team.return_value = TeamFormationDecision(
-            should_form_team=False,
-            agents=[],
-            mode=TeamMode.COLLABORATE,
-        )
+        mock_decide_team.return_value = TeamFormationDecision.none()
 
         mock_extract_agent.side_effect = _extract_agent_side_effect
 
@@ -214,9 +211,7 @@ async def test_voice_transcription_permissions_use_original_sender(mock_home_bot
 async def test_agent_ignores_non_voice_router_messages(mock_home_bot: AgentBot) -> None:
     """Test that agents still ignore regular router messages (not voice)."""
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     # Create a regular message from the router (not voice)
     router_message = MagicMock(spec=nio.RoomMessageText)
@@ -252,9 +247,7 @@ async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) 
     """Display-only router voice echoes should not trigger a second agent reply."""
     bot = mock_home_bot
     bot._derive_conversation_context = AsyncMock(return_value=(False, None, []))
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     router_voice_echo = MagicMock(spec=nio.RoomMessageText)
     router_voice_echo.event_id = "$router_voice_echo"
@@ -281,9 +274,7 @@ async def test_agent_ignores_visible_router_voice_echo(mock_home_bot: AgentBot) 
 async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: AgentBot) -> None:
     """Voice fallback relays should pass resolved attachment audio into generation."""
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     fallback_event = MagicMock(spec=nio.RoomMessageText)
     fallback_event.event_id = "$voice_fallback_event"
@@ -345,9 +336,7 @@ async def test_agent_receives_thread_audio_on_voice_raw_fallback(mock_home_bot: 
 async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_home_bot: AgentBot) -> None:
     """Fallback relays with attachment audio should skip thread-audio redownload."""
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     fallback_event = MagicMock(spec=nio.RoomMessageText)
     fallback_event.event_id = "$voice_fallback_attached"
@@ -401,9 +390,7 @@ async def test_agent_voice_fallback_uses_attachment_audio_without_refetch(mock_h
 async def test_followup_text_in_voice_thread_recovers_audio(mock_home_bot: AgentBot) -> None:
     """A follow-up text message in a voice-fallback thread should recover the audio attachment."""
     bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
+    room = _mock_voice_room("@mindroom_home:localhost", f"@mindroom_{ROUTER_AGENT_NAME}:localhost")
 
     # Simulate a plain follow-up text in a thread rooted at a voice event.
     followup_event = MagicMock(spec=nio.RoomMessageText)

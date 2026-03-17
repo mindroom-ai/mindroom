@@ -71,7 +71,11 @@ from mindroom.thread_utils import (
     should_agent_respond,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_tool_execution_identity,
+    tool_execution_identity,
+)
 
 from . import constants, interactive, voice_handler
 from .agents import create_agent, create_session_storage, remove_run_by_event_id
@@ -105,7 +109,11 @@ from .constants import (
     RuntimePaths,
     resolve_avatar_path,
 )
-from .knowledge.utils import MultiKnowledgeVectorDb, resolve_agent_knowledge
+from .knowledge.utils import (
+    MultiKnowledgeVectorDb,
+    ensure_request_knowledge_managers,
+    get_agent_knowledge,
+)
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
 from .matrix.client import (
@@ -127,7 +135,7 @@ from .scheduling import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     import structlog
@@ -136,6 +144,7 @@ if TYPE_CHECKING:
     from agno.media import Image
 
     from mindroom.config.main import Config
+    from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.orchestrator import MultiAgentOrchestrator
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -180,8 +189,9 @@ def _create_task_wrapper(
 class _ResponseAction:
     """Result of the shared team-formation / should-respond decision."""
 
-    kind: Literal["skip", "team", "individual"]
+    kind: Literal["skip", "team", "individual", "reject"]
     form_team: TeamFormationDecision | None = None
+    rejection_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -426,22 +436,25 @@ class AgentBot:
             return agent_config.show_tool_calls
         return self.config.defaults.show_tool_calls
 
-    def _get_shared_knowledge(self, base_id: str) -> Knowledge | None:
-        """Get shared knowledge instance for a configured knowledge base."""
-        orchestrator = self.orchestrator
-        if orchestrator is None:
-            return None
-        manager = orchestrator.knowledge_managers.get(base_id)
-        if manager is None:
-            return None
-        return manager.get_knowledge()
+    def _knowledge_for_agent(
+        self,
+        agent_name: str,
+        *,
+        request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    ) -> Knowledge | None:
+        """Return the current knowledge assigned to one or more agent bases."""
 
-    def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
-        """Return shared knowledge for agents assigned to one or more knowledge bases."""
-        return resolve_agent_knowledge(
+        def _shared_manager(base_id: str) -> KnowledgeManager | None:
+            if self.orchestrator is None:
+                return None
+            return self.orchestrator.knowledge_managers.get(base_id)
+
+        return get_agent_knowledge(
             agent_name,
             self.config,
-            self._get_shared_knowledge,
+            self.runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=_shared_manager,
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
@@ -449,15 +462,56 @@ class AgentBot:
             ),
         )
 
+    async def _ensure_request_knowledge_managers(
+        self,
+        agent_names: list[str],
+        execution_identity: ToolExecutionIdentity,
+    ) -> dict[str, KnowledgeManager]:
+        """Ensure and collect managers needed for the current request scope."""
+        try:
+            return await ensure_request_knowledge_managers(
+                agent_names,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to initialize request-scoped knowledge managers",
+                agent_names=agent_names,
+            )
+            return {}
+
+    def _build_shared_execution_identity(self) -> ToolExecutionIdentity:
+        """Build a non-request execution identity for shared agent materialization."""
+        return build_tool_execution_identity(
+            channel="matrix",
+            agent_name=self.agent_name,
+            runtime_paths=self.runtime_paths,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        )
+
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
+        if self.agent_name != ROUTER_AGENT_NAME and self.config.agents[self.agent_name].private is not None:
+            msg = (
+                f"AgentBot.agent is only available for shared agents. "
+                f"Private agent '{self.agent_name}' requires an explicit execution identity."
+            )
+            raise ValueError(msg)
+        execution_identity = self._build_shared_execution_identity()
         knowledge = self._knowledge_for_agent(self.agent_name)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
+            execution_identity=execution_identity,
         )
 
     @cached_property
@@ -1400,6 +1454,17 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
+        if action.kind == "reject":
+            assert action.rejection_message is not None
+            response_event_id = await self._send_response(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=action.rejection_message,
+                thread_id=dispatch.context.thread_id,
+            )
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
+            return
+
         if not dispatch.context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
@@ -1419,6 +1484,25 @@ class AgentBot:
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""
         return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config, self.runtime_paths)
+
+    def _team_response_action(self, form_team: TeamFormationDecision) -> _ResponseAction | None:
+        """Return the action implied by one team-formation decision, if any."""
+        if form_team.kind not in {"team", "individual", "reject"}:
+            return None
+        if not form_team.agents:
+            return _ResponseAction(kind="skip")
+        first_agent = min(form_team.agents, key=lambda x: x.full_id)
+        if self.matrix_id != first_agent:
+            return _ResponseAction(kind="skip")
+        if form_team.kind == "team":
+            return _ResponseAction(kind="team", form_team=form_team)
+        if form_team.kind == "individual":
+            return _ResponseAction(kind="individual")
+        return _ResponseAction(
+            kind="reject",
+            form_team=form_team,
+            rejection_message=form_team.rejection_message,
+        )
 
     async def _handle_router_dispatch(
         self,
@@ -1497,12 +1581,9 @@ class AgentBot:
             message,
             is_dm,
         )
-
-        if form_team.should_form_team and self.matrix_id in form_team.agents:
-            first_agent = min(form_team.agents, key=lambda x: x.full_id)
-            if self.matrix_id != first_agent:
-                return _ResponseAction(kind="skip")
-            return _ResponseAction(kind="team", form_team=form_team)
+        team_action = self._team_response_action(form_team)
+        if team_action is not None:
+            return team_action
 
         if not should_agent_respond(
             agent_name=self.agent_name,
@@ -1529,28 +1610,21 @@ class AgentBot:
         message: str,
         is_dm: bool,
     ) -> TeamFormationDecision:
-        """Decide team formation using only agents the sender is allowed to interact with."""
+        """Decide team formation using sender-visible candidates without losing explicit intent."""
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
             context.thread_history,
             self.config,
             self.runtime_paths,
         )
-        available_agents_in_room: list[MatrixID] | None = None
-        if is_dm:
-            available_agents_in_room = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            )
+        available_agents_in_room = get_available_agents_for_sender(
+            room,
+            requester_user_id,
+            self.config,
+            self.runtime_paths,
+        )
         return await decide_team_formation(
             self.matrix_id,
-            filter_agents_by_sender_permissions(
-                context.mentioned_agents,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            ),
+            context.mentioned_agents,
             filter_agents_by_sender_permissions(
                 agents_in_thread,
                 requester_user_id,
@@ -1660,16 +1734,15 @@ class AgentBot:
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
-        return ToolExecutionIdentity(
+        return build_tool_execution_identity(
             channel="matrix",
             agent_name=agent_name or self.agent_name,
+            runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
             room_id=room_id,
             thread_id=thread_id,
             resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
             session_id=session_id,
-            tenant_id=self.runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=self.runtime_paths.env_value("ACCOUNT_ID"),
         )
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:
@@ -1745,6 +1818,9 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in team_agents]
+        self.config.assert_team_agents_supported(
+            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
+        )
         include_matrix_prompt_context = any(self._agent_has_matrix_messaging_tool(name) for name in agent_names)
         model_message = self._append_matrix_prompt_context(
             payload.prompt,
@@ -1780,16 +1856,22 @@ class AgentBot:
             if use_streaming and not existing_event_id:
                 # Show typing indicator while team generates streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                    ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
                             message=model_message,
                             orchestrator=orchestrator,
+                            execution_identity=execution_identity,
                             mode=mode,
                             thread_history=thread_history,
                             model_name=model_name,
                             media=payload.media,
                             show_tool_calls=self.show_tool_calls,
+                            session_id=session_id,
+                            user_id=requester_user_id,
                         )
 
                         event_id, accumulated = await send_streaming_response(
@@ -1820,15 +1902,21 @@ class AgentBot:
             else:
                 # Show typing indicator while team generates non-streaming response
                 async with typing_indicator(client, room_id):
-                    with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                    with (
+                        tool_execution_identity(execution_identity),
+                        tool_runtime_context(tool_context),
+                    ):
                         response_text = await team_response(
                             agent_names=agent_names,
                             mode=mode,
                             message=model_message,
                             orchestrator=orchestrator,
+                            execution_identity=execution_identity,
                             thread_history=thread_history,
                             model_name=model_name,
                             media=payload.media,
+                            session_id=session_id,
+                            user_id=requester_user_id,
                         )
 
                 # Either edit the thinking message or send new
@@ -1989,7 +2077,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2011,12 +2098,23 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
+        )
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                ):
+                    knowledge = self._knowledge_for_agent(
+                        self.agent_name,
+                        request_knowledge_managers=request_knowledge_managers,
+                    )
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2032,6 +2130,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
+                        execution_identity=execution_identity,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -2105,7 +2204,6 @@ class AgentBot:
             return None
 
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(agent_name)
         model_prompt = self._append_matrix_prompt_context(
             prompt,
             room_id=room_id,
@@ -2128,17 +2226,27 @@ class AgentBot:
             session_id=session_id,
             agent_name=agent_name,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers([agent_name], execution_identity)
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
+            self.runtime_paths,
             agent_name=agent_name,
             active_session_id=session_id,
+            execution_identity=execution_identity,
         )
         show_tool_calls = self._show_tool_calls_for_agent(agent_name)
         tool_trace: list[ToolTraceEntry] = []
         run_metadata_content: dict[str, Any] = {}
         async with typing_indicator(self.client, room_id):
-            with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+            with (
+                tool_execution_identity(execution_identity),
+                tool_runtime_context(tool_context),
+            ):
+                knowledge = self._knowledge_for_agent(
+                    agent_name,
+                    request_knowledge_managers=request_knowledge_managers,
+                )
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
@@ -2152,6 +2260,7 @@ class AgentBot:
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
+                    execution_identity=execution_identity,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -2190,8 +2299,10 @@ class AgentBot:
             mark_auto_flush_dirty_session(
                 self.storage_path,
                 self.config,
+                self.runtime_paths,
                 agent_name=agent_name,
                 session_id=session_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(agent_name) == "mem0":
                 create_background_task(
@@ -2277,7 +2388,6 @@ class AgentBot:
 
         media_inputs = media or MediaInputs()
         session_id = create_session_id(room_id, thread_id)
-        knowledge = self._knowledge_for_agent(self.agent_name)
         room_mode = self.config.get_entity_thread_mode(self.agent_name, self.runtime_paths, room_id=room_id) == "room"
         model_prompt = self._append_matrix_prompt_context(
             prompt,
@@ -2300,11 +2410,22 @@ class AgentBot:
             user_id=user_id,
             session_id=session_id,
         )
+        request_knowledge_managers = await self._ensure_request_knowledge_managers(
+            [self.agent_name],
+            execution_identity,
+        )
         run_metadata_content: dict[str, Any] = {}
         try:
             # Show typing indicator while generating response
             async with typing_indicator(self.client, room_id):
-                with tool_execution_identity(execution_identity), tool_runtime_context(tool_context):
+                with (
+                    tool_execution_identity(execution_identity),
+                    tool_runtime_context(tool_context),
+                ):
+                    knowledge = self._knowledge_for_agent(
+                        self.agent_name,
+                        request_knowledge_managers=request_knowledge_managers,
+                    )
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2319,6 +2440,7 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
+                        execution_identity=execution_identity,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -2404,8 +2526,10 @@ class AgentBot:
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
+            self.runtime_paths,
             agent_name=self.agent_name,
             active_session_id=session_id,
+            execution_identity=execution_identity,
         )
 
         # Dynamically determine whether to use streaming based on user presence
@@ -2464,8 +2588,10 @@ class AgentBot:
             mark_auto_flush_dirty_session(
                 self.storage_path,
                 self.config,
+                self.runtime_paths,
                 agent_name=self.agent_name,
                 session_id=session_id,
+                execution_identity=execution_identity,
             )
             if self.config.get_agent_memory_backend(self.agent_name) == "mem0":
                 create_background_task(
@@ -2815,9 +2941,13 @@ class AgentBot:
                 user_id=requester_user_id,
                 session_id=session_id,
             )
-            with tool_execution_identity(execution_identity):
-                storage = create_session_storage(self.agent_name, self.storage_path)
-                removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+            storage = create_session_storage(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+            removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",
@@ -2846,6 +2976,7 @@ class AgentBot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            storage_path=self.storage_path,
             logger=self.logger,
             response_tracker=self.response_tracker,
             derive_conversation_context=self._derive_conversation_context,

@@ -15,7 +15,7 @@ describe('EnhancedConfigDialog', () => {
     (global.fetch as any).mockReset();
   });
 
-  it('loads and saves scoped credentials with agent_name', async () => {
+  it('loads and saves scoped credentials with explicit execution_scope', async () => {
     const onClose = vi.fn();
     const onSuccess = vi.fn();
 
@@ -50,11 +50,14 @@ describe('EnhancedConfigDialog', () => {
         ]}
         onSuccess={onSuccess}
         agentName="code"
+        executionScope="shared"
       />
     );
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/credentials/weather?agent_name=code');
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/credentials/weather?agent_name=code&execution_scope=shared'
+      );
     });
 
     fireEvent.change(document.getElementById('api_key') as HTMLInputElement, {
@@ -63,15 +66,18 @@ describe('EnhancedConfigDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/credentials/weather?agent_name=code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          credentials: {
-            api_key: 'scoped-key',
-          },
-        }),
-      });
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/credentials/weather?agent_name=code&execution_scope=shared',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            credentials: {
+              api_key: 'scoped-key',
+            },
+          }),
+        }
+      );
       expect(onSuccess).toHaveBeenCalled();
       expect(onClose).toHaveBeenCalled();
     });

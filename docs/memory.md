@@ -11,7 +11,10 @@ MindRoom supports two memory backends:
 
 Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
-Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory.
+When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root.
+Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
+`private` changes where private files live.
+It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -74,7 +77,6 @@ memory:
 
 `memory.file.path` is an optional fallback root for direct file-memory paths.
 It does not relocate canonical agent or team file memory.
-Use `agents.<name>.memory_file_path` to place an agent's file memory inside its workspace.
 
 Per-agent override example:
 
@@ -87,20 +89,41 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
-    memory_file_path: mind_data
 ```
 
-`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`.
-For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`.
-Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`.
-Absolute paths and `..` traversal are rejected.
+For shared agents, file memory now lives directly under `agents/<name>/workspace/`.
+For requester-private agents, file memory lives directly under the effective private root.
+Use `private` when you need per-requester file-memory isolation.
+
+Private instance example:
+
+```yaml
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    memory_backend: file
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+```
+
+In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage.
+When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root.
+If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester.
+Later runs backfill newly added scaffold files without overwriting requester edits.
+MindRoom does not invent `MEMORY.md` or `memory/` for private agents.
+Put those files in your template directory if you want them scaffolded into each private root.
+If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active.
+Use `private` for requester-isolated workspaces.
 
 ### File layout
 
-Agent file memory is stored under each agent's storage directory by default:
+Agent file memory is stored under each agent's canonical workspace root:
 
-- `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
-- `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/workspace/MEMORY.md`
+- `agents/<agent>/workspace/memory/YYYY-MM-DD.md`
 
 Team file memory is mirrored under each participating agent's storage directory:
 
@@ -151,7 +174,7 @@ The Dashboard **Memory** page supports:
 - extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
 
 Save from the Memory page to persist changes to `config.yaml`.
-Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override and optional **Memory File Path**.
+Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
 
 ## Optional Memory Tool
 

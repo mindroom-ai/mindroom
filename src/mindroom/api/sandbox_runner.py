@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants
 from mindroom.api import sandbox_exec, sandbox_protocol, sandbox_worker_prep
-from mindroom.config.main import load_config
+from mindroom.config.main import Config, load_config
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.metadata import (
@@ -35,6 +35,7 @@ from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    build_worker_target_from_runtime_env,
     tool_execution_identity,
 )
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -44,7 +45,6 @@ if TYPE_CHECKING:
 
     from agno.tools.toolkit import Toolkit
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.models import WorkerHandle
 
@@ -93,12 +93,17 @@ def _startup_runner_token_from_env() -> str | None:
     return raw_token or None
 
 
-def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config | None]:
+def _runtime_config_or_empty(runtime_paths: RuntimePaths) -> Config:
+    """Return the active runtime config, or an explicit empty config if none exists."""
+    if runtime_paths.config_path.exists():
+        return load_config(runtime_paths)
+    return Config.validate_with_runtime({}, runtime_paths)
+
+
+def _load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload."""
     runtime_paths = _startup_runtime_paths_from_env()
-    if runtime_paths.config_path.exists():
-        return runtime_paths, load_config(runtime_paths)
-    return runtime_paths, None
+    return runtime_paths, _runtime_config_or_empty(runtime_paths)
 
 
 def initialize_sandbox_runner_app(
@@ -114,7 +119,7 @@ def initialize_sandbox_runner_app(
     )
 
 
-def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config | None) -> None:
+def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
     """Load config from env and ensure the tool registry is populated.
 
     Used by both the FastAPI startup and the subprocess worker so that
@@ -126,6 +131,13 @@ def ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Conf
 def _runner_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Return the sandbox runner's persisted credential manager."""
     return get_runtime_credentials_manager(runtime_paths)
+
+
+def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozenset[str] | None:
+    """Return the explicit user-agent visibility snapshot carried by one request."""
+    if request.private_agent_names is None:
+        return None
+    return frozenset(request.private_agent_names)
 
 
 class SandboxRunnerExecuteRequest(BaseModel):
@@ -147,6 +159,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     worker_scope: WorkerScope | None = None
     routing_agent_name: str | None = None
     execution_identity: dict[str, Any] = Field(default_factory=dict)
+    private_agent_names: list[str] | None = None
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
@@ -269,16 +282,25 @@ async def _maybe_await(value: object) -> object:
 def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
-    config: Config | None,
+    config: Config,
     tool_name: str,
     function_name: str,
+    execution_identity: ToolExecutionIdentity | None = None,
     credential_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    private_agent_names: frozenset[str] | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config(runtime_paths, config)
+    worker_target = build_worker_target_from_runtime_env(
+        worker_scope,
+        routing_agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=private_agent_names,
+    )
     try:
         toolkit = get_tool_by_name(
             tool_name,
@@ -288,8 +310,7 @@ def _resolve_entrypoint(
             credentials_manager=_runner_credentials_manager(runtime_paths),
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
+            worker_target=worker_target,
         )
     except ToolInitOverrideError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -322,6 +343,7 @@ def _serialize_worker(worker: WorkerHandle) -> SandboxWorkerResponse:
 async def _execute_request_inprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
+    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -332,6 +354,7 @@ async def _execute_request_inprocess(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
+            private_agent_names=_request_private_agent_names(request),
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -347,19 +370,23 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    config = load_config(effective_runtime_paths) if effective_runtime_paths.config_path.exists() else None
+    effective_config = config
+    if effective_runtime_paths is not runtime_paths:
+        effective_config = _runtime_config_or_empty(effective_runtime_paths)
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
             runtime_paths=effective_runtime_paths,
-            config=config,
+            config=effective_config,
             tool_name=request.tool_name,
             function_name=request.function_name,
+            execution_identity=execution_identity,
             credential_overrides=request.credential_overrides or None,
             tool_init_overrides=request.tool_init_overrides or None,
             runtime_overrides=runtime_overrides,
             worker_scope=request.worker_scope,
             routing_agent_name=request.routing_agent_name,
+            private_agent_names=_request_private_agent_names(request),
         )
 
         try:
@@ -429,6 +456,7 @@ def _execute_request_subprocess_sync(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
+            private_agent_names=_request_private_agent_names(request),
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -509,13 +537,14 @@ def _run_subprocess_worker() -> int:
         return 1
     runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
     request.worker_key = sandbox_worker_prep.normalize_request_worker_key(request.worker_key, runtime_paths)
+    config = _runtime_config_or_empty(runtime_paths)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker we write to stderr afterwards.
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     with redirect_stdout(captured_out), redirect_stderr(captured_err):
-        response = asyncio.run(_execute_request_inprocess(request, runtime_paths))
+        response = asyncio.run(_execute_request_inprocess(request, runtime_paths, config))
 
     # Flush captured tool output to real stdout/stderr (informational only).
     tool_stdout = captured_out.getvalue()
@@ -579,6 +608,7 @@ async def execute_tool_call(  # noqa: C901
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
     runtime_paths = sandbox_runner_runtime_paths(request)
+    config = _runtime_config_or_empty(runtime_paths)
     runner_token = _app_runner_token(request.app)
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     if payload.credential_overrides:
@@ -608,6 +638,7 @@ async def execute_tool_call(  # noqa: C901
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
+                private_agent_names=_request_private_agent_names(payload),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -640,12 +671,7 @@ async def execute_tool_call(  # noqa: C901
             prepared_worker,
             runner_token=runner_token,
         )
-    return await _execute_request_inprocess(
-        payload,
-        runtime_paths,
-        prepared_worker,
-        runner_token=runner_token,
-    )
+    return await _execute_request_inprocess(payload, runtime_paths, config, prepared_worker, runner_token=runner_token)
 
 
 if __name__ == "__main__":

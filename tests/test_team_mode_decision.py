@@ -35,6 +35,12 @@ async def decide_team_formation_for_test(**kwargs: object) -> TeamFormationDecis
             raise TypeError(msg)
         runtime_paths = runtime_paths_for(config)
     kwargs["runtime_paths"] = runtime_paths
+    room = kwargs.get("room")
+    if isinstance(config, Config) and isinstance(room, MagicMock) and "users" not in room.__dict__:
+        # Team-formation tests should default to all configured agents being visible in the room.
+        room.users = {
+            agent_id.full_id: None for agent_id in config.get_ids(runtime_paths).values() if agent_id is not None
+        }
     return await decide_team_formation(**kwargs)
 
 
@@ -222,7 +228,7 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.should_form_team is True
+            assert result.kind == "team"
             assert _agent_names(result.agents, mock_config) == ["email", "phone"]
             assert result.mode == TeamMode.COORDINATE
             mock_determine.assert_called_once_with(
@@ -249,7 +255,7 @@ class TestShouldFormTeam:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is True
+        assert result.kind == "team"
         assert _agent_names(result.agents, mock_config) == ["email", "phone"]
         # Hardcoded logic: multiple tagged agents = COORDINATE
         assert result.mode == TeamMode.COORDINATE
@@ -271,7 +277,7 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.should_form_team is True
+        assert result.kind == "team"
         assert _agent_names(result.agents, mock_config) == ["email", "phone"]
         # Should use hardcoded logic when message is None
         assert result.mode == TeamMode.COORDINATE
@@ -294,7 +300,7 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.should_form_team is True
+        assert result.kind == "team"
         assert _agent_names(result.agents, mock_config) == ["email", "phone"]
         # Should use hardcoded logic when config is None
         assert result.mode == TeamMode.COORDINATE
@@ -314,7 +320,7 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.should_form_team is False
+        assert result.kind == "none"
         assert result.agents == []
         assert result.mode == TeamMode.COLLABORATE
 
@@ -338,7 +344,7 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.should_form_team is True
+            assert result.kind == "team"
             assert _agent_names(result.agents, mock_config) == ["research", "analyst"]
             assert result.mode == TeamMode.COLLABORATE
 
@@ -363,7 +369,7 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.should_form_team is True
+            assert result.kind == "team"
             assert _agent_names(result.agents, mock_config) == ["email", "phone", "research"]
             assert result.mode == TeamMode.COLLABORATE
 
@@ -399,7 +405,7 @@ class TestIntegrationScenarios:
                     use_ai_decision=True,
                 )
 
-                assert result.should_form_team is True
+                assert result.kind == "team"
                 assert result.mode == TeamMode.COORDINATE
                 assert set(_agent_names(result.agents, mock_config)) == {"email", "phone"}
 
@@ -431,7 +437,7 @@ class TestIntegrationScenarios:
                     use_ai_decision=True,
                 )
 
-                assert result.should_form_team is True
+                assert result.kind == "team"
                 assert result.mode == TeamMode.COLLABORATE
                 assert set(_agent_names(result.agents, mock_config)) == {"research", "analyst"}
 
@@ -452,6 +458,6 @@ class TestIntegrationScenarios:
         )
 
         # Should still work with hardcoded logic
-        assert result.should_form_team is True
+        assert result.kind == "team"
         assert _agent_names(result.agents, mock_config) == ["email", "phone"]
         assert result.mode == TeamMode.COORDINATE  # Hardcoded for multiple tagged

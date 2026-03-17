@@ -112,7 +112,7 @@ Point the base URL at `http://localhost:8765/v1` and set the API key. MindRoom i
 
 ### Model selection
 
-Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`.
+Each agent in `config.yaml` appears as a selectable model. The model ID is the agent's internal name (e.g., `code`, `research`), and the display name comes from `display_name`. Only shared agents that are either unscoped or explicitly configured with `worker_scope=shared` appear in `/v1/models`. Agents that use `agents.<name>.private` are not listed there, because `private.per` creates requester-private instances and therefore an isolating execution scope.
 
 ### Auto-routing
 
@@ -178,4 +178,6 @@ The OpenAI-compatible API uses its own auth (`OPENAI_COMPAT_API_KEYS`), separate
 - **Token usage is always zeros** — Agno doesn't expose token counts
 - **No native `tool_calls` format** — tool results appear inline in content text
 - **`show_tool_calls` config is Matrix-only today** — OpenAI-compatible `/v1/chat/completions` currently includes tool-call text/events regardless of `show_tool_calls: false`
+- **No room memory** — only agent-scoped memory (no `room_id` in API requests)
+- **No requester-private instances** — `/v1` currently supports only shared agents that are unscoped or configured with `worker_scope=shared`, so `agents.<name>.private` and other isolating execution scopes are not available there
 - **Scheduler tool unavailable** — scheduling requires Matrix context and returns an error message when no Matrix scheduling context is available

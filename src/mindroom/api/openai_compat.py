@@ -36,20 +36,25 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import initialize_shared_knowledge_managers
+from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    build_tool_execution_identity,
+    tool_execution_identity,
+)
 
 _AUTO_MODEL_NAME = "auto"
 _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -85,31 +90,75 @@ def _load_config(request: Request) -> tuple[Config, RuntimePaths]:
 
 
 def _openai_compatible_agent_names(config: Config) -> list[str]:
+    delegation_closures: dict[str, frozenset[str]] = {}
     return [
         agent_name
         for agent_name in config.agents
         if agent_name != ROUTER_AGENT_NAME
-        and config.get_agent_worker_scope(agent_name) in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and not _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
     ]
 
 
 def _openai_incompatible_agents(agent_names: list[str], config: Config) -> list[str]:
+    delegation_closures: dict[str, frozenset[str]] = {}
     return [
         agent_name
         for agent_name in agent_names
         if agent_name in config.agents
-        and config.get_agent_worker_scope(agent_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
     ]
+
+
+def _openai_incompatible_agent_closure(
+    agent_name: str,
+    config: Config,
+    *,
+    delegation_closures: dict[str, frozenset[str]],
+) -> frozenset[str]:
+    """Return the unsupported agents reachable from one /v1 agent request."""
+    return frozenset(
+        target_name
+        for target_name in config.get_agent_delegation_closure(
+            agent_name,
+            closures=delegation_closures,
+        )
+        if target_name in config.agents
+        and config.get_agent_execution_scope(target_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+    )
 
 
 def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> JSONResponse:
     invalid_agents = ", ".join(agent_names)
-    invalid_scopes = {
-        config.get_agent_worker_scope(agent_name) for agent_name in agent_names if agent_name in config.agents
+    delegation_closures: dict[str, frozenset[str]] = {}
+    invalid_scope_agents = {
+        target_name
+        for agent_name in agent_names
+        for target_name in _openai_incompatible_agent_closure(
+            agent_name,
+            config,
+            delegation_closures=delegation_closures,
+        )
     }
-    message = "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared."
-    if invalid_scopes & {"user", "user_agent"}:
-        message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    invalid_execution_scopes = {
+        config.get_agent_execution_scope(agent_name)
+        for agent_name in invalid_scope_agents
+        if agent_name in config.agents
+    }
+    has_private_agents = any(
+        config.get_agent(agent_name).private is not None
+        for agent_name in invalid_scope_agents
+        if agent_name in config.agents
+    )
+    message = (
+        "OpenAI-compatible chat completions currently support only shared agents that are "
+        "unscoped or configured with worker_scope=shared, including all delegation targets."
+    )
+    if invalid_execution_scopes & {"user", "user_agent"}:
+        message += " Shared agents with worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    if has_private_agents:
+        message += " Requester-private agents configured with private.per are not yet supported on /v1."
+    if invalid_scope_agents and set(agent_names) != invalid_scope_agents:
+        message += f" Delegation reaches unsupported agents: {', '.join(sorted(invalid_scope_agents))}."
 
     return _error_response(
         400,
@@ -501,26 +550,6 @@ def _validate_chat_request(
     return _validate_agent_model_request(agent_name, config)
 
 
-def _build_tool_execution_identity(
-    *,
-    agent_name: str,
-    session_id: str,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity:
-    """Build the execution identity used for worker-routed tool calls."""
-    return ToolExecutionIdentity(
-        channel="openai_compat",
-        agent_name=agent_name,
-        requester_id=None,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=session_id,
-        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
-    )
-
-
 def _parse_chat_request(
     request: Request,
     body: bytes,
@@ -576,12 +605,12 @@ async def _resolve_auto_route(
 async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePaths) -> None:
     """Initialize knowledge managers if needed.
 
-    Safe to call multiple times — `initialize_knowledge_managers` is
+    Safe to call multiple times — `initialize_shared_knowledge_managers` is
     idempotent and reuses existing managers that match the config.
     """
     if not config.knowledge_bases:
         return
-    await initialize_knowledge_managers(
+    await initialize_shared_knowledge_managers(
         config=config,
         runtime_paths=runtime_paths,
         start_watchers=False,
@@ -589,20 +618,12 @@ async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePa
     )
 
 
-def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
-    """Resolve knowledge base(s) for an agent from the global knowledge managers.
-
-    Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
-    """
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: (manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None),
-        on_missing_bases=lambda missing_base_ids: logger.warning(
-            "Knowledge bases not available for agent",
-            agent=agent_name,
-            knowledge_bases=missing_base_ids,
-        ),
+def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
+    """Build a missing-knowledge callback for one agent name."""
+    return lambda missing_base_ids: logger.warning(
+        "Knowledge bases not available for agent",
+        agent=agent_name,
+        knowledge_bases=missing_base_ids,
     )
 
 
@@ -716,9 +737,20 @@ async def chat_completions(
         stream=req.stream,
         session_id=session_id,
     )
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
+        agent_name=agent_name,
+        session_id=session_id,
+        runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+    )
 
     # Initialize shared knowledge managers once per request (idempotent).
-    # Team and single-agent paths both rely on this for knowledge resolution.
+    # `/v1` only supports shared/unscoped agent state today, so private
+    # requester-local knowledge is intentionally out of scope here.
     try:
         await _ensure_knowledge_initialized(config, runtime_paths)
     except Exception:
@@ -727,11 +759,6 @@ async def chat_completions(
     # Team execution path
     if agent_name.startswith(_TEAM_MODEL_PREFIX):
         team_name = agent_name.removeprefix(_TEAM_MODEL_PREFIX)
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-        )
         if req.stream:
             response: JSONResponse | StreamingResponse = await _stream_team_completion(
                 team_name,
@@ -755,20 +782,20 @@ async def chat_completions(
                     runtime_paths,
                     thread_history,
                     req.user,
+                    execution_identity=execution_identity,
                 )
     else:
         # Resolve knowledge base for this agent
         try:
-            knowledge = _resolve_knowledge(agent_name, config)
+            knowledge = get_agent_knowledge(
+                agent_name,
+                config,
+                runtime_paths,
+                on_missing_bases=_log_missing_knowledge_bases(agent_name),
+            )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
-
-        execution_identity = _build_tool_execution_identity(
-            agent_name=agent_name,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-        )
         if req.stream:
             response = await _stream_completion(
                 agent_name,
@@ -792,6 +819,7 @@ async def chat_completions(
                     thread_history,
                     req.user,
                     knowledge,
+                    execution_identity=execution_identity,
                 )
 
     return response
@@ -811,6 +839,7 @@ async def _non_stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -824,6 +853,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_interactive_questions=False,
+        execution_identity=execution_identity,
     )
 
     # Detect error responses from ai_response()
@@ -1003,6 +1033,7 @@ async def _stream_completion(
             knowledge=knowledge,
             user_id=user,
             include_interactive_questions=False,
+            execution_identity=execution_identity,
         )
 
         # Peek at first event to detect errors before committing to SSE
@@ -1055,6 +1086,7 @@ def _build_team(
     team_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
@@ -1077,7 +1109,13 @@ def _build_team(
                     member_name,
                     config,
                     runtime_paths,
-                    knowledge=_resolve_knowledge(member_name, config),
+                    execution_identity=execution_identity,
+                    knowledge=get_agent_knowledge(
+                        member_name,
+                        config,
+                        runtime_paths,
+                        on_missing_bases=_log_missing_knowledge_bases(member_name),
+                    ),
                     include_interactive_questions=False,
                 ),
             )
@@ -1113,9 +1151,10 @@ async def _non_stream_team_completion(
     runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config, runtime_paths)
+    agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1163,7 +1202,7 @@ async def _stream_team_completion(
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config, runtime_paths)
+        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 

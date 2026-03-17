@@ -154,7 +154,7 @@ async def _upload_text_as_mxc(  # noqa: C901
 
     try:
         # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-        upload_result, encryption_dict = await client.upload(
+        upload_result, _encryption_dict = await client.upload(
             data_provider=data_provider,
             content_type="application/octet-stream" if room_encrypted else mimetype,
             filename=enc_filename,

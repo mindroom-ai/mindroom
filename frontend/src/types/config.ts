@@ -3,6 +3,10 @@ import type { PROVIDERS } from '@/lib/providers';
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
 export type WorkerScope = 'shared' | 'user' | 'user_agent';
+export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
+export type TeamEligibilityByAgent = Record<string, string | null>;
+export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = 'memory';
+export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -70,6 +74,23 @@ export interface KnowledgeBaseConfig {
   git?: KnowledgeGitConfig;
 }
 
+export interface AgentPrivateKnowledgeConfig {
+  enabled?: boolean;
+  path?: string | null;
+  watch?: boolean;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  git?: KnowledgeGitConfig | null;
+}
+
+export interface AgentPrivateConfig {
+  per: PrivateWorkerScope;
+  root?: string | null;
+  template_dir?: string | null;
+  context_files?: string[] | null;
+  knowledge?: AgentPrivateKnowledgeConfig | null;
+}
+
 export type LearningMode = 'always' | 'agentic';
 export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
@@ -90,11 +111,11 @@ export interface Agent {
   learning?: boolean; // Defaults to true when omitted
   learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
-  memory_file_path?: string; // Workspace-relative directory for this agent's file memory
   model?: string; // Reference to a model in the models section
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
   worker_scope?: WorkerScope | null;
+  private?: AgentPrivateConfig | null;
   delegate_to?: string[]; // Agent names this agent can delegate tasks to
   thread_mode?: ThreadMode; // Conversation threading mode
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
@@ -160,6 +181,7 @@ export interface Config {
     learning?: boolean;
     learning_mode?: LearningMode;
     show_tool_calls?: boolean;
+    worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
@@ -178,4 +200,86 @@ export interface Config {
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+}
+
+export function getAgentExecutionScope(
+  config: Pick<Config, 'defaults'> | null | undefined,
+  agent: Pick<Agent, 'private' | 'worker_scope'>
+): WorkerScope | null {
+  // Mirror Config.get_agent_execution_scope() on the backend. This is the derived
+  // runtime concept, not the authored config field, so private agents come from
+  // private.per while shared agents come from worker_scope/defaults.worker_scope.
+  return agent.private?.per ?? agent.worker_scope ?? config?.defaults.worker_scope ?? null;
+}
+
+export function getAgentScopeLabel(
+  config: Pick<Config, 'defaults'> | null | undefined,
+  agent: Pick<Agent, 'private' | 'worker_scope'>
+): string | null {
+  // Keep the authored label separate from the derived execution scope so the UI does
+  // not blur private.per together with worker_scope again.
+  if (agent.private != null) {
+    return `private.per=${agent.private.per}`;
+  }
+  const executionScope = getAgentExecutionScope(config, agent);
+  if (executionScope != null) {
+    return `worker_scope=${executionScope}`;
+  }
+  return null;
+}
+
+function normalizePrivateKnowledgeConfig(
+  knowledge: AgentPrivateKnowledgeConfig | null | undefined
+): AgentPrivateKnowledgeConfig | null | undefined {
+  if (knowledge == null) {
+    return knowledge;
+  }
+
+  const trimmedPath = knowledge.path?.trim();
+  if (knowledge.enabled === true) {
+    return {
+      ...knowledge,
+      path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+    };
+  }
+
+  return {
+    ...knowledge,
+    path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : undefined,
+  };
+}
+
+function normalizePrivateConfig(
+  privateConfig: AgentPrivateConfig | null | undefined
+): AgentPrivateConfig | null | undefined {
+  if (privateConfig == null) {
+    return privateConfig;
+  }
+
+  return {
+    ...privateConfig,
+    per: privateConfig.per ?? 'user',
+    knowledge: normalizePrivateKnowledgeConfig(privateConfig.knowledge),
+  };
+}
+
+export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
+  if (agent.private != null) {
+    return agent.private;
+  }
+  return {
+    per: 'user',
+  };
+}
+
+export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Partial<Agent> {
+  const normalizedUpdates: Partial<Agent> = { ...updates };
+  const nextPrivate = 'private' in updates ? updates.private : agent.private;
+
+  if (nextPrivate != null) {
+    normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
+    normalizedUpdates.worker_scope = undefined;
+  }
+
+  return normalizedUpdates;
 }

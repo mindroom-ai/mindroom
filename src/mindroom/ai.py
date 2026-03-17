@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -252,7 +253,8 @@ def _apply_context_window_limit(
     config: Config,
     full_prompt: str,
     session_id: str | None,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     session: AgentSession | None = None,
 ) -> None:
     """Dynamically reduce ``agent.num_history_runs`` when the estimated context approaches the model's context window.
@@ -278,7 +280,12 @@ def _apply_context_window_limit(
 
     # Use pre-loaded session or load from storage
     if session is None:
-        storage = create_session_storage(agent_name, storage_path)
+        storage = create_session_storage(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
         session = _get_agent_session(storage, session_id)
     if not session or not session.runs:
         return
@@ -893,6 +900,7 @@ async def _prepare_agent_and_prompt(
     include_interactive_questions: bool = True,
     session_id: str | None = None,
     reply_to_event_id: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[Agent, str, list[str]]:
     """Prepare agent and full prompt for AI processing.
 
@@ -903,7 +911,14 @@ async def _prepare_agent_and_prompt(
 
     """
     storage_path = runtime_paths.storage_root
-    enhanced_prompt = await build_memory_enhanced_prompt(prompt, agent_name, storage_path, config, runtime_paths)
+    enhanced_prompt = await build_memory_enhanced_prompt(
+        prompt,
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
     unseen_event_ids: list[str] = []
 
@@ -911,7 +926,12 @@ async def _prepare_agent_and_prompt(
     session = None
     has_prior_runs = False
     if session_id and thread_history:
-        storage = create_session_storage(agent_name, storage_path)
+        storage = create_session_storage(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
         session = _get_agent_session(storage, session_id)
         has_prior_runs = session is not None and bool(session.runs)
 
@@ -945,8 +965,18 @@ async def _prepare_agent_and_prompt(
         runtime_paths,
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
+        execution_identity=execution_identity,
     )
-    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path, session=session)
+    _apply_context_window_limit(
+        agent,
+        agent_name,
+        config,
+        full_prompt,
+        session_id,
+        runtime_paths,
+        execution_identity=execution_identity,
+        session=session,
+    )
     return agent, full_prompt, unseen_event_ids
 
 
@@ -966,6 +996,7 @@ async def ai_response(
     show_tool_calls: bool = True,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     run_metadata_collector: dict[str, Any] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> str:
     """Generates a response using the specified agno Agent with memory integration.
 
@@ -990,6 +1021,8 @@ async def ai_response(
             entries from this run.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
+        execution_identity: Request execution identity used to resolve scoped
+            agent state, sessions, and memory consistently for this run.
 
     Returns:
         Agent response string
@@ -1010,6 +1043,7 @@ async def ai_response(
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
+            execution_identity=execution_identity,
         )
     except Exception as e:
         logger.exception("Error preparing agent", agent=agent_name)
@@ -1169,6 +1203,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
     reply_to_event_id: str | None = None,
     show_tool_calls: bool = True,
     run_metadata_collector: dict[str, Any] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1194,6 +1229,8 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
         show_tool_calls: Whether to include tool call details inline in the streamed response.
         run_metadata_collector: Optional mapping that receives versioned
             run/model/token metadata for Matrix message content.
+        execution_identity: Request execution identity used to resolve scoped
+            agent state, sessions, and memory consistently for this run.
 
     Yields:
         Streaming chunks/events as they become available
@@ -1215,6 +1252,7 @@ async def stream_agent_response(  # noqa: C901, PLR0912, PLR0915
             include_interactive_questions=include_interactive_questions,
             session_id=session_id,
             reply_to_event_id=reply_to_event_id,
+            execution_identity=execution_identity,
         )
     except Exception as e:
         logger.exception("Error preparing agent for streaming", agent=agent_name)
