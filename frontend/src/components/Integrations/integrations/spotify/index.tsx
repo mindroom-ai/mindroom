@@ -15,8 +15,11 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     connected: false,
   };
 
-  private localStorageKey(agentName?: string | null): string {
-    return agentName ? `spotify_configured:${agentName}` : 'spotify_configured';
+  private localStorageKey(agentName?: string | null, executionScope?: WorkerScope | null): string {
+    const scopeKey = executionScope ?? 'unscoped';
+    return agentName
+      ? `spotify_configured:${agentName}:${scopeKey}`
+      : `spotify_configured:${scopeKey}`;
   }
 
   getConfig(scope?: IntegrationScope): IntegrationConfig {
@@ -65,7 +68,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
       const pollInterval = setInterval(async () => {
         if (authWindow?.closed) {
           clearInterval(pollInterval);
-          localStorage.setItem(this.localStorageKey(agentName), 'true');
+          localStorage.setItem(this.localStorageKey(agentName, executionScope), 'true');
           // The parent component should reload status after this
         }
       }, 2000);
@@ -79,7 +82,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     agentName?: string | null,
     executionScope?: WorkerScope | null
   ): Promise<void> {
-    localStorage.removeItem(this.localStorageKey(agentName));
+    localStorage.removeItem(this.localStorageKey(agentName, executionScope));
     // Optionally call backend to revoke tokens
     try {
       await fetch(
@@ -102,7 +105,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     executionScope?: WorkerScope | null
   ): Promise<boolean> {
     // Check localStorage first for quick response
-    const localConfig = localStorage.getItem(this.localStorageKey(agentName));
+    const localConfig = localStorage.getItem(this.localStorageKey(agentName, executionScope));
     if (localConfig) return true;
 
     // Then check backend for authoritative status

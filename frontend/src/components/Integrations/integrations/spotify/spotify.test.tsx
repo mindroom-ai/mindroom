@@ -99,7 +99,28 @@ describe('SpotifyIntegrationProvider', () => {
 
       await spotifyIntegration.loadStatus({ agentName: 'code', executionScope: 'shared' });
 
-      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured:code');
+      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured:code:shared');
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/api/integrations/spotify/status?agent_name=code&execution_scope=shared'
+      );
+    });
+
+    it('does not reuse optimistic scoped cache entries across execution scopes', async () => {
+      localStorageMock.getItem.mockImplementation((key: string) =>
+        key === 'spotify_configured:code:user' ? 'true' : null
+      );
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ connected: false }),
+      });
+
+      const status = await spotifyIntegration.loadStatus({
+        agentName: 'code',
+        executionScope: 'shared',
+      });
+
+      expect(status.connected).toBe(false);
+      expect(localStorageMock.getItem).toHaveBeenCalledWith('spotify_configured:code:shared');
       expect(global.fetch).toHaveBeenCalledWith(
         '/api/integrations/spotify/status?agent_name=code&execution_scope=shared'
       );
@@ -173,7 +194,7 @@ describe('SpotifyIntegrationProvider', () => {
       const config = spotifyIntegration.getConfig();
       await config.onDisconnect!('spotify');
 
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured');
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:unscoped');
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/integrations/spotify/disconnect'),
         expect.objectContaining({ method: 'POST' })
@@ -187,7 +208,7 @@ describe('SpotifyIntegrationProvider', () => {
 
       // Should not throw, just log error
       await expect(config.onDisconnect!('spotify')).resolves.not.toThrow();
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured');
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:unscoped');
     });
 
     it('appends agent_name and execution_scope for scoped disconnect', async () => {
@@ -196,7 +217,7 @@ describe('SpotifyIntegrationProvider', () => {
       const config = spotifyIntegration.getConfig({ agentName: 'code', executionScope: 'shared' });
       await config.onDisconnect!('spotify');
 
-      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:code');
+      expect(localStorageMock.removeItem).toHaveBeenCalledWith('spotify_configured:code:shared');
       expect(global.fetch).toHaveBeenCalledWith(
         '/api/integrations/spotify/disconnect?agent_name=code&execution_scope=shared',
         expect.objectContaining({ method: 'POST' })
