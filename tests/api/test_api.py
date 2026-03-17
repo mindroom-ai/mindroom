@@ -806,17 +806,58 @@ def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClie
         patch("mindroom.api.tools.ensure_tool_registry_loaded"),
         patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
         patch(
-            "mindroom.api.tools.load_scoped_credentials",
+            "mindroom.api.tools._load_env_shared_preview_credentials",
             return_value={"WEATHER_API_KEY": "secret", "_source": "env"},
         ),
     ):
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
 
     assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
     tool = response.json()["tools"][0]
     assert tool["name"] == "weather"
     assert tool["status"] == "available"
     assert tool["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_does_not_treat_requester_owned_scoped_credentials_as_dashboard_truth(
+    test_client: TestClient,
+) -> None:
+    """Requester-owned scoped credentials must not flip isolated dashboard status to available."""
+    config = _config_with_worker_scope("user")
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch("mindroom.api.tools.load_scoped_credentials") as mock_load_scoped_credentials,
+    ):
+        response = test_client.get("/api/tools/?agent_name=general")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status_authoritative"] is False
+    tool = body["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "requires_config"
+    assert tool["dashboard_configuration_supported"] is False
+    mock_load_scoped_credentials.assert_not_called()
 
 
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:

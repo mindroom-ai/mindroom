@@ -74,6 +74,7 @@ export function Integrations() {
     tools: backendTools,
     loading: toolsLoading,
     refetch: refetchTools,
+    statusAuthoritative,
   } = useTools(scopeAgentName, selectedExecutionScope);
 
   // State
@@ -740,6 +741,15 @@ export function Integrations() {
                 Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
                 are only supported for shared deployment credentials or agents with an effective
                 shared runtime scope (<code>worker_scope=shared</code>).
+              </AlertDescription>
+            </Alert>
+          )}
+          {selectedScopeAgent && statusAuthoritative === false && (
+            <Alert className="mt-3">
+              <AlertDescription>
+                Requester-scoped tool status is preview only. The dashboard can show scope support
+                rules and shared env-backed availability, but it cannot inspect live requester-owned
+                scoped credentials.
               </AlertDescription>
             </Alert>
           )}

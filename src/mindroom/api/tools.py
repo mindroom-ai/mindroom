@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,7 @@ class ToolsResponse(BaseModel):
     """Response containing all registered tools."""
 
     tools: list[dict]
+    status_authoritative: bool = True
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class _ResolvedToolAvailabilityContext:
 
     execution_scope: WorkerScope | None
     dashboard_configuration_supported: bool
+    status_authoritative: bool
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
 
@@ -122,6 +125,25 @@ def _annotate_execution_scope_support(
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
 
 
+def _load_env_shared_preview_credentials(
+    service: str,
+    *,
+    credentials_manager: CredentialsManager,
+) -> dict[str, Any] | None:
+    """Return only env-backed shared credentials for non-authoritative dashboard previews.
+
+    Dashboard users are not the same trusted requester identity as live Matrix senders.
+    For isolated scopes we can still report capabilities and shared env-backed availability,
+    but we must not pretend to inspect requester-owned scoped credential state.
+    """
+    shared_credentials = credentials_manager.shared_manager().load_credentials(service)
+    if not isinstance(shared_credentials, Mapping):
+        return None
+    if shared_credentials.get("_source") != "env":
+        return None
+    return dict(shared_credentials)
+
+
 def _resolve_tool_availability_context(
     request: Request,
     *,
@@ -141,11 +163,10 @@ def _resolve_tool_availability_context(
     )
 
     runtime_paths = api_runtime_paths(request)
+    status_authoritative = dashboard_supports_worker_credentials(execution_scope)
     execution_identity = (
-        # Dashboard previews use the authenticated dashboard user as requester identity so
-        # draft scope checks exercise the same scoped-runtime path as saved requests.
         build_dashboard_execution_identity(request, agent_name)
-        if agent_name is not None and execution_scope is not None
+        if status_authoritative and agent_name is not None and execution_scope is not None
         else None
     )
     worker_target = (
@@ -155,12 +176,13 @@ def _resolve_tool_availability_context(
             execution_identity=execution_identity,
             runtime_paths=runtime_paths,
         )
-        if agent_name is not None or execution_scope is not None
+        if status_authoritative and (agent_name is not None or execution_scope is not None)
         else None
     )
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         dashboard_configuration_supported=dashboard_supports_worker_credentials(execution_scope),
+        status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
     )
@@ -175,11 +197,17 @@ def _update_tools_statuses(
 
     def get_credentials(service: str) -> dict[str, Any] | None:
         if service not in credentials_cache:
-            credentials_cache[service] = load_scoped_credentials(
-                service,
-                credentials_manager=context.credentials_manager,
-                worker_target=context.worker_target,
-            )
+            if context.status_authoritative:
+                credentials_cache[service] = load_scoped_credentials(
+                    service,
+                    credentials_manager=context.credentials_manager,
+                    worker_target=context.worker_target,
+                )
+            else:
+                credentials_cache[service] = _load_env_shared_preview_credentials(
+                    service,
+                    credentials_manager=context.credentials_manager,
+                )
         return credentials_cache[service]
 
     for tool in tools:
@@ -240,4 +268,4 @@ async def get_registered_tools(
     )
     _update_tools_statuses(tools, context)
 
-    return ToolsResponse(tools=tools)
+    return ToolsResponse(tools=tools, status_authoritative=context.status_authoritative)

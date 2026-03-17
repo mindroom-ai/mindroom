@@ -32,6 +32,7 @@ import {
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
@@ -71,10 +72,11 @@ export function AgentEditor() {
     () => (selectedAgent ? getAgentExecutionScope(config, selectedAgent) : null),
     [config, selectedAgent]
   );
-  const { tools: backendTools, loading: toolsLoading } = useTools(
-    selectedAgentId,
-    selectedExecutionScope
-  );
+  const {
+    tools: backendTools,
+    loading: toolsLoading,
+    statusAuthoritative,
+  } = useTools(selectedAgentId, selectedExecutionScope);
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
   // Enable swipe back on mobile
@@ -920,6 +922,15 @@ export function AgentEditor() {
       {/* Tools */}
       <FieldGroup label="Tools" helperText="Select tools this agent can use">
         <div className="space-y-4">
+          {selectedExecutionScope != null && statusAuthoritative === false && (
+            <Alert>
+              <AlertDescription>
+                Requester-scoped tool status is preview only. The dashboard can show scope support
+                rules and shared env-backed availability, but it cannot inspect live requester-owned
+                scoped credentials.
+              </AlertDescription>
+            </Alert>
+          )}
           {toolsLoading ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               Loading available tools...

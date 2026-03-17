@@ -34,6 +34,7 @@ vi.mock('@/hooks/useTools', () => ({
       },
     ],
     loading: false,
+    statusAuthoritative: true,
   })),
 }));
 
@@ -136,6 +137,7 @@ describe('AgentEditor', () => {
         },
       ],
       loading: false,
+      statusAuthoritative: true,
     });
   });
 

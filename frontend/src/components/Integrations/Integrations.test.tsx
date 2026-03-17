@@ -29,9 +29,15 @@ const mockTools = [
     dependencies: null,
   },
 ];
+let mockStatusAuthoritative = true;
 
 vi.mock('@/hooks/useTools', () => ({
-  useTools: () => ({ tools: mockTools, loading: false, refetch: vi.fn() }),
+  useTools: () => ({
+    tools: mockTools,
+    loading: false,
+    refetch: vi.fn(),
+    statusAuthoritative: mockStatusAuthoritative,
+  }),
   mapToolToIntegration: (tool: any) => ({
     id: tool.name,
     name: tool.display_name,
@@ -187,6 +193,7 @@ describe('Integrations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockToast.mockReset();
+    mockStatusAuthoritative = true;
     useConfigStore.setState({ agents: [] });
     Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
       configurable: true,
@@ -514,6 +521,41 @@ describe('Integrations', () => {
       expect(
         screen.getByText('Configuring tools for Inherited Scope Agent (worker_scope=user).')
       ).toBeInTheDocument();
+    });
+  });
+
+  it('shows requester-scoped status as preview only', async () => {
+    mockStatusAuthoritative = false;
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Requester-scoped tool status is preview only/i)).toBeInTheDocument();
     });
   });
 
