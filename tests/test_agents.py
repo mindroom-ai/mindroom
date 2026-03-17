@@ -2310,6 +2310,32 @@ def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree(
         )
 
 
+def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> None:
+    """Git-backed private knowledge must not target the file-memory entrypoint file."""
+    with pytest.raises(
+        ValidationError,
+        match="git-backed private knowledge at 'MEMORY.md'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        template_dir="./mind_template",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path="MEMORY.md",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="file",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
 def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> None:
     """Dedicated private knowledge subtrees remain valid for git-backed sync."""
     config = Config(

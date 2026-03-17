@@ -320,6 +320,7 @@ class Config(BaseModel):
     def validate_private_git_knowledge_paths(self, info: ValidationInfo) -> Config:
         """Ensure git-backed private knowledge uses a dedicated subtree."""
         memory_notes_dir = Path("memory")
+        memory_notes_entrypoint = Path("MEMORY.md")
         runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private
@@ -342,6 +343,11 @@ class Config(BaseModel):
                 knowledge_path,
                 memory_notes_dir,
             )
+            if self.get_agent_memory_backend(agent_name) == "file" and _relative_paths_overlap(
+                knowledge_path,
+                memory_notes_entrypoint,
+            ):
+                overlaps_private_file_memory = True
             overlaps_template_scaffold = False
             if private_config.template_dir is not None:
                 if _relative_paths_overlap(knowledge_path, memory_notes_dir):
