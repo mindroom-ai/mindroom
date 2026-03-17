@@ -250,6 +250,14 @@ class TeamFormationDecision(NamedTuple):
     should_form_team: bool
     agents: list[MatrixID]
     mode: TeamMode
+    rejected_request: bool = False
+
+
+class _FilteredTeamMembers(NamedTuple):
+    """Filtered team members plus whether the request was explicitly rejected."""
+
+    agents: list[MatrixID]
+    rejected_request: bool
 
 
 class _CandidateTeamMembers(NamedTuple):
@@ -378,17 +386,19 @@ async def decide_team_formation(
         )
 
     if config is not None:
-        team_agents = _filter_supported_team_agents(
+        filtered_team_members = _filter_supported_team_agents(
             team_agents,
             config,
             runtime_paths,
             allow_partial=candidate_team_members.allow_partial,
         )
+        team_agents = filtered_team_members.agents
         if len(team_agents) < 2:
             return TeamFormationDecision(
                 should_form_team=False,
                 agents=[],
                 mode=TeamMode.COLLABORATE,
+                rejected_request=filtered_team_members.rejected_request,
             )
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
@@ -479,7 +489,7 @@ def _filter_supported_team_agents(
     runtime_paths: RuntimePaths,
     *,
     allow_partial: bool,
-) -> list[MatrixID]:
+) -> _FilteredTeamMembers:
     """Return the team-eligible agents from one candidate set."""
     candidate_agents: list[tuple[MatrixID, str]] = []
     for agent_id in agent_ids:
@@ -500,13 +510,16 @@ def _filter_supported_team_agents(
                 for agent_name, private_targets in unsupported_agents.items()
             },
         )
-        return []
+        return _FilteredTeamMembers([], True)
     if unsupported_agents:
         logger.info(
             "Skipping unsupported team members during ad hoc team formation",
             skipped_agents=sorted(unsupported_agents),
         )
-    return [agent_id for agent_id, agent_name in candidate_agents if agent_name not in unsupported_agents]
+    return _FilteredTeamMembers(
+        [agent_id for agent_id, agent_name in candidate_agents if agent_name not in unsupported_agents],
+        False,
+    )
 
 
 def _get_agents_from_orchestrator(

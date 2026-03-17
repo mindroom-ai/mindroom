@@ -584,6 +584,7 @@ class TestRouterTeamFormation:
         )
 
         assert result.should_form_team is False
+        assert result.rejected_request is True
 
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
@@ -629,6 +630,7 @@ class TestRouterTeamFormation:
         )
 
         assert result.should_form_team is False
+        assert result.rejected_request is True
 
     @pytest.mark.asyncio
     async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:

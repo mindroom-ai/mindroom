@@ -1559,6 +1559,9 @@ class AgentBot:
                 return _ResponseAction(kind="skip")
             return _ResponseAction(kind="team", form_team=form_team)
 
+        if form_team.rejected_request:
+            return _ResponseAction(kind="skip")
+
         if not should_agent_respond(
             agent_name=self.agent_name,
             am_i_mentioned=context.am_i_mentioned,
