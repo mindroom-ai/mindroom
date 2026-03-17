@@ -360,7 +360,13 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=("google",),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect

@@ -304,7 +304,13 @@ async def callback(request: Request) -> RedirectResponse:
     await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
     pending = consume_pending_oauth_request(request, "homeassistant", state)
     agent_name = pending.agent_name
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=("homeassistant",),
+        execution_scope_override_provided=pending.execution_scope_override_provided,
+        execution_scope_override=pending.execution_scope_override,
+    )
 
     instance_url = (pending.payload or {}).get("instance_url")
     client_id = (pending.payload or {}).get("client_id")

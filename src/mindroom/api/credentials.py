@@ -38,6 +38,8 @@ class _PendingOAuthState:
     service: str
     user_id: str
     agent_name: str | None
+    execution_scope_override_provided: bool
+    execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
     created_at: float
 
@@ -100,12 +102,15 @@ def issue_pending_oauth_state(
 ) -> str:
     """Create a short-lived server-side OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
+    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     state = secrets.token_urlsafe(24)
     now = time.time()
     pending = _PendingOAuthState(
         service=service,
         user_id=user_id,
         agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
         payload=payload,
         created_at=now,
     )
@@ -218,6 +223,8 @@ def resolve_request_credentials_target(
     agent_name: str | None = None,
     credentials_manager: CredentialsManager | None = None,
     service_names: tuple[str, ...] = (),
+    execution_scope_override_provided: bool | None = None,
+    execution_scope_override: WorkerScope | None = None,
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
@@ -226,7 +233,10 @@ def resolve_request_credentials_target(
     runtime_paths = api_runtime_paths(request)
 
     base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
-    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
+    if execution_scope_override_provided is None:
+        execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
+            request,
+        )
 
     if not agent_name:
         if execution_scope_override_provided:
