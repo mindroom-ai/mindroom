@@ -20,6 +20,7 @@ from mindroom.knowledge.manager import (
     KnowledgeManager,
     _create_embedder,
     _knowledge_manager_init_locks,
+    _knowledge_managers,
     ensure_agent_knowledge_managers,
     get_knowledge_manager,
     initialize_knowledge_managers,
@@ -1235,6 +1236,82 @@ async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys
             get_knowledge_manager("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is second["docs"]
         )
         assert first["docs"] is not second["docs"]
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent replacement should not leave the stale shared manager alive."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_a = tmp_path / "docs-a"
+    docs_b = tmp_path / "docs-b"
+    docs_a.mkdir(parents=True, exist_ok=True)
+    docs_b.mkdir(parents=True, exist_ok=True)
+    (docs_a / "guide.md").write_text("Docs A.\n", encoding="utf-8")
+    (docs_b / "guide.md").write_text("Docs B.\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
+    config_a = bind_runtime_paths(
+        Config(
+            agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
+        ),
+        runtime_paths,
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={"researcher": AgentConfig(display_name="Researcher", knowledge_bases=["docs"])},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
+        ),
+        runtime_paths,
+    )
+    old_started = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def fake_initialize(manager: KnowledgeManager) -> None:
+        if manager.knowledge_path == docs_a.resolve():
+            old_started.set()
+            await release_old.wait()
+
+    try:
+        with patch.object(KnowledgeManager, "initialize", new=fake_initialize):
+            old_task = asyncio.create_task(
+                ensure_agent_knowledge_managers(
+                    "researcher",
+                    config_a,
+                    runtime_paths_for(config_a),
+                    reindex_on_create=True,
+                ),
+            )
+            await old_started.wait()
+            new_task = asyncio.create_task(
+                ensure_agent_knowledge_managers(
+                    "researcher",
+                    config_b,
+                    runtime_paths_for(config_b),
+                    reindex_on_create=True,
+                ),
+            )
+            await asyncio.sleep(0)
+            release_old.set()
+            old_result, new_result = await asyncio.gather(old_task, new_task)
+
+        new_manager = new_result["docs"]
+        assert old_result["docs"] is not new_manager
+        assert len(_knowledge_managers) == 1
+        remaining_key = next(iter(_knowledge_managers))
+        assert remaining_key.base_id == "docs"
+        assert remaining_key.knowledge_path == str(docs_b.resolve())
+        assert get_knowledge_manager("docs", config=config_a, runtime_paths=runtime_paths_for(config_a)) is None
+        assert get_knowledge_manager("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is new_manager
     finally:
         await shutdown_knowledge_managers()
 

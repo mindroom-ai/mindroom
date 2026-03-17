@@ -1168,6 +1168,9 @@ _scoped_private_manager_lru: OrderedDict[KnowledgeManagerKey, None] = OrderedDic
 _knowledge_manager_init_locks: weakref.WeakValueDictionary[KnowledgeManagerKey, asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
+_knowledge_manager_replacement_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 _SCOPED_PRIVATE_MANAGER_CACHE_LIMIT = 128
 
 
@@ -1190,6 +1193,24 @@ def _knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _knowledge_manager_init_locks[key] = lock
+    return lock
+
+
+def _knowledge_manager_replacement_lock_key(
+    config: Config,
+    base_id: str,
+    key: KnowledgeManagerKey,
+) -> tuple[str, str]:
+    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+        return base_id, ""
+    return base_id, key.storage_path
+
+
+def _knowledge_manager_replacement_lock(lock_key: tuple[str, str]) -> asyncio.Lock:
+    lock = _knowledge_manager_replacement_locks.get(lock_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _knowledge_manager_replacement_locks[lock_key] = lock
     return lock
 
 
@@ -1310,23 +1331,26 @@ async def ensure_agent_knowledge_managers(
             execution_identity,
             True,
         )
-        for other_key in _stale_request_manager_keys(config, base_id, key):
-            await _stop_and_remove_manager(other_key)
-        managers[base_id] = await _ensure_knowledge_manager(
-            key=key,
-            base_id=base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            storage_path=resolved_storage_path,
-            knowledge_path=knowledge_path,
-            start_background_watchers=start_background_watchers,
-            incremental_sync_on_access=_should_incrementally_sync_on_access(
-                config,
-                base_id,
-                start_watchers,
-            ),
-            reindex_on_create=reindex_on_create,
-        )
+        async with _knowledge_manager_replacement_lock(
+            _knowledge_manager_replacement_lock_key(config, base_id, key),
+        ):
+            for other_key in _stale_request_manager_keys(config, base_id, key):
+                await _stop_and_remove_manager(other_key)
+            managers[base_id] = await _ensure_knowledge_manager(
+                key=key,
+                base_id=base_id,
+                config=config,
+                runtime_paths=runtime_paths,
+                storage_path=resolved_storage_path,
+                knowledge_path=knowledge_path,
+                start_background_watchers=start_background_watchers,
+                incremental_sync_on_access=_should_incrementally_sync_on_access(
+                    config,
+                    base_id,
+                    start_watchers,
+                ),
+                reindex_on_create=reindex_on_create,
+            )
     return managers
 
 
@@ -1433,4 +1457,5 @@ async def shutdown_knowledge_managers() -> None:
     _static_knowledge_manager_keys.clear()
     _scoped_private_manager_lru.clear()
     _knowledge_manager_init_locks.clear()
+    _knowledge_manager_replacement_locks.clear()
     _knowledge_managers.clear()
