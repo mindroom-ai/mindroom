@@ -132,6 +132,7 @@ def _mind_private_agent(
     *,
     watch: bool,
     template_dir: str,
+    knowledge_path: str = "memory",
     git: KnowledgeGitConfig | None = None,
 ) -> AgentConfig:
     """Return a worker-scoped private Mind agent config for knowledge tests."""
@@ -144,7 +145,7 @@ def _mind_private_agent(
             template_dir=template_dir,
             context_files=["SOUL.md"],
             knowledge=AgentPrivateKnowledgeConfig(
-                path="memory",
+                path=knowledge_path,
                 watch=watch,
                 git=git,
             ),
@@ -1006,6 +1007,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
             "mind": _mind_private_agent(
                 watch=True,
                 template_dir=str(template_dir),
+                knowledge_path="kb_repo",
                 git=KnowledgeGitConfig(
                     repo_url="https://github.com/example/memory.git",
                     branch="main",
