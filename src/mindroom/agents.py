@@ -28,13 +28,9 @@ from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
-    resolve_agent_state_storage_path,
     shared_storage_root,
 )
-from mindroom.workspaces import (
-    ensure_workspace_template,
-    resolve_agent_private_state_storage_path,
-)
+from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -501,16 +497,16 @@ def _resolve_agent_learning(
 
 def create_session_storage(
     agent_name: str,
-    storage_path: Path,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
     return _create_agent_state_db(
         agent_name,
-        storage_path,
         config,
+        runtime_paths,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
         execution_identity=execution_identity,
@@ -519,16 +515,16 @@ def create_session_storage(
 
 def _create_learning_storage(
     agent_name: str,
-    storage_path: Path,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent learning storage for an agent."""
     return _create_agent_state_db(
         agent_name,
-        storage_path,
         config,
+        runtime_paths,
         subdir="learning",
         session_table=f"{agent_name}_learning_sessions",
         execution_identity=execution_identity,
@@ -537,30 +533,26 @@ def _create_learning_storage(
 
 def _create_agent_state_db(
     agent_name: str,
-    storage_path: Path,
     config: Config,
+    runtime_paths: constants.RuntimePaths,
     *,
     subdir: str,
     session_table: str,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database for one agent state category."""
-    agent_config = config.get_agent(agent_name)
-    if agent_config.private is None:
-        state_storage_path = resolve_agent_state_storage_path(
-            agent_name=agent_name,
-            base_storage_path=storage_path,
-        )
-    else:
-        state_storage_path = resolve_agent_private_state_storage_path(
-            agent_name,
-            config,
-            base_storage_path=storage_path,
-            execution_identity=execution_identity,
-        )
-    db_dir = state_storage_path / subdir
-    db_dir.mkdir(parents=True, exist_ok=True)
-    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
+    state_storage_path = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).state_root
+    return _create_agent_state_db_from_state_root(
+        agent_name,
+        state_storage_path,
+        subdir=subdir,
+        session_table=session_table,
+    )
 
 
 def _create_agent_state_db_from_state_root(
@@ -693,23 +685,6 @@ def _resolve_agent_culture(
     return culture_manager, settings
 
 
-def _culture_storage_path(
-    agent_name: str,
-    config: Config,
-    storage_path: Path,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Path:
-    """Resolve the durable culture root for one agent instance."""
-    if config.agents[agent_name].private is None:
-        return storage_path
-    return resolve_agent_private_state_storage_path(
-        agent_name,
-        config,
-        base_storage_path=storage_path,
-        execution_identity=execution_identity,
-    )
-
-
 def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
@@ -748,7 +723,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         runtime_paths,
         create=True,
     )
-    execution_identity = agent_runtime.execution_identity
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
@@ -869,12 +843,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,
-        _culture_storage_path(
-            agent_name,
-            config,
-            resolved_storage_path,
-            execution_identity,
-        ),
+        agent_runtime.state_root if agent_runtime.is_private else resolved_storage_path,
         model,
     )
 

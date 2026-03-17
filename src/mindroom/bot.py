@@ -2891,7 +2891,7 @@ class AgentBot:
                 session_id=session_id,
             )
             with tool_execution_identity(execution_identity):
-                storage = create_session_storage(self.agent_name, self.storage_path, self.config)
+                storage = create_session_storage(self.agent_name, self.config, self.runtime_paths)
                 removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(

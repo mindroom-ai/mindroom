@@ -252,7 +252,7 @@ def _apply_context_window_limit(
     config: Config,
     full_prompt: str,
     session_id: str | None,
-    storage_path: Path,
+    runtime_paths: RuntimePaths,
     session: AgentSession | None = None,
 ) -> None:
     """Dynamically reduce ``agent.num_history_runs`` when the estimated context approaches the model's context window.
@@ -278,7 +278,7 @@ def _apply_context_window_limit(
 
     # Use pre-loaded session or load from storage
     if session is None:
-        storage = create_session_storage(agent_name, storage_path, config)
+        storage = create_session_storage(agent_name, config, runtime_paths)
         session = _get_agent_session(storage, session_id)
     if not session or not session.runs:
         return
@@ -911,7 +911,7 @@ async def _prepare_agent_and_prompt(
     session = None
     has_prior_runs = False
     if session_id and thread_history:
-        storage = create_session_storage(agent_name, storage_path, config)
+        storage = create_session_storage(agent_name, config, runtime_paths)
         session = _get_agent_session(storage, session_id)
         has_prior_runs = session is not None and bool(session.runs)
 
@@ -946,7 +946,7 @@ async def _prepare_agent_and_prompt(
         knowledge=knowledge,
         include_interactive_questions=include_interactive_questions,
     )
-    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, storage_path, session=session)
+    _apply_context_window_limit(agent, agent_name, config, full_prompt, session_id, runtime_paths, session=session)
     return agent, full_prompt, unseen_event_ids
 
 

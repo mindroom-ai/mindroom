@@ -32,6 +32,8 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 
 @dataclass
 class _FakeMessage:
@@ -740,14 +742,14 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
 
     def _fake_create_session_storage(
         agent_name: str,
-        storage_path: Path,
         config: Config,
+        runtime_paths: RuntimePaths,
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> _DummyStorage:
         captured["agent_name"] = agent_name
-        captured["storage_path"] = storage_path
         captured["config"] = config
+        captured["runtime_paths"] = runtime_paths
         captured["execution_identity"] = execution_identity
         return _DummyStorage()
 
@@ -756,7 +758,7 @@ def test_load_agent_session_passes_execution_identity_for_private_agents(
     assert (
         _load_agent_session(
             config,
-            tmp_path,
+            runtime_paths_for(config),
             "mind",
             "session-alice",
             execution_identity=alice_identity,
