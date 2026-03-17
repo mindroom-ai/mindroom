@@ -387,6 +387,14 @@ def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
     return (priority_rank, entry.get("first_dirty_at", now))
 
 
+def _flush_batch_key(config: Config, agent_name: str, entry: _FlushSessionEntry) -> str:
+    agent_config = config.agents.get(agent_name)
+    worker_key = entry.get("worker_key")
+    if agent_config is not None and agent_config.private is not None and isinstance(worker_key, str):
+        return f"{agent_name}:{worker_key}"
+    return agent_name
+
+
 def _select_recent_chat_lines(
     session: AgentSession,
     *,
@@ -648,7 +656,8 @@ class MemoryAutoFlushWorker:
             if not isinstance(agent_name, str) or not isinstance(session_id, str):
                 continue
 
-            if per_agent_count.get(agent_name, 0) >= max_per_agent:
+            batch_key = _flush_batch_key(config, agent_name, entry)
+            if per_agent_count.get(batch_key, 0) >= max_per_agent:
                 continue
             entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
 
@@ -682,7 +691,7 @@ class MemoryAutoFlushWorker:
                 continue
 
             selected_keys.append(key)
-            per_agent_count[agent_name] = per_agent_count.get(agent_name, 0) + 1
+            per_agent_count[batch_key] = per_agent_count.get(batch_key, 0) + 1
             with _STATE_LOCK:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)
