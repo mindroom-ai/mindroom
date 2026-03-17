@@ -691,6 +691,10 @@ class TestRoutingRegression:
         # Create room
         mock_room = MagicMock()
         mock_room.room_id = test_room_id
+        mock_room.users = {
+            mock_research_agent.user_id: MagicMock(),
+            mock_news_agent.user_id: MagicMock(),
+        }
 
         # User mentions BOTH agents
         message_event = MagicMock(spec=nio.RoomMessageText)

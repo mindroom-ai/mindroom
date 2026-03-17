@@ -2968,8 +2968,12 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
-        # Mock room users to include the agent - use the actual agent's user_id
-        mock_room.users = {mock_agent_user.user_id: MagicMock()}
+        # Thread team resolution now uses room-visible membership, so include the
+        # other participating agent in the room fixture as well.
+        mock_room.users = {
+            mock_agent_user.user_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+        }
 
         # Test 1: Thread with only this agent - should respond without mention
         mock_fetch_history.return_value = [

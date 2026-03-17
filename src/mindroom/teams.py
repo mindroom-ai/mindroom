@@ -357,7 +357,7 @@ async def decide_team_formation(
     tagged_agents: list[MatrixID],
     agents_in_thread: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
-    room: nio.MatrixRoom,
+    room: nio.MatrixRoom | None,
     runtime_paths: RuntimePaths,
     message: str | None = None,
     config: Config | None = None,
@@ -373,7 +373,7 @@ async def decide_team_formation(
         tagged_agents: Agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
-        room: The Matrix room object (for checking available agents)
+        room: The Matrix room object when room-membership visibility is available
         runtime_paths: Explicit runtime context for permissions and identity resolution
         message: The user's message (for AI decision context)
         config: Application configuration (for AI model access)
@@ -453,7 +453,7 @@ def _candidate_team_agents(
     tagged_agents: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
     agents_in_thread: list[MatrixID],
-    room: nio.MatrixRoom,
+    room: nio.MatrixRoom | None,
     config: Config | None,
     runtime_paths: RuntimePaths,
     *,
@@ -497,7 +497,7 @@ def _room_unavailable_team_agents_message(agent_names: list[str]) -> str:
 
 def _filter_room_available_team_agents(
     agent_ids: list[MatrixID],
-    room: nio.MatrixRoom,
+    room: nio.MatrixRoom | None,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
@@ -507,6 +507,10 @@ def _filter_room_available_team_agents(
     """Return the room-visible team members from one candidate set."""
     room_available_agents = available_agents_in_room
     if room_available_agents is None:
+        # Direct team-policy callers do not always have a live room object. Only enforce
+        # room-visible membership when the Matrix room context is actually available.
+        if room is None:
+            return _FilteredTeamMembers(agent_ids, None)
         room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
     available_agent_ids = {agent_id.full_id for agent_id in room_available_agents}
     filtered_agents = [agent_id for agent_id in agent_ids if agent_id.full_id in available_agent_ids]

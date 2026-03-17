@@ -301,8 +301,11 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         message_event.sender = test_user_id
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
-        # Mock room users to include the agent
-        room.users = {mock_calculator_agent.user_id: MagicMock()}
+        # Thread team resolution depends on visible room membership, not only thread history.
+        room.users = {
+            mock_calculator_agent.user_id: MagicMock(),
+            f"@mindroom_general:{domain}": MagicMock(),
+        }
 
         with (
             patch("mindroom.bot.ai_response") as mock_ai,
