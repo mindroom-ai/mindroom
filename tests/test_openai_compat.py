@@ -2120,6 +2120,30 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert "no valid agents" in response.json()["error"]["message"].lower()
 
+    def test_team_member_materialization_failure_returns_friendly_500(self, team_app_client: TestClient) -> None:
+        """Configured team failures should surface the user-facing materialization error."""
+        with (
+            patch("mindroom.api.openai_compat.get_model_instance", return_value=MagicMock()),
+            patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=None),
+            patch(
+                "mindroom.api.openai_compat.create_agent",
+                side_effect=[MagicMock(name="GeneralAgent"), RuntimeError("boom")],
+            ),
+        ):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "team/super_team",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == 500
+        assert response.json()["error"]["type"] == "server_error"
+        assert response.json()["error"]["message"] == (
+            "Team 'super_team' includes agent 'code' that could not be materialized for this request."
+        )
+
     def test_team_execution_failure_500(self, team_app_client: TestClient) -> None:
         """Team execution exception returns 500."""
         from mindroom.teams import TeamMode  # noqa: PLC0415
