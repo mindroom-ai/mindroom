@@ -22,7 +22,14 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
-from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
+from mindroom.bot import (
+    AgentBot,
+    MultiKnowledgeVectorDb,
+    _DispatchPayload,
+    _MessageContext,
+    _PreparedDispatch,
+    _ResponseAction,
+)
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -2710,7 +2717,7 @@ class TestAgentBot:
         ]
 
     @pytest.mark.asyncio
-    async def test_resolve_response_action_skips_individual_reply_when_team_request_is_rejected(
+    async def test_resolve_response_action_rejects_instead_of_falling_through_to_individual_reply(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -2740,7 +2747,12 @@ class TestAgentBot:
             patch.object(
                 bot,
                 "_decide_team_for_sender",
-                new=AsyncMock(return_value=TeamFormationDecision.reject()),
+                new=AsyncMock(
+                    return_value=TeamFormationDecision.reject(
+                        agents=[bot.matrix_id],
+                        reason="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+                    ),
+                ),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         ):
@@ -2752,8 +2764,62 @@ class TestAgentBot:
                 False,
             )
 
-        assert action.kind == "skip"
+        assert action.kind == "reject"
+        assert "private agents cannot participate in teams yet" in action.rejection_message
         mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Rejected team requests should send one actionable reply instead of silently skipping."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.response_tracker = MagicMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+        )
+        action = _ResponseAction(
+            kind="reject",
+            rejection_message="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+        )
+
+        with patch.object(bot, "_send_response", new=AsyncMock(return_value="$reply")) as mock_send_response:
+            await bot._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                action,
+                _DispatchPayload(prompt="help me"),
+                processing_log="processing",
+            )
+
+        mock_send_response.assert_awaited_once()
+        assert mock_send_response.await_args.kwargs["response_text"].endswith(
+            "private agents cannot participate in teams yet",
+        )
+        bot.response_tracker.mark_responded.assert_called_once_with("$event", "$reply")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])

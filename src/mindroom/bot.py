@@ -189,8 +189,9 @@ def _create_task_wrapper(
 class _ResponseAction:
     """Result of the shared team-formation / should-respond decision."""
 
-    kind: Literal["skip", "team", "individual"]
+    kind: Literal["skip", "team", "individual", "reject"]
     form_team: TeamFormationDecision | None = None
+    rejection_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1453,6 +1454,17 @@ class AgentBot:
             self.response_tracker.mark_responded(event.event_id, response_event_id)
             return
 
+        if action.kind == "reject":
+            assert action.rejection_message is not None
+            response_event_id = await self._send_response(
+                room_id=room.room_id,
+                reply_to_event_id=event.event_id,
+                response_text=action.rejection_message,
+                thread_id=dispatch.context.thread_id,
+            )
+            self.response_tracker.mark_responded(event.event_id, response_event_id)
+            return
+
         if not dispatch.context.am_i_mentioned:
             self.logger.info("Will respond: only agent in thread")
 
@@ -1472,6 +1484,23 @@ class AgentBot:
     def _can_reply_to_sender(self, sender_id: str) -> bool:
         """Return whether this entity may reply to *sender_id*."""
         return is_sender_allowed_for_agent_reply(sender_id, self.agent_name, self.config, self.runtime_paths)
+
+    def _team_response_action(self, form_team: TeamFormationDecision) -> _ResponseAction | None:
+        """Return the action implied by one team-formation decision, if any."""
+        if form_team.kind not in {"team", "reject"}:
+            return None
+        if not form_team.agents:
+            return _ResponseAction(kind="skip")
+        first_agent = min(form_team.agents, key=lambda x: x.full_id)
+        if self.matrix_id != first_agent:
+            return _ResponseAction(kind="skip")
+        if form_team.kind == "team":
+            return _ResponseAction(kind="team", form_team=form_team)
+        return _ResponseAction(
+            kind="reject",
+            form_team=form_team,
+            rejection_message=form_team.rejection_message,
+        )
 
     async def _handle_router_dispatch(
         self,
@@ -1550,15 +1579,9 @@ class AgentBot:
             message,
             is_dm,
         )
-
-        if form_team.kind == "team" and self.matrix_id in form_team.agents:
-            first_agent = min(form_team.agents, key=lambda x: x.full_id)
-            if self.matrix_id != first_agent:
-                return _ResponseAction(kind="skip")
-            return _ResponseAction(kind="team", form_team=form_team)
-
-        if form_team.kind == "reject":
-            return _ResponseAction(kind="skip")
+        team_action = self._team_response_action(form_team)
+        if team_action is not None:
+            return team_action
 
         if not should_agent_respond(
             agent_name=self.agent_name,

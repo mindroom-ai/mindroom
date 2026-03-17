@@ -251,6 +251,7 @@ class TeamFormationDecision:
     kind: Literal["team", "none", "reject"]
     agents: list[MatrixID]
     mode: TeamMode
+    rejection_message: str | None = None
 
     @classmethod
     def none(cls) -> TeamFormationDecision:
@@ -258,9 +259,9 @@ class TeamFormationDecision:
         return cls(kind="none", agents=[], mode=TeamMode.COLLABORATE)
 
     @classmethod
-    def reject(cls) -> TeamFormationDecision:
+    def reject(cls, *, agents: list[MatrixID], reason: str) -> TeamFormationDecision:
         """Return the explicit-rejection outcome."""
-        return cls(kind="reject", agents=[], mode=TeamMode.COLLABORATE)
+        return cls(kind="reject", agents=agents, mode=TeamMode.COLLABORATE, rejection_message=reason)
 
     @classmethod
     def team(cls, *, agents: list[MatrixID], mode: TeamMode) -> TeamFormationDecision:
@@ -269,10 +270,10 @@ class TeamFormationDecision:
 
 
 class _FilteredTeamMembers(NamedTuple):
-    """Filtered team members plus whether the request was explicitly rejected."""
+    """Filtered team members plus the rejection reason for explicit requests."""
 
     agents: list[MatrixID]
-    rejected_request: bool
+    rejection_message: str | None
 
 
 class _CandidateTeamMembers(NamedTuple):
@@ -397,6 +398,11 @@ async def decide_team_formation(
         return TeamFormationDecision.none()
 
     if config is not None:
+        requested_team_agents = [
+            agent_id
+            for agent_id in team_agents
+            if (agent_id.agent_name(config, runtime_paths) or agent_id.username) != ROUTER_AGENT_NAME
+        ]
         filtered_team_members = _filter_supported_team_agents(
             team_agents,
             config,
@@ -405,8 +411,11 @@ async def decide_team_formation(
         )
         team_agents = filtered_team_members.agents
         if len(team_agents) < 2:
-            if filtered_team_members.rejected_request:
-                return TeamFormationDecision.reject()
+            if filtered_team_members.rejection_message is not None:
+                return TeamFormationDecision.reject(
+                    agents=requested_team_agents,
+                    reason=filtered_team_members.rejection_message,
+                )
             return TeamFormationDecision.none()
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
@@ -507,6 +516,12 @@ def _filter_supported_team_agents(
         candidate_agents.append((agent_id, agent_name))
     unsupported_agents = config.get_unsupported_team_agents([name for _, name in candidate_agents])
     if unsupported_agents and not allow_partial:
+        first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
+        rejection_message = config.unsupported_team_agent_message(
+            first_unsupported_agent,
+            prefix="Team request",
+            private_targets=private_targets,
+        )
         logger.info(
             "Rejecting team formation because requested members are unsupported",
             unsupported_agents={
@@ -518,7 +533,7 @@ def _filter_supported_team_agents(
                 for agent_name, private_targets in unsupported_agents.items()
             },
         )
-        return _FilteredTeamMembers([], True)
+        return _FilteredTeamMembers([], rejection_message)
     if unsupported_agents:
         logger.info(
             "Skipping unsupported team members during ad hoc team formation",
@@ -526,7 +541,7 @@ def _filter_supported_team_agents(
         )
     return _FilteredTeamMembers(
         [agent_id for agent_id, agent_name in candidate_agents if agent_name not in unsupported_agents],
-        False,
+        None,
     )
 
 
