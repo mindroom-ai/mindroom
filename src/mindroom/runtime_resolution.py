@@ -68,6 +68,7 @@ class ResolvedKnowledgeBinding:
     base_id: str
     storage_root: Path
     knowledge_path: Path
+    request_scoped: bool
     start_background_watchers: bool
     incremental_sync_on_access: bool
 
@@ -228,6 +229,7 @@ def resolve_knowledge_binding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
+            request_scoped=False,
             start_background_watchers=start_background_watchers,
             incremental_sync_on_access=False,
         )
@@ -253,6 +255,7 @@ def resolve_knowledge_binding(
             base_config.path,
             field_name=f"knowledge base '{base_id}' path",
         ),
+        request_scoped=uses_isolating_worker_scope,
         start_background_watchers=start_background_watchers,
         incremental_sync_on_access=start_watchers and base_config.watch and uses_isolating_worker_scope,
     )

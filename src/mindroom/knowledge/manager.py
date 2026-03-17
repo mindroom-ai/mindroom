@@ -302,16 +302,6 @@ class KnowledgeManagerKey:
     knowledge_path: str
 
 
-def _knowledge_base_uses_isolating_worker_workspace(
-    config: Config,
-    base_id: str,
-) -> bool:
-    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
-    if effective_agent_name is None:
-        return False
-    return config.get_agent_worker_scope(effective_agent_name) not in {None, "shared"}
-
-
 def _resolve_knowledge_manager_binding(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1139,11 +1129,12 @@ def _knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
 
 
 def _knowledge_manager_replacement_lock_key(
-    config: Config,
     base_id: str,
     key: KnowledgeManagerKey,
+    *,
+    request_scoped: bool,
 ) -> tuple[str, str]:
-    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+    if not request_scoped:
         return base_id, ""
     return base_id, key.storage_path
 
@@ -1158,10 +1149,10 @@ def _knowledge_manager_replacement_lock(lock_key: tuple[str, str]) -> asyncio.Lo
 
 async def _touch_scoped_private_manager_key(
     key: KnowledgeManagerKey,
-    config: Config,
-    base_id: str,
+    *,
+    request_scoped: bool,
 ) -> None:
-    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+    if not request_scoped:
         return
 
     _scoped_private_manager_lru.pop(key, None)
@@ -1181,6 +1172,7 @@ async def _ensure_knowledge_manager(
     runtime_paths: RuntimePaths,
     storage_path: Path,
     knowledge_path: Path,
+    request_scoped: bool,
     start_background_watchers: bool,
     incremental_sync_on_access: bool,
     reindex_on_create: bool,
@@ -1193,7 +1185,7 @@ async def _ensure_knowledge_manager(
                 await _sync_manager_without_full_reindex(existing)
             if start_background_watchers:
                 await existing.start_watcher()
-            await _touch_scoped_private_manager_key(key, config, base_id)
+            await _touch_scoped_private_manager_key(key, request_scoped=request_scoped)
             return existing
 
         full_reindex_required = (
@@ -1239,7 +1231,7 @@ async def _ensure_knowledge_manager(
             await manager.start_watcher()
 
         _knowledge_managers[key] = manager
-        await _touch_scoped_private_manager_key(key, config, base_id)
+        await _touch_scoped_private_manager_key(key, request_scoped=request_scoped)
         return manager
 
 
@@ -1270,9 +1262,17 @@ async def ensure_agent_knowledge_managers(
             create=True,
         )
         async with _knowledge_manager_replacement_lock(
-            _knowledge_manager_replacement_lock_key(config, base_id, key),
+            _knowledge_manager_replacement_lock_key(
+                base_id,
+                key,
+                request_scoped=binding.request_scoped,
+            ),
         ):
-            for other_key in _stale_request_manager_keys(config, base_id, key):
+            for other_key in _stale_request_manager_keys(
+                base_id,
+                key,
+                request_scoped=binding.request_scoped,
+            ):
                 await _stop_and_remove_manager(other_key)
             managers[base_id] = await _ensure_knowledge_manager(
                 key=key,
@@ -1281,6 +1281,7 @@ async def ensure_agent_knowledge_managers(
                 runtime_paths=runtime_paths,
                 storage_path=binding.storage_root,
                 knowledge_path=binding.knowledge_path,
+                request_scoped=binding.request_scoped,
                 start_background_watchers=binding.start_background_watchers,
                 incremental_sync_on_access=binding.incremental_sync_on_access,
                 reindex_on_create=reindex_on_create,
@@ -1289,12 +1290,13 @@ async def ensure_agent_knowledge_managers(
 
 
 def _stale_request_manager_keys(
-    config: Config,
     base_id: str,
     key: KnowledgeManagerKey,
+    *,
+    request_scoped: bool,
 ) -> list[KnowledgeManagerKey]:
     """Return stale request-time manager keys superseded by the current effective key."""
-    if not _knowledge_base_uses_isolating_worker_workspace(config, base_id):
+    if not request_scoped:
         return [candidate for candidate in _knowledge_managers if candidate.base_id == base_id and candidate != key]
     return [
         candidate
@@ -1341,6 +1343,7 @@ async def initialize_knowledge_managers(
             runtime_paths=runtime_paths,
             storage_path=binding.storage_root,
             knowledge_path=binding.knowledge_path,
+            request_scoped=binding.request_scoped,
             start_background_watchers=binding.start_background_watchers,
             incremental_sync_on_access=binding.incremental_sync_on_access,
             reindex_on_create=reindex_on_create,
