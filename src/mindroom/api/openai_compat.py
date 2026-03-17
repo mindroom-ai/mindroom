@@ -40,7 +40,7 @@ from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
-from mindroom.teams import TeamMode, format_team_response
+from mindroom.teams import TeamMode, TeamOutcome, format_team_response, resolve_configured_team
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -1095,10 +1095,23 @@ def _build_team(
     """
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
+    config_ids = config.get_ids(runtime_paths)
+    requested_members = [config_ids[member_name] for member_name in team_config.agents if member_name in config_ids]
+    preflight_resolution = resolve_configured_team(
+        team_name,
+        requested_members,
+        mode,
+        config,
+        runtime_paths,
+        materializable_agent_names=set(config.agents),
+    )
+    if preflight_resolution.outcome is not TeamOutcome.TEAM:
+        raise ValueError(preflight_resolution.reason or f"Team '{team_name}' cannot be materialized")
     model_name = team_config.model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
 
     agents: list[Agent] = []
+    built_member_names: list[str] = []
     for member_name in team_config.agents:
         if member_name not in config.agents or member_name == ROUTER_AGENT_NAME:
             logger.warning("Team member not found, skipping", team=team_name, agent=member_name)
@@ -1119,11 +1132,20 @@ def _build_team(
                     include_interactive_questions=False,
                 ),
             )
+            built_member_names.append(member_name)
         except Exception:
             logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
 
-    if not agents:
-        return [], None, mode
+    final_resolution = resolve_configured_team(
+        team_name,
+        requested_members,
+        mode,
+        config,
+        runtime_paths,
+        materializable_agent_names=set(built_member_names),
+    )
+    if final_resolution.outcome is not TeamOutcome.TEAM:
+        raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
 
     team = Team(
         members=agents,  # type: ignore[arg-type]
@@ -1154,7 +1176,10 @@ async def _non_stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    try:
+        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    except ValueError as e:
+        return _error_response(500, str(e), error_type="server_error")
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1201,8 +1226,11 @@ async def _stream_team_completion(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
-    with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    try:
+        with tool_execution_identity(execution_identity):
+            agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
+    except ValueError as e:
+        return _error_response(500, str(e), error_type="server_error")
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 

@@ -11,7 +11,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.teams import TeamMode, decide_team_formation
+from mindroom.teams import TeamMode, TeamOutcome, decide_team_formation
 from mindroom.thread_utils import (
     check_agent_mentioned,
     get_agents_in_thread,
@@ -269,7 +269,8 @@ class TestIntegrationWithTeamFormation:
 
         # Agents should be in the same order as tagged
         # Convert MatrixID objects to agent names for comparison
-        agent_names = [mid.agent_name(mock_config, runtime_paths) for mid in result.agents]
+        assert result.outcome is TeamOutcome.TEAM
+        agent_names = [mid.agent_name(mock_config, runtime_paths) for mid in result.eligible_members]
         assert agent_names == ["phone", "email", "research"]
         assert result.mode == TeamMode.COORDINATE  # Multiple tagged = coordinate
 

@@ -12,8 +12,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.teams import (
-    TeamFormationDecision,
     TeamMode,
+    TeamOutcome,
+    TeamResolution,
     _select_team_mode,
     _TeamModeDecision,
     decide_team_formation,
@@ -25,7 +26,7 @@ async def _select_team_mode_for_test(message: str, agent_names: list[str], confi
     return await _select_team_mode(message, agent_names, config, runtime_paths_for(config))
 
 
-async def decide_team_formation_for_test(**kwargs: object) -> TeamFormationDecision:
+async def decide_team_formation_for_test(**kwargs: object) -> TeamResolution:
     """Run team-formation logic with the test config's bound runtime context."""
     config = kwargs.get("config")
     runtime_paths = kwargs.get("runtime_paths")
@@ -228,8 +229,8 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.kind == "team"
-            assert _agent_names(result.agents, mock_config) == ["email", "phone"]
+            assert result.outcome is TeamOutcome.TEAM
+            assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
             assert result.mode == TeamMode.COORDINATE
             mock_determine.assert_called_once_with(
                 "Send email then call",
@@ -255,8 +256,8 @@ class TestShouldFormTeam:
             use_ai_decision=False,
         )
 
-        assert result.kind == "team"
-        assert _agent_names(result.agents, mock_config) == ["email", "phone"]
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
         # Hardcoded logic: multiple tagged agents = COORDINATE
         assert result.mode == TeamMode.COORDINATE
 
@@ -277,8 +278,8 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.kind == "team"
-        assert _agent_names(result.agents, mock_config) == ["email", "phone"]
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
         # Should use hardcoded logic when message is None
         assert result.mode == TeamMode.COORDINATE
 
@@ -300,8 +301,8 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.kind == "team"
-        assert _agent_names(result.agents, mock_config) == ["email", "phone"]
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
         # Should use hardcoded logic when config is None
         assert result.mode == TeamMode.COORDINATE
 
@@ -320,9 +321,9 @@ class TestShouldFormTeam:
             use_ai_decision=True,
         )
 
-        assert result.kind == "none"
-        assert result.agents == []
-        assert result.mode == TeamMode.COLLABORATE
+        assert result.outcome is TeamOutcome.NONE
+        assert result.eligible_members == []
+        assert result.mode is None
 
     @pytest.mark.asyncio
     async def test_decide_team_formation_thread_agents(self, mock_config):
@@ -344,8 +345,8 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.kind == "team"
-            assert _agent_names(result.agents, mock_config) == ["research", "analyst"]
+            assert result.outcome is TeamOutcome.TEAM
+            assert _agent_names(result.eligible_members, mock_config) == ["research", "analyst"]
             assert result.mode == TeamMode.COLLABORATE
 
     @pytest.mark.asyncio
@@ -369,8 +370,8 @@ class TestShouldFormTeam:
                 use_ai_decision=True,
             )
 
-            assert result.kind == "team"
-            assert _agent_names(result.agents, mock_config) == ["email", "phone", "research"]
+            assert result.outcome is TeamOutcome.TEAM
+            assert _agent_names(result.eligible_members, mock_config) == ["email", "phone", "research"]
             assert result.mode == TeamMode.COLLABORATE
 
 
@@ -405,9 +406,9 @@ class TestIntegrationScenarios:
                     use_ai_decision=True,
                 )
 
-                assert result.kind == "team"
+                assert result.outcome is TeamOutcome.TEAM
                 assert result.mode == TeamMode.COORDINATE
-                assert set(_agent_names(result.agents, mock_config)) == {"email", "phone"}
+                assert set(_agent_names(result.eligible_members, mock_config)) == {"email", "phone"}
 
     @pytest.mark.asyncio
     async def test_brainstorming_scenario(self, mock_config):
@@ -437,14 +438,13 @@ class TestIntegrationScenarios:
                     use_ai_decision=True,
                 )
 
-                assert result.kind == "team"
+                assert result.outcome is TeamOutcome.TEAM
                 assert result.mode == TeamMode.COLLABORATE
-                assert set(_agent_names(result.agents, mock_config)) == {"research", "analyst"}
+                assert set(_agent_names(result.eligible_members, mock_config)) == {"research", "analyst"}
 
     @pytest.mark.asyncio
-    async def test_backwards_compatibility(self, mock_config):
-        """Test that the function still works with old call signature."""
-        # Old code might call without message and config
+    async def test_optional_message_and_config_defaults(self, mock_config):
+        """Test that optional message/config inputs still fall back cleanly."""
         result = await decide_team_formation_for_test(
             agent=mock_config.get_ids(runtime_paths_for(mock_config))["email"],
             tagged_agents=[
@@ -458,6 +458,6 @@ class TestIntegrationScenarios:
         )
 
         # Should still work with hardcoded logic
-        assert result.kind == "team"
-        assert _agent_names(result.agents, mock_config) == ["email", "phone"]
+        assert result.outcome is TeamOutcome.TEAM
+        assert _agent_names(result.eligible_members, mock_config) == ["email", "phone"]
         assert result.mode == TeamMode.COORDINATE  # Hardcoded for multiple tagged
