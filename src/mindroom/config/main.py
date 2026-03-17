@@ -718,6 +718,52 @@ class Config(BaseModel):
             ),
         )
 
+    def get_unsupported_team_agents(
+        self,
+        agent_names: list[str],
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+    ) -> dict[str, tuple[str, ...] | None]:
+        """Return unsupported team members keyed by agent name.
+
+        Unknown agents map to `None`.
+        Supported known agents are omitted.
+        Private or transitively private members map to their reachable private targets.
+        """
+        closure_cache = closures if closures is not None else {}
+        unsupported_agents: dict[str, tuple[str, ...] | None] = {}
+        for agent_name in agent_names:
+            if agent_name not in self.agents:
+                unsupported_agents[agent_name] = None
+                continue
+            private_targets = self.get_private_team_targets(agent_name, closures=closure_cache)
+            if private_targets:
+                unsupported_agents[agent_name] = private_targets
+        return unsupported_agents
+
+    @staticmethod
+    def unsupported_team_agent_message(
+        agent_name: str,
+        *,
+        prefix: str,
+        private_targets: tuple[str, ...] | None,
+    ) -> str:
+        """Return the user-facing error for one unsupported team member."""
+        if private_targets is None:
+            return f"{prefix} references unknown agent '{agent_name}'"
+        if agent_name in private_targets:
+            return f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
+        if len(private_targets) == 1:
+            return (
+                f"{prefix} includes agent '{agent_name}' which reaches private agent "
+                f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
+            )
+        return (
+            f"{prefix} includes agent '{agent_name}' which reaches private agents "
+            f"{', '.join(repr(target) for target in private_targets)} via delegation; "
+            "private agents cannot participate in teams yet"
+        )
+
     def assert_team_agents_supported(
         self,
         agent_names: list[str],
@@ -727,30 +773,17 @@ class Config(BaseModel):
         """Reject unknown or currently unsupported team members."""
         prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
         closure_cache: dict[str, frozenset[str]] = {}
-        for agent_name in agent_names:
-            if agent_name not in self.agents:
-                msg = f"{prefix} references unknown agent '{agent_name}'"
-                raise ValueError(msg)
-
-        for agent_name in agent_names:
-            private_targets = self.get_private_team_targets(agent_name, closures=closure_cache)
-            if not private_targets:
-                continue
-            if agent_name in private_targets:
-                msg = f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
-                raise ValueError(msg)
-            if len(private_targets) == 1:
-                msg = (
-                    f"{prefix} includes agent '{agent_name}' which reaches private agent "
-                    f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
-                )
-                raise ValueError(msg)
-            msg = (
-                f"{prefix} includes agent '{agent_name}' which reaches private agents "
-                f"{', '.join(repr(target) for target in private_targets)} via delegation; "
-                "private agents cannot participate in teams yet"
-            )
-            raise ValueError(msg)
+        unsupported_agents = self.get_unsupported_team_agents(agent_names, closures=closure_cache)
+        if not unsupported_agents:
+            return
+        first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
+        raise ValueError(
+            self.unsupported_team_agent_message(
+                first_unsupported_agent,
+                prefix=prefix,
+                private_targets=private_targets,
+            ),
+        )
 
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:

@@ -631,8 +631,8 @@ class TestRouterTeamFormation:
         assert result.should_form_team is False
 
     @pytest.mark.asyncio
-    async def test_tagged_private_agents_are_filtered_before_team_formation(self) -> None:
-        """Mixed shared/private mentions should not create a later-failing ad hoc team."""
+    async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
+        """Mixed shared/private mentions should reject the whole ad hoc team request."""
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         import nio  # noqa: PLC0415
@@ -643,6 +643,7 @@ class TestRouterTeamFormation:
             Config(
                 agents={
                     "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                    "general": AgentConfig(display_name="General", role="General"),
                     "mind": AgentConfig(
                         display_name="Mind",
                         role="Private assistant",
@@ -659,12 +660,13 @@ class TestRouterTeamFormation:
             agent=config.get_ids(runtime_paths_for(config))["calculator"],
             tagged_agents=[
                 config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
                 config.get_ids(runtime_paths_for(config))["mind"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="calculator and mind, help",
+            message="calculator, general, and mind, help",
             config=config,
             room=room,
             use_ai_decision=False,
@@ -673,8 +675,10 @@ class TestRouterTeamFormation:
         assert result.should_form_team is False
 
     @pytest.mark.asyncio
-    async def test_tagged_agents_that_delegate_to_private_are_filtered_before_team_formation(self) -> None:
-        """Ad hoc team formation must reject members whose delegation reaches private agents."""
+    async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
+        self,
+    ) -> None:
+        """Ad hoc team formation must reject explicit member sets that reach private agents."""
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         import nio  # noqa: PLC0415
@@ -690,6 +694,7 @@ class TestRouterTeamFormation:
                         delegate_to=["research"],
                     ),
                     "code": AgentConfig(display_name="Code", role="Coder"),
+                    "analyst": AgentConfig(display_name="Analyst", role="Analyst"),
                     "research": AgentConfig(
                         display_name="Research",
                         role="Private researcher",
@@ -707,11 +712,12 @@ class TestRouterTeamFormation:
             tagged_agents=[
                 config.get_ids(runtime_paths_for(config))["general"],
                 config.get_ids(runtime_paths_for(config))["code"],
+                config.get_ids(runtime_paths_for(config))["analyst"],
             ],
             agents_in_thread=[],
             all_mentioned_in_thread=[],
             runtime_paths=runtime_paths_for(config),
-            message="general and code, help",
+            message="general, code, and analyst, help",
             config=config,
             room=room,
             use_ai_decision=False,

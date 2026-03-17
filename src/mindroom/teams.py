@@ -252,6 +252,13 @@ class TeamFormationDecision(NamedTuple):
     mode: TeamMode
 
 
+class _CandidateTeamMembers(NamedTuple):
+    """Candidate team members and whether the source may degrade by filtering."""
+
+    agents: list[MatrixID]
+    allow_partial: bool
+
+
 async def _select_team_mode(
     message: str,
     agent_names: list[str],
@@ -350,7 +357,7 @@ async def decide_team_formation(
         TeamFormationDecision with team formation decision
 
     """
-    team_agents = _candidate_team_agents(
+    candidate_team_members = _candidate_team_agents(
         tagged_agents,
         all_mentioned_in_thread,
         agents_in_thread,
@@ -361,6 +368,7 @@ async def decide_team_formation(
         is_thread=is_thread,
         available_agents_in_room=available_agents_in_room,
     )
+    team_agents = candidate_team_members.agents
 
     if not team_agents:
         return TeamFormationDecision(
@@ -370,7 +378,12 @@ async def decide_team_formation(
         )
 
     if config is not None:
-        team_agents = _filter_supported_team_agents(team_agents, config, runtime_paths)
+        team_agents = _filter_supported_team_agents(
+            team_agents,
+            config,
+            runtime_paths,
+            allow_partial=candidate_team_members.allow_partial,
+        )
         if len(team_agents) < 2:
             return TeamFormationDecision(
                 should_form_team=False,
@@ -404,28 +417,28 @@ def _candidate_team_agents(
     is_dm_room: bool,
     is_thread: bool,
     available_agents_in_room: list[MatrixID] | None,
-) -> list[MatrixID]:
+) -> _CandidateTeamMembers:
     """Return the candidate team members for one response."""
     if len(tagged_agents) > 1:
         logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
-        return tagged_agents
+        return _CandidateTeamMembers(tagged_agents, False)
     if not tagged_agents and len(all_mentioned_in_thread) > 1:
         logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
-        return all_mentioned_in_thread
+        return _CandidateTeamMembers(all_mentioned_in_thread, False)
     if not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
-        return agents_in_thread
+        return _CandidateTeamMembers(agents_in_thread, False)
     if not (is_dm_room and not is_thread and not tagged_agents and room and config):
-        return []
+        return _CandidateTeamMembers([], False)
 
     available_agents = available_agents_in_room
     if available_agents is None:
         available_agents = get_available_agents_in_room(room, config, runtime_paths)
     if len(available_agents) <= 1:
-        return []
+        return _CandidateTeamMembers([], False)
 
     logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
-    return available_agents
+    return _CandidateTeamMembers(available_agents, True)
 
 
 def _build_prompt_with_context(
@@ -464,26 +477,36 @@ def _filter_supported_team_agents(
     agent_ids: list[MatrixID],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    allow_partial: bool,
 ) -> list[MatrixID]:
-    """Return only team-eligible agents from one candidate set."""
-    supported_agents: list[MatrixID] = []
-    skipped_agents: list[str] = []
-    closure_cache: dict[str, frozenset[str]] = {}
+    """Return the team-eligible agents from one candidate set."""
+    candidate_agents: list[tuple[MatrixID, str]] = []
     for agent_id in agent_ids:
         agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
         if agent_name == ROUTER_AGENT_NAME:
             continue
-        agent_config = config.agents.get(agent_name)
-        if agent_config is None or config.get_private_team_targets(agent_name, closures=closure_cache):
-            skipped_agents.append(agent_name)
-            continue
-        supported_agents.append(agent_id)
-    if skipped_agents:
+        candidate_agents.append((agent_id, agent_name))
+    unsupported_agents = config.get_unsupported_team_agents([name for _, name in candidate_agents])
+    if unsupported_agents and not allow_partial:
+        logger.info(
+            "Rejecting team formation because requested members are unsupported",
+            unsupported_agents={
+                agent_name: config.unsupported_team_agent_message(
+                    agent_name,
+                    prefix="Team request",
+                    private_targets=private_targets,
+                )
+                for agent_name, private_targets in unsupported_agents.items()
+            },
+        )
+        return []
+    if unsupported_agents:
         logger.info(
             "Skipping unsupported team members during ad hoc team formation",
-            skipped_agents=skipped_agents,
+            skipped_agents=sorted(unsupported_agents),
         )
-    return supported_agents
+    return [agent_id for agent_id, agent_name in candidate_agents if agent_name not in unsupported_agents]
 
 
 def _get_agents_from_orchestrator(
