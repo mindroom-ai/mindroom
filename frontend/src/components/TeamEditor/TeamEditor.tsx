@@ -15,6 +15,7 @@ import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
+import { findConfigValidationIssue } from '@/lib/configValidation';
 
 export function TeamEditor() {
   const {
@@ -25,11 +26,9 @@ export function TeamEditor() {
     updateTeam,
     deleteTeam,
     saveConfig,
-    refreshTeamEligibility,
     teamEligibilityByAgent,
     config,
     isDirty,
-    editorError,
     configValidationIssues,
     selectTeam,
   } = useConfigStore();
@@ -40,13 +39,11 @@ export function TeamEditor() {
       if (!selectedTeamId) {
         return undefined;
       }
-      const prefix = ['teams', selectedTeamId, ...path];
-      return configValidationIssues.find(issue =>
+      return findConfigValidationIssue(
+        configValidationIssues,
+        ['teams', selectedTeamId, ...path],
         exact
-          ? issue.loc.length === prefix.length &&
-            prefix.every((segment, index) => issue.loc[index] === segment)
-          : prefix.every((segment, index) => issue.loc[index] === segment)
-      )?.msg;
+      );
     },
     [configValidationIssues, selectedTeamId]
   );
@@ -81,11 +78,6 @@ export function TeamEditor() {
       reset(selectedTeam);
     }
   }, [selectedTeam, reset]);
-
-  useEffect(() => {
-    void refreshTeamEligibility(agents);
-  }, [agents, refreshTeamEligibility]);
-
   // Create a debounced update function
   const handleFieldChange = useCallback(
     (fieldName: keyof Team, value: any) => {
@@ -119,9 +111,9 @@ export function TeamEditor() {
       onDelete={handleDelete}
       onBack={() => selectTeam(null)}
     >
-      {(editorError || teamRootError) && (
+      {teamRootError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-          {teamRootError ?? editorError}
+          {teamRootError}
         </div>
       )}
 

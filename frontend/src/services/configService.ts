@@ -1,12 +1,7 @@
 import { Agent, Config, TeamEligibilityByAgent } from '@/types/config';
+import { ConfigValidationIssue } from '@/lib/configValidation';
 
 const API_BASE = '/api';
-
-export interface ConfigValidationIssue {
-  loc: Array<string | number>;
-  msg: string;
-  type: string;
-}
 
 function isConfigValidationIssue(detail: unknown): detail is ConfigValidationIssue {
   return (

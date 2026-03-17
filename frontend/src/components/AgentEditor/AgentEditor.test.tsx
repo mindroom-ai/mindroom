@@ -286,7 +286,6 @@ describe('AgentEditor', () => {
 
     render(<AgentEditor />);
 
-    expect(screen.getByText('Configuration validation failed')).toBeInTheDocument();
     expect(
       screen.getByText('private.root must stay within the private instance root')
     ).toBeInTheDocument();

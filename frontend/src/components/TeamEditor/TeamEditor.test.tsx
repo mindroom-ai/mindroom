@@ -127,7 +127,6 @@ describe('TeamEditor', () => {
     expect(screen.getByDisplayValue('Dev Team')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Development team for coding tasks')).toBeInTheDocument();
     expect(screen.getByText('Team Details')).toBeInTheDocument();
-    expect(mockRefreshTeamEligibility).toHaveBeenCalledWith(mockAgents);
   });
 
   it('shows placeholder when no team is selected', () => {
@@ -432,7 +431,6 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
-      editorError: 'Configuration validation failed',
       configValidationIssues: [
         {
           loc: ['teams', 'dev_team', 'agents'],
@@ -444,7 +442,6 @@ describe('TeamEditor', () => {
 
     render(<TeamEditor />);
 
-    expect(screen.getByText('Configuration validation failed')).toBeInTheDocument();
     expect(screen.getByText('Team members cannot include private agents.')).toBeInTheDocument();
   });
 });

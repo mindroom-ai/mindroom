@@ -12,7 +12,7 @@ import {
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
-import type { ConfigValidationIssue } from '@/services/configService';
+import type { ConfigValidationIssue } from '@/lib/configValidation';
 
 function unassignAgentsFromOtherCultures(
   cultures: Culture[],

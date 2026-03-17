@@ -34,6 +34,7 @@ import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
+import { findConfigValidationIssue } from '@/lib/configValidation';
 
 export function AgentEditor() {
   const {
@@ -45,7 +46,6 @@ export function AgentEditor() {
     saveConfig,
     config,
     isDirty,
-    editorError,
     configValidationIssues,
     selectAgent,
   } = useConfigStore();
@@ -130,16 +130,15 @@ export function AgentEditor() {
       if (!selectedAgentId) {
         return undefined;
       }
-      const prefix = ['agents', selectedAgentId, ...path];
-      return configValidationIssues.find(issue =>
+      return findConfigValidationIssue(
+        configValidationIssues,
+        ['agents', selectedAgentId, ...path],
         exact
-          ? issue.loc.length === prefix.length &&
-            prefix.every((segment, index) => issue.loc[index] === segment)
-          : prefix.every((segment, index) => issue.loc[index] === segment)
-      )?.msg;
+      );
     },
     [configValidationIssues, selectedAgentId]
   );
+  const agentRootError = validationErrorForPath([], true);
   const privateScopeError = validationErrorForPath(['private', 'per'], true);
   const privateRootError = validationErrorForPath(['private', 'root'], true);
   const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
@@ -404,9 +403,9 @@ export function AgentEditor() {
       onDelete={handleDelete}
       onBack={() => selectAgent(null)}
     >
-      {editorError && (
+      {agentRootError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-          {editorError}
+          {agentRootError}
         </div>
       )}
 
