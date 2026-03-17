@@ -2785,6 +2785,7 @@ class TestAgentBot:
                                 agent=bot.matrix_id,
                                 name=bot.agent_name,
                                 status=TeamMemberStatus.ELIGIBLE,
+                                can_respond=True,
                             ),
                         ],
                         eligible_members=[bot.matrix_id],
@@ -2965,11 +2966,13 @@ class TestAgentBot:
                                 agent=config.get_ids(runtime_paths_for(config))["alpha"],
                                 name="alpha",
                                 status=TeamMemberStatus.NOT_MATERIALIZABLE,
+                                can_respond=False,
                             ),
                             TeamResolutionMember(
                                 agent=config.get_ids(runtime_paths_for(config))["calculator"],
                                 name="calculator",
                                 status=TeamMemberStatus.ELIGIBLE,
+                                can_respond=True,
                             ),
                         ],
                         eligible_members=[config.get_ids(runtime_paths_for(config))["calculator"]],
@@ -2990,6 +2993,82 @@ class TestAgentBot:
 
         assert action.kind == "reject"
         assert action.rejection_message == "Team request includes agent 'alpha' that is not available right now."
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_ignores_unsupported_non_responders_for_reject_ownership(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Reject ownership should ignore unsupported members that cannot emit the response."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(display_name="AlphaAgent", rooms=["!room:localhost"]),
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        context = _MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            has_non_agent_mentions=False,
+        )
+
+        with (
+            patch.object(
+                bot,
+                "_decide_team_for_sender",
+                new=AsyncMock(
+                    return_value=TeamResolution(
+                        intent=TeamIntent.EXPLICIT_MEMBERS,
+                        requested_members=[
+                            config.get_ids(runtime_paths_for(config))["alpha"],
+                            config.get_ids(runtime_paths_for(config))["calculator"],
+                        ],
+                        member_statuses=[
+                            TeamResolutionMember(
+                                agent=config.get_ids(runtime_paths_for(config))["alpha"],
+                                name="alpha",
+                                status=TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
+                                can_respond=False,
+                            ),
+                            TeamResolutionMember(
+                                agent=config.get_ids(runtime_paths_for(config))["calculator"],
+                                name="calculator",
+                                status=TeamMemberStatus.ELIGIBLE,
+                                can_respond=True,
+                            ),
+                        ],
+                        eligible_members=[config.get_ids(runtime_paths_for(config))["calculator"]],
+                        outcome=TeamOutcome.REJECT,
+                        reason="Team request includes private agent 'alpha'; private agents cannot participate in teams yet",
+                    ),
+                ),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
+        ):
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "alpha and calculator, help",
+                False,
+            )
+
+        assert action.kind == "reject"
+        assert "private agents cannot participate in teams yet" in action.rejection_message
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio

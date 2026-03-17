@@ -279,6 +279,7 @@ class TeamResolutionMember:
     agent: MatrixID
     name: str
     status: TeamMemberStatus
+    can_respond: bool
     private_targets: tuple[str, ...] | None = None
 
 
@@ -328,6 +329,21 @@ class TeamResolution:
             eligible_members=[],
             outcome=TeamOutcome.NONE,
         )
+
+    def response_owner_candidates(self) -> list[MatrixID]:
+        """Return the bots that may emit this resolution to the user."""
+        if self.outcome is TeamOutcome.NONE:
+            return []
+        if self.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
+            return self.eligible_members
+        return [member.agent for member in self.member_statuses if member.can_respond]
+
+    def response_owner(self) -> MatrixID | None:
+        """Return the single deterministic bot that should emit this resolution."""
+        response_owners = self.response_owner_candidates()
+        if not response_owners:
+            return None
+        return min(response_owners, key=lambda x: x.full_id)
 
     @classmethod
     def reject(
@@ -671,7 +687,7 @@ def _evaluate_team_members(
     sender_visible_agents: list[MatrixID] | None,
     materializable_agent_names: set[str] | None,
 ) -> list[TeamResolutionMember]:
-    """Evaluate one status for each requested team member."""
+    """Evaluate one status and response capability for each requested member."""
     room_visible_ids: set[str] | None = None
     if room is not None and config is not None:
         room_visible_ids = {
@@ -699,13 +715,17 @@ def _evaluate_team_members(
     for agent_id in requested_members:
         agent_name = _team_member_name(agent_id, config, runtime_paths)
         private_targets = unsupported_agents.get(agent_name)
-        if room_visible_ids is not None and agent_id.full_id not in room_visible_ids:
+        is_room_visible = room_visible_ids is None or agent_id.full_id in room_visible_ids
+        is_sender_visible = sender_visible_ids is None or agent_id.full_id in sender_visible_ids
+        is_materializable = materializable_agent_names is None or agent_name in materializable_agent_names
+        can_respond = is_room_visible and is_sender_visible and is_materializable
+        if not is_room_visible:
             status = TeamMemberStatus.NOT_IN_ROOM
-        elif sender_visible_ids is not None and agent_id.full_id not in sender_visible_ids:
+        elif not is_sender_visible:
             status = TeamMemberStatus.HIDDEN_FROM_SENDER
         elif agent_name in unsupported_agents:
             status = TeamMemberStatus.UNSUPPORTED_FOR_TEAM
-        elif materializable_agent_names is not None and agent_name not in materializable_agent_names:
+        elif not is_materializable:
             status = TeamMemberStatus.NOT_MATERIALIZABLE
         else:
             status = TeamMemberStatus.ELIGIBLE
@@ -714,6 +734,7 @@ def _evaluate_team_members(
                 agent=agent_id,
                 name=agent_name,
                 status=status,
+                can_respond=can_respond,
                 private_targets=private_targets,
             ),
         )

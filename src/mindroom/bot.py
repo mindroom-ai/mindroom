@@ -53,7 +53,6 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.teams import (
-    TeamMemberStatus,
     TeamMode,
     TeamOutcome,
     TeamResolution,
@@ -203,23 +202,6 @@ class _RouterDispatchResult:
 
     handled: bool
     mark_visible_echo_responded: bool = False
-
-
-def _response_owner_candidates(resolution: TeamResolution) -> list[MatrixID]:
-    """Return the visible bots that may own this resolution's response."""
-    if resolution.outcome in {TeamOutcome.TEAM, TeamOutcome.INDIVIDUAL}:
-        return resolution.eligible_members
-    if resolution.outcome is not TeamOutcome.REJECT:
-        return []
-    return [
-        member.agent
-        for member in resolution.member_statuses
-        if member.status
-        in {
-            TeamMemberStatus.ELIGIBLE,
-            TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
-        }
-    ]
 
 
 def _should_skip_mentions(event_source: dict) -> bool:
@@ -1510,11 +1492,10 @@ class AgentBot:
         """Return the action implied by one team-formation decision, if any."""
         if form_team.outcome is TeamOutcome.NONE:
             return None
-        response_owners = _response_owner_candidates(form_team)
-        if not response_owners:
+        response_owner = form_team.response_owner()
+        if response_owner is None:
             return _ResponseAction(kind="skip")
-        first_agent = min(response_owners, key=lambda x: x.full_id)
-        if self.matrix_id != first_agent:
+        if self.matrix_id != response_owner:
             return _ResponseAction(kind="skip")
         if form_team.outcome is TeamOutcome.TEAM:
             return _ResponseAction(kind="team", form_team=form_team)

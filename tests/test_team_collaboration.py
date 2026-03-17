@@ -871,6 +871,64 @@ class TestRouterTeamFormation:
         assert result.outcome is TeamOutcome.REJECT
 
     @pytest.mark.asyncio
+    async def test_tagged_unsupported_non_materializable_member_does_not_own_reject_response(self) -> None:
+        """Explicit rejects should stay owned by a live visible bot."""
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        import nio  # noqa: PLC0415
+
+        from mindroom.teams import decide_team_formation  # noqa: PLC0415
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "alpha": AgentConfig(
+                        display_name="Alpha",
+                        role="Private assistant",
+                        private=AgentPrivateConfig(per="user", root="alpha_data"),
+                    ),
+                    "calculator": AgentConfig(display_name="Calculator", role="Math"),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+            ),
+        )
+
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: None,
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: None,
+        }
+
+        result = await decide_team_formation(
+            agent=config.get_ids(runtime_paths_for(config))["calculator"],
+            tagged_agents=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            agents_in_thread=[],
+            all_mentioned_in_thread=[],
+            runtime_paths=runtime_paths_for(config),
+            message="alpha and calculator, help",
+            config=config,
+            room=room,
+            use_ai_decision=False,
+            available_agents_in_room=[
+                config.get_ids(runtime_paths_for(config))["alpha"],
+                config.get_ids(runtime_paths_for(config))["calculator"],
+            ],
+            materializable_agent_names={"calculator"},
+        )
+
+        assert result.outcome is TeamOutcome.REJECT
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
+            "calculator": TeamMemberStatus.ELIGIBLE,
+        }
+        assert result.response_owner_candidates() == [config.get_ids(runtime_paths_for(config))["calculator"]]
+        assert result.response_owner() == config.get_ids(runtime_paths_for(config))["calculator"]
+
+    @pytest.mark.asyncio
     async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
         self,
     ) -> None:
