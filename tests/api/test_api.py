@@ -698,6 +698,81 @@ def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(tes
     assert "calculator" in tools_by_name
 
 
+def test_get_tools_execution_scope_override_filters_backend_tools(test_client: TestClient) -> None:
+    """Draft execution-scope overrides should drive shared-only tool filtering."""
+    config = _config_with_worker_scope("shared")
+    tools = [
+        {
+            "name": "homeassistant",
+            "display_name": "Home Assistant",
+            "description": "HA",
+            "category": "automation",
+            "status": "requires_config",
+            "setup_type": "special",
+            "config_fields": None,
+        },
+        {
+            "name": "calculator",
+            "display_name": "Calculator",
+            "description": "Calc",
+            "category": "utility",
+            "status": "available",
+            "setup_type": "none",
+            "config_fields": None,
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
+    assert "homeassistant" not in tools_by_name
+    assert "calculator" in tools_by_name
+
+
+def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
+    """Supported scoped tools should report runtime env credentials as available."""
+    config = _config_with_worker_scope("shared")
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [
+                {
+                    "name": "WEATHER_API_KEY",
+                    "required": True,
+                },
+            ],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
+        patch("mindroom.api.tools.ensure_tool_registry_loaded"),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+        patch(
+            "mindroom.api.tools.load_scoped_credentials",
+            return_value={"WEATHER_API_KEY": "secret", "_source": "env"},
+        ),
+    ):
+        response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
+
+    assert response.status_code == 200
+    tool = response.json()["tools"][0]
+    assert tool["name"] == "weather"
+    assert tool["status"] == "available"
+    assert tool["dashboard_configuration_supported"] is False
+
+
 def test_google_disconnect_rejects_isolating_worker_scope(test_client: TestClient) -> None:
     """Google dashboard actions should reject unsupported worker scopes."""
     config = _config_with_worker_scope("user")

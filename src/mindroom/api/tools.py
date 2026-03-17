@@ -1,23 +1,31 @@
 """API endpoints for tools information."""
 
-from typing import Any
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
+    build_dashboard_execution_identity,
     dashboard_supports_worker_credentials,
-    load_credentials_for_target,
-    resolve_request_credentials_target,
 )
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
+from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
+    build_worker_target_from_runtime_env,
     unsupported_shared_only_integration_names,
 )
+
+if TYPE_CHECKING:
+    from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
@@ -26,6 +34,16 @@ class ToolsResponse(BaseModel):
     """Response containing all registered tools."""
 
     tools: list[dict]
+
+
+@dataclass(frozen=True)
+class _ResolvedToolAvailabilityContext:
+    """Runtime tool-availability context for one dashboard request."""
+
+    execution_scope: WorkerScope | None
+    dashboard_configuration_supported: bool
+    credentials_manager: CredentialsManager
+    worker_target: ResolvedWorkerTarget | None
 
 
 def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
@@ -74,27 +92,73 @@ def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
                 "auth_provider": None,
                 "docs_url": None,
                 "helper_text": f"Config-only macro. Expands to: {', '.join(expansion)}.",
+                "dashboard_configuration_supported": True,
             },
         )
 
 
+def _annotate_dashboard_configuration_support(
+    tools: list[dict[str, Any]],
+    *,
+    supported: bool,
+) -> None:
+    """Expose whether dashboard credential configuration is supported for this scope."""
+    for tool in tools:
+        tool["dashboard_configuration_supported"] = supported
+
+
+def _resolve_tool_availability_context(
+    request: Request,
+    *,
+    config: Config,
+    agent_name: str | None,
+    execution_scope_override: WorkerScope | None,
+) -> _ResolvedToolAvailabilityContext:
+    """Resolve one tool-availability context from persisted config plus optional draft override."""
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
+
+    execution_scope = execution_scope_override
+    if execution_scope is None and agent_name in config.agents:
+        execution_scope = config.get_agent_execution_scope(agent_name)
+
+    runtime_paths = api_runtime_paths(request)
+    execution_identity = (
+        build_dashboard_execution_identity(request, agent_name)
+        if agent_name is not None and execution_scope is not None
+        else None
+    )
+    worker_target = (
+        build_worker_target_from_runtime_env(
+            execution_scope,
+            agent_name,
+            execution_identity,
+            runtime_paths,
+        )
+        if agent_name is not None or execution_scope is not None
+        else None
+    )
+    return _ResolvedToolAvailabilityContext(
+        execution_scope=execution_scope,
+        dashboard_configuration_supported=dashboard_supports_worker_credentials(execution_scope),
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+
+
 def _update_tools_statuses(
     tools: list[dict[str, Any]],
-    request: Request,
-    agent_name: str | None,
-    *,
-    worker_scope: WorkerScope | None,
+    context: _ResolvedToolAvailabilityContext,
 ) -> None:
-    """Update tool availability using the resolved credential target."""
-    if not dashboard_supports_worker_credentials(worker_scope):
-        return
-
-    target = resolve_request_credentials_target(request, agent_name=agent_name)
+    """Update tool runtime availability using the resolved credential context."""
     credentials_cache: dict[str, dict[str, Any] | None] = {}
 
     def get_credentials(service: str) -> dict[str, Any] | None:
         if service not in credentials_cache:
-            credentials_cache[service] = load_credentials_for_target(service, target)
+            credentials_cache[service] = load_scoped_credentials(
+                service,
+                credentials_manager=context.credentials_manager,
+                worker_target=context.worker_target,
+            )
         return credentials_cache[service]
 
     for tool in tools:
@@ -121,7 +185,11 @@ def _update_tools_statuses(
 
 @router.get("")
 @router.get("/")
-async def get_registered_tools(request: Request, agent_name: str | None = None) -> ToolsResponse:
+async def get_registered_tools(
+    request: Request,
+    agent_name: str | None = None,
+    execution_scope: WorkerScope | None = None,
+) -> ToolsResponse:
     """Get all registered tools from mindroom.
 
     This builds tool metadata from the in-memory registry and updates availability
@@ -133,13 +201,22 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
-    execution_scope = config.get_agent_execution_scope(agent_name) if agent_name in config.agents else None
+    context = _resolve_tool_availability_context(
+        request,
+        config=config,
+        agent_name=agent_name,
+        execution_scope_override=execution_scope,
+    )
     unsupported_tools = set(
-        unsupported_shared_only_integration_names([tool["name"] for tool in tools], execution_scope),
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], context.execution_scope),
     )
     if unsupported_tools:
         tools = [tool for tool in tools if tool["name"] not in unsupported_tools]
     _append_config_only_presets(tools)
-    _update_tools_statuses(tools, request, agent_name, worker_scope=execution_scope)
+    _annotate_dashboard_configuration_support(
+        tools,
+        supported=context.dashboard_configuration_supported,
+    )
+    _update_tools_statuses(tools, context)
 
     return ToolsResponse(tools=tools)

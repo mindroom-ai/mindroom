@@ -81,7 +81,7 @@ export function Integrations() {
     tools: backendTools,
     loading: toolsLoading,
     refetch: refetchTools,
-  } = useTools(scopeAgentName);
+  } = useTools(scopeAgentName, selectedExecutionScope);
 
   // State
   const [integrations, setIntegrations] = useState<Integration[]>([]);

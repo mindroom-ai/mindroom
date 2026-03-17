@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchJSON, withAgentName } from '@/lib/api';
+import { API_ENDPOINTS, fetchJSON, withQueryParams } from '@/lib/api';
+import type { WorkerScope } from '@/types/config';
 import { useFetchData } from './useFetchData';
 
 export interface ToolInfo {
@@ -16,6 +17,7 @@ export interface ToolInfo {
   auth_provider?: string | null;
   docs_url?: string | null;
   helper_text?: string | null;
+  dashboard_configuration_supported?: boolean;
 }
 
 export interface ToolsResponse {
@@ -24,15 +26,18 @@ export interface ToolsResponse {
 
 const DEFAULT: ToolInfo[] = [];
 
-export function useTools(agentName?: string | null) {
+export function useTools(agentName?: string | null, executionScope?: WorkerScope | null) {
   const fetcher = useMemo(
     () => async () => {
       const response = (await fetchJSON<ToolsResponse>(
-        withAgentName(API_ENDPOINTS.tools, agentName)
+        withQueryParams(API_ENDPOINTS.tools, {
+          agent_name: agentName,
+          execution_scope: executionScope ?? null,
+        })
       )) as ToolsResponse;
       return response.tools;
     },
-    [agentName]
+    [agentName, executionScope]
   );
   const { data: tools, ...rest } = useFetchData(fetcher, DEFAULT);
   return { tools, ...rest };

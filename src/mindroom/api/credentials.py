@@ -141,7 +141,8 @@ def consume_pending_oauth_request(
     return _consume_pending_oauth_request(request, service, state)
 
 
-def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+def build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+    """Build one dashboard-scoped execution identity for API credential and tool lookups."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     auth_user = _request_auth_user(request) or {}
@@ -239,7 +240,7 @@ def resolve_request_credentials_target(
             ),
         )
 
-    execution_identity = _build_dashboard_execution_identity(request, agent_name)
+    execution_identity = build_dashboard_execution_identity(request, agent_name)
     worker_key = require_worker_key_for_scope(
         execution_scope,
         execution_identity=execution_identity,

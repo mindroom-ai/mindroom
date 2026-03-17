@@ -26,6 +26,7 @@ import {
   getDefaultPrivateConfig,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
+  getAgentExecutionScope,
   normalizeAgentUpdates,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
@@ -64,31 +65,41 @@ export function AgentEditor() {
   );
 
   // Fetch tools and skills from backend
-  const { tools: backendTools, loading: toolsLoading } = useTools(selectedAgentId);
+  const selectedExecutionScope = useMemo(
+    () => (selectedAgent ? getAgentExecutionScope(selectedAgent) : null),
+    [selectedAgent]
+  );
+  const { tools: backendTools, loading: toolsLoading } = useTools(
+    selectedAgentId,
+    selectedExecutionScope
+  );
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
-  // Split tools into configured and unconfigured (but usable) categories
-  const { configuredTools, unconfiguredTools } = useMemo(() => {
+  // Split tools into configured, default, and setup-required categories.
+  const { configuredTools, defaultTools, setupRequiredTools } = useMemo(() => {
     const configured: typeof backendTools = [];
-    const unconfigured: typeof backendTools = [];
+    const defaults: typeof backendTools = [];
+    const setupRequired: typeof backendTools = [];
 
     backendTools.forEach(tool => {
       // delegate is managed via delegate_to, not the tools picker
       if (tool.name === 'delegate') return;
-      // Tools that don't require configuration are "unconfigured but usable"
+      // Tools that do not require configuration are default tools.
       if (tool.setup_type === 'none') {
-        unconfigured.push(tool);
-      }
-      // Tools that are configured
-      else if (tool.status === 'available') {
+        defaults.push(tool);
+      } else if (tool.status === 'available') {
         configured.push(tool);
+      } else {
+        setupRequired.push(tool);
       }
-      // Exclude everything else (requires_config)
     });
 
     return {
       configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-      unconfiguredTools: unconfigured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+      defaultTools: defaults.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+      setupRequiredTools: setupRequired.sort((a, b) =>
+        a.display_name.localeCompare(b.display_name)
+      ),
     };
   }, [backendTools]);
 
@@ -857,7 +868,9 @@ export function AgentEditor() {
             <div className="text-sm text-muted-foreground text-center py-4">
               Loading available tools...
             </div>
-          ) : configuredTools.length === 0 && unconfiguredTools.length === 0 ? (
+          ) : configuredTools.length === 0 &&
+            defaultTools.length === 0 &&
+            setupRequiredTools.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               No tools are available. Please configure tools in the Tools tab first.
             </div>
@@ -934,26 +947,27 @@ export function AgentEditor() {
               )}
 
               {/* Divider if both sections have content */}
-              {configuredTools.length > 0 && unconfiguredTools.length > 0 && (
-                <div className="border-t border-gray-200 dark:border-gray-700" />
-              )}
+              {configuredTools.length > 0 &&
+                (defaultTools.length > 0 || setupRequiredTools.length > 0) && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
 
-              {/* Unconfigured but Usable Tools Section */}
-              {unconfiguredTools.length > 0 && (
+              {/* Default Tools Section */}
+              {defaultTools.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 mb-2">
                     <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
                       Default Tools
                     </h4>
                     <Badge variant="secondary" className="text-xs">
-                      {unconfiguredTools.length}
+                      {defaultTools.length}
                     </Badge>
                     <span className="text-xs text-muted-foreground">
                       (work without configuration)
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {unconfiguredTools.map(tool => (
+                    {defaultTools.map(tool => (
                       <Controller
                         key={tool.name}
                         name="tools"
@@ -983,6 +997,79 @@ export function AgentEditor() {
                                   {tool.display_name}
                                 </label>
                               </div>
+                            </div>
+                          );
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Divider if a setup-required section follows */}
+              {(configuredTools.length > 0 || defaultTools.length > 0) &&
+                setupRequiredTools.length > 0 && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
+
+              {/* Setup Required Tools Section */}
+              {setupRequiredTools.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                      Setup Required
+                    </h4>
+                    <Badge variant="outline" className="text-xs">
+                      {setupRequiredTools.length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      (selectable after credentials are configured)
+                    </span>
+                  </div>
+                  <div className="pl-2 space-y-1">
+                    {setupRequiredTools.map(tool => (
+                      <Controller
+                        key={tool.name}
+                        name="tools"
+                        control={control}
+                        render={({ field }) => {
+                          const isChecked = field.value.includes(tool.name);
+                          const setupBlocked = tool.dashboard_configuration_supported === false;
+
+                          return (
+                            <div className="rounded-lg p-2 transition-colors hover:bg-gray-50 dark:hover:bg-white/5">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center space-x-3 sm:space-x-2">
+                                  <Checkbox
+                                    id={`setup-${tool.name}`}
+                                    checked={isChecked}
+                                    onCheckedChange={checked => {
+                                      const newTools = checked
+                                        ? [...field.value, tool.name]
+                                        : field.value.filter(t => t !== tool.name);
+                                      field.onChange(newTools);
+                                      handleFieldChange('tools', newTools);
+                                    }}
+                                    className="h-5 w-5 sm:h-4 sm:w-4"
+                                  />
+                                  <label
+                                    htmlFor={`setup-${tool.name}`}
+                                    className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 cursor-pointer select-none"
+                                  >
+                                    {tool.display_name}
+                                  </label>
+                                </div>
+                                <Badge variant="secondary" className="text-xs">
+                                  Setup required
+                                </Badge>
+                              </div>
+                              {setupBlocked && (
+                                <p className="pl-8 pt-1 text-xs text-muted-foreground">
+                                  This scope can use runtime env credentials, but dashboard
+                                  credential setup is only supported for shared deployment
+                                  credentials.
+                                </p>
+                              )}
                             </div>
                           );
                         }}

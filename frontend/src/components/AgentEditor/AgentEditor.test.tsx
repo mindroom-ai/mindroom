@@ -147,7 +147,33 @@ describe('AgentEditor', () => {
   it('requests agent-scoped tools for the selected agent', () => {
     render(<AgentEditor />);
 
-    expect(useTools).toHaveBeenCalledWith('test_agent');
+    expect(useTools).toHaveBeenCalledWith('test_agent', null);
+  });
+
+  it('shows selectable setup-required tools instead of hiding them', () => {
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'calculator',
+          display_name: 'Calculator',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'weather',
+          display_name: 'Weather',
+          setup_type: 'api_key',
+          status: 'requires_config',
+          dashboard_configuration_supported: true,
+        },
+      ],
+      loading: false,
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('Setup Required')).toBeInTheDocument();
+    expect(screen.getByLabelText('Weather')).toBeInTheDocument();
   });
 
   it('displays selected agent details', () => {
