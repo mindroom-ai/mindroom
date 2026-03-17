@@ -2814,3 +2814,97 @@ def test_private_agents_share_culture_manager_within_same_requester_scope(
     second_kwargs = mock_agent_class.call_args_list[1].kwargs
     assert first_kwargs["culture_manager"] is created_culture_manager
     assert second_kwargs["culture_manager"] is created_culture_manager
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_private_user_agent_agents_share_culture_manager_within_same_requester_scope(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Private user_agent cultures should share one requester-scoped culture manager."""
+    _CULTURE_MANAGER_CACHE.clear()
+    _PRIVATE_CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "agent_one": AgentConfig(
+                display_name="Agent One",
+                role="First",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+            ),
+            "agent_two": AgentConfig(
+                display_name="Agent Two",
+                role="Second",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+            ),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["agent_one", "agent_two"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    created_culture_manager = MagicMock(name="shared_private_culture_manager")
+    mock_culture_manager_class.return_value = created_culture_manager
+
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        _create_agent_for_test(
+            "agent_one",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="agent_one",
+                requester_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+        _create_agent_for_test(
+            "agent_two",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="agent_two",
+                requester_id="@alice:example.org",
+                room_id="!room:example.org",
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            ),
+        )
+
+    assert mock_culture_manager_class.call_count == 1
+    culture_db_calls = [
+        str(call.kwargs.get("db_file", ""))
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 1
+    assert "/private_instances/" in culture_db_calls[0]
+    assert "/agent_one/" not in culture_db_calls[0]
+    assert "/agent_two/" not in culture_db_calls[0]
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+    assert first_kwargs["culture_manager"] is created_culture_manager
+    assert second_kwargs["culture_manager"] is created_culture_manager

@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
-    resolve_private_scope_root,
+    resolve_private_requester_scope_root,
 )
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
@@ -880,7 +880,17 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         if worker_key is None:
             msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
             raise ValueError(msg)
-        culture_storage_root = resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key)
+        execution_scope = agent_runtime.execution_scope
+        execution_identity = agent_runtime.execution_identity
+        if execution_scope is None or execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an execution scope and identity to resolve culture state"
+            raise ValueError(msg)
+        culture_storage_root = resolve_private_requester_scope_root(
+            runtime_paths=runtime_paths,
+            execution_scope=execution_scope,
+            execution_identity=execution_identity,
+            worker_key=worker_key,
+        )
         cache_private_culture = True
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,

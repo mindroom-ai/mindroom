@@ -10,6 +10,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_worker_execution_scope,
+    resolve_worker_key,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
@@ -85,6 +86,26 @@ def resolve_private_scope_root(
             worker_key=worker_key,
         ).relative_to(runtime_paths.storage_root.expanduser().resolve()),
         field_name="Private scope root",
+    )
+
+
+def resolve_private_requester_scope_root(
+    *,
+    runtime_paths: RuntimePaths,
+    execution_scope: WorkerScope,
+    execution_identity: ToolExecutionIdentity,
+    worker_key: str,
+) -> Path:
+    """Return the requester-scoped private root shared across same-requester agents."""
+    requester_worker_key = worker_key
+    if execution_scope == "user_agent":
+        requester_worker_key = resolve_worker_key("user", execution_identity, agent_name=None)
+        if requester_worker_key is None:
+            msg = "Requester-scoped private root requires a requester identity"
+            raise ValueError(msg)
+    return resolve_private_scope_root(
+        runtime_paths=runtime_paths,
+        worker_key=requester_worker_key,
     )
 
 
