@@ -2798,6 +2798,63 @@ class TestAgentBot:
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_rejects_when_explicit_mentions_include_hidden_agent(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit mixed mentions should reject instead of collapsing to one visible agent."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": ["@alice:localhost"],
+                        "general": ["@bob:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+        }
+        context = _MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            has_non_agent_mentions=False,
+        )
+
+        with patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond:
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@alice:localhost",
+                "calculator and general, help",
+                False,
+            )
+
+        assert action.kind == "reject"
+        assert action.rejection_message == (
+            "Team request includes agent 'general' that is not available to you in this room."
+        )
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_resolve_response_action_honors_single_agent_team_fallback(
         self,
         mock_agent_user: AgentMatrixUser,

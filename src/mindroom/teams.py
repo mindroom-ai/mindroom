@@ -281,11 +281,27 @@ class _FilteredTeamMembers(NamedTuple):
     rejection_message: str | None
 
 
-class _CandidateTeamMembers(NamedTuple):
-    """Candidate team members and whether the source may degrade by filtering."""
+class _TeamCandidateSource(str, Enum):
+    """Origin of one ad hoc team candidate set."""
+
+    EXPLICIT_REQUEST = "explicit_request"
+    THREAD_MENTIONS = "thread_mentions"
+    THREAD_PARTICIPANTS = "thread_participants"
+    DM_FALLBACK = "dm_fallback"
+
+
+@dataclass(frozen=True)
+class _CandidateTeamMembers:
+    """Candidate team members plus the source semantics that govern filtering."""
 
     agents: list[MatrixID]
-    allow_partial: bool
+    source: _TeamCandidateSource
+    rejection_message: str | None = None
+
+    @property
+    def allow_partial(self) -> bool:
+        """Return whether this candidate source may degrade after filtering."""
+        return self.source is not _TeamCandidateSource.EXPLICIT_REQUEST
 
 
 async def _select_team_mode(
@@ -370,7 +386,7 @@ async def decide_team_formation(
 
     Args:
         agent: The agent calling this function
-        tagged_agents: Agents explicitly mentioned in the current message
+        tagged_agents: Raw agents explicitly mentioned in the current message
         agents_in_thread: Agents that have participated in the thread
         all_mentioned_in_thread: All agents ever mentioned in the thread
         room: The Matrix room object when room-membership visibility is available
@@ -397,42 +413,16 @@ async def decide_team_formation(
         is_thread=is_thread,
         available_agents_in_room=available_agents_in_room,
     )
-    team_agents = candidate_team_members.agents
-
-    if not team_agents:
-        return TeamFormationDecision.none()
-
-    if config is not None:
-        room_filtered_team_members = _filter_room_available_team_agents(
-            team_agents,
-            room,
-            config,
-            runtime_paths,
-            allow_partial=candidate_team_members.allow_partial,
-            available_agents_in_room=available_agents_in_room,
-        )
-        if room_filtered_team_members.rejection_message is not None:
-            return TeamFormationDecision.reject(
-                agents=room_filtered_team_members.agents,
-                reason=room_filtered_team_members.rejection_message,
-            )
-        team_agents = room_filtered_team_members.agents
-        filtered_team_members = _filter_supported_team_agents(
-            team_agents,
-            config,
-            runtime_paths,
-            allow_partial=candidate_team_members.allow_partial,
-        )
-        if filtered_team_members.rejection_message is not None:
-            return TeamFormationDecision.reject(
-                agents=filtered_team_members.agents,
-                reason=filtered_team_members.rejection_message,
-            )
-        team_agents = filtered_team_members.agents
-        if len(team_agents) < 2:
-            if candidate_team_members.allow_partial and len(team_agents) == 1:
-                return TeamFormationDecision.individual(agent=team_agents[0])
-            return TeamFormationDecision.none()
+    team_agents_or_decision = _resolve_candidate_team_agents(
+        candidate_team_members,
+        room,
+        config,
+        runtime_paths,
+        available_agents_in_room=available_agents_in_room,
+    )
+    if isinstance(team_agents_or_decision, TeamFormationDecision):
+        return team_agents_or_decision
+    team_agents = team_agents_or_decision
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
     # Only do this AI call for the first agent to avoid duplication
@@ -449,6 +439,87 @@ async def decide_team_formation(
     return TeamFormationDecision.team(agents=team_agents, mode=mode)
 
 
+def _resolve_candidate_team_agents(
+    candidate_team_members: _CandidateTeamMembers,
+    room: nio.MatrixRoom | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+    *,
+    available_agents_in_room: list[MatrixID] | None,
+) -> list[MatrixID] | TeamFormationDecision:
+    """Resolve one candidate set into final team members or an immediate outcome."""
+    immediate_decision = _candidate_team_decision(candidate_team_members)
+    if immediate_decision is not None:
+        return immediate_decision
+    team_agents = candidate_team_members.agents
+    if config is None:
+        return team_agents
+
+    room_filtered_team_members = _filter_room_available_team_agents(
+        team_agents,
+        room,
+        config,
+        runtime_paths,
+        allow_partial=candidate_team_members.allow_partial,
+        available_agents_in_room=available_agents_in_room,
+    )
+    room_decision = _filtered_team_decision(room_filtered_team_members)
+    if room_decision is not None:
+        return room_decision
+    team_agents = room_filtered_team_members.agents
+
+    filtered_team_members = _filter_supported_team_agents(
+        team_agents,
+        config,
+        runtime_paths,
+        allow_partial=candidate_team_members.allow_partial,
+    )
+    supported_decision = _filtered_team_decision(filtered_team_members)
+    if supported_decision is not None:
+        return supported_decision
+    return _resolved_team_members_or_fallback(
+        filtered_team_members.agents,
+        allow_partial=candidate_team_members.allow_partial,
+    )
+
+
+def _candidate_team_decision(
+    candidate_team_members: _CandidateTeamMembers,
+) -> TeamFormationDecision | None:
+    """Return an immediate outcome for one candidate set, if any."""
+    if not candidate_team_members.agents:
+        return TeamFormationDecision.none()
+    if candidate_team_members.rejection_message is None:
+        return None
+    return TeamFormationDecision.reject(
+        agents=candidate_team_members.agents,
+        reason=candidate_team_members.rejection_message,
+    )
+
+
+def _filtered_team_decision(filtered_team_members: _FilteredTeamMembers) -> TeamFormationDecision | None:
+    """Return the rejection implied by one filtered member set, if any."""
+    if filtered_team_members.rejection_message is None:
+        return None
+    return TeamFormationDecision.reject(
+        agents=filtered_team_members.agents,
+        reason=filtered_team_members.rejection_message,
+    )
+
+
+def _resolved_team_members_or_fallback(
+    team_agents: list[MatrixID],
+    *,
+    allow_partial: bool,
+) -> list[MatrixID] | TeamFormationDecision:
+    """Return the final team members or one fallback outcome after filtering."""
+    if len(team_agents) >= 2:
+        return team_agents
+    if allow_partial and len(team_agents) == 1:
+        return TeamFormationDecision.individual(agent=team_agents[0])
+    return TeamFormationDecision.none()
+
+
 def _candidate_team_agents(
     tagged_agents: list[MatrixID],
     all_mentioned_in_thread: list[MatrixID],
@@ -461,27 +532,121 @@ def _candidate_team_agents(
     is_thread: bool,
     available_agents_in_room: list[MatrixID] | None,
 ) -> _CandidateTeamMembers:
-    """Return the candidate team members for one response."""
+    """Return the candidate team members for one response.
+
+    Explicit tags preserve the raw requested agent set so the policy can reject
+    partially unavailable requests instead of silently collapsing them to a
+    single visible agent. Implicit thread/DM sources are advisory and may
+    degrade after availability or support filtering.
+    """
     if len(tagged_agents) > 1:
         logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
-        return _CandidateTeamMembers(tagged_agents, False)
+        return _candidate_explicit_team_agents(
+            tagged_agents,
+            room,
+            config,
+            runtime_paths,
+            available_agents_in_room=available_agents_in_room,
+        )
     if not tagged_agents and len(all_mentioned_in_thread) > 1:
         logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
-        return _CandidateTeamMembers(all_mentioned_in_thread, False)
+        return _CandidateTeamMembers(all_mentioned_in_thread, _TeamCandidateSource.THREAD_MENTIONS)
     if not tagged_agents and len(agents_in_thread) > 1:
         logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
-        return _CandidateTeamMembers(agents_in_thread, False)
+        return _CandidateTeamMembers(agents_in_thread, _TeamCandidateSource.THREAD_PARTICIPANTS)
     if not (is_dm_room and not is_thread and not tagged_agents and room and config):
-        return _CandidateTeamMembers([], False)
+        return _CandidateTeamMembers([], _TeamCandidateSource.DM_FALLBACK)
 
     available_agents = available_agents_in_room
     if available_agents is None:
         available_agents = get_available_agents_in_room(room, config, runtime_paths)
     if len(available_agents) <= 1:
-        return _CandidateTeamMembers([], False)
+        return _CandidateTeamMembers([], _TeamCandidateSource.DM_FALLBACK)
 
     logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
-    return _CandidateTeamMembers(available_agents, True)
+    return _CandidateTeamMembers(available_agents, _TeamCandidateSource.DM_FALLBACK)
+
+
+def _sender_unavailable_team_agents_message(agent_names: list[str]) -> str:
+    """Return the rejection message for requested agents hidden from this sender."""
+    if len(agent_names) == 1:
+        return f"Team request includes agent '{agent_names[0]}' that is not available to you in this room."
+    return (
+        "Team request includes agents "
+        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
+        + " that are not available to you in this room."
+    )
+
+
+def _mixed_unavailable_team_agents_message(agent_names: list[str]) -> str:
+    """Return the rejection message when requested agents fail multiple availability checks."""
+    if len(agent_names) == 1:
+        return f"Team request includes agent '{agent_names[0]}' that is not available for this request."
+    return (
+        "Team request includes agents "
+        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
+        + " that are not available for this request."
+    )
+
+
+def _candidate_explicit_team_agents(
+    tagged_agents: list[MatrixID],
+    room: nio.MatrixRoom | None,
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+    *,
+    available_agents_in_room: list[MatrixID] | None,
+) -> _CandidateTeamMembers:
+    """Resolve explicit tagged requests without collapsing hidden members away."""
+    if config is None:
+        return _CandidateTeamMembers(tagged_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
+
+    room_available_agents: list[MatrixID] | None = None
+    if room is not None:
+        room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
+    sender_available_agents = available_agents_in_room or room_available_agents
+    if sender_available_agents is None:
+        return _CandidateTeamMembers(tagged_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
+
+    sender_available_ids = {agent_id.full_id for agent_id in sender_available_agents}
+    filtered_agents = [agent_id for agent_id in tagged_agents if agent_id.full_id in sender_available_ids]
+    if len(filtered_agents) == len(tagged_agents):
+        return _CandidateTeamMembers(filtered_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
+
+    room_available_ids = (
+        {agent_id.full_id for agent_id in room_available_agents}
+        if room_available_agents is not None
+        else sender_available_ids
+    )
+    unavailable_in_room: list[str] = []
+    unavailable_for_sender: list[str] = []
+    for agent_id in tagged_agents:
+        if agent_id.full_id in sender_available_ids:
+            continue
+        agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
+        if agent_id.full_id not in room_available_ids:
+            unavailable_in_room.append(agent_name)
+        else:
+            unavailable_for_sender.append(agent_name)
+
+    unavailable_names = unavailable_in_room + unavailable_for_sender
+    if unavailable_in_room and not unavailable_for_sender:
+        rejection_message = _room_unavailable_team_agents_message(unavailable_in_room)
+    elif unavailable_for_sender and not unavailable_in_room:
+        rejection_message = _sender_unavailable_team_agents_message(unavailable_for_sender)
+    else:
+        rejection_message = _mixed_unavailable_team_agents_message(unavailable_names)
+    rejection_agents = filtered_agents or sender_available_agents
+    logger.info(
+        "Rejecting explicit team request because requested members are unavailable",
+        unavailable_in_room=sorted(unavailable_in_room),
+        unavailable_for_sender=sorted(unavailable_for_sender),
+    )
+    return _CandidateTeamMembers(
+        rejection_agents,
+        _TeamCandidateSource.EXPLICIT_REQUEST,
+        rejection_message,
+    )
 
 
 def _room_unavailable_team_agents_message(agent_names: list[str]) -> str:

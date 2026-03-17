@@ -1610,7 +1610,7 @@ class AgentBot:
         message: str,
         is_dm: bool,
     ) -> TeamFormationDecision:
-        """Decide team formation using only agents the sender is allowed to interact with."""
+        """Decide team formation using sender-visible candidates without losing explicit intent."""
         all_mentioned_in_thread = get_all_mentioned_agents_in_thread(
             context.thread_history,
             self.config,
@@ -1624,12 +1624,7 @@ class AgentBot:
         )
         return await decide_team_formation(
             self.matrix_id,
-            filter_agents_by_sender_permissions(
-                context.mentioned_agents,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            ),
+            context.mentioned_agents,
             filter_agents_by_sender_permissions(
                 agents_in_thread,
                 requester_user_id,
