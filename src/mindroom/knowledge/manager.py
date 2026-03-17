@@ -35,7 +35,7 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_knowledge_binding
+from mindroom.runtime_resolution import ResolvedKnowledgeBinding, resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -72,12 +72,13 @@ def _match_paths(
     if isinstance(storage_path, RuntimePaths):
         runtime_paths = storage_path
         if knowledge_path is None:
-            resolved_storage_path, resolved_knowledge_path = _resolve_effective_knowledge_path(
+            binding = _resolve_knowledge_manager_binding(
                 config,
                 runtime_paths,
                 base_id,
+                start_watchers=True,
             )
-            return resolved_storage_path, resolved_knowledge_path
+            return binding.storage_root, binding.knowledge_path
         return runtime_paths.storage_root, knowledge_path
     if knowledge_path is None:
         msg = f"Knowledge path is required when matching manager '{base_id}' against a storage root"
@@ -311,68 +312,52 @@ def _knowledge_base_uses_isolating_worker_workspace(
     return config.get_agent_worker_scope(effective_agent_name) not in {None, "shared"}
 
 
-def _should_start_background_watchers(
-    config: Config,
-    base_id: str,
-    start_watchers: bool,
-) -> bool:
-    if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
-        return False
-    return not _knowledge_base_uses_isolating_worker_workspace(config, base_id)
-
-
-def _should_incrementally_sync_on_access(
-    config: Config,
-    base_id: str,
-    start_watchers: bool,
-) -> bool:
-    if not start_watchers or not config.get_knowledge_base_config(base_id).watch:
-        return False
-    return _knowledge_base_uses_isolating_worker_workspace(config, base_id)
-
-
-def _resolve_effective_knowledge_path(
+def _resolve_knowledge_manager_binding(
     config: Config,
     runtime_paths: RuntimePaths,
     base_id: str,
+    *,
     execution_identity: ToolExecutionIdentity | None = None,
+    start_watchers: bool,
     create: bool = False,
-) -> tuple[Path, Path]:
+) -> ResolvedKnowledgeBinding:
     binding = resolve_knowledge_binding(
         base_id,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        start_watchers=True,
+        start_watchers=start_watchers,
         create=create,
     )
     if create:
         _ensure_knowledge_directory_ready(binding.knowledge_path)
-    return binding.storage_root, binding.knowledge_path
+    return binding
 
 
 def _knowledge_manager_key(
     config: Config,
     runtime_paths: RuntimePaths,
     base_id: str,
+    *,
     execution_identity: ToolExecutionIdentity | None = None,
+    start_watchers: bool,
     create: bool = False,
-) -> tuple[KnowledgeManagerKey, Path, Path]:
-    resolved_storage_path, knowledge_path = _resolve_effective_knowledge_path(
+) -> tuple[KnowledgeManagerKey, ResolvedKnowledgeBinding]:
+    binding = _resolve_knowledge_manager_binding(
         config,
         runtime_paths,
         base_id,
         execution_identity=execution_identity,
+        start_watchers=start_watchers,
         create=create,
     )
     return (
         KnowledgeManagerKey(
             base_id=base_id,
-            storage_path=str(resolved_storage_path),
-            knowledge_path=str(knowledge_path),
+            storage_path=str(binding.storage_root),
+            knowledge_path=str(binding.knowledge_path),
         ),
-        resolved_storage_path,
-        knowledge_path,
+        binding,
     )
 
 
@@ -1276,17 +1261,13 @@ async def ensure_agent_knowledge_managers(
 
     managers: dict[str, KnowledgeManager] = {}
     for base_id in base_ids:
-        start_background_watchers = _should_start_background_watchers(
-            config,
-            base_id,
-            start_watchers,
-        )
-        key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
+        key, binding = _knowledge_manager_key(
             config,
             runtime_paths,
             base_id,
-            execution_identity,
-            True,
+            execution_identity=execution_identity,
+            start_watchers=start_watchers,
+            create=True,
         )
         async with _knowledge_manager_replacement_lock(
             _knowledge_manager_replacement_lock_key(config, base_id, key),
@@ -1298,14 +1279,10 @@ async def ensure_agent_knowledge_managers(
                 base_id=base_id,
                 config=config,
                 runtime_paths=runtime_paths,
-                storage_path=resolved_storage_path,
-                knowledge_path=knowledge_path,
-                start_background_watchers=start_background_watchers,
-                incremental_sync_on_access=_should_incrementally_sync_on_access(
-                    config,
-                    base_id,
-                    start_watchers,
-                ),
+                storage_path=binding.storage_root,
+                knowledge_path=binding.knowledge_path,
+                start_background_watchers=binding.start_background_watchers,
+                incremental_sync_on_access=binding.incremental_sync_on_access,
                 reindex_on_create=reindex_on_create,
             )
     return managers
@@ -1344,10 +1321,11 @@ async def initialize_knowledge_managers(
     _static_knowledge_manager_keys.clear()
 
     for base_id in sorted(configured_base_ids):
-        key, resolved_storage_path, knowledge_path = _knowledge_manager_key(
+        key, binding = _knowledge_manager_key(
             config,
             runtime_paths,
             base_id,
+            start_watchers=start_watchers,
             create=True,
         )
 
@@ -1361,14 +1339,10 @@ async def initialize_knowledge_managers(
             base_id=base_id,
             config=config,
             runtime_paths=runtime_paths,
-            storage_path=resolved_storage_path,
-            knowledge_path=knowledge_path,
-            start_background_watchers=_should_start_background_watchers(
-                config,
-                base_id,
-                start_watchers,
-            ),
-            incremental_sync_on_access=False,
+            storage_path=binding.storage_root,
+            knowledge_path=binding.knowledge_path,
+            start_background_watchers=binding.start_background_watchers,
+            incremental_sync_on_access=binding.incremental_sync_on_access,
             reindex_on_create=reindex_on_create,
         )
         _static_knowledge_manager_keys[base_id] = key
@@ -1390,11 +1364,12 @@ def get_knowledge_manager(
     """Get one process-wide knowledge manager by effective base/storage/path key."""
     if config is not None and runtime_paths is not None:
         try:
-            key, _, _ = _knowledge_manager_key(
+            key, _binding = _knowledge_manager_key(
                 config,
                 runtime_paths,
                 base_id,
-                execution_identity,
+                execution_identity=execution_identity,
+                start_watchers=True,
             )
         except ValueError:
             return None
