@@ -324,6 +324,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
         "clickup",
         {"api_key": "clickup-test", "master_space_id": "space-123"},
         credentials_manager=credentials_manager,
+        execution_identity=None,
     )
 
     toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
@@ -681,7 +682,11 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
         credentials_module._credentials_manager = None
         credentials_module._credentials_manager_signature = None
 
-        toolkit = get_tool_by_name(tool_name, resolve_runtime_paths(config_path=Path("config.yaml")))
+        toolkit = get_tool_by_name(
+            tool_name,
+            resolve_runtime_paths(config_path=Path("config.yaml")),
+            execution_identity=None,
+        )
 
         assert toolkit.token == stored_value
     finally:

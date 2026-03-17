@@ -54,12 +54,34 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/tool_system/worker_routing.py",
 }
 _EXPLICIT_EXECUTION_IDENTITY_CALLS = {
+    "_build_tool_instance",
+    "build_agent_tool_init_context",
+    "build_agent_toolkit",
     "create_agent",
+    "create_session_storage",
     "get_tool_by_name",
     "load_scoped_credentials",
+    "_resolve_worker_credentials_manager",
+    "resolve_knowledge_binding",
+    "resolve_worker_execution_scope",
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "save_scoped_credentials",
+}
+_EXPLICIT_EXECUTION_IDENTITY_NO_DEFAULTS = {
+    ("src/mindroom/agents.py", "build_agent_tool_init_context"),
+    ("src/mindroom/agents.py", "build_agent_toolkit"),
+    ("src/mindroom/agents.py", "create_session_storage"),
+    ("src/mindroom/agents.py", "create_agent"),
+    ("src/mindroom/credentials.py", "load_scoped_credentials"),
+    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager"),
+    ("src/mindroom/credentials.py", "save_scoped_credentials"),
+    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_execution"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime"),
+    ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding"),
+    ("src/mindroom/runtime_resolution.py", "resolve_worker_execution_scope"),
+    ("src/mindroom/tool_system/metadata.py", "get_tool_by_name"),
 }
 
 
@@ -197,6 +219,32 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             keyword_names = {keyword.arg for keyword in node.keywords if keyword.arg is not None}
             if "execution_identity" not in keyword_names:
                 violations.append(f"{relative_path}:{node.lineno} calls {_call_name(node)} without execution_identity=")
+    return sorted(set(violations))
+
+
+def _collect_execution_identity_default_violations() -> list[str]:
+    violations: list[str] = []
+    for source_path in _runtime_source_files():
+        relative_path = source_path.relative_to(_repo_root()).as_posix()
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if (relative_path, node.name) not in _EXPLICIT_EXECUTION_IDENTITY_NO_DEFAULTS:
+                continue
+            positional_args = [*node.args.posonlyargs, *node.args.args]
+            positional_defaults = [None] * (len(positional_args) - len(node.args.defaults)) + list(node.args.defaults)
+            keyword_defaults = list(node.args.kw_defaults)
+            for argument, default in zip(positional_args, positional_defaults, strict=False):
+                if argument.arg == "execution_identity" and default is not None:
+                    violations.append(
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for execution_identity",
+                    )
+            for argument, default in zip(node.args.kwonlyargs, keyword_defaults, strict=False):
+                if argument.arg == "execution_identity" and default is not None:
+                    violations.append(
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for execution_identity",
+                    )
     return sorted(set(violations))
 
 
@@ -995,6 +1043,11 @@ class TestRuntimeGuardrails:
     def test_feature_sensitive_helpers_require_explicit_execution_identity(self) -> None:
         """Prevent feature-sensitive runtime helpers from silently omitting execution identity."""
         violations = _collect_execution_identity_keyword_violations()
+        assert not violations, "\n".join(violations)
+
+    def test_core_execution_identity_helpers_do_not_default_execution_identity(self) -> None:
+        """Prevent core execution seams from quietly reintroducing implicit execution identity."""
+        violations = _collect_execution_identity_default_violations()
         assert not violations, "\n".join(violations)
 
     def test_production_code_does_not_read_ambient_execution_identity(self) -> None:

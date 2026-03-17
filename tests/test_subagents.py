@@ -67,7 +67,7 @@ def _make_context(
 def test_subagents_tool_registered_and_instantiates() -> None:
     """Subagents should be present in metadata and constructible from the registry."""
     assert "subagents" in TOOL_METADATA
-    assert isinstance(get_tool_by_name("subagents", resolve_runtime_paths()), SubAgentsTools)
+    assert isinstance(get_tool_by_name("subagents", resolve_runtime_paths(), execution_identity=None), SubAgentsTools)
 
 
 def test_subagents_tool_name_contract() -> None:

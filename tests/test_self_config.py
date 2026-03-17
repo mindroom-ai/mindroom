@@ -53,7 +53,7 @@ def _runtime_paths_for(config: Config, config_path: Path | None = None) -> Runti
 
 def _create_agent_for_test(agent_name: str, config: Config) -> object:
     """Create an agent with the explicit runtime bound to the test config."""
-    return create_agent(agent_name, config=config, runtime_paths=_runtime_paths_for(config))
+    return create_agent(agent_name, config=config, runtime_paths=_runtime_paths_for(config), execution_identity=None)
 
 
 def _self_config_tools(agent_name: str, config_path: Path) -> SelfConfigTools:

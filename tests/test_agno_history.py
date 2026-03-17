@@ -6,7 +6,7 @@ import importlib
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -78,7 +78,14 @@ def _load_default_config() -> Config:
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
     """Create an agent with the test config's bound runtime context."""
-    return mindroom.agents.create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
+    execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    return mindroom.agents.create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        execution_identity=execution_identity,
+        **kwargs,
+    )
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:

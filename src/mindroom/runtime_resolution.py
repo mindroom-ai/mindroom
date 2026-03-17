@@ -74,7 +74,7 @@ class ResolvedKnowledgeBinding:
 
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     agent_name: str | None = None,
     tenant_id: str | None = None,
@@ -125,7 +125,7 @@ def _resolved_private_state_root(
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
     agent_config = config.get_agent(agent_name)
@@ -156,7 +156,7 @@ def resolve_agent_runtime(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     create: bool = False,
 ) -> ResolvedAgentRuntime:
@@ -209,7 +209,7 @@ def resolve_knowledge_binding(
     base_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     start_watchers: bool = True,
     create: bool = False,

@@ -136,6 +136,7 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
             get_tool_by_name(
                 tool_name,
                 runtime_paths,
+                execution_identity=None,
                 runtime_overrides={"runtime_paths": runtime_paths},
             )
     finally:
@@ -184,6 +185,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         tool = get_tool_by_name(
             tool_name,
             runtime_paths,
+            execution_identity=None,
             worker_scope="shared",
             routing_agent_name="general",
         )

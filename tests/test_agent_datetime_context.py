@@ -84,7 +84,7 @@ def test_agent_prompt_includes_datetime() -> None:
 
     # Create an agent
     with patch("mindroom.ai.get_model_instance", return_value=model):
-        agent = create_agent("general", config, runtime_paths)
+        agent = create_agent("general", config, runtime_paths, execution_identity=None)
 
     # Check that the role includes all expected sections
     role = agent.role
@@ -117,12 +117,12 @@ def test_agent_prompt_datetime_changes_with_timezone() -> None:
     # Test with New York timezone
     config.timezone = "America/New_York"
     with patch("mindroom.ai.get_model_instance", return_value=model):
-        agent_ny = create_agent("general", config, runtime_paths)
+        agent_ny = create_agent("general", config, runtime_paths, execution_identity=None)
 
     # Test with Tokyo timezone
     config.timezone = "Asia/Tokyo"
     with patch("mindroom.ai.get_model_instance", return_value=model):
-        agent_tokyo = create_agent("general", config, runtime_paths)
+        agent_tokyo = create_agent("general", config, runtime_paths, execution_identity=None)
 
     # The prompts should be different (different timezones)
     assert "America/New_York timezone" in agent_ny.role

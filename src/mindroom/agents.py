@@ -365,7 +365,7 @@ def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
     runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_runtime = resolve_agent_runtime(
@@ -391,7 +391,7 @@ def build_agent_toolkit(
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_init_context: AgentToolInitContext,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     delegation_depth: int = 0,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
@@ -530,7 +530,7 @@ def create_session_storage(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
     return _create_agent_state_db(
@@ -547,7 +547,7 @@ def _create_agent_state_db(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     subdir: str,
     session_table: str,
@@ -701,7 +701,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     *,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,

@@ -76,6 +76,7 @@ class TestHomeAssistantTools:
         tool = get_tool_by_name(
             "homeassistant",
             runtime_paths,
+            execution_identity=None,
             credentials_manager=mock_credentials_manager,
             worker_scope="shared",
             routing_agent_name="general",
@@ -95,6 +96,7 @@ class TestHomeAssistantTools:
             get_tool_by_name(
                 "homeassistant",
                 runtime_paths,
+                execution_identity=None,
                 credentials_manager=mock_credentials_manager,
                 worker_scope="user",
                 routing_agent_name="general",

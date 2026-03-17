@@ -490,6 +490,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -508,6 +509,7 @@ class TestDelegateAutoInjection:
             "worker",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -531,6 +533,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -554,6 +557,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
         )
         tool_names = [tool.name for tool in agent.tools]
@@ -583,6 +587,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )
@@ -614,6 +619,7 @@ class TestDelegateAutoInjection:
             "leader",
             config=config,
             runtime_paths=runtime_paths_for(config),
+            execution_identity=None,
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
         )

@@ -119,7 +119,14 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     """Create an agent with the test config's explicit runtime context."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
-    return create_agent(agent_name, config, runtime_paths_for(config), **kwargs)
+    execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        execution_identity=execution_identity,
+        **kwargs,
+    )
 
 
 @patch("mindroom.agents.SqliteDb")
@@ -437,7 +444,13 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_
     runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
     bound_config = _bind_runtime_paths(config, runtime_paths)
 
-    workspace = resolve_agent_runtime("general", bound_config, runtime_paths, create=True).workspace
+    workspace = resolve_agent_runtime(
+        "general",
+        bound_config,
+        runtime_paths,
+        execution_identity=None,
+        create=True,
+    ).workspace
 
     expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     assert workspace is not None
@@ -562,7 +575,7 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
 
-    runtime = resolve_agent_runtime("general", config, runtime_paths, create=True)
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
     assert runtime.is_private is False
     assert runtime.worker_key is None
@@ -614,7 +627,7 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].worker_scope = "shared"
 
-    runtime = resolve_agent_runtime("general", config, runtime_paths, create=True)
+    runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
     assert runtime.is_private is False
     assert runtime.worker_scope == "shared"
@@ -1790,7 +1803,7 @@ def test_create_agent_private_root_requires_execution_identity(
     )
 
     with pytest.raises(ValueError, match="requires an active execution identity"):
-        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path))
+        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path), execution_identity=None)
 
     assert not (tmp_path / "mind_data").exists()
 

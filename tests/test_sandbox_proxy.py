@@ -133,7 +133,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         _recording_client_class(captured=captured),
     )
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, execution_identity=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -165,7 +165,7 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, execution_identity=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -197,7 +197,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         ),
     )
 
-    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials)
+    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials, execution_identity=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -217,13 +217,23 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
 def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
     """Tool init overrides should allow only the explicit safe whitelist."""
     with pytest.raises(ToolInitOverrideError, match="api_key"):
-        get_tool_by_name("openai", _TEST_RUNTIME_PATHS, tool_init_overrides={"api_key": "sk-test"})
+        get_tool_by_name(
+            "openai",
+            _TEST_RUNTIME_PATHS,
+            tool_init_overrides={"api_key": "sk-test"},
+            execution_identity=None,
+        )
 
 
 def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
     """base_dir overrides should be validated before toolkit construction."""
     with pytest.raises(ToolInitOverrideError, match="base_dir"):
-        get_tool_by_name("coding", _TEST_RUNTIME_PATHS, tool_init_overrides={"base_dir": {"bad": "value"}})
+        get_tool_by_name(
+            "coding",
+            _TEST_RUNTIME_PATHS,
+            tool_init_overrides={"base_dir": {"bad": "value"}},
+            execution_identity=None,
+        )
 
 
 def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path) -> None:
@@ -245,9 +255,10 @@ def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path)
             "enable_delete_file": True,
         },
         credentials_manager=credentials_manager,
+        execution_identity=None,
     )
 
-    tool = get_tool_by_name("file", runtime_paths)
+    tool = get_tool_by_name("file", runtime_paths, execution_identity=None)
 
     assert tool.base_dir == workspace.resolve()
     assert "delete_file" in tool.functions
@@ -274,6 +285,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
             "location": "us-central1",
         },
         credentials_manager=credentials_manager,
+        execution_identity=None,
     )
     captured: dict[str, object] = {}
 
@@ -284,7 +296,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
 
     monkeypatch.setattr("agno.tools.google_bigquery.bigquery.Client", _FakeBigQueryClient)
 
-    tool = get_tool_by_name("google_bigquery", runtime_paths)
+    tool = get_tool_by_name("google_bigquery", runtime_paths, execution_identity=None)
 
     assert tool.dataset == "demo_dataset"
     assert tool.project == "demo-project"
@@ -310,7 +322,7 @@ def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> No
     )
 
     with pytest.raises(ValueError, match="CLICKUP_API_KEY not set"):
-        get_tool_by_name("clickup", runtime_paths)
+        get_tool_by_name("clickup", runtime_paths, execution_identity=None)
 
 
 def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution(tmp_path: Path) -> None:
@@ -329,7 +341,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
         },
     )
 
-    tool = get_tool_by_name("python", runtime_paths)
+    tool = get_tool_by_name("python", runtime_paths, execution_identity=None)
     entrypoint = tool.functions["run_python_code"].entrypoint
     assert entrypoint is not None
 
@@ -361,7 +373,12 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
         },
     )
 
-    tool = get_tool_by_name("python", runtime_paths, tool_init_overrides={"base_dir": str(tmp_path)})
+    tool = get_tool_by_name(
+        "python",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        execution_identity=None,
+    )
     save_entrypoint = tool.functions["save_to_file_and_run"].entrypoint
     run_file_entrypoint = tool.functions["run_python_file_return_variable"].entrypoint
     assert save_entrypoint is not None
@@ -399,7 +416,7 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
         process_env={},
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, execution_identity=None)
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -427,7 +444,7 @@ def test_local_shell_does_not_inherit_filtered_process_env(
         process_env={},
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, execution_identity=None)
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -472,7 +489,7 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
         process_env=dict(os.environ),
     )
 
-    shell_tool = get_tool_by_name("shell", runtime_paths)
+    shell_tool = get_tool_by_name("shell", runtime_paths, execution_identity=None)
     shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
     result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
@@ -483,7 +500,7 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
     captured.clear()
-    calculator = get_tool_by_name("calculator", runtime_paths)
+    calculator = get_tool_by_name("calculator", runtime_paths, execution_identity=None)
     calculator_entrypoint = calculator.functions["add"].entrypoint
     assert calculator_entrypoint is not None
     calculator_entrypoint(1, 2)
@@ -563,7 +580,7 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, execution_identity=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
@@ -1081,6 +1098,7 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
+        execution_identity=None,
         worker_tools_override=["shell"],
         worker_scope=None,
         routing_agent_name="code",
@@ -1273,6 +1291,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "homeassistant",
             runtime_paths,
+            execution_identity=None,
             credentials_manager=fake_credentials,
             worker_tools_override=["homeassistant"],
             worker_scope="shared",
@@ -1301,7 +1320,12 @@ class TestWorkerToolsOverride:
         )
 
         # Override says sandbox calculator
-        tool = get_tool_by_name("calculator", runtime_paths, worker_tools_override=["calculator"])
+        tool = get_tool_by_name(
+            "calculator",
+            runtime_paths,
+            worker_tools_override=["calculator"],
+            execution_identity=None,
+        )
         entrypoint = tool.functions["add"].entrypoint
         assert entrypoint is not None
         result = entrypoint(1, 2)
@@ -1327,6 +1351,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "coding",
             runtime_paths,
+            execution_identity=None,
             tool_init_overrides={"base_dir": "/workspace/demo"},
             worker_tools_override=["coding"],
         )
@@ -1411,6 +1436,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "coding",
             runtime_paths,
+            execution_identity=None,
             tool_init_overrides={"base_dir": str(base_dir)},
             worker_tools_override=["coding"],
         )

@@ -306,7 +306,7 @@ def _resolve_worker_credentials_manager(
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> CredentialsManager | None:
@@ -423,7 +423,7 @@ def load_scoped_credentials(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> dict[str, Any] | None:
@@ -461,7 +461,7 @@ def save_scoped_credentials(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     credentials_manager: CredentialsManager,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> None:

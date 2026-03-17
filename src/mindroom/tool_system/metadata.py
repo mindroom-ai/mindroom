@@ -167,7 +167,7 @@ def _build_tool_instance(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
@@ -251,7 +251,7 @@ def get_tool_by_name(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:

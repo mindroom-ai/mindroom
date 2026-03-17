@@ -215,7 +215,7 @@ class _DirectTeamAgentBot:
 
     @property
     def agent(self) -> object:
-        return create_agent(self._agent_name, self._config, runtime_paths_for(self._config))
+        return create_agent(self._agent_name, self._config, runtime_paths_for(self._config), execution_identity=None)
 
 
 def _build_private_team_orchestrator(*, include_private_member: bool) -> tuple[Config, MagicMock]:
