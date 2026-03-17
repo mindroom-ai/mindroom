@@ -178,10 +178,6 @@ class AgentConfig(BaseModel):
         default=None,
         description="Memory backend override for this agent ('mem0' or 'file'); inherits memory.backend when omitted",
     )
-    memory_file_path: str | None = Field(
-        default=None,
-        description="Workspace-relative directory inside this agent's canonical workspace to use for file memory instead of the default memory_files/agent_<name>/",
-    )
     private: AgentPrivateConfig | None = Field(
         default=None,
         description="Optional requester-private state materialized per worker scope",
@@ -252,9 +248,6 @@ class AgentConfig(BaseModel):
         if self.private is not None and self.worker_scope is not None:
             msg = "agents.<name>.private.per replaces agents.<name>.worker_scope; configure only one"
             raise ValueError(msg)
-        if self.private is not None and self.memory_file_path is not None:
-            msg = "agents.<name>.private replaces agents.<name>.memory_file_path; configure only one"
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="before")
@@ -267,6 +260,13 @@ class AgentConfig(BaseModel):
                 raise ValueError(msg)
             if "memory_dir" in data:
                 msg = "Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."
+                raise ValueError(msg)
+            if "memory_file_path" in data:
+                msg = (
+                    "Agent field 'memory_file_path' was removed. File-backed agent memory now lives in the "
+                    "canonical agent workspace root; keep memory_backend=file and configure context_files "
+                    "relative to that workspace."
+                )
                 raise ValueError(msg)
             if "sandbox_tools" in data:
                 msg = "Agent field 'sandbox_tools' was removed. Use 'worker_tools' instead."
@@ -288,14 +288,6 @@ class AgentConfig(BaseModel):
             msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
             raise ValueError(msg)
         return knowledge_bases
-
-    @field_validator("memory_file_path")
-    @classmethod
-    def validate_memory_file_path(cls, value: str | None) -> str | None:
-        """Ensure agent file-memory paths stay inside the canonical workspace."""
-        if value is None:
-            return value
-        return agent_workspace_relative_path(value).as_posix()
 
     @field_validator("context_files")
     @classmethod

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -134,26 +133,24 @@ def _resolve_workspace(
     if agent_config is None:
         return None
 
-    if agent_config.private is None and agent_config.memory_file_path is None:
-        return None
-
-    workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)
-    if workspace is None:
-        memory_file_path = agent_config.memory_file_path
-        if memory_file_path is None:
+    if agent_config.private is None:
+        if config.get_agent_memory_backend(agent_name) != "file":
             return None
-        legacy_root = resolve_agent_owned_path(
-            memory_file_path,
-            agent_name=agent_name,
-            base_storage_path=runtime_paths.storage_root,
+        root = resolve_workspace_relative_path(
+            state_storage_path,
+            "workspace",
+            field_name="agent workspace root",
         )
         if create:
-            legacy_root.mkdir(parents=True, exist_ok=True)
+            root.mkdir(parents=True, exist_ok=True)
         return ResolvedAgentWorkspace(
-            root=legacy_root,
+            root=root,
             context_files=(),
-            file_memory_path=legacy_root,
+            file_memory_path=root,
         )
+
+    workspace = _effective_workspace(agent_name, config, runtime_paths=runtime_paths)
+    assert workspace is not None
 
     if not use_state_storage_path:
         msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"

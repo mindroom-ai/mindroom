@@ -253,7 +253,6 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
 ) -> None:
     """Worker-scoped flushes should reuse the canonical agent-owned memory path."""
     config.agents["general"].worker_scope = "user"
-    config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.file.path = str(tmp_path / "shared-memory")
 
     alice_identity = ToolExecutionIdentity(
@@ -296,7 +295,7 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
     await worker._run_cycle(config)
 
     worker_daily_files = list(
-        (agent_workspace_root_path(tmp_path, "general") / "custom-agent-memory" / "memory").rglob("*.md"),
+        (agent_workspace_root_path(tmp_path, "general") / "memory").rglob("*.md"),
     )
     assert len(worker_daily_files) == 1
     assert "important decision" in worker_daily_files[0].read_text(encoding="utf-8")
@@ -306,13 +305,12 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
 
 
 @pytest.mark.asyncio
-async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
+async def test_worker_flush_unscoped_uses_canonical_agent_workspace_memory_path(
     tmp_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unscoped flushes should still honor per-agent custom file-memory paths."""
-    config.agents["general"].memory_file_path = "./custom-agent-memory"
+    """Unscoped flushes should write into the canonical shared workspace memory path."""
     config.memory.file.path = str(tmp_path / "shared-memory")
 
     fake_session = _FakeSession(
@@ -340,11 +338,9 @@ async def test_worker_flush_unscoped_preserves_custom_agent_memory_path(
     )
 
     assert wrote_memory is True
-    custom_daily_files = list(
-        (agent_workspace_root_path(tmp_path, "general") / "custom-agent-memory" / "memory").rglob("*.md"),
-    )
-    assert len(custom_daily_files) == 1
-    assert "important decision" in custom_daily_files[0].read_text(encoding="utf-8")
+    canonical_daily_files = list((agent_workspace_root_path(tmp_path, "general") / "memory").rglob("*.md"))
+    assert len(canonical_daily_files) == 1
+    assert "important decision" in canonical_daily_files[0].read_text(encoding="utf-8")
     assert not list((tmp_path / "shared-memory").rglob("*.md"))
     assert not list((tmp_path / "memory_files").rglob("*.md"))
 
@@ -356,7 +352,6 @@ async def test_existing_memory_context_resolves_to_canonical_agent_memory_path(
 ) -> None:
     """Duplicate-avoidance context should reuse the canonical agent-owned memory path."""
     config.agents["general"].worker_scope = "user"
-    config.agents["general"].memory_file_path = "./custom-agent-memory"
     config.memory.auto_flush.extractor.include_memory_context.memory_snippets = 5
     config.memory.auto_flush.extractor.include_memory_context.snippet_max_chars = 200
 

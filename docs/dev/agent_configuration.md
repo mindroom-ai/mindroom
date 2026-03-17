@@ -63,7 +63,7 @@ memory:
 ```
 
 You can override the memory backend per agent with `memory_backend`.
-You can set a per-agent directory with `memory_file_path` when using file memory.
+When an agent uses `memory_backend: file`, its file memory lives in the canonical workspace root.
 Use `provider: "sentence_transformers"` to run embeddings locally inside MindRoom with the optional `sentence-transformers` package.
 
 ## Router Configuration
@@ -151,7 +151,6 @@ agents:
     learning: true  # Optional: enable Agno Learning (defaults to true)
     learning_mode: "always"  # Optional: "always" or "agentic"
     memory_backend: "file"  # Optional: per-agent override ("mem0" or "file")
-    memory_file_path: "mind_data"  # Optional: directory inside the agent's workspace for file memory
     knowledge_bases:
       - docs
     context_files:
@@ -173,7 +172,6 @@ agents:
 - **learning**: Enable Agno Learning for this agent (default: true)
 - **learning_mode**: Learning mode (`always` or `agentic`, default: `always`)
 - **memory_backend**: Optional per-agent memory backend override (`mem0` or `file`), inherits from `memory.backend` when omitted
-- **memory_file_path**: Optional directory for this agent's file memory, relative to `agents/<name>/workspace/`
 - **knowledge_bases**: List of configured knowledge base IDs assigned to this agent
 - **context_files**: File paths (relative to `agents/<name>/workspace/`) loaded into each agent instance; edits take effect on the next reply without restarting
 - **model**: (Optional) Specific model to use for this agent, overrides the default model

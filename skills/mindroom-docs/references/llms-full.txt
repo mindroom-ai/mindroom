@@ -702,15 +702,14 @@ agents:
     learning: true                 # Optional: Override default (inherits from defaults section)
     learning_mode: always          # Optional: Override default (inherits from defaults section)
     memory_backend: file           # Optional: Per-agent memory backend override (mem0 or file)
-    memory_file_path: mind_data  # Optional: directory inside the agent's workspace for file memory
     knowledge_bases: [docs]         # Optional: Assign one or more configured knowledge bases
     context_files:                 # Optional: Load files into each freshly built agent instance
-      - mind_data/SOUL.md
-      - mind_data/AGENTS.md
-      - mind_data/USER.md
-      - mind_data/IDENTITY.md
-      - mind_data/TOOLS.md
-      - mind_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
   researcher:
     display_name: Researcher
     role: Research and gather information
@@ -888,7 +887,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - `agents.<name>.context_files` load files from the agent's workspace into each agent instance, so edits take effect on the next reply without restarting (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
 - `agents.<name>.room_thread_modes` overrides `thread_mode` for specific rooms, and resolution is room-aware for agents, teams, and router decisions (see [Agents](https://docs.mindroom.chat/configuration/agents/index.md))
-- `memory.backend` sets the global memory default, `agents.<name>.memory_backend` overrides it per agent, and `agents.<name>.memory_file_path` sets a custom directory for that agent's file memory
+- `memory.backend` sets the global memory default, and `agents.<name>.memory_backend` overrides it per agent
 - `defaults.max_preload_chars` caps preloaded file context (`context_files`)
 - When `authorization.default_room_access` is `false`, only users in `global_users` or room-specific `room_permissions` can interact with agents
 - `authorization.agent_reply_permissions` can further restrict which users specific agents/teams/router will reply to
@@ -960,20 +959,17 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Directory inside the agent's workspace for file memory (optional)
-    memory_file_path: mind_data
-
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
     # Optional: additional files loaded into each freshly built agent instance
     context_files:
-      - mind_data/SOUL.md
-      - mind_data/AGENTS.md
-      - mind_data/USER.md
-      - mind_data/IDENTITY.md
-      - mind_data/TOOLS.md
-      - mind_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
@@ -1026,7 +1022,6 @@ agents:
 | `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                                                                                                                                                                                                                     |
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                                                                                                                                                                                                       |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                                                                                                                                                                                                      |
 | `private`                     | object | `null`      | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                                                                                                                                                              |
@@ -1047,7 +1042,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `memory_file_path` and `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). Absolute paths and `..` traversal are rejected.
+Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory. Absolute paths and `..` traversal are rejected.
 
 ## Worker Routing
 
@@ -1063,7 +1058,7 @@ Leave `worker_scope` unset for unscoped execution — calls still run in the san
 
 ### Filesystem Isolation
 
-`worker_scope` controls runtime reuse, not filesystem security. When `memory_file_path` is set, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside that workspace. Without `memory_file_path`, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
+`worker_scope` controls runtime reuse, not filesystem security. When the effective memory backend is `file`, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) at the agent's canonical workspace root. Without file-backed workspace state, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 
@@ -1166,9 +1161,8 @@ In the example above, each requester gets their own effective `mind_data/` root 
 - Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
 - Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want requester-local knowledge indexing.
 - `private` cannot be combined with `worker_scope`.
-- `private` cannot be combined with `memory_file_path`.
 - Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both requester-local knowledge and shared knowledge in the same run.
-- Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+- Top-level `context_files` remain the shared workspace-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 - Custom templates are fully supported.
 - The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
 
@@ -2172,7 +2166,6 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: openclaw_data
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms: [personal]
@@ -2185,12 +2178,12 @@ agents:
       - Before answering prior-history questions, search memory files first with `search_knowledge_base` when configured.
 
     context_files:
-      - openclaw_data/SOUL.md
-      - openclaw_data/AGENTS.md
-      - openclaw_data/USER.md
-      - openclaw_data/IDENTITY.md
-      - openclaw_data/TOOLS.md
-      - openclaw_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
 
     knowledge_bases: [openclaw_memory]
 
@@ -2213,7 +2206,7 @@ memory:
     enabled: true
 ```
 
-When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the `memory_file_path` directory — no need to add it to `context_files`. If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
+When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root — no need to add it to `context_files`. If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded. The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
 
 ## Recommended workspace layout
 
@@ -2238,11 +2231,10 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory.backend: mem0` for vector memory (global default)
 - `memory.backend: file` for file-first memory (global default)
 - `memory_backend: file` on an individual agent to override the global default
-- `memory_file_path: openclaw_data` to store file memory in `agents/<name>/workspace/openclaw_data/` instead of the default `agents/<name>/memory_files/agent_<name>/`
-- Agents that use file memory without `memory_file_path` store it under their own `agents/<name>/` directory, not under the shared global `memory.file.path` tree
+- agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
-Recommended for OpenClaw-style setups: `memory_backend: file` with `memory_file_path` pointing at your workspace directory and `memory.auto_flush.enabled: true`.
+Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical workspace layout and `memory.auto_flush.enabled: true`.
 
 ## Context Management
 
@@ -2941,7 +2933,7 @@ MindRoom supports two memory backends:
 - `mem0`: vector memory (semantic retrieval + extraction via Mem0)
 - `file`: markdown memory files (`MEMORY.md` plus optional dated notes)
 
-Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. Set `agents.<name>.memory_file_path` to use a custom directory inside the agent's workspace for file memory. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
+Set the global default backend with `memory.backend`. Override the backend per agent with `agents.<name>.memory_backend`. When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root. Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root. `private` changes where private files live. It does not switch the memory backend by itself.
 
 OpenClaw compatibility uses this same backend selection; there is no separate OpenClaw-only memory engine.
 
@@ -3005,7 +2997,7 @@ memory:
     max_entrypoint_lines: 200
 ```
 
-`memory.file.path` is an optional fallback root for direct file-memory paths. It does not relocate canonical agent or team file memory. Use `agents.<name>.memory_file_path` to place an agent's file memory inside its workspace.
+`memory.file.path` is an optional fallback root for direct file-memory paths. It does not relocate canonical agent or team file memory.
 
 Per-agent override example:
 
@@ -3018,10 +3010,9 @@ agents:
     display_name: Coder
     role: Write and review code
     memory_backend: file
-    memory_file_path: mind_data
 ```
 
-`memory_file_path` is relative to the agent's workspace directory (`agents/<name>/workspace/`), not `config.yaml`. For example, `memory_file_path: mind_data` resolves to `agents/<name>/workspace/mind_data/`. Without this setting, file memory defaults to `agents/<name>/memory_files/agent_<name>/`. Absolute paths and `..` traversal are rejected. For requester-private agents, use `private` instead of `memory_file_path` when you need per-requester file-memory isolation.
+For shared agents, file memory now lives directly under `agents/<name>/workspace/`. For requester-private agents, file memory lives directly under the effective private root. Use `private` when you need per-requester file-memory isolation.
 
 Private instance example:
 
@@ -3037,14 +3028,14 @@ agents:
       template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root instead of `<storage_path>/memory_files/agent_<name>/`. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded on first use. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. `private` and `memory_file_path` are mutually exclusive. Use `memory_file_path` for shared single-user workspaces. Use `private` for requester-isolated workspaces.
+In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded on first use. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. Use `private` for requester-isolated workspaces.
 
 ### File layout
 
-Agent file memory is stored under each agent's storage directory by default:
+Agent file memory is stored under each agent's canonical workspace root:
 
-- `agents/<agent>/memory_files/agent_<name>/MEMORY.md`
-- `agents/<agent>/memory_files/agent_<name>/memory/YYYY-MM-DD.md`
+- `agents/<agent>/workspace/MEMORY.md`
+- `agents/<agent>/workspace/memory/YYYY-MM-DD.md`
 
 Team file memory is mirrored under each participating agent's storage directory:
 
@@ -3095,7 +3086,7 @@ The Dashboard **Memory** page supports:
 - batch sizing
 - extractor settings (`no_reply_token`, message/char/time limits, memory-context bounds)
 
-Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override and optional **Memory File Path**.
+Save from the Memory page to persist changes to `config.yaml`. Use the Dashboard **Agents** page to set an agent-specific **Memory Backend** override.
 
 ## Optional Memory Tool
 

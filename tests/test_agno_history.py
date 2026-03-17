@@ -655,12 +655,11 @@ class TestPrepareAgentAndPrompt:
         """Editing a context file should affect the next reply preparation without restart."""
         config = bind_runtime_paths(config, _runtime_paths(tmp_path))
         config.agents["general"].memory_backend = "file"
-        config.agents["general"].memory_file_path = "mind_data"
-        config.agents["general"].context_files = ["mind_data/SOUL.md"]
+        config.agents["general"].context_files = ["SOUL.md"]
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
 
-        workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+        workspace = agent_workspace_root_path(tmp_path, "general")
         workspace.mkdir(parents=True, exist_ok=True)
         soul_path = workspace / "SOUL.md"
         soul_path.write_text("First context version.", encoding="utf-8")

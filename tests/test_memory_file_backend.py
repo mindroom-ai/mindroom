@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from pydantic import ValidationError
 
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -238,7 +237,7 @@ async def test_file_backend_add_and_list_memories(storage_path: Path, config: Co
     assert results[0]["memory"] == "User prefers concise responses"
     assert results[0]["id"].startswith("m_")
 
-    memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
+    memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
     assert memory_file.exists()
     assert "User prefers concise responses" in memory_file.read_text(encoding="utf-8")
 
@@ -286,7 +285,7 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
     assert "Alice-authored shared agent memory" in alice_prompt
     assert "Alice-authored shared agent memory" in bob_prompt
 
-    memory_file = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md"
+    memory_file = agent_workspace_root_path(storage_path, "general") / "MEMORY.md"
     assert memory_file.exists()
 
 
@@ -318,7 +317,7 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
 
 
 @pytest.mark.asyncio
-async def test_file_backend_worker_scope_ignores_global_memory_file_path(
+async def test_file_backend_worker_scope_uses_canonical_agent_workspace(
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -355,7 +354,7 @@ async def test_file_backend_worker_scope_ignores_global_memory_file_path(
 
     assert any(result.get("memory") == "Alice-authored shared memory" for result in bob_results)
     assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
-    assert (agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "MEMORY.md").exists()
+    assert (agent_workspace_root_path(storage_path, "general") / "MEMORY.md").exists()
 
 
 @pytest.mark.asyncio
@@ -628,15 +627,14 @@ async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_team_search_ignores_agent_memory_file_path_override(
+async def test_file_backend_team_search_reuses_shared_team_scope(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """Team memory should stay visible even when one member stores personal memory in a workspace subdir."""
+    """Team memory should stay visible through the shared team scope."""
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
 
     await store_conversation_memory(
@@ -669,7 +667,7 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     config: Config,
 ) -> None:
     """File-backed team member CRUD should reject private team members."""
-    workspace = agent_workspace_root_path(storage_path, "calculator") / "calc-workspace"
+    workspace = agent_workspace_root_path(storage_path, "calculator")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCalculator note.\n", encoding="utf-8")
 
@@ -677,7 +675,6 @@ async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
-    config.agents["calculator"].memory_file_path = "calc-workspace"
     config.memory.team_reads_member_memory = True
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
@@ -709,9 +706,9 @@ async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, confi
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
 
-    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\n\nKey facts:\n- Project uses FastAPI.\n", encoding="utf-8")
 
     enhanced = await build_memory_enhanced_prompt("How do we build the API?", "general", storage_path, config)
     assert "[File memory entrypoint (agent)]" in enhanced
@@ -728,9 +725,9 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     config.memory.file.path = str(storage_path / "memory-files")
     config.memory.file.max_entrypoint_lines = 10
 
-    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
 
     enhanced = await build_memory_enhanced_prompt("What should I remember?", "general", storage_path, config)
     assert "Curated fact." in enhanced
@@ -743,9 +740,9 @@ async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: P
     config.memory.file.path = str(storage_path / "memory-files")
     config.memory.file.max_entrypoint_lines = 2
 
-    memory_dir = agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    (memory_dir / "MEMORY.md").write_text(
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text(
         "# Memory\nCurated fact.\n- [id=m1] Structured fact.\nTrailing fact.\n",
         encoding="utf-8",
     )
@@ -765,9 +762,7 @@ async def test_file_backend_search_skips_structured_line_duplicates(storage_path
     memories = await list_all_agent_memories("general", storage_path, config)
     memory_id = memories[0]["id"]
 
-    daily_file = (
-        agent_state_root_path(storage_path, "general") / "memory_files" / "agent_general" / "memory" / "2026-02-28.md"
-    )
+    daily_file = agent_workspace_root_path(storage_path, "general") / "memory" / "2026-02-28.md"
     daily_file.parent.mkdir(parents=True, exist_ok=True)
     daily_file.write_text(f"- [id={memory_id}] Project owner is Bas\nProject owner is Bas\n", encoding="utf-8")
 
@@ -854,18 +849,17 @@ async def test_file_backend_team_context_member_scope_toggle(storage_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_team_can_crud_member_memory_in_custom_memory_file_path(
+async def test_team_can_crud_member_memory_in_canonical_workspace(
     storage_path: Path,
     config: Config,
 ) -> None:
-    workspace = agent_workspace_root_path(storage_path, "general") / "general-workspace"
+    workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCanonical note.\n", encoding="utf-8")
 
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "general-workspace"
     config.memory.team_reads_member_memory = True
     config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
 
@@ -895,7 +889,7 @@ async def test_team_can_crud_member_memory_in_custom_memory_file_path(
 
 
 @pytest.mark.asyncio
-async def test_team_can_crud_member_memory_in_canonical_agent_memory_file_path(
+async def test_team_can_crud_member_memory_in_worker_scoped_canonical_workspace(
     storage_path: Path,
     config: Config,
 ) -> None:
@@ -904,10 +898,9 @@ async def test_team_can_crud_member_memory_in_canonical_agent_memory_file_path(
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].worker_scope = "user_agent"
     config.agents["calculator"].worker_scope = "user_agent"
-    config.agents["general"].memory_file_path = "mind_data"
     config.memory.team_reads_member_memory = True
     config.teams = {"gc": MockTeamConfig(agents=["general", "calculator"])}
-    canonical_workspace = agent_workspace_root_path(storage_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(storage_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     (canonical_workspace / "MEMORY.md").write_text("# Memory\n\nCanonical note.\n", encoding="utf-8")
 
@@ -1027,48 +1020,16 @@ async def test_file_backend_rejects_path_traversal_memory_id(storage_path: Path,
     assert await get_agent_memory("file:../../secret.md:1", "general", storage_path, config) is None
 
 
-def test_memory_file_path_rejects_absolute_paths(storage_path: Path, config: Config) -> None:
-    """Agent memory_file_path must stay inside the canonical workspace."""
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-
-    with pytest.raises(ValidationError, match="workspace-relative"):
-        config.agents["general"].memory_file_path = str(storage_path / "my-workspace")
-
-
 @pytest.mark.asyncio
-async def test_relative_memory_file_path_supports_crud(storage_path: Path, config: Config) -> None:
-    config.memory.backend = "file"
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
-
-    await add_agent_memory("Original memory", "general", storage_path, config)
-    memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
-
-    result = await get_agent_memory(memory_id, "general", storage_path, config)
-    assert result is not None
-    assert result["memory"] == "Original memory"
-
-    await update_agent_memory(memory_id, "Updated memory", "general", storage_path, config)
-    updated = await get_agent_memory(memory_id, "general", storage_path, config)
-    assert updated is not None
-    assert updated["memory"] == "Updated memory"
-
-    await delete_agent_memory(memory_id, "general", storage_path, config)
-    assert await get_agent_memory(memory_id, "general", storage_path, config) is None
-
-
-@pytest.mark.asyncio
-async def test_worker_scoped_memory_file_path_uses_canonical_agent_scope(
+async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
     storage_path: Path,
     config: Config,
 ) -> None:
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["general"].worker_scope = "user"
-    config.agents["general"].memory_file_path = "mind_data"
 
-    canonical_workspace = agent_workspace_root_path(storage_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(storage_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     (canonical_workspace / "MEMORY.md").write_text("# Memory\n\nExisting worker memory.\n", encoding="utf-8")
 
@@ -1095,14 +1056,13 @@ async def test_worker_scoped_memory_file_path_uses_canonical_agent_scope(
 
 
 @pytest.mark.asyncio
-async def test_memory_file_path_entrypoint_loaded_in_prompt(storage_path: Path, config: Config) -> None:
-    workspace = agent_workspace_root_path(storage_path, "general") / "my-workspace"
+async def test_workspace_entrypoint_loaded_in_prompt(storage_path: Path, config: Config) -> None:
+    workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nI prefer Python over JavaScript.\n", encoding="utf-8")
 
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "my-workspace"
 
     enhanced = await build_memory_enhanced_prompt("What language?", "general", storage_path, config)
     assert "I prefer Python over JavaScript." in enhanced
@@ -1110,13 +1070,12 @@ async def test_memory_file_path_entrypoint_loaded_in_prompt(storage_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_memory_file_path_daily_files_in_custom_scope(storage_path: Path, config: Config) -> None:
-    workspace = agent_workspace_root_path(storage_path, "general") / "my-workspace"
+async def test_workspace_daily_files_live_in_canonical_scope(storage_path: Path, config: Config) -> None:
+    workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True)
 
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "my-workspace"
 
     result = append_agent_daily_memory("Daily note", "general", storage_path, config)
     assert result["memory"] == "Daily note"
@@ -1127,13 +1086,16 @@ async def test_memory_file_path_daily_files_in_custom_scope(storage_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_memory_file_path_does_not_affect_other_agents(storage_path: Path, config: Config) -> None:
-    workspace = agent_workspace_root_path(storage_path, "general") / "my-workspace"
+async def test_shared_file_memory_uses_workspace_root_without_affecting_other_agents(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True)
 
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
-    config.agents["general"].memory_file_path = "my-workspace"
+    config.agents["general"].memory_backend = "file"
 
     await add_agent_memory("Custom workspace memory", "general", storage_path, config)
     await add_agent_memory("Default scope memory", "calculator", storage_path, config)
@@ -1144,6 +1106,4 @@ async def test_memory_file_path_does_not_affect_other_agents(storage_path: Path,
     calc_memories = await list_all_agent_memories("calculator", storage_path, config)
     assert any(memory["memory"] == "Default scope memory" for memory in calc_memories)
     assert (workspace / "MEMORY.md").exists()
-    assert (
-        agent_state_root_path(storage_path, "calculator") / "memory_files" / "agent_calculator" / "MEMORY.md"
-    ).exists()
+    assert (agent_workspace_root_path(storage_path, "calculator") / "MEMORY.md").exists()

@@ -90,7 +90,7 @@ def _config_init_storage_plan(
 
 def _default_mind_workspace(storage_root: Path) -> Path:
     """Return the starter Mind workspace inside the canonical agent workspace."""
-    return agent_workspace_root_path(storage_root, "mind") / "mind_data"
+    return agent_workspace_root_path(storage_root, "mind")
 
 
 def _path_string_for_config(path: Path, config_dir: Path) -> str:
@@ -111,7 +111,7 @@ def _default_mind_knowledge_base_path(
 ) -> str:
     """Return the starter knowledge-base path anchored to the chosen runtime storage root."""
     if use_storage_env_placeholder:
-        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
     return _path_string_for_config(_default_mind_workspace(storage_root) / "memory", config_dir)
 
 
@@ -686,16 +686,15 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: mind_data
     rooms:
       - personal
     context_files:
-      - mind_data/SOUL.md
-      - mind_data/AGENTS.md
-      - mind_data/USER.md
-      - mind_data/IDENTITY.md
-      - mind_data/TOOLS.md
-      - mind_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
     knowledge_bases:
       - mind_memory
     tools:

@@ -60,20 +60,17 @@ agents:
     # Memory backend override for this agent (optional: mem0 or file)
     memory_backend: file
 
-    # Directory inside the agent's workspace for file memory (optional)
-    memory_file_path: mind_data
-
     # Assign agent to one or more configured knowledge bases (optional)
     knowledge_bases: [docs]
 
     # Optional: additional files loaded into each freshly built agent instance
     context_files:
-      - mind_data/SOUL.md
-      - mind_data/AGENTS.md
-      - mind_data/USER.md
-      - mind_data/IDENTITY.md
-      - mind_data/TOOLS.md
-      - mind_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
 
     # Whether to include defaults.tools for this agent (default: true)
     include_default_tools: true
@@ -126,7 +123,6 @@ agents:
 | `learning`                    | bool   | `null`      | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`)                                                                                                                                                                                                                                                                                                                     |
 | `learning_mode`               | string | `null`      | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`)                                                                                                                                                                                                                                                                                                                                       |
 | `memory_backend`              | string | `null`      | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `memory_file_path`            | string | `null`      | Directory path (relative to the agent's workspace) used for file memory. For example, `mind_data` resolves to `agents/<name>/workspace/mind_data/`                                                                                                                                                                                                                                                                                                                                                                      |
 | `private`                     | object | `null`      | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
 | `knowledge_bases`             | list   | `[]`        | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `context_files`               | list   | `[]`        | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`)                                                                                                                                                                                                                                                                                                                                                                              |
@@ -147,7 +143,7 @@ Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `con
 
 Per-agent fields with a `null` default inherit from the `defaults` section at runtime. Per-agent values override them. `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent. `show_stop_button` and `enable_streaming` are global-only settings in `defaults` and cannot be overridden per-agent. The dashboard Agents tab exposes this as the **Memory Backend** selector for each agent.
 
-Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `memory_file_path` and `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). Absolute paths and `..` traversal are rejected.
+Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted. `context_files` are resolved relative to the agent's workspace directory (`agents/<name>/workspace/`). When the effective memory backend is `file`, the agent's canonical file memory root is that same workspace directory. Absolute paths and `..` traversal are rejected.
 
 ## Worker Routing
 
@@ -163,7 +159,7 @@ Leave `worker_scope` unset for unscoped execution — calls still run in the san
 
 ### Filesystem Isolation
 
-`worker_scope` controls runtime reuse, not filesystem security. When `memory_file_path` is set, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) inside that workspace. Without `memory_file_path`, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
+`worker_scope` controls runtime reuse, not filesystem security. When the effective memory backend is `file`, tools like `shell`, `file`, `python`, and `coding` get a default working directory (`base_dir`) at the agent's canonical workspace root. Without file-backed workspace state, those tools keep their normal defaults such as the current directory. Even when set, `base_dir` is a convenience, not a hard boundary.
 
 Isolation depends on the worker backend:
 
@@ -266,9 +262,8 @@ In the example above, each requester gets their own effective `mind_data/` root 
 - Set `private.knowledge.path` explicitly for any copied files or folders you want indexed as requester-local knowledge.
 - Omit `private.knowledge` entirely, or set `private.knowledge.enabled: false`, when you do not want requester-local knowledge indexing.
 - `private` cannot be combined with `worker_scope`.
-- `private` cannot be combined with `memory_file_path`.
 - Top-level `knowledge_bases` remain shared or company-wide corpora, so one agent can use both requester-local knowledge and shared knowledge in the same run.
-- Top-level `context_files` and `memory_file_path` remain the shared config-relative mechanism used by single-user setups, including the default `mindroom config init` output.
+- Top-level `context_files` remain the shared workspace-relative mechanism used by single-user setups, including the default `mindroom config init` output.
 - Custom templates are fully supported.
 - The Mind-style filenames shown above are a convention, not a requirement, unless you choose to reference them in `private.context_files` or `private.knowledge.path`.
 

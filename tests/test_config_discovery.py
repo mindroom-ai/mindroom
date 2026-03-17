@@ -452,11 +452,11 @@ class TestResolveConfigRelativePath:
         )
 
         resolved = constants_mod.resolve_config_relative_path(
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
             runtime_paths,
         )
 
-        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
+        assert resolved == storage_root.resolve() / "agents" / "mind" / "workspace" / "memory"
 
     def test_rejects_non_runtime_placeholders(self, tmp_path: Path) -> None:
         """Config-relative paths should fail closed for unsupported env placeholders."""

@@ -36,8 +36,7 @@ class _MemoryFileConfig(BaseModel):
         description=(
             "Optional fallback root for direct file-memory paths. Relative paths resolve "
             "from the config directory. Canonical agent and team file memory live under "
-            "agent-owned roots; use agents.<name>.memory_file_path to place an agent's "
-            "file memory inside its workspace."
+            "their canonical workspace or scope roots."
         ),
     )
     max_entrypoint_lines: int = Field(

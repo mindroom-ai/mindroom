@@ -26,7 +26,8 @@ Support requester-isolated and shared runtime execution without building one ful
 - Each non-private agent has one canonical state root.
 - Each realized private instance has one canonical state root.
 - The files under that root are the real files, not copies, seeds, mirrors, or alternate authoritative locations.
-- `context_files` and `memory_file_path` must resolve inside the agent's canonical workspace.
+- `context_files` must resolve inside the agent's canonical workspace.
+- File-backed agent memory must use the canonical workspace root rather than a separate per-agent subdirectory model.
 - `worker_scope` does not change which files are authoritative.
 - `shared`, `user_agent`, and unscoped dedicated execution for agent A must only be able to see agent A's canonical state root plus their own worker runtime root.
 - `user` is different.

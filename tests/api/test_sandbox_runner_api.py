@@ -702,7 +702,7 @@ def test_resolve_worker_base_dir_does_not_create_directories_during_validation(t
     """Worker base-dir validation should not leave empty directories behind."""
     storage_root = tmp_path / "mindroom_data"
     worker_root = tmp_path / "workers" / "worker-state"
-    requested_base_dir = "agents/general/workspace/mind_data"
+    requested_base_dir = "agents/general/workspace"
 
     resolved = sandbox_worker_prep_module.resolve_worker_base_dir(
         SimpleNamespace(root=worker_root, workspace=worker_root / "workspace"),
@@ -1009,13 +1009,13 @@ def test_sandbox_runner_dedicated_worker_uses_shared_storage_root_env_for_agent_
             "args": ["hello", "note.txt"],
             "kwargs": {},
             "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
         },
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    saved_file = shared_root / "agents" / "general" / "workspace" / "mind_data" / "note.txt"
+    saved_file = shared_root / "agents" / "general" / "workspace" / "note.txt"
     assert saved_file.read_text(encoding="utf-8") == "hello"
 
 
@@ -1174,7 +1174,7 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
             "args": ["hello", "note.txt"],
             "kwargs": {},
             "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
         },
     )
 
@@ -1404,14 +1404,14 @@ def test_sandbox_runner_worker_request_preserves_forwarded_base_dir(
             "args": ["hello from canonical workspace", "note.txt"],
             "kwargs": {},
             "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
         },
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    canonical_file = agent_workspace_root_path(storage_root, "general") / "mind_data" / "note.txt"
+    canonical_file = agent_workspace_root_path(storage_root, "general") / "note.txt"
     worker_root = storage_root / "workers"
     assert canonical_file.read_text(encoding="utf-8") == "hello from canonical workspace"
     assert not (worker_root / worker_dir_name(worker_key) / "workspace" / "note.txt").exists()
@@ -1633,14 +1633,14 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
             "args": ["hello from dedicated worker canonical workspace", "note.txt"],
             "kwargs": {},
             "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
         },
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from dedicated worker canonical workspace"
     assert not (worker_root / "workspace" / "note.txt").exists()
 
@@ -1671,14 +1671,14 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_nested_work
             "args": ["hello from nested worker prefix", "note.txt"],
             "kwargs": {},
             "worker_key": worker_key,
-            "tool_init_overrides": {"base_dir": "agents/general/workspace/mind_data"},
+            "tool_init_overrides": {"base_dir": "agents/general/workspace"},
         },
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    canonical_file = agent_workspace_root_path(shared_root, "general") / "mind_data" / "note.txt"
+    canonical_file = agent_workspace_root_path(shared_root, "general") / "note.txt"
     assert canonical_file.read_text(encoding="utf-8") == "hello from nested worker prefix"
     assert not (worker_root / "workspace" / "note.txt").exists()
 

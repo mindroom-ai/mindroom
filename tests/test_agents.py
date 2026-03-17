@@ -414,15 +414,14 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
-    """Workspace-relative memory_file_path should point tools at the canonical workspace."""
+    """Shared file-backed agents should point tools at the canonical workspace root."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "README.md").write_text("Canonical workspace.\n", encoding="utf-8")
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
@@ -436,11 +435,10 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     assert overrides_by_tool["duckduckgo"] is None
 
 
-def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_path(tmp_path: Path) -> None:
-    """Legacy non-private memory_file_path should stay under the canonical agent workspace."""
+def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
+    """Shared file-backed agents should resolve to the canonical agent workspace root."""
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
     bound_config = _bind_runtime_paths(config, runtime_paths)
 
@@ -452,10 +450,10 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_
         create=True,
     ).workspace
 
-    expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    expected_workspace = agent_workspace_root_path(tmp_path, "general")
     assert workspace is not None
     assert workspace.root == expected_workspace
-    assert not (runtime_paths.config_dir / "mind_data").exists()
+    assert not (runtime_paths.config_dir / "workspace").exists()
 
 
 def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: Path) -> None:
@@ -813,11 +811,10 @@ def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Agents without memory_file_path should not be forced into an auto-created workspace."""
+    """Agents without file-backed workspace semantics should keep tool defaults."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
-    config.agents["general"].memory_file_path = None
     config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
     config.agents["general"].include_default_tools = False
 
@@ -850,22 +847,18 @@ def test_create_agent_threads_config_path_to_plugin_loading(
     assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
 
 
-def test_create_agent_rejects_absolute_memory_file_workspace(tmp_path: Path) -> None:
-    """Absolute memory_file_path should fail fast instead of creating copied state."""
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-
-    with pytest.raises(ValidationError, match="workspace-relative"):
-        config.agents["general"].memory_file_path = str(tmp_path / "external" / "mind_data")
-
-
-def test_create_agent_rejects_env_var_memory_file_workspace() -> None:
-    """Env-var memory_file_path should fail fast instead of becoming a literal workspace subdir."""
-    config = _test_config()
-    config.agents["general"].memory_backend = "file"
-
-    with pytest.raises(ValidationError, match="env-variable references"):
-        config.agents["general"].memory_file_path = "${MINDROOM_STORAGE_PATH}/mind_data"
+def test_config_rejects_removed_memory_file_path_field() -> None:
+    """Legacy memory_file_path should fail fast with a directed migration error."""
+    with pytest.raises(ValidationError, match="memory_file_path"):
+        Config(
+            agents={
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                    "memory_file_path": "mind_data",
+                },
+            },
+        )
 
 
 def test_create_agent_rejects_absolute_context_files(tmp_path: Path) -> None:
@@ -902,10 +895,9 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     """Worker-routed scoped tools should receive the same workspace override as local tools."""
     mock_get_tool_by_name.return_value = MagicMock()
 
-    workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    workspace = agent_workspace_root_path(tmp_path, "general")
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
     config.agents["general"].tools = ["coding", "shell"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
@@ -1243,34 +1235,30 @@ def test_resolve_worker_key_rejects_unknown_scope() -> None:
 def test_resolve_agent_owned_path_resolves_workspace_relative_path(tmp_path: Path) -> None:
     """Agent-owned paths should resolve directly inside the canonical workspace."""
     resolved = resolve_agent_owned_path(
-        "mind_data/SOUL.md",
+        "SOUL.md",
         agent_name="general",
         base_storage_path=tmp_path,
     )
 
     assert resolved.is_relative_to(agent_state_root_path(tmp_path, "general"))
-    assert resolved == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+    assert resolved == agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
 
 def test_agent_owned_validation_matches_runtime_resolution(tmp_path: Path) -> None:
     """Validation and runtime resolution should share the same normalization contract."""
     config = _test_config()
-    config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
-    config.agents["general"].context_files = ["./mind_data/SOUL.md"]
+    config.agents["general"].context_files = ["./SOUL.md"]
 
-    validated_workspace = config.agents["general"].memory_file_path
     validated_context = config.agents["general"].context_files[0]
 
-    assert validated_workspace == "mind_data"
-    assert validated_context == "mind_data/SOUL.md"
+    assert validated_context == "SOUL.md"
     assert (
         resolve_agent_owned_path(
             validated_context,
             agent_name="general",
             base_storage_path=tmp_path,
         )
-        == agent_workspace_root_path(tmp_path, "general") / "mind_data" / "SOUL.md"
+        == agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
     )
 
 
@@ -1384,14 +1372,13 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "mind_data"
-    config.agents["general"].context_files = ["mind_data/SOUL.md"]
+    config.agents["general"].context_files = ["SOUL.md"]
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
     config.agents["general"].worker_scope = "user"
     config.agents["general"].worker_tools = ["coding"]
 
-    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     canonical_workspace.mkdir(parents=True, exist_ok=True)
     canonical_soul = canonical_workspace / "SOUL.md"
     canonical_soul.write_text("Canonical soul context.", encoding="utf-8")
@@ -1448,21 +1435,20 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                 include_default_tools=False,
                 learning=False,
                 memory_backend="file",
-                memory_file_path="mind_data",
                 context_files=[
-                    "mind_data/SOUL.md",
-                    "mind_data/AGENTS.md",
-                    "mind_data/USER.md",
-                    "mind_data/IDENTITY.md",
-                    "mind_data/TOOLS.md",
-                    "mind_data/HEARTBEAT.md",
+                    "SOUL.md",
+                    "AGENTS.md",
+                    "USER.md",
+                    "IDENTITY.md",
+                    "TOOLS.md",
+                    "HEARTBEAT.md",
                 ],
                 knowledge_bases=["mind_memory"],
             ),
         },
         knowledge_bases={
             "mind_memory": KnowledgeBaseConfig(
-                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory",
+                path="${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory",
                 watch=True,
             ),
         },
@@ -1471,7 +1457,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
 
     agent = _create_agent_for_test("mind", config=_bind_runtime_paths(config, _runtime_paths(runtime_storage)))
 
-    workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+    workspace = runtime_storage / "agents" / "mind" / "workspace"
     assert (workspace / "SOUL.md").exists()
     assert (workspace / "AGENTS.md").exists()
     assert (workspace / "USER.md").exists()
@@ -1495,7 +1481,6 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
 
@@ -1508,7 +1493,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(tmp_path, "general")
-    canonical_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(tmp_path, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
     assert agent_root / "learning" / "general.db" in db_files
@@ -1529,7 +1514,6 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
 
     config = _test_config()
     config.agents["general"].memory_backend = "file"
-    config.agents["general"].memory_file_path = "./mind_data"
     config.agents["general"].tools = ["coding"]
     config.agents["general"].include_default_tools = False
 
@@ -1546,7 +1530,7 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     agent_root = agent_state_root_path(shared_root, "general")
-    canonical_workspace = agent_workspace_root_path(shared_root, "general") / "mind_data"
+    canonical_workspace = agent_workspace_root_path(shared_root, "general")
     db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
     assert agent_root / "sessions" / "general.db" in db_files
     assert agent_root / "learning" / "general.db" in db_files
@@ -1941,36 +1925,36 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     assert config.uses_mem0_memory() is True
 
 
-def test_config_rejects_memory_file_path_when_effective_backend_is_mem0() -> None:
-    """memory_file_path should fail fast unless effective backend resolves to file."""
+def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
+    """memory_file_path should fail fast because the field was removed."""
     with pytest.raises(
         ValidationError,
-        match=re.escape(
-            "agents.<name>.memory_file_path requires effective file memory backend; invalid agents: general",
-        ),
+        match="memory_file_path",
     ):
         Config(
             agents={
-                "general": AgentConfig(display_name="General", memory_file_path="./openclaw_data"),
+                "general": {
+                    "display_name": "General",
+                    "memory_file_path": "./openclaw_data",
+                },
             },
             memory={"backend": "mem0"},
         )
 
 
-def test_config_accepts_memory_file_path_with_file_backend_override() -> None:
-    """memory_file_path is valid when effective backend resolves to file."""
-    config = Config(
-        agents={
-            "general": AgentConfig(
-                display_name="General",
-                memory_backend="file",
-                memory_file_path="./openclaw_data",
-            ),
-        },
-        memory={"backend": "mem0"},
-    )
-
-    assert config.agents["general"].memory_file_path == "openclaw_data"
+def test_config_rejects_memory_file_path_even_with_file_backend() -> None:
+    """memory_file_path should stay removed even when the agent uses file memory."""
+    with pytest.raises(ValidationError, match="memory_file_path"):
+        Config(
+            agents={
+                "general": {
+                    "display_name": "General",
+                    "memory_backend": "file",
+                    "memory_file_path": "./openclaw_data",
+                },
+            },
+            memory={"backend": "mem0"},
+        )
 
 
 def test_config_accepts_valid_agent_knowledge_base_assignment() -> None:

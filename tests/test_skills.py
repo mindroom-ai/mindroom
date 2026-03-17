@@ -550,7 +550,6 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
 
     config = _base_config(["dispatch"])
     config.agents["code"].memory_backend = "file"
-    config.agents["code"].memory_file_path = "./mind_data"
     config.agents["code"].tools = ["coding"]
     config.agents["code"].include_default_tools = False
     config.agents["code"].worker_scope = "shared"
@@ -568,7 +567,7 @@ def test_collect_agent_toolkits_uses_runtime_storage_path_for_canonical_agent_wo
         resolved_thread_id=None,
         session_id=None,
     )
-    expected_workspace = agent_workspace_root_path(runtime_storage, "code") / "mind_data"
+    expected_workspace = agent_workspace_root_path(runtime_storage, "code")
 
     with tool_execution_identity(identity):
         toolkits = _collect_agent_toolkits(

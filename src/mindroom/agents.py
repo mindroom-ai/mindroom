@@ -48,14 +48,13 @@ logger = get_logger(__name__)
 # Maximum length for instruction descriptions to include in agent summary
 _MAX_INSTRUCTION_LENGTH = 100
 _DEFAULT_MIND_AGENT_NAME = "mind"
-_DEFAULT_MIND_WORKSPACE_DIRNAME = "mind_data"
 _DEFAULT_MIND_CONTEXT_FILES = (
-    "mind_data/SOUL.md",
-    "mind_data/AGENTS.md",
-    "mind_data/USER.md",
-    "mind_data/IDENTITY.md",
-    "mind_data/TOOLS.md",
-    "mind_data/HEARTBEAT.md",
+    "SOUL.md",
+    "AGENTS.md",
+    "USER.md",
+    "IDENTITY.md",
+    "TOOLS.md",
+    "HEARTBEAT.md",
 )
 
 
@@ -100,14 +99,14 @@ _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
 def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
     return (
         agent_name == _DEFAULT_MIND_AGENT_NAME
+        and agent_config.private is None
         and agent_config.memory_backend == "file"
-        and agent_config.memory_file_path == _DEFAULT_MIND_WORKSPACE_DIRNAME
         and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
     )
 
 
 def _ensure_default_mind_workspace(storage_path: Path) -> None:
-    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME) / _DEFAULT_MIND_WORKSPACE_DIRNAME
+    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
     ensure_workspace_template(workspace_path, template="mind")
 
 

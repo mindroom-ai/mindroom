@@ -1396,7 +1396,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             execution_identity=execution_identity,
-            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
+            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace"},
             shared_storage_root_path=Path("/srv/mindroom"),
             worker_tools_override=["coding"],
             worker_scope="shared",
@@ -1408,7 +1408,7 @@ class TestWorkerToolsOverride:
 
         assert result == "sandbox-result"
         assert captured["url"].endswith("/api/sandbox-runner/execute")
-        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace/mind_data"}
+        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace"}
 
     def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
         self,

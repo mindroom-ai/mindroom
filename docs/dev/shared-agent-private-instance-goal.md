@@ -73,17 +73,13 @@ Private context files and private knowledge paths should stay explicit in config
 
 Shared/global knowledge should remain distinct from requester-local knowledge.
 
-Existing single-user and unscoped behavior must continue to work.
+Supported external behavior and protocol compatibility must continue to work.
 
-Existing worker-scoped sessions, learning, credentials, and file memory behavior must continue to work.
-
-`mindroom config init` must keep its current single-user output and behavior.
+Internal transition helpers and alternate internal paths are not part of the contract and should be removed.
 
 ## What This PR Is Not
 
 This PR is not about making every worker-scoped agent automatically get private copied context files.
-
-This PR is not about changing the single-user `mindroom config init` setup.
 
 This PR is not about `/v1` isolation support.
 
@@ -101,7 +97,27 @@ Private requester-local knowledge should be representable as private instance st
 
 Top-level shared knowledge definitions should remain available for truly shared/global corpora.
 
-The current low-level workspace machinery can remain as internal implementation if it helps.
+Low-level workspace machinery may remain only as implementation detail.
+
+It must not create a second source of truth for runtime scope or state-root decisions.
+
+If an internal helper exists only to preserve an older internal path shape, it should be removed.
+
+## Surface Simplification
+
+This architecture keeps protocol compatibility and intentionally supported product behavior.
+
+It does not preserve internal backward compatibility.
+
+The code should not keep silent normalization, alternate call paths, or legacy wrappers just because older internal code used them.
+
+`agents.<name>.memory_file_path` has been removed.
+
+Shared file-backed agents now use the canonical shared workspace root directly.
+
+Private file-backed agents use their canonical private root directly.
+
+There is no second public model for choosing a separate file-memory subdirectory.
 
 ## Runtime Resolver Contract
 
@@ -118,6 +134,8 @@ After ingress, resolved runtime state should be passed explicitly instead of bei
 Worker visibility and knowledge bindings may remain derived helpers, but they must come from the same resolver layer.
 
 Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision.
+
+Outside the resolver layer, no module should introduce a second product model for agent-local state.
 
 ## Execution Identity Boundary
 
@@ -180,3 +198,5 @@ If a reader instead thinks:
 "I need to wire a bunch of relative paths together to make worker scoping happen."
 
 then the config design is still wrong.
+
+If a reader thinks there are two equally valid product models for agent-local state, the architecture is still too loose.

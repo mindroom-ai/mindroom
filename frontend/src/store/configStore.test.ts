@@ -39,7 +39,6 @@ describe('configStore', () => {
             skills: [],
             instructions: ['Test instruction'],
             rooms: ['lobby'],
-            memory_file_path: './openclaw_data',
           },
         },
         models: {
@@ -65,7 +64,6 @@ describe('configStore', () => {
       expect(state.agents[0].display_name).toBe('Test Agent');
       expect(state.agents[0].learning).toBe(true);
       expect(state.agents[0].learning_mode).toBe('always');
-      expect(state.agents[0].memory_file_path).toBe('./openclaw_data');
       expect(state.syncStatus).toBe('synced');
     });
 
@@ -197,7 +195,6 @@ describe('configStore', () => {
             skills: [],
             instructions: [],
             rooms: [],
-            memory_file_path: './openclaw_data',
           },
         },
         models: {},
@@ -225,7 +222,6 @@ describe('configStore', () => {
           skills: [],
           instructions: [],
           rooms: [],
-          memory_file_path: './openclaw_data',
         },
       ];
       useConfigStore.setState({
