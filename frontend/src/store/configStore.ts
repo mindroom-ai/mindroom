@@ -8,7 +8,6 @@ import {
   KnowledgeBaseConfig,
   Culture,
   TeamEligibilityByAgent,
-  WorkerScope,
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
@@ -73,7 +72,6 @@ interface ConfigState {
   rooms: Room[];
   teamEligibilityByAgent: TeamEligibilityByAgent;
   teamEligibilityRequestId: number;
-  restorableWorkerScopesByAgent: Record<string, WorkerScope>;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -127,7 +125,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   rooms: [],
   teamEligibilityByAgent: {},
   teamEligibilityRequestId: 0,
-  restorableWorkerScopesByAgent: {},
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -209,7 +206,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         cultures,
         rooms,
         teamEligibilityByAgent,
-        restorableWorkerScopesByAgent: {},
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
@@ -344,38 +340,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
 
       const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
-      const resolvedUpdates = { ...normalizedUpdates };
-      let restorableWorkerScopesByAgent = state.restorableWorkerScopesByAgent;
-      const hasPrivateUpdate = Object.prototype.hasOwnProperty.call(updates, 'private');
-      const nextPrivate = hasPrivateUpdate ? updates.private : currentAgent.private;
-
-      if (hasPrivateUpdate && currentAgent.private == null && nextPrivate != null) {
-        if (currentAgent.worker_scope != null) {
-          restorableWorkerScopesByAgent = {
-            ...state.restorableWorkerScopesByAgent,
-            [agentId]: currentAgent.worker_scope,
-          };
-        }
-      }
-
-      if (hasPrivateUpdate && currentAgent.private != null && nextPrivate == null) {
-        const { [agentId]: restoredWorkerScope, ...remainingWorkerScopes } =
-          state.restorableWorkerScopesByAgent;
-        restorableWorkerScopesByAgent = remainingWorkerScopes;
-        if (restoredWorkerScope != null) {
-          resolvedUpdates.worker_scope = restoredWorkerScope;
-        }
-      }
-
       nextAgents = state.agents.map(agent =>
-        agent.id === agentId ? { ...agent, ...resolvedUpdates } : agent
+        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
       );
       const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
       shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
 
       return {
         agents: nextAgents,
-        restorableWorkerScopesByAgent,
         isDirty: true,
         editorError: null,
         configValidationIssues: [],
@@ -428,8 +400,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const nextTeamEligibilityByAgent = Object.fromEntries(
       Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
     );
-    const { [agentId]: _removedWorkerScope, ...restorableWorkerScopesByAgent } =
-      state.restorableWorkerScopesByAgent;
     set({
       agents: nextAgents,
       teams: removeMissingTeamMembers(state.teams, nextAgents),
@@ -438,7 +408,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agents: culture.agents.filter(id => id !== agentId),
       })),
       teamEligibilityByAgent: nextTeamEligibilityByAgent,
-      restorableWorkerScopesByAgent,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
       editorError: null,

@@ -26,6 +26,7 @@ import {
   getDefaultPrivateConfig,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
+  WorkerScope,
   normalizeAgentUpdates,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
@@ -50,6 +51,9 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
+  const [restorableWorkerScopesByAgent, setRestorableWorkerScopesByAgent] = useState<
+    Record<string, WorkerScope>
+  >({});
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -284,7 +288,35 @@ export function AgentEditor() {
     value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined, worker_scope: null });
 
   const handleEnablePrivate = (enabled: boolean) => {
-    updatePrivate(enabled ? getDefaultPrivateConfig(selectedAgent ?? getValues()) : undefined);
+    if (enabled) {
+      const sourceAgent = selectedAgent ?? getValues();
+      if (
+        selectedAgentId != null &&
+        sourceAgent.private == null &&
+        sourceAgent.worker_scope != null
+      ) {
+        setRestorableWorkerScopesByAgent(current => ({
+          ...current,
+          [selectedAgentId]: sourceAgent.worker_scope as WorkerScope,
+        }));
+      }
+      updatePrivate(getDefaultPrivateConfig(sourceAgent));
+      return;
+    }
+
+    if (!selectedAgentId) {
+      updatePrivate(undefined);
+      return;
+    }
+
+    const { [selectedAgentId]: restoredWorkerScope, ...remainingWorkerScopes } =
+      restorableWorkerScopesByAgent;
+    setRestorableWorkerScopesByAgent(remainingWorkerScopes);
+    setValue('private', undefined);
+    updateAgent(selectedAgentId, {
+      private: undefined,
+      worker_scope: restoredWorkerScope,
+    });
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {

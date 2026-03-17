@@ -423,6 +423,49 @@ describe('AgentEditor', () => {
     });
   });
 
+  it('restores a legacy worker_scope when private mode is disabled again', async () => {
+    const scopedAgent: Agent = {
+      ...mockAgent,
+      worker_scope: 'user_agent',
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [scopedAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: scopedAgent,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    const privateToggle = screen.getByLabelText('Enable requester-private state');
+    fireEvent.click(privateToggle);
+    fireEvent.click(privateToggle);
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenNthCalledWith(
+        1,
+        'test_agent',
+        expect.objectContaining({
+          worker_scope: undefined,
+          private: { per: 'user_agent' },
+        })
+      );
+      expect(mockStore.updateAgent).toHaveBeenNthCalledWith(
+        2,
+        'test_agent',
+        expect.objectContaining({
+          private: undefined,
+          worker_scope: 'user_agent',
+        })
+      );
+    });
+  });
+
   it('renders and updates private agent fields', async () => {
     const privateAgent: Agent = {
       ...mockAgent,

@@ -17,7 +17,6 @@ describe('configStore', () => {
       rooms: [],
       teamEligibilityByAgent: {},
       teamEligibilityRequestId: 0,
-      restorableWorkerScopesByAgent: {},
       selectedAgentId: null,
       selectedTeamId: null,
       selectedCultureId: null,
@@ -515,36 +514,6 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.agents[0].worker_scope).toBeUndefined();
       expect(state.agents[0].private).toEqual({ per: 'user_agent' });
-    });
-
-    it('restores a legacy worker_scope when private state is disabled again', () => {
-      useConfigStore.setState({
-        agents: [
-          {
-            id: 'mind',
-            display_name: 'Mind',
-            role: 'Assistant',
-            tools: [],
-            skills: [],
-            instructions: [],
-            rooms: [],
-            worker_scope: 'user_agent',
-          },
-        ],
-        restorableWorkerScopesByAgent: {},
-      });
-
-      useConfigStore.getState().updateAgent('mind', {
-        private: { per: 'user_agent' },
-      });
-      useConfigStore.getState().updateAgent('mind', {
-        private: undefined,
-      });
-
-      const state = useConfigStore.getState();
-      expect(state.agents[0].private).toBeUndefined();
-      expect(state.agents[0].worker_scope).toBe('user_agent');
-      expect(state.restorableWorkerScopesByAgent).toEqual({});
     });
 
     it('defaults private knowledge path when enabling it from an empty state', () => {
