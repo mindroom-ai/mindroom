@@ -1029,18 +1029,23 @@ def test_sandbox_runner_user_scope_allows_broad_agents_tree_base_dir(
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
 
-    response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello", "note.txt"],
-            "kwargs": {},
-            "worker_key": "v1:tenant-123:user:@alice:example.org",
-            "tool_init_overrides": {"base_dir": "agents/other/workspace"},
-        },
-    )
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
+
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello", "note.txt"],
+                "kwargs": {},
+                "worker_key": "v1:tenant-123:user:@alice:example.org",
+                "tool_init_overrides": {"base_dir": "agents/other/workspace"},
+            },
+        )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
