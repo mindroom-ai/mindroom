@@ -75,34 +75,6 @@ export function AgentEditor() {
   );
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
-  // Split tools into configured, default, and setup-required categories.
-  const { configuredTools, defaultTools, setupRequiredTools } = useMemo(() => {
-    const configured: typeof backendTools = [];
-    const defaults: typeof backendTools = [];
-    const setupRequired: typeof backendTools = [];
-
-    backendTools.forEach(tool => {
-      // delegate is managed via delegate_to, not the tools picker
-      if (tool.name === 'delegate') return;
-      // Tools that do not require configuration are default tools.
-      if (tool.setup_type === 'none') {
-        defaults.push(tool);
-      } else if (tool.status === 'available') {
-        configured.push(tool);
-      } else {
-        setupRequired.push(tool);
-      }
-    });
-
-    return {
-      configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-      defaultTools: defaults.sort((a, b) => a.display_name.localeCompare(b.display_name)),
-      setupRequiredTools: setupRequired.sort((a, b) =>
-        a.display_name.localeCompare(b.display_name)
-      ),
-    };
-  }, [backendTools]);
-
   // Enable swipe back on mobile
   useSwipeBack({
     onSwipeBack: () => selectAgent(null),
@@ -147,6 +119,67 @@ export function AgentEditor() {
   const privateContextFilesError = validationErrorForPath(['private', 'context_files']);
   const privateKnowledgeError = validationErrorForPath(['private', 'knowledge'], true);
   const privateKnowledgePathError = validationErrorForPath(['private', 'knowledge', 'path'], true);
+  // Split tools into configured, default, and setup-required categories.
+  const { configuredTools, defaultTools, setupRequiredTools, selectedUnavailableTools } =
+    useMemo(() => {
+      const configured: typeof backendTools = [];
+      const defaults: typeof backendTools = [];
+      const setupRequired: typeof backendTools = [];
+      const selectedUnavailable: Array<{
+        name: string;
+        display_name: string;
+        reason: string;
+      }> = [];
+      const selectedToolNames = agentTools ?? [];
+      const backendToolNames = new Set<string>();
+
+      backendTools.forEach(tool => {
+        backendToolNames.add(tool.name);
+        // delegate is managed via delegate_to, not the tools picker
+        if (tool.name === 'delegate') return;
+        if (tool.execution_scope_supported === false) {
+          if (selectedToolNames.includes(tool.name)) {
+            selectedUnavailable.push({
+              name: tool.name,
+              display_name: tool.display_name,
+              reason: 'Not supported for this execution scope. Uncheck it to remove it.',
+            });
+          }
+          return;
+        }
+        // Tools that do not require configuration are default tools.
+        if (tool.setup_type === 'none') {
+          defaults.push(tool);
+        } else if (tool.status === 'available') {
+          configured.push(tool);
+        } else {
+          setupRequired.push(tool);
+        }
+      });
+
+      for (const toolName of selectedToolNames) {
+        if (toolName === 'delegate' || backendToolNames.has(toolName)) {
+          continue;
+        }
+        selectedUnavailable.push({
+          name: toolName,
+          display_name: toolName,
+          reason:
+            'This tool is no longer available in the current registry. Uncheck it to remove it.',
+        });
+      }
+
+      return {
+        configuredTools: configured.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+        defaultTools: defaults.sort((a, b) => a.display_name.localeCompare(b.display_name)),
+        setupRequiredTools: setupRequired.sort((a, b) =>
+          a.display_name.localeCompare(b.display_name)
+        ),
+        selectedUnavailableTools: selectedUnavailable.sort((a, b) =>
+          a.display_name.localeCompare(b.display_name)
+        ),
+      };
+    }, [agentTools, backendTools]);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -229,6 +262,17 @@ export function AgentEditor() {
       }
     },
     [selectedAgent, selectedAgentId, updateAgent]
+  );
+
+  const updateSelectedTools = useCallback(
+    (currentTools: string[], toolName: string, checked: boolean) => {
+      const nextTools = checked
+        ? [...new Set([...currentTools, toolName])]
+        : currentTools.filter(tool => tool !== toolName);
+      handleFieldChange('tools', nextTools);
+      return nextTools;
+    },
+    [handleFieldChange]
   );
 
   const handleDelete = () => {
@@ -870,12 +914,73 @@ export function AgentEditor() {
             </div>
           ) : configuredTools.length === 0 &&
             defaultTools.length === 0 &&
-            setupRequiredTools.length === 0 ? (
+            setupRequiredTools.length === 0 &&
+            selectedUnavailableTools.length === 0 ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               No tools are available. Please configure tools in the Tools tab first.
             </div>
           ) : (
             <>
+              {selectedUnavailableTools.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                      Selected But Unavailable
+                    </h4>
+                    <Badge variant="destructive" className="text-xs">
+                      {selectedUnavailableTools.length}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      (uncheck to remove invalid tool assignments)
+                    </span>
+                  </div>
+                  <div className="pl-2 space-y-1">
+                    {selectedUnavailableTools.map(tool => (
+                      <Controller
+                        key={tool.name}
+                        name="tools"
+                        control={control}
+                        render={({ field }) => (
+                          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-3 sm:space-x-2">
+                                <Checkbox
+                                  id={`unavailable-${tool.name}`}
+                                  checked={field.value.includes(tool.name)}
+                                  onCheckedChange={checked => {
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
+                                  }}
+                                  className="h-5 w-5 sm:h-4 sm:w-4"
+                                />
+                                <label
+                                  htmlFor={`unavailable-${tool.name}`}
+                                  className="text-sm font-medium leading-none cursor-pointer select-none"
+                                >
+                                  {tool.display_name}
+                                </label>
+                              </div>
+                              <Badge variant="destructive" className="text-xs">
+                                Remove
+                              </Badge>
+                            </div>
+                            <p className="pl-8 pt-1 text-xs text-muted-foreground">{tool.reason}</p>
+                          </div>
+                        )}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedUnavailableTools.length > 0 &&
+                (configuredTools.length > 0 ||
+                  defaultTools.length > 0 ||
+                  setupRequiredTools.length > 0) && (
+                  <div className="border-t border-gray-200 dark:border-gray-700" />
+                )}
+
               {/* Configured Tools Section */}
               {configuredTools.length > 0 && (
                 <div className="space-y-2">
@@ -911,11 +1016,9 @@ export function AgentEditor() {
                                   id={`configured-${tool.name}`}
                                   checked={isChecked}
                                   onCheckedChange={checked => {
-                                    const newTools = checked
-                                      ? [...field.value, tool.name]
-                                      : field.value.filter(t => t !== tool.name);
-                                    field.onChange(newTools);
-                                    handleFieldChange('tools', newTools);
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
@@ -982,11 +1085,9 @@ export function AgentEditor() {
                                   id={`default-${tool.name}`}
                                   checked={isChecked}
                                   onCheckedChange={checked => {
-                                    const newTools = checked
-                                      ? [...field.value, tool.name]
-                                      : field.value.filter(t => t !== tool.name);
-                                    field.onChange(newTools);
-                                    handleFieldChange('tools', newTools);
+                                    field.onChange(
+                                      updateSelectedTools(field.value, tool.name, checked === true)
+                                    );
                                   }}
                                   className="h-5 w-5 sm:h-4 sm:w-4"
                                 />
@@ -1044,11 +1145,13 @@ export function AgentEditor() {
                                     id={`setup-${tool.name}`}
                                     checked={isChecked}
                                     onCheckedChange={checked => {
-                                      const newTools = checked
-                                        ? [...field.value, tool.name]
-                                        : field.value.filter(t => t !== tool.name);
-                                      field.onChange(newTools);
-                                      handleFieldChange('tools', newTools);
+                                      field.onChange(
+                                        updateSelectedTools(
+                                          field.value,
+                                          tool.name,
+                                          checked === true
+                                        )
+                                      );
                                     }}
                                     className="h-5 w-5 sm:h-4 sm:w-4"
                                   />

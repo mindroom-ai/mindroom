@@ -681,8 +681,10 @@ def test_get_tools(test_client: TestClient) -> None:
     assert "icon_color" in first_tool  # New field we added
 
 
-def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(test_client: TestClient) -> None:
-    """Shared-only integrations should be hidden for isolating worker scopes."""
+def test_get_tools_marks_shared_only_integrations_unsupported_for_isolating_worker_scope(
+    test_client: TestClient,
+) -> None:
+    """Shared-only integrations should stay visible but be marked unsupported."""
     config = _config_with_worker_scope("user")
 
     with (
@@ -692,14 +694,17 @@ def test_get_tools_hides_shared_only_integrations_for_isolating_worker_scope(tes
 
     assert response.status_code == 200
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
-    assert "homeassistant" not in tools_by_name
-    assert "gmail" not in tools_by_name
-    assert "spotify" not in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["gmail"]["execution_scope_supported"] is False
+    assert tools_by_name["spotify"]["execution_scope_supported"] is False
     assert "calculator" in tools_by_name
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
 
-def test_get_tools_execution_scope_override_filters_backend_tools(test_client: TestClient) -> None:
-    """Draft execution-scope overrides should drive shared-only tool filtering."""
+def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
+    test_client: TestClient,
+) -> None:
+    """Draft execution-scope overrides should drive shared-only tool support flags."""
     config = _config_with_worker_scope("shared")
     tools = [
         {
@@ -731,8 +736,9 @@ def test_get_tools_execution_scope_override_filters_backend_tools(test_client: T
 
     assert response.status_code == 200
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
-    assert "homeassistant" not in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
     assert "calculator" in tools_by_name
+    assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
 
 def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
@@ -772,6 +778,7 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert "homeassistant" in tools_by_name
     assert "calculator" in tools_by_name
+    assert tools_by_name["homeassistant"]["execution_scope_supported"] is True
 
 
 def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:

@@ -18,6 +18,7 @@ export interface ToolInfo {
   docs_url?: string | null;
   helper_text?: string | null;
   dashboard_configuration_supported?: boolean;
+  execution_scope_supported?: boolean;
 }
 
 export interface ToolsResponse {

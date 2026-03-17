@@ -176,6 +176,40 @@ describe('AgentEditor', () => {
     expect(screen.getByLabelText('Weather')).toBeInTheDocument();
   });
 
+  it('keeps selected unsupported tools visible so they can be removed', async () => {
+    const invalidToolAgent = { ...mockAgent, tools: ['gmail'] };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [invalidToolAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: invalidToolAgent },
+      },
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'gmail',
+          display_name: 'Gmail',
+          setup_type: 'oauth',
+          status: 'requires_config',
+          execution_scope_supported: false,
+        },
+      ],
+      loading: false,
+    });
+
+    render(<AgentEditor />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Selected But Unavailable')).toBeInTheDocument();
+      expect(screen.getByLabelText('Gmail')).toBeInTheDocument();
+      expect(
+        screen.getByText('Not supported for this execution scope. Uncheck it to remove it.')
+      ).toBeInTheDocument();
+    });
+  });
+
   it('displays selected agent details', () => {
     render(<AgentEditor />);
 

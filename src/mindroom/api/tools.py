@@ -108,6 +108,19 @@ def _annotate_dashboard_configuration_support(
         tool["dashboard_configuration_supported"] = supported
 
 
+def _annotate_execution_scope_support(
+    tools: list[dict[str, Any]],
+    *,
+    execution_scope: WorkerScope | None,
+) -> None:
+    """Expose whether each tool is supported for the requested execution scope."""
+    unsupported_tools = set(
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], execution_scope),
+    )
+    for tool in tools:
+        tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
+
+
 def _resolve_tool_availability_context(
     request: Request,
     *,
@@ -210,12 +223,11 @@ async def get_registered_tools(
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,
     )
-    unsupported_tools = set(
-        unsupported_shared_only_integration_names([tool["name"] for tool in tools], context.execution_scope),
-    )
-    if unsupported_tools:
-        tools = [tool for tool in tools if tool["name"] not in unsupported_tools]
     _append_config_only_presets(tools)
+    _annotate_execution_scope_support(
+        tools,
+        execution_scope=context.execution_scope,
+    )
     _annotate_dashboard_configuration_support(
         tools,
         supported=context.dashboard_configuration_supported,

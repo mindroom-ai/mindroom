@@ -44,13 +44,6 @@ import { EnhancedConfigDialog } from './EnhancedConfigDialog';
 import { FilterSelector } from '@/components/shared/FilterSelector';
 
 const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
-const SHARED_ONLY_BACKEND_TOOL_IDS = new Set([
-  'spotify',
-  'homeassistant',
-  'gmail',
-  'google_calendar',
-  'google_sheets',
-]);
 
 export function Integrations() {
   const { agents } = useConfigStore();
@@ -152,9 +145,7 @@ export function Integrations() {
 
       const backendIntegrations = backendTools
         .filter(tool => !providerIds.includes(tool.name))
-        .filter(
-          tool => !hidesSharedOnlyIntegrations || !SHARED_ONLY_BACKEND_TOOL_IDS.has(tool.name)
-        )
+        .filter(tool => !hidesSharedOnlyIntegrations || tool.execution_scope_supported !== false)
         .map(tool => {
           const mapped = mapToolToIntegration(tool);
           return {
