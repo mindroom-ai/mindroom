@@ -424,6 +424,7 @@ def _backend(
     idle_timeout_seconds: float = 60.0,
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
+    storage_path: Path | None = None,
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, bool]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -470,7 +471,7 @@ def _backend(
     backend = DockerWorkerBackend(
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_path=tmp_path if storage_path is None else storage_path,
         runtime_paths=runtime_paths,
     )
     monkeypatch.setattr(
@@ -490,11 +491,13 @@ def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) ->
 
         import yaml
 
+        from mindroom.constants import resolve_runtime_paths
         from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
         from mindroom.workers.backends.docker_projection import DockerProjectionManager
         from mindroom.workers.backends.local import local_worker_state_paths_for_root
 
         tmp_path = Path(__WORKSPACE_ROOT__)
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         config = _DockerWorkerBackendConfig(
             image="ghcr.io/mindroom-ai/mindroom:latest",
             worker_port=8766,
@@ -510,7 +513,11 @@ def _projection_signature_for_hash_seed(hash_seed: str, workspace_root: Path) ->
             extra_env={},
             extra_labels={},
         )
-        manager = DockerProjectionManager(config=config, projected_configs_root=tmp_path / "projections")
+        manager = DockerProjectionManager(
+            config=config,
+            projected_configs_root=tmp_path / "projections",
+            runtime_paths=runtime_paths,
+        )
         paths = local_worker_state_paths_for_root(tmp_path / "workers" / "worker-a")
         projection = manager.projected_config(
             paths,
@@ -590,6 +597,70 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+def test_docker_backend_projects_assets_from_runtime_storage_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected Docker assets should resolve ${MINDROOM_STORAGE_PATH} from the active runtime."""
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    plugin_root = runtime_storage / "plugins" / "runtime-plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "plugin.py").write_text("PLUGIN_VERSION = 'runtime'\n", encoding="utf-8")
+    knowledge_root = runtime_storage / "knowledge_docs"
+    knowledge_root.mkdir()
+    (knowledge_root / "guide.md").write_text("# Runtime Guide\n", encoding="utf-8")
+    context_file = runtime_storage / "context.md"
+    context_file.parent.mkdir(parents=True, exist_ok=True)
+    context_file.write_text("# Runtime Context\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=runtime_storage)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+plugins:
+  - ${MINDROOM_STORAGE_PATH}/plugins/runtime-plugin
+knowledge_bases:
+  docs:
+    path: ${MINDROOM_STORAGE_PATH}/knowledge_docs
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    context_files:
+      - ${MINDROOM_STORAGE_PATH}/context.md
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+    )
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
+
+    assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-runtime-plugin" in projected_config
+    assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
+    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    assert (projection_root / ".mindroom-worker-assets" / "plugins" / "00-runtime-plugin" / "plugin.py").read_text(
+        encoding="utf-8",
+    ) == "PLUGIN_VERSION = 'runtime'\n"
+    assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md").read_text(
+        encoding="utf-8",
+    ) == "# Runtime Guide\n"
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
+    ).read_text(encoding="utf-8") == "# Runtime Context\n"
 
 
 def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
