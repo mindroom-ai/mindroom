@@ -17,6 +17,7 @@ describe('configStore', () => {
       rooms: [],
       teamEligibilityByAgent: {},
       teamEligibilityRequestId: 0,
+      restorableWorkerScopesByAgent: {},
       selectedAgentId: null,
       selectedTeamId: null,
       selectedCultureId: null,
@@ -260,6 +261,47 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('error');
     });
+
+    it('keeps the loaded config when team eligibility derivation fails', async () => {
+      const mockConfig = {
+        agents: {
+          test: {
+            display_name: 'Test Agent',
+            role: 'Test role',
+            tools: ['calculator'],
+            skills: [],
+            instructions: ['Test instruction'],
+            rooms: ['lobby'],
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ detail: 'boom' }),
+      });
+
+      await useConfigStore.getState().loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {}, cultures: {} });
+      expect(state.teams).toEqual([]);
+      expect(state.teamEligibilityByAgent).toEqual({});
+      expect(state.editorError).toBe('Failed to derive team eligibility');
+      expect(state.error).toBeNull();
+      expect(state.syncStatus).toBe('synced');
+    });
   });
 
   describe('refreshTeamEligibility', () => {
@@ -352,10 +394,6 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ team_eligibility: { test: null } }),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
         json: async () => ({ success: true }),
       });
 
@@ -364,7 +402,8 @@ describe('configStore', () => {
 
       // The saveConfig removes the id field when saving
       const { id: _id, ...agentWithoutId } = mockAgents[0];
-      expect(global.fetch).toHaveBeenNthCalledWith(2, '/api/config/save', {
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -423,10 +462,6 @@ describe('configStore', () => {
       });
 
       (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ team_eligibility: { mind: null } }),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
         ok: false,
         status: 422,
         json: async () => ({
@@ -482,6 +517,36 @@ describe('configStore', () => {
       expect(state.agents[0].private).toEqual({ per: 'user_agent' });
     });
 
+    it('restores a legacy worker_scope when private state is disabled again', () => {
+      useConfigStore.setState({
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        ],
+        restorableWorkerScopesByAgent: {},
+      });
+
+      useConfigStore.getState().updateAgent('mind', {
+        private: { per: 'user_agent' },
+      });
+      useConfigStore.getState().updateAgent('mind', {
+        private: undefined,
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBe('user_agent');
+      expect(state.restorableWorkerScopesByAgent).toEqual({});
+    });
+
     it('defaults private knowledge path when enabling it from an empty state', () => {
       useConfigStore.setState({
         agents: [
@@ -513,7 +578,7 @@ describe('configStore', () => {
       });
     });
 
-    it('removes an edited team member when backend eligibility marks it unsupported', async () => {
+    it('keeps draft team membership when backend eligibility marks an edited agent unsupported', async () => {
       useConfigStore.setState({
         config: {
           memory: {
@@ -575,11 +640,15 @@ describe('configStore', () => {
       });
 
       await waitFor(() => {
-        expect(useConfigStore.getState().teams[0].agents).toEqual(['helper']);
+        expect(useConfigStore.getState().teams[0].agents).toEqual(['leader', 'helper']);
+        expect(useConfigStore.getState().teamEligibilityByAgent).toEqual({
+          leader: 'Private agents cannot participate in teams yet.',
+          helper: null,
+        });
       });
     });
 
-    it('removes an edited team member when delegation now reaches a private agent', async () => {
+    it('keeps draft team membership when delegation now reaches a private agent', async () => {
       useConfigStore.setState({
         config: {
           memory: {
@@ -657,7 +726,12 @@ describe('configStore', () => {
       });
 
       await waitFor(() => {
-        expect(useConfigStore.getState().teams[0].agents).toEqual(['helper']);
+        expect(useConfigStore.getState().teams[0].agents).toEqual(['leader', 'helper']);
+        expect(useConfigStore.getState().teamEligibilityByAgent).toEqual({
+          leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+          helper: null,
+          mind: 'Private agents cannot participate in teams yet.',
+        });
       });
     });
   });
@@ -1400,17 +1474,14 @@ describe('configStore', () => {
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ team_eligibility: { agent1: null } }),
-      });
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
         json: async () => ({}),
       });
 
       const { saveConfig } = useConfigStore.getState();
       await saveConfig();
 
-      expect(global.fetch).toHaveBeenNthCalledWith(2, '/api/config/save', {
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenNthCalledWith(1, '/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...mockConfig, cultures: {} }),

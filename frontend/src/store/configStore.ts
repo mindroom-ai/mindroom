@@ -8,6 +8,7 @@ import {
   KnowledgeBaseConfig,
   Culture,
   TeamEligibilityByAgent,
+  WorkerScope,
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
@@ -30,17 +31,11 @@ function unassignAgentsFromOtherCultures(
   });
 }
 
-function reconcileTeamMembers(
-  teams: Team[],
-  agents: Agent[],
-  teamEligibilityByAgent: TeamEligibilityByAgent
-): Team[] {
+function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
   const knownAgents = new Set(agents.map(agent => agent.id));
   return teams.map(team => ({
     ...team,
-    agents: team.agents.filter(
-      agentId => knownAgents.has(agentId) && teamEligibilityByAgent[agentId] == null
-    ),
+    agents: team.agents.filter(agentId => knownAgents.has(agentId)),
   }));
 }
 
@@ -63,6 +58,7 @@ interface ConfigState {
   rooms: Room[];
   teamEligibilityByAgent: TeamEligibilityByAgent;
   teamEligibilityRequestId: number;
+  restorableWorkerScopesByAgent: Record<string, WorkerScope>;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -116,6 +112,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   rooms: [],
   teamEligibilityByAgent: {},
   teamEligibilityRequestId: 0,
+  restorableWorkerScopesByAgent: {},
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -182,21 +179,26 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           model: roomModel,
         };
       });
-      const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
-
-      const reconciledTeams = reconcileTeamMembers(teams, agents, teamEligibilityByAgent);
+      let teamEligibilityByAgent: TeamEligibilityByAgent = {};
+      let editorError: string | null = null;
+      try {
+        teamEligibilityByAgent = await configService.getTeamEligibility(agents);
+      } catch (error) {
+        editorError = error instanceof Error ? error.message : 'Failed to derive team eligibility';
+      }
 
       set({
         config: normalizedConfig,
         agents,
-        teams: reconciledTeams,
+        teams,
         cultures,
         rooms,
         teamEligibilityByAgent,
+        restorableWorkerScopesByAgent: {},
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
-        editorError: null,
+        editorError,
         configValidationIssues: [],
       });
     } catch (error) {
@@ -216,15 +218,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
         return;
       }
-      set(state => ({
+      set({
         teamEligibilityByAgent,
-        teams: reconcileTeamMembers(state.teams, agents, teamEligibilityByAgent),
-      }));
+        editorError: null,
+      });
     } catch (error) {
       if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
         return;
       }
       set({
+        teamEligibilityByAgent: {},
         editorError: error instanceof Error ? error.message : 'Failed to derive team eligibility',
       });
     }
@@ -232,7 +235,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Save configuration to backend
   saveConfig: async () => {
-    const { config, agents, cultures, rooms } = get();
+    const { config, agents, teams, cultures, rooms } = get();
     if (!config) return;
 
     set({
@@ -243,9 +246,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       syncStatus: 'syncing',
     });
     try {
-      await get().refreshTeamEligibility(agents);
-      const { teams, teamEligibilityByAgent } = get();
-
       // Convert agents array back to object format
       const agentsObject = agents.reduce(
         (acc, agent) => {
@@ -276,7 +276,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const updatedConfig: Config = {
         ...config,
         agents: agentsObject,
-        teams: reconcileTeamMembers(teams, agents, teamEligibilityByAgent).reduce(
+        teams: teams.reduce(
           (acc, team) => {
             const { id, ...rest } = team;
             acc[id] = rest;
@@ -320,14 +320,48 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update an existing agent
   updateAgent: (agentId, updates) => {
-    const nextAgents = get().agents.map(agent =>
-      agent.id === agentId ? { ...agent, ...normalizeAgentUpdates(agent, updates) } : agent
-    );
-    set({
-      agents: nextAgents,
-      isDirty: true,
-      editorError: null,
-      configValidationIssues: [],
+    let nextAgents: Agent[] = [];
+    set(state => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return state;
+      }
+
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const resolvedUpdates = { ...normalizedUpdates };
+      let restorableWorkerScopesByAgent = state.restorableWorkerScopesByAgent;
+      const hasPrivateUpdate = Object.prototype.hasOwnProperty.call(updates, 'private');
+      const nextPrivate = hasPrivateUpdate ? updates.private : currentAgent.private;
+
+      if (hasPrivateUpdate && currentAgent.private == null && nextPrivate != null) {
+        if (currentAgent.worker_scope != null) {
+          restorableWorkerScopesByAgent = {
+            ...state.restorableWorkerScopesByAgent,
+            [agentId]: currentAgent.worker_scope,
+          };
+        }
+      }
+
+      if (hasPrivateUpdate && currentAgent.private != null && nextPrivate == null) {
+        const { [agentId]: restoredWorkerScope, ...remainingWorkerScopes } =
+          state.restorableWorkerScopesByAgent;
+        restorableWorkerScopesByAgent = remainingWorkerScopes;
+        if (restoredWorkerScope != null) {
+          resolvedUpdates.worker_scope = restoredWorkerScope;
+        }
+      }
+
+      nextAgents = state.agents.map(agent =>
+        agent.id === agentId ? { ...agent, ...resolvedUpdates } : agent
+      );
+
+      return {
+        agents: nextAgents,
+        restorableWorkerScopesByAgent,
+        isDirty: true,
+        editorError: null,
+        configValidationIssues: [],
+      };
     });
     if (get().config != null) {
       void get().refreshTeamEligibility(nextAgents);
@@ -376,14 +410,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const nextTeamEligibilityByAgent = Object.fromEntries(
       Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
     );
+    const { [agentId]: _removedWorkerScope, ...restorableWorkerScopesByAgent } =
+      state.restorableWorkerScopesByAgent;
     set({
       agents: nextAgents,
-      teams: reconcileTeamMembers(state.teams, nextAgents, nextTeamEligibilityByAgent),
+      teams: removeMissingTeamMembers(state.teams, nextAgents),
       cultures: state.cultures.map(culture => ({
         ...culture,
         agents: culture.agents.filter(id => id !== agentId),
       })),
       teamEligibilityByAgent: nextTeamEligibilityByAgent,
+      restorableWorkerScopesByAgent,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
       editorError: null,

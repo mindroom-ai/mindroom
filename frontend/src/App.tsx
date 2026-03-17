@@ -91,6 +91,7 @@ function AppContent() {
     loadConfig,
     syncStatus,
     error,
+    editorError,
     selectedAgentId,
     selectedTeamId,
     selectedCultureId,
@@ -305,6 +306,12 @@ function AppContent() {
             </div>
           </div>
         </header>
+
+        {editorError && (
+          <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive sm:px-6">
+            {editorError}
+          </div>
+        )}
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">

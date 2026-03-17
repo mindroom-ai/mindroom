@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
 import { useConfigStore } from '@/store/configStore';
 import { Agent, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
+import { useTools } from '@/hooks/useTools';
 
 // Mock the store
 vi.mock('@/store/configStore', () => ({
@@ -114,11 +115,40 @@ describe('AgentEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue(mockStore);
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'calculator',
+          display_name: 'Calculator',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'delegate',
+          display_name: 'Agent Delegation',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'file',
+          display_name: 'File',
+          setup_type: 'none',
+          status: 'available',
+        },
+      ],
+      loading: false,
+    });
   });
 
   it('renders without infinite loops', () => {
     const { container } = render(<AgentEditor />);
     expect(container).toBeTruthy();
+  });
+
+  it('requests agent-scoped tools for the selected agent', () => {
+    render(<AgentEditor />);
+
+    expect(useTools).toHaveBeenCalledWith('test_agent');
   });
 
   it('displays selected agent details', () => {

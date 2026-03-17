@@ -116,6 +116,8 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: false,
+      editorError: null,
+      configValidationIssues: [],
     });
   });
 
@@ -141,6 +143,8 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: {},
       config: mockConfig,
       isDirty: false,
+      editorError: null,
+      configValidationIssues: [],
     });
 
     render(<TeamEditor />);
@@ -355,6 +359,8 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
+      editorError: null,
+      configValidationIssues: [],
     });
 
     render(<TeamEditor />);
@@ -396,11 +402,49 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
+      editorError: null,
+      configValidationIssues: [],
     });
 
     render(<TeamEditor />);
 
     const saveButton = screen.getByRole('button', { name: /Save/i });
     expect(saveButton).not.toBeDisabled();
+  });
+
+  it('renders save diagnostics for team validation failures', () => {
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      config: mockConfig,
+      isDirty: true,
+      editorError: 'Configuration validation failed',
+      configValidationIssues: [
+        {
+          loc: ['teams', 'dev_team', 'agents'],
+          msg: 'Team members cannot include private agents.',
+          type: 'value_error',
+        },
+      ],
+    });
+
+    render(<TeamEditor />);
+
+    expect(screen.getByText('Configuration validation failed')).toBeInTheDocument();
+    expect(screen.getByText('Team members cannot include private agents.')).toBeInTheDocument();
   });
 });

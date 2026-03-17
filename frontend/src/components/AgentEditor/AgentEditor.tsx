@@ -65,7 +65,7 @@ export function AgentEditor() {
   );
 
   // Fetch tools and skills from backend
-  const { tools: backendTools, loading: toolsLoading } = useTools();
+  const { tools: backendTools, loading: toolsLoading } = useTools(selectedAgentId);
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
   // Split tools into configured and unconfigured (but usable) categories
