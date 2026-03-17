@@ -251,35 +251,41 @@ class TestCredentialsAPI:
         self,
         client: TestClient,
     ) -> None:
-        """An explicit dashboard override must win over persisted shared config."""
+        """Credential management must reject draft-only execution-scope overrides."""
         config = _config_with_worker_scope(None)
 
         with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get("/api/credentials/google?agent_name=general&execution_scope=user")
 
-        assert response.status_code == 400
+        assert response.status_code == 409
+        assert "Save the configuration before managing credentials" in response.json()["detail"]
         assert "execution_scope=user" in response.json()["detail"]
 
-    def test_unscoped_execution_scope_override_does_not_fall_back_to_saved_scope(
+    def test_execution_scope_override_rejects_draft_unscoped_scope(
         self,
         client: TestClient,
-        mock_credentials_manager: MagicMock,
     ) -> None:
-        """Explicit unscoped dashboard overrides must bypass saved worker scope."""
+        """Credential management must reject draft unscoped overrides too."""
         config = _config_with_worker_scope("shared")
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-test-long-key-value",
-            "_source": "ui",
-        }
 
         with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
             response = client.get(
                 "/api/credentials/openai/api-key?agent_name=general&execution_scope=unscoped",
             )
 
-        assert response.status_code == 200
-        assert response.json()["has_key"] is True
-        mock_credentials_manager.for_worker.assert_not_called()
+        assert response.status_code == 409
+        assert "execution_scope=unscoped" in response.json()["detail"]
+        assert "Persisted scope is worker_scope=shared" in response.json()["detail"]
+
+    def test_unknown_agent_rejected_for_dashboard_credentials(self, client: TestClient) -> None:
+        """Dashboard credentials must reject unknown agents instead of falling back to shared state."""
+        config = _config_with_worker_scope("shared")
+
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/openai/api-key?agent_name=missing")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Unknown agent: missing"
 
     def test_shared_agent_name_does_not_merge_global_ui_credentials(
         self,

@@ -735,8 +735,10 @@ def test_get_tools_execution_scope_override_marks_backend_tools_unsupported(
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=user")
 
     assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
+    assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
     assert "calculator" in tools_by_name
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
 
@@ -775,10 +777,22 @@ def test_get_tools_explicit_unscoped_override_does_not_fall_back_to_saved_scope(
         response = test_client.get("/api/tools/?agent_name=general&execution_scope=unscoped")
 
     assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
     tools_by_name = {tool["name"]: tool for tool in response.json()["tools"]}
     assert "homeassistant" in tools_by_name
     assert "calculator" in tools_by_name
-    assert tools_by_name["homeassistant"]["execution_scope_supported"] is True
+    assert tools_by_name["homeassistant"]["dashboard_configuration_supported"] is False
+
+
+def test_get_tools_unknown_agent_rejected(test_client: TestClient) -> None:
+    """Tool preview should reject unknown agents instead of falling back to shared state."""
+    config = _config_with_worker_scope("shared")
+
+    with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+        response = test_client.get("/api/tools/?agent_name=missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Unknown agent: missing"
 
 
 def test_get_tools_marks_env_backed_scoped_tools_available(test_client: TestClient) -> None:
@@ -948,73 +962,23 @@ def test_google_connect_uses_pending_oauth_state(
     assert issued_state["state"] != "general"
 
 
-def test_google_oauth_callback_preserves_execution_scope_override(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Google callback should reuse the connect-time execution_scope override."""
+def test_google_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
+    """Google connect must reject draft-only execution-scope overrides."""
     config = _config_with_worker_scope("user")
-    issued_state: dict[str, str] = {}
-
-    class _FakeFlow:
-        def authorization_url(
-            self,
-            *,
-            access_type: str,
-            include_granted_scopes: str,
-            prompt: str,
-            state: str,
-        ) -> tuple[str, str]:
-            assert access_type == "offline"
-            assert include_granted_scopes == "true"
-            assert prompt == "consent"
-            issued_state["state"] = state
-            return ("https://accounts.google.test/o/oauth2/auth", "ignored")
-
-        def fetch_token(self, code: str) -> None:
-            assert code == "test-code"
-            self.credentials = object()
-
-    class _FakeFlowFactory:
-        @staticmethod
-        def from_client_config(
-            client_config: object,
-            *,
-            scopes: list[str],
-            redirect_uri: str,
-        ) -> _FakeFlow:
-            assert client_config
-            assert scopes
-            assert redirect_uri
-            return _FakeFlow()
-
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._get_oauth_credentials",
-        lambda _runtime_paths: {"web": {"client_id": "client-id", "client_secret": "client-secret"}},
-    )
-    monkeypatch.setattr(
-        "mindroom.api.google_integration._ensure_google_packages",
-        lambda _runtime_paths: (object, object, _FakeFlowFactory),
-    )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
     with (
+        patch(
+            "mindroom.api.google_integration._get_oauth_credentials",
+            return_value={"web": {"client_id": "client-id", "client_secret": "client-secret"}},
+        ),
         patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.google_integration._save_credentials") as mock_save_credentials,
     ):
         connect_response = api_key_client.post("/api/google/connect?agent_name=general&execution_scope=shared")
-        assert connect_response.status_code == 200
-
-        callback_response = api_key_client.get(
-            f"/api/google/callback?code=test-code&state={issued_state['state']}",
-            follow_redirects=False,
-        )
-
-    assert callback_response.status_code in {302, 307}
-    mock_save_credentials.assert_called_once()
-    target = mock_save_credentials.call_args.args[1]
-    assert target.worker_scope == "shared"
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
 def test_google_configure_writes_runtime_env_file_and_refreshes_runtime(
@@ -1307,31 +1271,16 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     )
 
 
-def test_homeassistant_oauth_callback_preserves_execution_scope_override(
+def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
-    """Home Assistant callback should reuse the connect-time execution_scope override."""
+    """Home Assistant connect must reject draft-only execution-scope overrides."""
     config = _config_with_worker_scope("user")
-    base_manager = MagicMock()
-    worker_manager = MagicMock()
-    base_manager.for_worker.return_value = worker_manager
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
-    token_response = MagicMock()
-    token_response.status_code = 200
-    token_response.json.return_value = {
-        "access_token": "ha-access",
-        "refresh_token": "ha-refresh",
-        "expires_in": 3600,
-    }
-    async_client = MagicMock()
-    async_client.__aenter__.return_value.post.return_value = token_response
-
     with (
         patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.credentials.get_runtime_credentials_manager", return_value=base_manager),
-        patch("mindroom.api.homeassistant_integration.httpx.AsyncClient", return_value=async_client),
     ):
         connect_response = api_key_client.post(
             "/api/homeassistant/connect/oauth?agent_name=general&execution_scope=shared",
@@ -1340,27 +1289,9 @@ def test_homeassistant_oauth_callback_preserves_execution_scope_override(
                 "client_id": "client-id",
             },
         )
-        assert connect_response.status_code == 200
-        state = parse_qs(urlparse(connect_response.json()["auth_url"]).query)["state"][0]
-
-        callback_response = api_key_client.get(
-            f"/api/homeassistant/callback?code=test-code&state={state}",
-            follow_redirects=False,
-        )
-
-    assert callback_response.status_code in {302, 307}
-    worker_manager.save_credentials.assert_called_once_with(
-        "homeassistant",
-        {
-            "instance_url": "http://homeassistant.local:8123",
-            "client_id": "client-id",
-            "access_token": "ha-access",
-            "refresh_token": "ha-refresh",
-            "expires_in": 3600,
-            "_source": "ui",
-        },
-    )
-    base_manager.save_credentials.assert_not_called()
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
 def test_spotify_connect_uses_pending_oauth_state(
@@ -1419,36 +1350,9 @@ def test_spotify_connect_uses_pending_oauth_state(
     assert issued_state["state"] != "general"
 
 
-def test_spotify_oauth_callback_preserves_execution_scope_override(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Spotify callback should reuse the connect-time execution_scope override."""
+def test_spotify_connect_rejects_draft_execution_scope_override(api_key_client: TestClient) -> None:
+    """Spotify connect must reject draft-only execution-scope overrides."""
     config = _config_with_worker_scope("user")
-    base_manager = MagicMock()
-    worker_manager = MagicMock()
-    base_manager.for_worker.return_value = worker_manager
-    issued_state: dict[str, str] = {}
-
-    class _FakeSpotifyOAuth:
-        def get_authorize_url(self, state: str | None = None) -> str:
-            issued_state["state"] = state or ""
-            return "https://accounts.spotify.test/authorize"
-
-        def get_access_token(self, code: str) -> dict[str, Any]:
-            assert code == "test-code"
-            return {
-                "access_token": "spotify-access",
-                "refresh_token": "spotify-refresh",
-                "expires_at": 12345,
-            }
-
-    class _FakeSpotify:
-        def __init__(self, *, auth: str) -> None:
-            assert auth == "spotify-access"
-
-        def current_user(self) -> dict[str, str]:
-            return {"display_name": "Spotify User"}
 
     main.initialize_api_app(
         main.app,
@@ -1473,43 +1377,18 @@ def test_spotify_oauth_callback_preserves_execution_scope_override(
         ),
         supabase_auth=None,
     )
-
-    def _spotify_oauth_factory(**_kwargs: object) -> _FakeSpotifyOAuth:
-        return _FakeSpotifyOAuth()
-
-    monkeypatch.setattr(
-        "mindroom.api.integrations._ensure_spotify_packages",
-        lambda _runtime_paths: (_FakeSpotify, _spotify_oauth_factory),
-    )
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
     with (
         patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))),
-        patch("mindroom.api.credentials.get_runtime_credentials_manager", return_value=base_manager),
     ):
         connect_response = api_key_client.post(
             "/api/integrations/spotify/connect?agent_name=general&execution_scope=shared",
         )
-        assert connect_response.status_code == 200
-
-        callback_response = api_key_client.get(
-            f"/api/integrations/spotify/callback?code=test-code&state={issued_state['state']}",
-            follow_redirects=False,
-        )
-
-    assert callback_response.status_code in {302, 307}
-    worker_manager.save_credentials.assert_called_once_with(
-        "spotify",
-        {
-            "access_token": "spotify-access",
-            "refresh_token": "spotify-refresh",
-            "expires_at": 12345,
-            "username": "Spotify User",
-            "_source": "ui",
-        },
-    )
-    base_manager.save_credentials.assert_not_called()
+    assert connect_response.status_code == 409
+    assert "Save the configuration before managing credentials" in connect_response.json()["detail"]
+    assert "execution_scope=shared" in connect_response.json()["detail"]
 
 
 def test_spotify_status_rejects_isolating_worker_scope(test_client: TestClient) -> None:

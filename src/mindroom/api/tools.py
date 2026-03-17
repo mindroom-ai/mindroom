@@ -13,7 +13,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     build_dashboard_execution_identity,
     dashboard_supports_worker_credentials,
-    resolve_dashboard_agent_execution_scope,
+    resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
 from mindroom.api.google_tools_helper import check_google_tool_configured
@@ -155,33 +155,37 @@ def _resolve_tool_availability_context(
     """Resolve one tool-availability context from persisted config plus optional draft override."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    execution_scope = resolve_dashboard_agent_execution_scope(
+    scope_request = resolve_dashboard_agent_execution_scope_request(
         config=config,
         agent_name=agent_name,
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,
+        allow_draft_override=True,
     )
+    execution_scope = scope_request.requested_execution_scope
 
     runtime_paths = api_runtime_paths(request)
-    status_authoritative = dashboard_supports_worker_credentials(execution_scope)
+    status_authoritative = not scope_request.draft_scope_preview and dashboard_supports_worker_credentials(
+        execution_scope,
+    )
     execution_identity = (
-        build_dashboard_execution_identity(request, agent_name)
-        if status_authoritative and agent_name is not None and execution_scope is not None
+        build_dashboard_execution_identity(request, scope_request.agent_name)
+        if status_authoritative and scope_request.agent_name is not None and execution_scope is not None
         else None
     )
     worker_target = (
         build_worker_target_from_runtime_env(
             execution_scope,
-            agent_name,
+            scope_request.agent_name,
             execution_identity=execution_identity,
             runtime_paths=runtime_paths,
         )
-        if status_authoritative and (agent_name is not None or execution_scope is not None)
+        if status_authoritative and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
-        dashboard_configuration_supported=dashboard_supports_worker_credentials(execution_scope),
+        dashboard_configuration_supported=status_authoritative,
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,

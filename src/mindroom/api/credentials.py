@@ -73,6 +73,17 @@ class RequestCredentialsTarget:
     execution_identity: ToolExecutionIdentity | None
 
 
+@dataclass(frozen=True)
+class DashboardAgentExecutionScopeResolution:
+    """Resolved dashboard scope request for one agent selection."""
+
+    agent_name: str | None
+    persisted_execution_scope: WorkerScope | None
+    requested_execution_scope: WorkerScope | None
+    execution_scope_override_provided: bool
+    draft_scope_preview: bool
+
+
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
     auth_user = request.scope.get("auth_user")
     return auth_user if isinstance(auth_user, dict) else None
@@ -214,24 +225,62 @@ def resolve_dashboard_execution_scope_override(
     )
 
 
-def resolve_dashboard_agent_execution_scope(
+def resolve_dashboard_agent_execution_scope_request(
     *,
     config: Config,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
-) -> WorkerScope | None:
-    """Return the dashboard's effective execution scope for one agent selection.
+    allow_draft_override: bool,
+) -> DashboardAgentExecutionScopeResolution:
+    """Resolve one dashboard execution-scope request against persisted agent config.
 
-    This resolves the internal derived execution scope, not the authored config field.
-    `worker_scope` remains a shared-agent config knob, while private agents derive the
-    same runtime concept from `private.per`.
+    Tools may preview draft execution scopes, but persistent credential writes must
+    stay bound to the saved config. This helper keeps that policy in one place.
     """
-    if execution_scope_override_provided:
-        return execution_scope_override
-    if agent_name is None or agent_name not in config.agents:
-        return None
-    return config.get_agent_execution_scope(agent_name)
+    if agent_name is None:
+        if execution_scope_override_provided:
+            raise HTTPException(
+                status_code=400,
+                detail="Query parameter 'execution_scope' requires agent_name on the dashboard API.",
+            )
+        return DashboardAgentExecutionScopeResolution(
+            agent_name=None,
+            persisted_execution_scope=None,
+            requested_execution_scope=None,
+            execution_scope_override_provided=False,
+            draft_scope_preview=False,
+        )
+
+    if agent_name not in config.agents:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+
+    persisted_execution_scope = config.get_agent_execution_scope(agent_name)
+    requested_execution_scope = (
+        execution_scope_override if execution_scope_override_provided else persisted_execution_scope
+    )
+    draft_scope_preview = execution_scope_override_provided and requested_execution_scope != persisted_execution_scope
+    if draft_scope_preview and not allow_draft_override:
+        requested_scope_label = _dashboard_scope_label(
+            config_labeled_scope=config.get_agent_scope_label(agent_name),
+            execution_scope=requested_execution_scope,
+            execution_scope_override_provided=True,
+        )
+        persisted_scope_label = config.get_agent_scope_label(agent_name) or "execution_scope=unscoped"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Save the configuration before managing credentials for agent '{agent_name}' with "
+                f"{requested_scope_label}. Persisted scope is {persisted_scope_label}."
+            ),
+        )
+    return DashboardAgentExecutionScopeResolution(
+        agent_name=agent_name,
+        persisted_execution_scope=persisted_execution_scope,
+        requested_execution_scope=requested_execution_scope,
+        execution_scope_override_provided=execution_scope_override_provided,
+        draft_scope_preview=draft_scope_preview,
+    )
 
 
 def _reject_raw_worker_targeting(request: Request) -> None:
@@ -267,12 +316,15 @@ def resolve_request_credentials_target(
             request,
         )
 
-    if not agent_name:
-        if execution_scope_override_provided:
-            raise HTTPException(
-                status_code=400,
-                detail="Query parameter 'execution_scope' requires agent_name on the dashboard credentials API.",
-            )
+    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
+    scope_request = resolve_dashboard_agent_execution_scope_request(
+        config=config,
+        agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
+        allow_draft_override=False,
+    )
+    if scope_request.agent_name is None:
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
@@ -280,35 +332,28 @@ def resolve_request_credentials_target(
             agent_name=None,
             execution_identity=None,
         )
-
-    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
-    if agent_name not in config.agents:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
-
-    execution_scope = resolve_dashboard_agent_execution_scope(
-        config=config,
-        agent_name=agent_name,
-        execution_scope_override_provided=execution_scope_override_provided,
-        execution_scope_override=execution_scope_override,
-    )
+    execution_scope = scope_request.requested_execution_scope
     if execution_scope is None:
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
-            agent_name=agent_name,
+            agent_name=scope_request.agent_name,
             execution_identity=None,
         )
 
     scope_label = _dashboard_scope_label(
-        config_labeled_scope=config.get_agent_scope_label(agent_name),
+        config_labeled_scope=config.get_agent_scope_label(scope_request.agent_name),
         execution_scope=execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
     )
     if not dashboard_supports_worker_credentials(execution_scope):
         raise HTTPException(
             status_code=400,
-            detail=(f"Dashboard credential management does not support {scope_label} for agent '{agent_name}'."),
+            detail=(
+                f"Dashboard credential management does not support {scope_label} "
+                f"for agent '{scope_request.agent_name}'."
+            ),
         )
 
     unsupported_services = unsupported_shared_only_integration_names(list(service_names), execution_scope)
@@ -318,23 +363,23 @@ def resolve_request_credentials_target(
             detail=unsupported_shared_only_integration_message(
                 unsupported_services[0],
                 execution_scope,
-                agent_name=agent_name,
+                agent_name=scope_request.agent_name,
                 scope_label=scope_label,
             ),
         )
 
-    execution_identity = build_dashboard_execution_identity(request, agent_name)
+    execution_identity = build_dashboard_execution_identity(request, scope_request.agent_name)
     worker_key = require_worker_key_for_scope(
         execution_scope,
         execution_identity=execution_identity,
-        agent_name=agent_name,
-        failure_message=f"Could not resolve worker credentials for agent '{agent_name}'.",
+        agent_name=scope_request.agent_name,
+        failure_message=f"Could not resolve worker credentials for agent '{scope_request.agent_name}'.",
     )
     return RequestCredentialsTarget(
         base_manager=base_manager,
         target_manager=base_manager.for_worker(worker_key),
         worker_scope=execution_scope,
-        agent_name=agent_name,
+        agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
     )
 
