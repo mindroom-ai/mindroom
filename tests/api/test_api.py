@@ -1532,6 +1532,48 @@ def test_get_teams_empty(test_client: TestClient) -> None:
     assert len(teams) == 0
 
 
+def test_team_eligibility_endpoint_uses_backend_policy(test_client: TestClient) -> None:
+    """Draft team eligibility should come from the backend delegation/private policy."""
+    response = test_client.post(
+        "/api/config/team-eligibility",
+        json={
+            "agents": {
+                "helper": {
+                    "display_name": "Helper",
+                    "role": "Helps",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                },
+                "leader": {
+                    "display_name": "Leader",
+                    "role": "Leads",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                    "delegate_to": ["mind"],
+                },
+                "mind": {
+                    "display_name": "Mind",
+                    "role": "Private",
+                    "tools": [],
+                    "instructions": [],
+                    "rooms": ["lobby"],
+                    "private": {"per": "user"},
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "team_eligibility": {
+            "helper": None,
+            "leader": "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+            "mind": "Private agents cannot participate in teams yet.",
+        },
+    }
+
+
 def test_create_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test creating a new team."""
     test_client.post("/api/config/load")

@@ -4,6 +4,7 @@ export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
 export type WorkerScope = 'shared' | 'user' | 'user_agent';
 export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
+export type TeamEligibilityByAgent = Record<string, string | null>;
 export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = 'memory';
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
 
@@ -278,69 +279,4 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
   }
 
   return normalizedUpdates;
-}
-
-function getAgentById(agents: readonly Agent[], agentId: string): Agent | undefined {
-  return agents.find(agent => agent.id === agentId);
-}
-
-function getAgentDelegationClosure(
-  agentId: string,
-  agents: readonly Agent[],
-  closures: Map<string, ReadonlySet<string>>,
-  visiting: ReadonlySet<string> = new Set()
-): ReadonlySet<string> {
-  const cached = closures.get(agentId);
-  if (cached != null) {
-    return cached;
-  }
-  if (visiting.has(agentId)) {
-    return new Set();
-  }
-
-  const agent = getAgentById(agents, agentId);
-  if (agent == null) {
-    const result = new Set([agentId]);
-    closures.set(agentId, result);
-    return result;
-  }
-
-  const reachable = new Set<string>([agentId]);
-  const nextVisiting = new Set(visiting);
-  nextVisiting.add(agentId);
-
-  for (const targetId of agent.delegate_to ?? []) {
-    for (const target of getAgentDelegationClosure(targetId, agents, closures, nextVisiting)) {
-      reachable.add(target);
-    }
-  }
-
-  closures.set(agentId, reachable);
-  return reachable;
-}
-
-export function getPrivateTeamTargets(agentId: string, agents: readonly Agent[]): string[] {
-  const closures = new Map<string, ReadonlySet<string>>();
-  return [...getAgentDelegationClosure(agentId, agents, closures)]
-    .filter(targetId => {
-      const targetAgent = getAgentById(agents, targetId);
-      return targetAgent?.private != null;
-    })
-    .sort();
-}
-
-export function getTeamEligibilityReason(agentId: string, agents: readonly Agent[]): string | null {
-  const privateTargets = getPrivateTeamTargets(agentId, agents);
-  if (privateTargets.length === 0) {
-    return null;
-  }
-  if (privateTargets.includes(agentId)) {
-    return 'Private agents cannot participate in teams yet.';
-  }
-  if (privateTargets.length === 1) {
-    return `Delegates to private agent '${privateTargets[0]}', so it cannot participate in teams yet.`;
-  }
-  return `Delegates to private agents ${privateTargets
-    .map(target => `'${target}'`)
-    .join(', ')}, so it cannot participate in teams yet.`;
 }

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TeamEditor } from './TeamEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Team, Agent, Config } from '@/types/config';
+import { Team, Agent, Config, TeamEligibilityByAgent } from '@/types/config';
 
 // Mock the store
 vi.mock('@/store/configStore');
@@ -79,6 +79,14 @@ describe('TeamEditor', () => {
   const mockUpdateTeam = vi.fn();
   const mockDeleteTeam = vi.fn();
   const mockSaveConfig = vi.fn();
+  const mockRefreshTeamEligibility = vi.fn().mockResolvedValue(undefined);
+  const mockTeamEligibilityByAgent: TeamEligibilityByAgent = {
+    code: null,
+    shell: null,
+    research: null,
+    leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+    mind: 'Private agents cannot participate in teams yet.',
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -104,6 +112,8 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: false,
     });
@@ -115,6 +125,7 @@ describe('TeamEditor', () => {
     expect(screen.getByDisplayValue('Dev Team')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Development team for coding tasks')).toBeInTheDocument();
     expect(screen.getByText('Team Details')).toBeInTheDocument();
+    expect(mockRefreshTeamEligibility).toHaveBeenCalledWith(mockAgents);
   });
 
   it('shows placeholder when no team is selected', () => {
@@ -126,6 +137,8 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: {},
       config: mockConfig,
       isDirty: false,
     });
@@ -338,6 +351,8 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
     });
@@ -377,6 +392,8 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
+      refreshTeamEligibility: mockRefreshTeamEligibility,
+      teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
     });

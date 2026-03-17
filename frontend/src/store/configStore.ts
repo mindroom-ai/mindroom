@@ -7,6 +7,7 @@ import {
   ModelConfig,
   KnowledgeBaseConfig,
   Culture,
+  TeamEligibilityByAgent,
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
@@ -45,6 +46,8 @@ interface ConfigState {
   teams: Team[];
   cultures: Culture[];
   rooms: Room[];
+  teamEligibilityByAgent: TeamEligibilityByAgent;
+  teamEligibilityRequestId: number;
   selectedAgentId: string | null;
   selectedTeamId: string | null;
   selectedCultureId: string | null;
@@ -57,6 +60,7 @@ interface ConfigState {
   // Actions
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<void>;
+  refreshTeamEligibility: (agents: Agent[]) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
   createAgent: (agent: Omit<Agent, 'id'>) => void;
@@ -93,6 +97,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   teams: [],
   cultures: [],
   rooms: [],
+  teamEligibilityByAgent: {},
+  teamEligibilityRequestId: 0,
   selectedAgentId: null,
   selectedTeamId: null,
   selectedCultureId: null,
@@ -157,6 +163,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           model: roomModel,
         };
       });
+      const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
 
       set({
         config: normalizedConfig,
@@ -164,6 +171,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         teams,
         cultures,
         rooms,
+        teamEligibilityByAgent,
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
@@ -173,6 +181,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         error: error instanceof Error ? error.message : 'Failed to load config',
         isLoading: false,
         syncStatus: 'error',
+      });
+    }
+  },
+
+  refreshTeamEligibility: async agents => {
+    const teamEligibilityRequestId = get().teamEligibilityRequestId + 1;
+    set({ teamEligibilityRequestId });
+    try {
+      const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
+      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+        return;
+      }
+      set({ teamEligibilityByAgent });
+    } catch (error) {
+      if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
+        return;
+      }
+      set({
+        error: error instanceof Error ? error.message : 'Failed to derive team eligibility',
       });
     }
   },

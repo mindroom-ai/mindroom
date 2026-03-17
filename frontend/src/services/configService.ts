@@ -1,4 +1,4 @@
-import { Config } from '@/types/config';
+import { Agent, Config, TeamEligibilityByAgent } from '@/types/config';
 
 const API_BASE = '/api';
 
@@ -21,6 +21,32 @@ export async function loadConfig(): Promise<Config> {
   }
 
   return response.json();
+}
+
+export async function getTeamEligibility(agents: Agent[]): Promise<TeamEligibilityByAgent> {
+  const agentsObject = agents.reduce(
+    (acc, agent) => {
+      const { id, ...rest } = agent;
+      acc[id] = rest;
+      return acc;
+    },
+    {} as Record<string, Omit<Agent, 'id'>>
+  );
+
+  const response = await fetch(`${API_BASE}/config/team-eligibility`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ agents: agentsObject }),
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to derive team eligibility');
+  }
+
+  const payload = (await response.json()) as { team_eligibility: TeamEligibilityByAgent };
+  return payload.team_eligibility;
 }
 
 export async function saveConfig(config: Config): Promise<void> {

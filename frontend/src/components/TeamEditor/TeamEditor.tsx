@@ -14,7 +14,7 @@ import {
 import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
-import { Team, getTeamEligibilityReason } from '@/types/config';
+import { Team } from '@/types/config';
 
 export function TeamEditor() {
   const {
@@ -25,6 +25,8 @@ export function TeamEditor() {
     updateTeam,
     deleteTeam,
     saveConfig,
+    refreshTeamEligibility,
+    teamEligibilityByAgent,
     config,
     isDirty,
     selectTeam,
@@ -55,6 +57,10 @@ export function TeamEditor() {
       reset(selectedTeam);
     }
   }, [selectedTeam, reset]);
+
+  useEffect(() => {
+    void refreshTeamEligibility(agents);
+  }, [agents, refreshTeamEligibility]);
 
   // Create a debounced update function
   const handleFieldChange = useCallback(
@@ -214,7 +220,7 @@ export function TeamEditor() {
               control={control}
               render={({ field }) => {
                 const isChecked = field.value.includes(agent.id);
-                const eligibilityReason = getTeamEligibilityReason(agent.id, agents);
+                const eligibilityReason = teamEligibilityByAgent[agent.id] ?? null;
                 const isSelectable = eligibilityReason == null;
                 return (
                   <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">

@@ -5,12 +5,12 @@ from __future__ import annotations
 import re
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
@@ -33,6 +33,8 @@ from mindroom.matrix.identity import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -120,6 +122,164 @@ def _normalized_config_data(data: object) -> object:
     normalized_data = cast("dict[str, object]", data.copy())
     _normalize_optional_config_sections(normalized_data)
     return normalized_data
+
+
+def _agent_delegation_targets(agent_data: AgentConfig | Mapping[str, Any] | None) -> tuple[str, ...]:
+    if agent_data is None:
+        return ()
+    if isinstance(agent_data, AgentConfig):
+        return tuple(agent_data.delegate_to)
+    raw_delegate_to = agent_data.get("delegate_to")
+    if not isinstance(raw_delegate_to, list | tuple):
+        return ()
+    return tuple(target for target in raw_delegate_to if isinstance(target, str))
+
+
+def _agent_is_private(agent_data: AgentConfig | Mapping[str, Any] | None) -> bool:
+    if agent_data is None:
+        return False
+    if isinstance(agent_data, AgentConfig):
+        return agent_data.private is not None
+    return agent_data.get("private") is not None
+
+
+def _get_agent_delegation_closure_for_agents(
+    agent_name: str,
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+    visiting: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """Return one agent plus all agents reachable through transitive delegation."""
+    if closures is None:
+        closures = {}
+    if agent_name in closures:
+        return closures[agent_name]
+    if agent_name in visiting:
+        return frozenset()
+
+    agent_data = agents.get(agent_name)
+    if agent_data is None or agent_name == ROUTER_AGENT_NAME:
+        result = frozenset({agent_name})
+        closures[agent_name] = result
+        return result
+
+    reachable = {agent_name}
+    next_visiting = visiting | {agent_name}
+    for target_name in _agent_delegation_targets(agent_data):
+        reachable.update(
+            _get_agent_delegation_closure_for_agents(
+                target_name,
+                agents,
+                closures=closures,
+                visiting=next_visiting,
+            ),
+        )
+
+    result = frozenset(reachable)
+    closures[agent_name] = result
+    return result
+
+
+def _get_private_team_targets_for_agents(
+    agent_name: str,
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+) -> tuple[str, ...]:
+    """Return private agents reachable from one team member, including itself."""
+    closure_cache = closures if closures is not None else {}
+    return tuple(
+        sorted(
+            target_name
+            for target_name in _get_agent_delegation_closure_for_agents(
+                agent_name,
+                agents,
+                closures=closure_cache,
+            )
+            if _agent_is_private(agents.get(target_name))
+        ),
+    )
+
+
+def _get_unsupported_team_agents_for_agents(
+    agent_names: list[str],
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+    *,
+    closures: dict[str, frozenset[str]] | None = None,
+) -> dict[str, tuple[str, ...] | None]:
+    """Return unsupported team members keyed by agent name."""
+    closure_cache = closures if closures is not None else {}
+    unsupported_agents: dict[str, tuple[str, ...] | None] = {}
+    for agent_name in agent_names:
+        if agent_name not in agents:
+            unsupported_agents[agent_name] = None
+            continue
+        private_targets = _get_private_team_targets_for_agents(agent_name, agents, closures=closure_cache)
+        if private_targets:
+            unsupported_agents[agent_name] = private_targets
+    return unsupported_agents
+
+
+def team_agent_eligibility_reason(
+    agent_name: str,
+    *,
+    private_targets: tuple[str, ...] | None,
+) -> str | None:
+    """Return the concise editor-facing team-eligibility reason for one agent."""
+    if private_targets is None:
+        return f"Unknown agent '{agent_name}'."
+    if not private_targets:
+        return None
+    if agent_name in private_targets:
+        return "Private agents cannot participate in teams yet."
+    if len(private_targets) == 1:
+        return f"Delegates to private agent '{private_targets[0]}', so it cannot participate in teams yet."
+    return (
+        "Delegates to private agents "
+        f"{', '.join(repr(target) for target in private_targets)}, so it cannot participate in teams yet."
+    )
+
+
+def _format_unsupported_team_agent_message(
+    agent_name: str,
+    *,
+    prefix: str,
+    private_targets: tuple[str, ...] | None,
+) -> str:
+    """Return the user-facing error for one unsupported team member."""
+    if private_targets is None:
+        return f"{prefix} references unknown agent '{agent_name}'"
+    if agent_name in private_targets:
+        return f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
+    if len(private_targets) == 1:
+        return (
+            f"{prefix} includes agent '{agent_name}' which reaches private agent "
+            f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
+        )
+    return (
+        f"{prefix} includes agent '{agent_name}' which reaches private agents "
+        f"{', '.join(repr(target) for target in private_targets)} via delegation; "
+        "private agents cannot participate in teams yet"
+    )
+
+
+def team_eligibility_reasons_for_agents(
+    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Return editor-facing team-eligibility reasons for all configured agents."""
+    closure_cache: dict[str, frozenset[str]] = {}
+    return {
+        agent_name: team_agent_eligibility_reason(
+            agent_name,
+            private_targets=_get_private_team_targets_for_agents(
+                agent_name,
+                agents,
+                closures=closure_cache,
+            ),
+        )
+        for agent_name in agents
+    }
 
 
 def _relative_paths_overlap(left: Path, right: Path) -> bool:
@@ -674,33 +834,12 @@ class Config(BaseModel):
         visiting: frozenset[str] = frozenset(),
     ) -> frozenset[str]:
         """Return one agent plus all agents reachable through transitive delegation."""
-        if closures is None:
-            closures = {}
-        if agent_name in closures:
-            return closures[agent_name]
-        if agent_name in visiting:
-            return frozenset()
-
-        agent_config = self.agents.get(agent_name)
-        if agent_config is None or agent_name == ROUTER_AGENT_NAME:
-            result = frozenset({agent_name})
-            closures[agent_name] = result
-            return result
-
-        reachable = {agent_name}
-        next_visiting = visiting | {agent_name}
-        for target_name in agent_config.delegate_to:
-            reachable.update(
-                self.get_agent_delegation_closure(
-                    target_name,
-                    closures=closures,
-                    visiting=next_visiting,
-                ),
-            )
-
-        result = frozenset(reachable)
-        closures[agent_name] = result
-        return result
+        return _get_agent_delegation_closure_for_agents(
+            agent_name,
+            self.agents,
+            closures=closures,
+            visiting=visiting,
+        )
 
     def get_private_team_targets(
         self,
@@ -709,14 +848,7 @@ class Config(BaseModel):
         closures: dict[str, frozenset[str]] | None = None,
     ) -> tuple[str, ...]:
         """Return private agents reachable from one team member, including itself."""
-        closure_cache = closures if closures is not None else {}
-        return tuple(
-            sorted(
-                target_name
-                for target_name in self.get_agent_delegation_closure(agent_name, closures=closure_cache)
-                if target_name in self.agents and self.agents[target_name].private is not None
-            ),
-        )
+        return _get_private_team_targets_for_agents(agent_name, self.agents, closures=closures)
 
     def get_unsupported_team_agents(
         self,
@@ -730,16 +862,7 @@ class Config(BaseModel):
         Supported known agents are omitted.
         Private or transitively private members map to their reachable private targets.
         """
-        closure_cache = closures if closures is not None else {}
-        unsupported_agents: dict[str, tuple[str, ...] | None] = {}
-        for agent_name in agent_names:
-            if agent_name not in self.agents:
-                unsupported_agents[agent_name] = None
-                continue
-            private_targets = self.get_private_team_targets(agent_name, closures=closure_cache)
-            if private_targets:
-                unsupported_agents[agent_name] = private_targets
-        return unsupported_agents
+        return _get_unsupported_team_agents_for_agents(agent_names, self.agents, closures=closures)
 
     @staticmethod
     def unsupported_team_agent_message(
@@ -749,19 +872,10 @@ class Config(BaseModel):
         private_targets: tuple[str, ...] | None,
     ) -> str:
         """Return the user-facing error for one unsupported team member."""
-        if private_targets is None:
-            return f"{prefix} references unknown agent '{agent_name}'"
-        if agent_name in private_targets:
-            return f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
-        if len(private_targets) == 1:
-            return (
-                f"{prefix} includes agent '{agent_name}' which reaches private agent "
-                f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
-            )
-        return (
-            f"{prefix} includes agent '{agent_name}' which reaches private agents "
-            f"{', '.join(repr(target) for target in private_targets)} via delegation; "
-            "private agents cannot participate in teams yet"
+        return _format_unsupported_team_agent_message(
+            agent_name,
+            prefix=prefix,
+            private_targets=private_targets,
         )
 
     def assert_team_agents_supported(

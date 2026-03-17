@@ -14,6 +14,8 @@ describe('configStore', () => {
       teams: [],
       cultures: [],
       rooms: [],
+      teamEligibilityByAgent: {},
+      teamEligibilityRequestId: 0,
       selectedAgentId: null,
       selectedTeamId: null,
       selectedCultureId: null,
@@ -53,6 +55,10 @@ describe('configStore', () => {
         ok: true,
         json: async () => mockConfig,
       });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ team_eligibility: { test: null } }),
+      });
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
@@ -64,6 +70,7 @@ describe('configStore', () => {
       expect(state.agents[0].display_name).toBe('Test Agent');
       expect(state.agents[0].learning).toBe(true);
       expect(state.agents[0].learning_mode).toBe('always');
+      expect(state.teamEligibilityByAgent).toEqual({ test: null });
       expect(state.syncStatus).toBe('synced');
     });
 
@@ -94,6 +101,10 @@ describe('configStore', () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ team_eligibility: { test: null } }),
       });
 
       const { loadConfig } = useConfigStore.getState();
@@ -129,6 +140,10 @@ describe('configStore', () => {
         ok: true,
         json: async () => mockConfig,
       });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ team_eligibility: { test: null } }),
+      });
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
@@ -163,6 +178,10 @@ describe('configStore', () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => mockConfig,
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ team_eligibility: { test: null } }),
       });
 
       const { loadConfig } = useConfigStore.getState();
@@ -206,6 +225,12 @@ describe('configStore', () => {
         ok: true,
         json: async () => mockConfig,
       });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: { mind: 'Private agents cannot participate in teams yet.' },
+        }),
+      });
 
       const { loadConfig } = useConfigStore.getState();
       await loadConfig();
@@ -231,6 +256,47 @@ describe('configStore', () => {
 
       const state = useConfigStore.getState();
       expect(state.syncStatus).toBe('error');
+    });
+  });
+
+  describe('refreshTeamEligibility', () => {
+    it('stores backend-derived eligibility reasons', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: {
+            helper: null,
+            mind: 'Private agents cannot participate in teams yet.',
+          },
+        }),
+      });
+
+      await useConfigStore.getState().refreshTeamEligibility([
+        {
+          id: 'helper',
+          display_name: 'Helper',
+          role: 'Helps',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+        },
+        {
+          id: 'mind',
+          display_name: 'Mind',
+          role: 'Private',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+          private: { per: 'user' },
+        },
+      ]);
+
+      expect(useConfigStore.getState().teamEligibilityByAgent).toEqual({
+        helper: null,
+        mind: 'Private agents cannot participate in teams yet.',
+      });
     });
   });
 
