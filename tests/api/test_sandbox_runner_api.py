@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
 import sys
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -20,7 +22,6 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
-import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -30,7 +31,13 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import (
+    SHARED_CREDENTIALS_PATH_ENV,
+    CredentialsManager,
+    _reset_credentials_manager_cache,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+)
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
@@ -51,6 +58,7 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
 )
 from mindroom.workers.backends import local as local_workers_module
+from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.models import WorkerSpec
 
 if TYPE_CHECKING:
@@ -702,7 +710,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env=dict(os.environ),
     )
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
@@ -844,7 +852,7 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env={},
+        process_env=dict(os.environ),
     )
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
@@ -861,6 +869,88 @@ def test_sandbox_runner_subprocess_shell_sees_runtime_env(
 
     assert response.ok is True
     assert response.result == "visible-in-shell"
+
+
+def test_sandbox_runner_subprocess_shell_sees_explicit_execution_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sandbox subprocess shell execution should preserve explicit per-request execution env values."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""]],
+            kwargs={},
+            execution_env={"TEST_EXECUTION_ENV": "explicit-value"},
+        ),
+        runtime_paths,
+        sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=SANDBOX_TOKEN,
+    )
+
+    assert response.ok is True
+    assert response.result == "explicit-value"
+
+
+def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Subprocess workers should execute the prepared request without re-running worker prep."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    prepared_request = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="calculator",
+        function_name="add",
+        args=[1, 2],
+        kwargs={},
+    )
+    envelope = sandbox_protocol_module.serialize_subprocess_envelope(
+        request=prepared_request.model_dump(mode="json"),
+        runtime_paths=serialize_runtime_paths(runtime_paths),
+    )
+
+    def _forbidden_prepare(*_args: object, **_kwargs: object) -> object:
+        msg = "subprocess child should not re-run worker preparation"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "resolve_prepared_worker_request",
+        _forbidden_prepare,
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(envelope))
+
+    exit_code = sandbox_runner_module._run_subprocess_worker()
+
+    assert exit_code == 0
+    response_json = sandbox_protocol_module.extract_response_json(capsys.readouterr().err)
+    assert response_json is not None
+    response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
+    assert response.ok is True
+    assert '"result": 3' in str(response.result)
 
 
 def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_env(
@@ -884,7 +974,7 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     runtime_paths = resolve_primary_runtime_paths(
         config_path=config_path,
         storage_path=tmp_path / "storage",
-        process_env=dict(os.environ),
+        process_env={},
     )
 
     execution_env = sandbox_exec_module.request_execution_env(
@@ -899,6 +989,154 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in execution_env
     assert "MINDROOM_API_KEY" not in execution_env
     assert "CI_JOB_TOKEN" not in execution_env
+
+
+def test_sandbox_runner_execution_env_excludes_blocked_file_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execution env should keep ordinary runtime values but exclude blocked control-plane file secrets."""
+    _set_sandbox_token(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    openai_key_path = tmp_path / "openai.key"
+    openai_key_path.write_text("sk-openai\n", encoding="utf-8")
+    github_key_path = tmp_path / "github.key"
+    github_key_path.write_text("ghp-secret\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        (
+            f"OPENAI_API_KEY_FILE={openai_key_path}\n"
+            f"GITHUB_TOKEN_FILE={github_key_path}\n"
+            f"MINDROOM_API_KEY_FILE={github_key_path}\n"
+            f"MINDROOM_LOCAL_CLIENT_SECRET_FILE={github_key_path}\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env(
+        "shell",
+        None,
+        runtime_paths,
+    )
+
+    assert execution_env["OPENAI_API_KEY_FILE"] == str(openai_key_path.resolve())
+    assert "GITHUB_TOKEN_FILE" not in execution_env
+    assert "MINDROOM_API_KEY_FILE" not in execution_env
+    assert "MINDROOM_LOCAL_CLIENT_SECRET_FILE" not in execution_env
+
+
+def test_sandbox_runner_execution_env_resolves_relative_file_secret_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Execution env should anchor relative file-backed secret paths to the config directory."""
+    _set_sandbox_token(monkeypatch)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    openai_key_path = config_dir / "secrets" / "openai.key"
+    openai_key_path.parent.mkdir(parents=True, exist_ok=True)
+    openai_key_path.write_text("sk-openai\n", encoding="utf-8")
+    credentials_path = config_dir / "google" / "adc.json"
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "OPENAI_API_KEY_FILE=secrets/openai.key\nGOOGLE_APPLICATION_CREDENTIALS=google/adc.json\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+
+    execution_env = sandbox_exec_module.request_execution_env("shell", None, runtime_paths)
+
+    assert execution_env["OPENAI_API_KEY_FILE"] == str(openai_key_path.resolve())
+    assert execution_env["GOOGLE_APPLICATION_CREDENTIALS"] == str(credentials_path.resolve())
+
+
+def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker request prep should not overwrite worker-local control paths or copied secrets."""
+    _set_sandbox_token(monkeypatch)
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    openai_key_path = config_dir / "secrets" / "openai.key"
+    openai_key_path.parent.mkdir(parents=True, exist_ok=True)
+    openai_key_path.write_text("sk-openai\n", encoding="utf-8")
+    credentials_path = config_dir / "google" / "adc.json"
+    credentials_path.parent.mkdir(parents=True, exist_ok=True)
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    (config_dir / ".env").write_text(
+        "OPENAI_API_KEY_FILE=secrets/openai.key\nGOOGLE_APPLICATION_CREDENTIALS=google/adc.json\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    worker_runtime = build_dedicated_worker_runtime_paths(
+        runtime_paths=runtime_paths,
+        backend_name="Docker",
+        worker_key="v1:default:shared:code",
+        config_path=Path("/app/config.yaml"),
+        dedicated_root=Path("/app/worker"),
+        local_dedicated_root=tmp_path / "worker-runtime",
+        worker_port=8766,
+        shared_storage_root="/app/shared-storage",
+        extra_env={},
+    )
+
+    prepared_request = sandbox_runner_module._prepare_execute_request(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_command",
+            execution_env=sandbox_exec_module.request_execution_env("shell", None, runtime_paths),
+        ),
+        worker_runtime,
+    )
+    subprocess_context = sandbox_runner_module._prepare_subprocess_context(prepared_request)
+
+    assert "MINDROOM_CONFIG_PATH" not in prepared_request.execution_env
+    assert "MINDROOM_STORAGE_PATH" not in prepared_request.execution_env
+    assert SHARED_CREDENTIALS_PATH_ENV not in prepared_request.execution_env
+    assert "OPENAI_API_KEY_FILE" not in prepared_request.execution_env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in prepared_request.execution_env
+    assert prepared_request.runtime_paths.config_path == worker_runtime.config_path
+    assert prepared_request.runtime_paths.storage_root == worker_runtime.storage_root
+    assert prepared_request.runtime_paths.env_value("OPENAI_API_KEY_FILE") == worker_runtime.env_value(
+        "OPENAI_API_KEY_FILE",
+    )
+    assert prepared_request.runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS") == worker_runtime.env_value(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    )
+    assert prepared_request.runtime_paths.env_value(SHARED_CREDENTIALS_PATH_ENV) == worker_runtime.env_value(
+        SHARED_CREDENTIALS_PATH_ENV,
+    )
+    assert subprocess_context.subprocess_env is not None
+    assert "MINDROOM_CONFIG_PATH" not in subprocess_context.subprocess_env
+    assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
 
 
 @pytest.mark.asyncio
@@ -1246,8 +1484,6 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     original_metadata = TOOL_METADATA.copy()
     original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
     original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
-    original_manager = credentials_module._credentials_manager
-    original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -1274,8 +1510,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
             tool_name,
             {"token": stored_value},
         )
-        credentials_module._credentials_manager = None
-        credentials_module._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
         runtime_paths, config = _refresh_runner_app_from_env()
         toolkit, _ = sandbox_runner_module._resolve_entrypoint(
@@ -1295,8 +1530,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
         TOOL_METADATA.update(original_metadata)
         metadata_module._BUILTIN_TOOL_METADATA.clear()
         metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
-        credentials_module._credentials_manager = original_manager
-        credentials_module._credentials_manager_signature = original_signature
+        _reset_credentials_manager_cache()
 
 
 def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_manager(
@@ -1319,8 +1553,6 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     original_metadata = TOOL_METADATA.copy()
     original_builtin_registry = metadata_module._BUILTIN_TOOL_REGISTRY.copy()
     original_builtin_metadata = metadata_module._BUILTIN_TOOL_METADATA.copy()
-    original_manager = credentials_module._credentials_manager
-    original_signature = credentials_module._credentials_manager_signature
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     metadata_module.register_builtin_tool_metadata(
@@ -1341,8 +1573,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
             tool_name,
             {"token": stored_value},
         )
-        credentials_module._credentials_manager = None
-        credentials_module._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
         toolkit = get_tool_by_name(
             tool_name,
@@ -1360,8 +1591,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
         TOOL_METADATA.update(original_metadata)
         metadata_module._BUILTIN_TOOL_METADATA.clear()
         metadata_module._BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
-        credentials_module._credentials_manager = original_manager
-        credentials_module._credentials_manager_signature = original_signature
+        _reset_credentials_manager_cache()
 
 
 def test_resolve_worker_base_dir_does_not_create_directories_during_validation(tmp_path: Path) -> None:
@@ -2097,14 +2327,12 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
-        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
-        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -2584,14 +2812,12 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
-        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
-        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
@@ -2681,7 +2907,6 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
-        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
@@ -2689,7 +2914,6 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
         assert request.worker_key == worker_key
         assert request.private_agent_names == ["mind"]
         assert runtime_paths is not None
-        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
@@ -2720,6 +2944,77 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert (private_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from private worker"
+
+
+@REQUIRES_LINUX_LOCAL_WORKER
+def test_dedicated_user_agent_worker_shell_uses_private_base_dir(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated user-agent workers should preserve private requester base_dir for shell tools."""
+    _set_sandbox_token(monkeypatch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="alpha",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+        tenant_id="tenant-123",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="alpha")
+    assert worker_key is not None
+
+    shared_root = tmp_path / "shared-storage"
+    worker_root = shared_root / "workers" / worker_dir_name(worker_key)
+    private_workspace = shared_root / "private_instances" / worker_dir_name(worker_key) / "alpha" / "mind_data"
+    private_workspace.mkdir(parents=True, exist_ok=True)
+    (private_workspace / "OWNER.txt").write_text("alice\n", encoding="utf-8")
+
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    _refresh_runner_app_from_env()
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [
+                [
+                    "python",
+                    "-c",
+                    (
+                        "from pathlib import Path; import json; "
+                        "print(json.dumps({'cwd': str(Path.cwd()), "
+                        "'owner': Path('OWNER.txt').read_text(encoding='utf-8').strip()}))"
+                    ),
+                ],
+            ],
+            "kwargs": {},
+            "worker_key": worker_key,
+            "worker_scope": "user_agent",
+            "routing_agent_name": "alpha",
+            "execution_identity": asdict(identity),
+            "private_agent_names": ["alpha"],
+            "tool_init_overrides": {
+                "base_dir": f"private_instances/{worker_dir_name(worker_key)}/alpha/mind_data",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert json.loads(data["result"]) == {
+        "cwd": str(private_workspace),
+        "owner": "alice",
+    }
 
 
 @REQUIRES_LINUX_LOCAL_WORKER

@@ -1321,7 +1321,7 @@ class TestAgentBot:
         """Startup failures before orchestrator creation should still clear runtime storage helpers."""
         reset_runtime_state()
         worker_storage_path_calls: list[Path | None] = []
-        credentials_storage_path_calls: list[Path | None] = []
+        runtime_paths = self._runtime_paths(tmp_path)
 
         with (
             patch("mindroom.orchestrator.setup_logging"),
@@ -1331,20 +1331,15 @@ class TestAgentBot:
                 "mindroom.orchestrator.set_primary_worker_storage_path",
                 side_effect=lambda storage_path: worker_storage_path_calls.append(storage_path),
             ),
-            patch(
-                "mindroom.orchestrator.set_primary_credentials_storage_path",
-                side_effect=lambda storage_path: credentials_storage_path_calls.append(storage_path),
-            ),
             pytest.raises(RuntimeError, match="boom"),
         ):
             await main(
                 log_level="INFO",
-                storage_path=tmp_path,
+                runtime_paths=runtime_paths,
                 api=False,
             )
 
-        assert worker_storage_path_calls == [tmp_path.resolve(), None]
-        assert credentials_storage_path_calls == [tmp_path.resolve(), None]
+        assert worker_storage_path_calls == [runtime_paths.storage_root, None]
         mock_orchestrator_cls.assert_not_called()
 
     @pytest.mark.asyncio
