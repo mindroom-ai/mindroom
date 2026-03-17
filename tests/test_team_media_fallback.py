@@ -313,6 +313,45 @@ async def test_team_response_stream_rejects_private_agents_even_when_private_mem
 
 
 @pytest.mark.asyncio
+async def test_team_response_rejects_members_that_delegate_to_private_agents() -> None:
+    """Direct team helpers should reject shared members that reach private agents via delegation."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
+                "helper": AgentConfig(display_name="Helper"),
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {
+        "leader": _DirectTeamAgentBot("leader", config),
+        "helper": _DirectTeamAgentBot("helper", config),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="reaches private agent 'mind' via delegation; private agents cannot participate in teams yet",
+    ):
+        await team_response(
+            agent_names=["leader", "helper"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_team_response_ignores_router_in_direct_team_member_list() -> None:
     """Direct team helpers should skip router entries before request-scoped setup."""
     config = _build_test_config()

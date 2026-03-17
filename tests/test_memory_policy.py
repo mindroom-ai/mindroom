@@ -142,6 +142,35 @@ def test_storage_paths_for_scope_user_id_rejects_mixed_private_team(
         ]
 
 
+def test_effective_storage_paths_for_team_rejects_transitive_private_delegate_target(
+    tmp_path: Path,
+    config: Config,
+) -> None:
+    """Team memory contexts should reject shared members that reach private agents via delegation."""
+    config.agents = {
+        "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
+        "helper": AgentConfig(display_name="Helper"),
+        "mind": AgentConfig(display_name="Mind", private=AgentPrivateConfig(per="user", root="mind_data")),
+    }
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="leader",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+    with (
+        tool_execution_identity(identity),
+        pytest.raises(
+            ValueError,
+            match="reaches private agent 'mind' via delegation; private agents cannot participate in teams yet",
+        ),
+    ):
+        effective_storage_paths_for_context(["leader", "helper"], tmp_path, config, runtime_paths_for(config))
+
+
 def test_get_team_ids_for_agent_rejects_private_team_members(config: Config) -> None:
     """Configured private teams should be rejected if they reach memory policy helpers."""
     config.agents = {

@@ -666,6 +666,42 @@ class Config(BaseModel):
             agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
         )
 
+    def get_agent_delegation_closure(
+        self,
+        agent_name: str,
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+        visiting: frozenset[str] = frozenset(),
+    ) -> frozenset[str]:
+        """Return one agent plus all agents reachable through transitive delegation."""
+        if closures is None:
+            closures = {}
+        if agent_name in closures:
+            return closures[agent_name]
+        if agent_name in visiting:
+            return frozenset()
+
+        agent_config = self.agents.get(agent_name)
+        if agent_config is None or agent_name == ROUTER_AGENT_NAME:
+            result = frozenset({agent_name})
+            closures[agent_name] = result
+            return result
+
+        reachable = {agent_name}
+        next_visiting = visiting | {agent_name}
+        for target_name in agent_config.delegate_to:
+            reachable.update(
+                self.get_agent_delegation_closure(
+                    target_name,
+                    closures=closures,
+                    visiting=next_visiting,
+                ),
+            )
+
+        result = frozenset(reachable)
+        closures[agent_name] = result
+        return result
+
     def assert_team_agents_supported(
         self,
         agent_names: list[str],
@@ -674,13 +710,35 @@ class Config(BaseModel):
     ) -> None:
         """Reject unknown or currently unsupported team members."""
         prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
+        closure_cache: dict[str, frozenset[str]] = {}
         for agent_name in agent_names:
             if agent_name not in self.agents:
                 msg = f"{prefix} references unknown agent '{agent_name}'"
                 raise ValueError(msg)
-            if self.agents[agent_name].private is not None:
+
+        for agent_name in agent_names:
+            private_targets = sorted(
+                target_name
+                for target_name in self.get_agent_delegation_closure(agent_name, closures=closure_cache)
+                if target_name in self.agents and self.agents[target_name].private is not None
+            )
+            if not private_targets:
+                continue
+            if agent_name in private_targets:
                 msg = f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
                 raise ValueError(msg)
+            if len(private_targets) == 1:
+                msg = (
+                    f"{prefix} includes agent '{agent_name}' which reaches private agent "
+                    f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
+                )
+                raise ValueError(msg)
+            msg = (
+                f"{prefix} includes agent '{agent_name}' which reaches private agents "
+                f"{', '.join(repr(target) for target in private_targets)} via delegation; "
+                "private agents cannot participate in teams yet"
+            )
+            raise ValueError(msg)
 
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:

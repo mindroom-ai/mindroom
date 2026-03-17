@@ -2134,6 +2134,34 @@ def test_config_rejects_private_agents_in_teams() -> None:
         )
 
 
+def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> None:
+    """Configured teams must reject shared members that reach private agents via delegation."""
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "Team 'mixed_team' includes agent 'leader' which reaches private agent 'mind' "
+            "via delegation; private agents cannot participate in teams yet"
+        ),
+    ):
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["mind"]),
+                "helper": AgentConfig(display_name="Helper"),
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+            },
+            teams={
+                "mixed_team": TeamConfig(
+                    display_name="Mixed Team",
+                    role="Mixed team",
+                    agents=["leader", "helper"],
+                ),
+            },
+        )
+
+
 def test_config_private_and_shared_knowledge_coexist() -> None:
     """Agents can combine requester-private knowledge with shared top-level knowledge bases."""
     config = Config(
