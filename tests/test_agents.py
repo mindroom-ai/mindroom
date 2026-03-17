@@ -518,7 +518,39 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     outside_root.mkdir(parents=True, exist_ok=True)
     canonical_state_root.symlink_to(outside_root, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="Private state root must stay within its canonical private-instance scope"):
+    with pytest.raises(ValueError, match="Private state root must stay within the canonical root"):
+        resolve_agent_runtime(
+            "general",
+            bound_config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+
+def test_resolve_agent_runtime_rejects_private_scope_root_symlink_escape(tmp_path: Path) -> None:
+    """Private state roots must stay under the resolved storage root even if the scope root is symlinked."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert worker_key is not None
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    scope_root.parent.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside"
+    outside_root.mkdir(parents=True, exist_ok=True)
+    scope_root.symlink_to(outside_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="Private state root must stay within the canonical root"):
         resolve_agent_runtime(
             "general",
             bound_config,

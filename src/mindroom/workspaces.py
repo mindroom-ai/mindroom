@@ -33,6 +33,30 @@ class _EffectiveAgentWorkspace:
     file_memory_path: str | None
 
 
+def resolve_relative_path_within_root(
+    root: Path,
+    relative_path: str | Path,
+    *,
+    field_name: str,
+    root_label: str = "canonical root",
+) -> Path:
+    """Resolve one relative path under a canonical root and reject symlink escapes."""
+    lexical_root = root.expanduser()
+    resolved_root = lexical_root.resolve()
+    candidate_path = lexical_root / relative_path
+    current = lexical_root
+    for part in Path(relative_path).parts:
+        current = current / part
+        if current.is_symlink():
+            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+            raise ValueError(msg)
+    candidate = candidate_path.resolve()
+    if not candidate.is_relative_to(resolved_root):
+        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
+        raise ValueError(msg)
+    return candidate
+
+
 def resolve_workspace_relative_path(
     root: Path,
     relative_path: str | Path,
@@ -40,12 +64,12 @@ def resolve_workspace_relative_path(
     field_name: str,
 ) -> Path:
     """Resolve one workspace-relative path and reject symlink escapes."""
-    resolved_root = root.expanduser().resolve()
-    candidate = (resolved_root / relative_path).resolve()
-    if not candidate.is_relative_to(resolved_root):
-        msg = f"{field_name} must stay within the workspace root: {resolved_root}"
-        raise ValueError(msg)
-    return candidate
+    return resolve_relative_path_within_root(
+        root,
+        relative_path,
+        field_name=field_name,
+        root_label="workspace root",
+    )
 
 
 def copy_workspace_template(
@@ -211,7 +235,7 @@ def resolve_agent_workspace_from_state_path(
         agent_name,
         config,
         runtime_paths=runtime_paths,
-        state_storage_path=state_storage_path.expanduser().resolve(),
+        state_storage_path=state_storage_path.expanduser(),
         use_state_storage_path=use_state_storage_path,
         create=create,
     )

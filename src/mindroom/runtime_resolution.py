@@ -15,6 +15,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
     resolve_agent_workspace_from_state_path,
+    resolve_relative_path_within_root,
     resolve_workspace_relative_path,
 )
 
@@ -140,17 +141,15 @@ def _resolved_private_state_root(
     agent_name: str,
 ) -> Path:
     """Return one canonical private-instance state root and reject symlink escapes."""
-    canonical_root = private_instance_state_root_path(
+    return resolve_relative_path_within_root(
         runtime_paths.storage_root,
-        worker_key=worker_key,
-        agent_name=agent_name,
-    ).expanduser()
-    resolved_scope_root = canonical_root.parent.resolve()
-    resolved_state_root = canonical_root.resolve()
-    if not resolved_state_root.is_relative_to(resolved_scope_root):
-        msg = f"Private state root must stay within its canonical private-instance scope: {canonical_root}"
-        raise ValueError(msg)
-    return resolved_state_root
+        private_instance_state_root_path(
+            runtime_paths.storage_root,
+            worker_key=worker_key,
+            agent_name=agent_name,
+        ).relative_to(runtime_paths.storage_root.expanduser().resolve()),
+        field_name="Private state root",
+    )
 
 
 def resolve_agent_execution(
