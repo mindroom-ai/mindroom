@@ -105,6 +105,7 @@ describe('AgentEditor', () => {
     ],
     selectedAgentId: 'test_agent',
     updateAgent: vi.fn(),
+    setAgentPrivateEnabled: vi.fn(),
     deleteAgent: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue(undefined),
     config: mockConfig,
@@ -483,12 +484,7 @@ describe('AgentEditor', () => {
     fireEvent.click(screen.getByLabelText('Enable requester-private state'));
 
     await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        'test_agent',
-        expect.objectContaining({
-          private: { per: 'user' },
-        })
-      );
+      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith('test_agent', true);
     });
   });
 
@@ -514,9 +510,7 @@ describe('AgentEditor', () => {
     fireEvent.click(screen.getByLabelText('Enable requester-private state'));
 
     await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith('test_agent', {
-        private: { per: 'user' },
-      });
+      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith('test_agent', true);
     });
   });
 
@@ -556,7 +550,27 @@ describe('AgentEditor', () => {
         updateAgent,
       };
     });
-    state = { ...state, updateAgent };
+    const privateWorkerScopeBackups: Record<string, Agent['worker_scope'] | null> = {};
+    const setAgentPrivateEnabled = vi.fn((agentId: string, enabled: boolean) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      if (enabled) {
+        privateWorkerScopeBackups[agentId] = currentAgent.worker_scope ?? null;
+        updateAgent(agentId, { private: { per: 'user' } });
+        return;
+      }
+      const restoredWorkerScope = privateWorkerScopeBackups[agentId];
+      delete privateWorkerScopeBackups[agentId];
+      updateAgent(
+        agentId,
+        restoredWorkerScope != null
+          ? { private: undefined, worker_scope: restoredWorkerScope }
+          : { private: undefined }
+      );
+    });
+    state = { ...state, updateAgent, setAgentPrivateEnabled };
     (useConfigStore as any).mockImplementation(() => state);
 
     const view = render(<AgentEditor />);
@@ -572,17 +586,8 @@ describe('AgentEditor', () => {
     fireEvent.click(screen.getByLabelText('Enable requester-private state'));
 
     await waitFor(() => {
-      expect(updateAgent).toHaveBeenNthCalledWith(
-        1,
-        'test_agent',
-        expect.objectContaining({
-          private: { per: 'user' },
-        })
-      );
-      expect(updateAgent).toHaveBeenNthCalledWith(2, 'test_agent', {
-        private: undefined,
-        worker_scope: 'user_agent',
-      });
+      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(1, 'test_agent', true);
+      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(2, 'test_agent', false);
       expect(state.agents[0].private).toBeUndefined();
       expect(state.agents[0].worker_scope).toBe('user_agent');
     });
@@ -670,7 +675,18 @@ describe('AgentEditor', () => {
         updateAgent,
       };
     });
-    state = { ...state, updateAgent };
+    const setAgentPrivateEnabled = vi.fn((agentId: string, enabled: boolean) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      if (enabled) {
+        updateAgent(agentId, { private: { per: 'user' } });
+        return;
+      }
+      updateAgent(agentId, { private: undefined });
+    });
+    state = { ...state, updateAgent, setAgentPrivateEnabled };
     (useConfigStore as any).mockImplementation(() => state);
 
     const view = render(<AgentEditor />);

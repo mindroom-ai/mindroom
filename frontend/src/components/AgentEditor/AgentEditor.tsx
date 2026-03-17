@@ -43,6 +43,7 @@ export function AgentEditor() {
     rooms,
     selectedAgentId,
     updateAgent,
+    setAgentPrivateEnabled,
     deleteAgent,
     saveConfig,
     config,
@@ -51,9 +52,6 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
-  const [restorableWorkerScope, setRestorableWorkerScope] = useState<Agent['worker_scope'] | null>(
-    null
-  );
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -257,11 +255,6 @@ export function AgentEditor() {
       });
     }
   }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
-
-  useEffect(() => {
-    setRestorableWorkerScope(null);
-  }, [selectedAgentId]);
-
   // Let the store normalize against current state so sequential UI updates do not
   // reuse stale render-time agent data.
   const handleFieldChange = useCallback(
@@ -292,7 +285,6 @@ export function AgentEditor() {
 
   const handleSave = async () => {
     await saveConfig();
-    setRestorableWorkerScope(null);
   };
 
   const handleAddInstruction = () => {
@@ -342,23 +334,9 @@ export function AgentEditor() {
     value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined });
 
   const handleEnablePrivate = (enabled: boolean) => {
-    if (enabled) {
-      const currentAgent = selectedAgent ?? getValues();
-      setRestorableWorkerScope(currentAgent.worker_scope ?? null);
-      updatePrivate(getDefaultPrivateConfig(currentAgent));
-      return;
-    }
-
-    setValue('private', undefined);
-    const nextUpdates: Partial<Agent> = { private: undefined };
-    if (restorableWorkerScope != null) {
-      setValue('worker_scope', restorableWorkerScope);
-      nextUpdates.worker_scope = restorableWorkerScope;
-    }
     if (selectedAgentId) {
-      updateAgent(selectedAgentId, nextUpdates);
+      setAgentPrivateEnabled(selectedAgentId, enabled);
     }
-    setRestorableWorkerScope(null);
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {

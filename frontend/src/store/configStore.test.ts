@@ -556,6 +556,158 @@ describe('configStore', () => {
       });
     });
 
+    it('restores the backed-up worker_scope when private mode is disabled', () => {
+      useConfigStore.setState({
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        ],
+        isDirty: false,
+      });
+
+      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
+      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBe('user_agent');
+      expect(state.privateWorkerScopeBackups).toEqual({});
+    });
+
+    it('preserves the private-toggle worker_scope backup across failed saves', async () => {
+      const mockConfig: Config = {
+        agents: {
+          mind: {
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        },
+        models: {},
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+
+      useConfigStore.setState({
+        config: mockConfig,
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        ],
+        isDirty: false,
+      });
+
+      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => ({ detail: 'save failed' }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+
+      const state = useConfigStore.getState();
+      expect(state.syncStatus).toBe('error');
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBe('user_agent');
+    });
+
+    it('clears the private-toggle worker_scope backup after a successful save', async () => {
+      const mockConfig: Config = {
+        agents: {
+          mind: {
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        },
+        models: {},
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+
+      useConfigStore.setState({
+        config: mockConfig,
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        ],
+        isDirty: false,
+      });
+
+      useConfigStore.getState().setAgentPrivateEnabled('mind', true);
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+      useConfigStore.getState().setAgentPrivateEnabled('mind', false);
+
+      const state = useConfigStore.getState();
+      expect(state.syncStatus).toBe('synced');
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBeUndefined();
+    });
+
     it('keeps draft team membership when backend eligibility marks an edited agent unsupported', async () => {
       useConfigStore.setState({
         config: {

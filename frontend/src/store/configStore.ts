@@ -8,6 +8,7 @@ import {
   KnowledgeBaseConfig,
   Culture,
   TeamEligibilityByAgent,
+  getDefaultPrivateConfig,
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
@@ -84,6 +85,9 @@ interface ConfigState {
   isLoading: boolean;
   diagnostics: ConfigDiagnostic[];
   syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
+  // UI-only backup so a draft private toggle can restore the prior explicit worker_scope
+  // until the draft is either saved successfully or toggled back off.
+  privateWorkerScopeBackups: Record<string, Agent['worker_scope'] | null>;
 
   // Actions
   loadConfig: () => Promise<void>;
@@ -91,6 +95,7 @@ interface ConfigState {
   refreshTeamEligibility: (agents: Agent[]) => Promise<void>;
   selectAgent: (agentId: string | null) => void;
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
+  setAgentPrivateEnabled: (agentId: string, enabled: boolean) => void;
   createAgent: (agent: Omit<Agent, 'id'>) => void;
   deleteAgent: (agentId: string) => void;
   selectTeam: (teamId: string | null) => void;
@@ -134,6 +139,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isLoading: false,
   diagnostics: [],
   syncStatus: 'disconnected',
+  privateWorkerScopeBackups: {},
 
   // Load configuration from backend
   loadConfig: async () => {
@@ -213,6 +219,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         syncStatus: 'synced',
         isDirty: false,
         diagnostics,
+        privateWorkerScopeBackups: {},
       });
     } catch (error) {
       set({
@@ -318,6 +325,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         syncStatus: 'synced',
         isDirty: false,
         diagnostics: [],
+        privateWorkerScopeBackups: {},
       });
     } catch (error) {
       if (error instanceof configService.ConfigValidationError) {
@@ -385,6 +393,50 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
   },
 
+  setAgentPrivateEnabled: (agentId, enabled) => {
+    let nextAgents: Agent[] = [];
+    let shouldRefreshTeamEligibility = false;
+    set(state => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return state;
+      }
+
+      const nextBackups = { ...state.privateWorkerScopeBackups };
+      const privateUpdates = enabled
+        ? (() => {
+            if (!(agentId in nextBackups)) {
+              nextBackups[agentId] = currentAgent.worker_scope ?? null;
+            }
+            return { private: getDefaultPrivateConfig(currentAgent) };
+          })()
+        : (() => {
+            const restoredWorkerScope = nextBackups[agentId];
+            delete nextBackups[agentId];
+            return restoredWorkerScope != null
+              ? { private: undefined, worker_scope: restoredWorkerScope }
+              : { private: undefined };
+          })();
+
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, privateUpdates);
+      nextAgents = state.agents.map(agent =>
+        agent.id === agentId ? { ...agent, ...normalizedUpdates } : agent
+      );
+      const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
+      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
+
+      return {
+        agents: nextAgents,
+        isDirty: true,
+        diagnostics: [],
+        privateWorkerScopeBackups: nextBackups,
+      };
+    });
+    if (shouldRefreshTeamEligibility && get().config != null) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
+  },
+
   // Create a new agent
   createAgent: agentData => {
     const id = agentData.display_name.toLowerCase().replace(/\s+/g, '_');
@@ -427,6 +479,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const nextTeamEligibilityByAgent = Object.fromEntries(
       Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
     );
+    const { [agentId]: _removedBackup, ...remainingBackups } = state.privateWorkerScopeBackups;
     set({
       agents: nextAgents,
       teams: removeMissingTeamMembers(state.teams, nextAgents),
@@ -435,6 +488,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agents: culture.agents.filter(id => id !== agentId),
       })),
       teamEligibilityByAgent: nextTeamEligibilityByAgent,
+      privateWorkerScopeBackups: remainingBackups,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
       diagnostics: [],
