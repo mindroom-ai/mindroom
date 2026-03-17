@@ -316,6 +316,17 @@ def resolve_request_credentials_target(
             request,
         )
 
+    # Plain dashboard credential reads/writes with no agent selection remain global and
+    # must not start depending on a persisted config file.
+    if agent_name is None and not execution_scope_override_provided:
+        return RequestCredentialsTarget(
+            base_manager=base_manager,
+            target_manager=base_manager,
+            worker_scope=None,
+            agent_name=None,
+            execution_identity=None,
+        )
+
     config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     scope_request = resolve_dashboard_agent_execution_scope_request(
         config=config,
