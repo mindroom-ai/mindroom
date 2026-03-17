@@ -18,9 +18,8 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    requires_shared_only_integration_scope,
+    supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
-    worker_scope_allows_shared_only_integrations,
 )
 
 if TYPE_CHECKING:
@@ -161,9 +160,7 @@ def _build_tool_instance(
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
-        worker_scope,
-    ):
+    if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
         msg = unsupported_shared_only_integration_message(
             tool_name,
             worker_scope,

@@ -15,9 +15,8 @@ from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
 from mindroom.tool_system.metadata import ensure_tool_registry_loaded, export_tools_metadata
 from mindroom.tool_system.worker_routing import (
-    SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
-    worker_scope_allows_shared_only_integrations,
+    unsupported_shared_only_integration_names,
 )
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -135,8 +134,9 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
     worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None
-    if not worker_scope_allows_shared_only_integrations(worker_scope):
-        tools = [tool for tool in tools if tool["name"] not in SHARED_ONLY_INTEGRATION_NAMES]
+    unsupported_tools = set(unsupported_shared_only_integration_names([tool["name"] for tool in tools], worker_scope))
+    if unsupported_tools:
+        tools = [tool for tool in tools if tool["name"] not in unsupported_tools]
     _append_config_only_presets(tools)
     _update_tools_statuses(tools, request, agent_name, worker_scope=worker_scope)
 

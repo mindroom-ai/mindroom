@@ -244,6 +244,23 @@ def requires_shared_only_integration_scope(name: str) -> bool:
     return name in SHARED_ONLY_INTEGRATION_NAMES
 
 
+def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
+    """Return whether one tool/integration name is supported for the effective worker scope."""
+    return not requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
+        worker_scope,
+    )
+
+
+def unsupported_shared_only_integration_names(
+    names: list[str],
+    worker_scope: WorkerScope | None,
+) -> list[str]:
+    """Return shared-only integration names that are invalid for the effective worker scope."""
+    if worker_scope_allows_shared_only_integrations(worker_scope):
+        return []
+    return [name for name in names if requires_shared_only_integration_scope(name)]
+
+
 def unsupported_shared_only_integration_message(
     name: str,
     worker_scope: WorkerScope | None,

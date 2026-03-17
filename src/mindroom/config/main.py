@@ -31,6 +31,7 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
+from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -422,6 +423,30 @@ class Config(BaseModel):
         """Ensure team members exist and do not use private requester-local state."""
         for team_name, team_config in self.teams.items():
             self.assert_team_agents_supported(team_config.agents, team_name=team_name)
+        return self
+
+    @model_validator(mode="after")
+    def validate_shared_only_integration_assignments(self) -> Config:
+        """Reject shared-only integrations on isolating worker scopes at config-validation time."""
+        invalid_assignments: list[str] = []
+        for agent_name in sorted(self.agents):
+            worker_scope = self.get_agent_worker_scope(agent_name)
+            unsupported_tools = unsupported_shared_only_integration_names(
+                self.get_agent_tools(agent_name),
+                worker_scope,
+            )
+            if not unsupported_tools:
+                continue
+            scope_label = worker_scope or "unscoped"
+            invalid_assignments.extend(
+                f"{agent_name} -> {tool_name} (worker_scope={scope_label})" for tool_name in unsupported_tools
+            )
+        if invalid_assignments:
+            msg = (
+                "Shared-only integrations are supported only for unscoped agents or worker_scope=shared. "
+                f"Invalid assignments: {', '.join(invalid_assignments)}"
+            )
+            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")

@@ -26,7 +26,7 @@ from mindroom.config.agent import (
 )
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -2184,6 +2184,40 @@ def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> 
                     agents=["leader", "helper"],
                 ),
             },
+        )
+
+
+def test_config_rejects_shared_only_integrations_for_isolating_worker_scope() -> None:
+    """Agents with isolating worker scope must not use shared-only integrations."""
+    with pytest.raises(
+        ValidationError,
+        match=r"general -> gmail \(worker_scope=user\)",
+    ):
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    tools=["gmail"],
+                    worker_scope="user",
+                ),
+            },
+        )
+
+
+def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> None:
+    """Shared-only defaults.tools must still be rejected for isolating agents."""
+    with pytest.raises(
+        ValidationError,
+        match=r"mind -> homeassistant \(worker_scope=user_agent\)",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                ),
+            },
+            defaults=DefaultsConfig(tools=["homeassistant"]),
         )
 
 

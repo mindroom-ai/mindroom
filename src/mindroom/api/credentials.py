@@ -19,13 +19,11 @@ from mindroom.credentials import (
     validate_service_name,
 )
 from mindroom.tool_system.worker_routing import (
-    SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
     WorkerScope,
     require_worker_key_for_scope,
-    requires_shared_only_integration_scope,
     unsupported_shared_only_integration_message,
-    worker_scope_allows_shared_only_integrations,
+    unsupported_shared_only_integration_names,
 )
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
@@ -229,18 +227,16 @@ def resolve_request_credentials_target(
             ),
         )
 
-    if not worker_scope_allows_shared_only_integrations(worker_scope):
-        for service_name in service_names:
-            if not requires_shared_only_integration_scope(service_name):
-                continue
-            raise HTTPException(
-                status_code=400,
-                detail=unsupported_shared_only_integration_message(
-                    service_name,
-                    worker_scope,
-                    agent_name=agent_name,
-                ),
-            )
+    unsupported_services = unsupported_shared_only_integration_names(list(service_names), worker_scope)
+    if unsupported_services:
+        raise HTTPException(
+            status_code=400,
+            detail=unsupported_shared_only_integration_message(
+                unsupported_services[0],
+                worker_scope,
+                agent_name=agent_name,
+            ),
+        )
 
     execution_identity = _build_dashboard_execution_identity(request, agent_name)
     worker_key = require_worker_key_for_scope(
@@ -309,8 +305,7 @@ async def list_services(
         and credentials.get("_source") == "env"
     }
     services = worker_services | env_services
-    if not worker_scope_allows_shared_only_integrations(target.worker_scope):
-        services -= SHARED_ONLY_INTEGRATION_NAMES
+    services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
     return sorted(services)
 
 
