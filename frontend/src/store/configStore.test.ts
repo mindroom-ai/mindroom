@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { waitFor } from '@testing-library/react';
 import { useConfigStore } from './configStore';
 import type { Agent, Team, Config } from '@/types/config';
 
@@ -349,6 +350,10 @@ describe('configStore', () => {
       });
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
+        json: async () => ({ team_eligibility: { test: null } }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
         json: async () => ({ success: true }),
       });
 
@@ -357,7 +362,7 @@ describe('configStore', () => {
 
       // The saveConfig removes the id field when saving
       const { id: _id, ...agentWithoutId } = mockAgents[0];
-      expect(global.fetch).toHaveBeenCalledWith('/api/config/save', {
+      expect(global.fetch).toHaveBeenNthCalledWith(2, '/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -429,6 +434,154 @@ describe('configStore', () => {
         enabled: true,
         path: 'memory',
         watch: true,
+      });
+    });
+
+    it('removes an edited team member when backend eligibility marks it unsupported', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          agents: {},
+          defaults: { markdown: true },
+          models: {},
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'leader',
+            display_name: 'Leader',
+            role: 'Lead',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          {
+            id: 'helper',
+            display_name: 'Helper',
+            role: 'Help',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        teams: [
+          {
+            id: 'duo',
+            display_name: 'Duo',
+            role: 'Two agents',
+            agents: ['leader', 'helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
+        teamEligibilityByAgent: { leader: null, helper: null },
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: {
+            leader: 'Private agents cannot participate in teams yet.',
+            helper: null,
+          },
+        }),
+      });
+
+      useConfigStore.getState().updateAgent('leader', {
+        private: { per: 'user' },
+      });
+
+      await waitFor(() => {
+        expect(useConfigStore.getState().teams[0].agents).toEqual(['helper']);
+      });
+    });
+
+    it('removes an edited team member when delegation now reaches a private agent', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          agents: {},
+          defaults: { markdown: true },
+          models: {},
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'leader',
+            display_name: 'Leader',
+            role: 'Lead',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            delegate_to: [],
+          },
+          {
+            id: 'helper',
+            display_name: 'Helper',
+            role: 'Help',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Private',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            private: { per: 'user' },
+          },
+        ],
+        teams: [
+          {
+            id: 'duo',
+            display_name: 'Duo',
+            role: 'Two agents',
+            agents: ['leader', 'helper'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
+        teamEligibilityByAgent: {
+          leader: null,
+          helper: null,
+          mind: 'Private agents cannot participate in teams yet.',
+        },
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: {
+            leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+            helper: null,
+            mind: 'Private agents cannot participate in teams yet.',
+          },
+        }),
+      });
+
+      useConfigStore.getState().updateAgent('leader', {
+        delegate_to: ['mind'],
+      });
+
+      await waitFor(() => {
+        expect(useConfigStore.getState().teams[0].agents).toEqual(['helper']);
       });
     });
   });
@@ -547,6 +700,16 @@ describe('configStore', () => {
             mode: 'automatic',
           },
         ],
+        teams: [
+          {
+            id: 'team1',
+            display_name: 'Team 1',
+            role: 'Test team',
+            agents: ['agent1', 'agent2'],
+            rooms: [],
+            mode: 'coordinate',
+          },
+        ],
       });
       const { deleteAgent } = useConfigStore.getState();
       deleteAgent('agent1');
@@ -555,6 +718,7 @@ describe('configStore', () => {
       expect(state.agents).toHaveLength(1);
       expect(state.agents[0].id).toBe('agent2');
       expect(state.cultures[0].agents).toEqual(['agent2']);
+      expect(state.teams[0].agents).toEqual(['agent2']);
       expect(state.isDirty).toBe(true);
     });
   });
@@ -1160,13 +1324,17 @@ describe('configStore', () => {
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
+        json: async () => ({ team_eligibility: { agent1: null } }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
         json: async () => ({}),
       });
 
       const { saveConfig } = useConfigStore.getState();
       await saveConfig();
 
-      expect(global.fetch).toHaveBeenCalledWith('/api/config/save', {
+      expect(global.fetch).toHaveBeenNthCalledWith(2, '/api/config/save', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...mockConfig, cultures: {} }),

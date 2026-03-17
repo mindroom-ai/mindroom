@@ -29,6 +29,20 @@ function unassignAgentsFromOtherCultures(
   });
 }
 
+function reconcileTeamMembers(
+  teams: Team[],
+  agents: Agent[],
+  teamEligibilityByAgent: TeamEligibilityByAgent
+): Team[] {
+  const knownAgents = new Set(agents.map(agent => agent.id));
+  return teams.map(team => ({
+    ...team,
+    agents: team.agents.filter(
+      agentId => knownAgents.has(agentId) && teamEligibilityByAgent[agentId] == null
+    ),
+  }));
+}
+
 type MemoryEmbedderUpdate = {
   provider: string;
   model: string;
@@ -165,10 +179,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       });
       const teamEligibilityByAgent = await configService.getTeamEligibility(agents);
 
+      const reconciledTeams = reconcileTeamMembers(teams, agents, teamEligibilityByAgent);
+
       set({
         config: normalizedConfig,
         agents,
-        teams,
+        teams: reconciledTeams,
         cultures,
         rooms,
         teamEligibilityByAgent,
@@ -193,7 +209,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
         return;
       }
-      set({ teamEligibilityByAgent });
+      set(state => ({
+        teamEligibilityByAgent,
+        teams: reconcileTeamMembers(state.teams, agents, teamEligibilityByAgent),
+      }));
     } catch (error) {
       if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
         return;
@@ -206,11 +225,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Save configuration to backend
   saveConfig: async () => {
-    const { config, agents, teams, cultures, rooms } = get();
+    const { config, agents, cultures, rooms } = get();
     if (!config) return;
 
     set({ isLoading: true, error: null, syncStatus: 'syncing' });
     try {
+      await get().refreshTeamEligibility(agents);
+      const { teams, teamEligibilityByAgent } = get();
+
       // Convert agents array back to object format
       const agentsObject = agents.reduce(
         (acc, agent) => {
@@ -221,15 +243,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         {} as Record<string, Omit<Agent, 'id'>>
       );
 
-      // Convert teams array back to object format
-      const teamsObject = teams.reduce(
-        (acc, team) => {
-          const { id, ...rest } = team;
-          acc[id] = rest;
-          return acc;
-        },
-        {} as Record<string, Omit<Team, 'id'>>
-      );
       const culturesObject = cultures.reduce(
         (acc, culture) => {
           const { id, ...rest } = culture;
@@ -250,7 +263,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const updatedConfig: Config = {
         ...config,
         agents: agentsObject,
-        teams: teamsObject,
+        teams: reconcileTeamMembers(teams, agents, teamEligibilityByAgent).reduce(
+          (acc, team) => {
+            const { id, ...rest } = team;
+            acc[id] = rest;
+            return acc;
+          },
+          {} as Record<string, Omit<Team, 'id'>>
+        ),
         cultures: culturesObject,
         room_models: Object.keys(roomModels).length > 0 ? roomModels : undefined,
       };
@@ -277,12 +297,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Update an existing agent
   updateAgent: (agentId, updates) => {
-    set(state => ({
-      agents: state.agents.map(agent =>
-        agent.id === agentId ? { ...agent, ...normalizeAgentUpdates(agent, updates) } : agent
-      ),
+    const nextAgents = get().agents.map(agent =>
+      agent.id === agentId ? { ...agent, ...normalizeAgentUpdates(agent, updates) } : agent
+    );
+    set({
+      agents: nextAgents,
       isDirty: true,
-    }));
+    });
+    if (get().config != null) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
   },
 
   // Create a new agent
@@ -303,29 +327,42 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       selectedAgentId: id,
       isDirty: true,
     }));
+    if (get().config != null) {
+      void get().refreshTeamEligibility([...get().agents]);
+    }
   },
 
   // Delete an agent
   deleteAgent: agentId => {
-    set(state => ({
-      agents: state.agents
-        .filter(agent => agent.id !== agentId)
-        .map(agent => {
-          if (!agent.delegate_to?.includes(agentId)) {
-            return agent;
-          }
-          return {
-            ...agent,
-            delegate_to: agent.delegate_to.filter(id => id !== agentId),
-          };
-        }),
+    const state = get();
+    const nextAgents = state.agents
+      .filter(agent => agent.id !== agentId)
+      .map(agent => {
+        if (!agent.delegate_to?.includes(agentId)) {
+          return agent;
+        }
+        return {
+          ...agent,
+          delegate_to: agent.delegate_to.filter(id => id !== agentId),
+        };
+      });
+    const nextTeamEligibilityByAgent = Object.fromEntries(
+      Object.entries(state.teamEligibilityByAgent).filter(([id]) => id !== agentId)
+    );
+    set({
+      agents: nextAgents,
+      teams: reconcileTeamMembers(state.teams, nextAgents, nextTeamEligibilityByAgent),
       cultures: state.cultures.map(culture => ({
         ...culture,
         agents: culture.agents.filter(id => id !== agentId),
       })),
+      teamEligibilityByAgent: nextTeamEligibilityByAgent,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
-    }));
+    });
+    if (get().config != null) {
+      void get().refreshTeamEligibility(nextAgents);
+    }
   },
 
   // Select a team for editing
