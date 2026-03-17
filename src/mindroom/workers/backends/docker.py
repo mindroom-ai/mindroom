@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -15,7 +16,12 @@ from typing import TYPE_CHECKING, Protocol, cast
 import httpx
 import yaml
 
-from mindroom.constants import RuntimePaths, resolve_config_relative_path, runtime_paths_with_storage_root
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_config_relative_path,
+    resolve_primary_runtime_paths,
+    runtime_paths_with_storage_root,
+)
 from mindroom.credentials import (
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
@@ -266,15 +272,24 @@ class DockerWorkerBackend:
         self._metadata_lock = threading.Lock()
         self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
         self._workers_root = docker_workers_root(self._storage_path)
+        self._runtime_paths = (
+            resolve_primary_runtime_paths(
+                config_path=config.host_config_path,
+                storage_path=self._storage_path,
+                process_env=dict(os.environ),
+            )
+            if runtime_paths is None
+            else runtime_paths_with_storage_root(runtime_paths, self._storage_path)
+        )
         self._projection_manager = DockerProjectionManager(
             config=config,
             projected_configs_root=self._workers_root / _PROJECTED_CONFIGS_DIRNAME,
+            runtime_paths=self._runtime_paths,
         )
         if runtime_paths is None:
             self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         else:
-            effective_runtime_paths = runtime_paths_with_storage_root(runtime_paths, self._storage_path)
-            self._credentials_manager = get_runtime_credentials_manager(effective_runtime_paths)
+            self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
