@@ -35,7 +35,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.knowledge.utils import bound_knowledge_managers
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -388,8 +387,13 @@ class TestAgentBot:
         bound_manager = MagicMock()
         bound_manager.get_knowledge.return_value = expected_knowledge
 
-        with bound_knowledge_managers({"research": bound_manager}):
-            assert bot._knowledge_for_agent("calculator") is expected_knowledge
+        assert (
+            bot._knowledge_for_agent(
+                "calculator",
+                request_knowledge_managers={"research": bound_manager},
+            )
+            is expected_knowledge
+        )
 
         bound_manager.get_knowledge.assert_called_once_with()
         cached_manager.get_knowledge.assert_not_called()
@@ -1086,7 +1090,15 @@ class TestAgentBot:
             )
 
         assert event_id == "$response"
-        bot._knowledge_for_agent.assert_called_once_with("calculator")
+        bot._knowledge_for_agent.assert_called_once()
+        args, kwargs = bot._knowledge_for_agent.call_args
+        assert args == ("calculator",)
+        assert kwargs["request_knowledge_managers"] == {}
+        execution_identity = kwargs["execution_identity"]
+        assert execution_identity is not None
+        assert execution_identity.requester_id == "@user:localhost"
+        assert execution_identity.room_id == "!test:localhost"
+        assert execution_identity.resolved_thread_id == "$event456"
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(

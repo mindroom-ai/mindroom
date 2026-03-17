@@ -201,14 +201,14 @@ class TestCredentialsManager:
             account_id="account-456",
         )
 
-        with tool_execution_identity(execution_identity):
-            save_scoped_credentials(
-                "google",
-                {"token": "worker-token", "_source": "ui"},
-                worker_scope="user",
-                routing_agent_name="general",
-                credentials_manager=manager,
-            )
+        save_scoped_credentials(
+            "google",
+            {"token": "worker-token", "_source": "ui"},
+            worker_scope="user",
+            routing_agent_name="general",
+            credentials_manager=manager,
+            execution_identity=execution_identity,
+        )
 
         shared_credentials = manager.load_credentials("google")
         worker_credentials = manager.for_worker(

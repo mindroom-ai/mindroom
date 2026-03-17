@@ -17,7 +17,13 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.media_inputs import MediaInputs
-from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
+from mindroom.teams import (
+    TeamMode,
+    _resolve_team_members,
+    _team_response_stream_raw,
+    team_response,
+    team_response_stream,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -95,8 +101,9 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
         patch("mindroom.teams._get_agents_from_orchestrator", return_value=[MagicMock(name="GeneralAgent")]),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
+        team_members = _resolve_team_members(["general"], orchestrator)
         raw_stream = await _team_response_stream_raw(
-            agent_ids=[config.get_ids(runtime_paths_for(config))["general"]],
+            team_members=team_members,
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             orchestrator=orchestrator,

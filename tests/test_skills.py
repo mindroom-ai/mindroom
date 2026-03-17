@@ -389,8 +389,12 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
         account_id="account-456",
     )
 
-    with tool_execution_identity(identity):
-        toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage_path))
+    toolkits = _collect_agent_toolkits(
+        config,
+        "code",
+        _runtime_paths(runtime_storage_path),
+        execution_identity=identity,
+    )
 
     expected_workspace = resolve_agent_runtime(
         "code",

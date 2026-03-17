@@ -73,7 +73,6 @@ from mindroom.thread_utils import (
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    get_tool_execution_identity,
     tool_execution_identity,
 )
 
@@ -111,7 +110,6 @@ from .constants import (
 )
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
-    bound_knowledge_managers,
     ensure_request_knowledge_managers,
     get_knowledge_for_base,
     resolve_agent_knowledge,
@@ -137,7 +135,7 @@ from .scheduling import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     import structlog
@@ -437,9 +435,14 @@ class AgentBot:
             return agent_config.show_tool_calls
         return self.config.defaults.show_tool_calls
 
-    def _knowledge_for_agent(self, agent_name: str) -> Knowledge | None:
+    def _knowledge_for_agent(
+        self,
+        agent_name: str,
+        execution_identity: ToolExecutionIdentity | None = None,
+        *,
+        request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    ) -> Knowledge | None:
         """Return the current knowledge assigned to one or more agent bases."""
-        execution_identity = get_tool_execution_identity()
 
         def _shared_manager(base_id: str) -> KnowledgeManager | None:
             if self.orchestrator is None:
@@ -453,6 +456,7 @@ class AgentBot:
                 base_id,
                 config=self.config,
                 runtime_paths=self.runtime_paths,
+                request_knowledge_managers=request_knowledge_managers,
                 shared_manager_lookup=_shared_manager,
                 execution_identity=execution_identity,
             ),
@@ -486,12 +490,13 @@ class AgentBot:
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        knowledge = self._knowledge_for_agent(self.agent_name)
+        knowledge = self._knowledge_for_agent(self.agent_name, execution_identity=None)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
+            execution_identity=None,
         )
 
     @cached_property
@@ -1805,7 +1810,6 @@ class AgentBot:
             user_id=requester_user_id,
             session_id=session_id,
         )
-        request_knowledge_managers = await self._ensure_request_knowledge_managers(agent_names, execution_identity)
         orchestrator = self.orchestrator
         if orchestrator is None:
             msg = "Orchestrator is not set"
@@ -1821,7 +1825,6 @@ class AgentBot:
                     with (
                         tool_execution_identity(execution_identity),
                         tool_runtime_context(tool_context),
-                        bound_knowledge_managers(request_knowledge_managers),
                     ):
                         response_stream = team_response_stream(
                             agent_ids=team_agents,
@@ -1867,7 +1870,6 @@ class AgentBot:
                     with (
                         tool_execution_identity(execution_identity),
                         tool_runtime_context(tool_context),
-                        bound_knowledge_managers(request_knowledge_managers),
                     ):
                         response_text = await team_response(
                             agent_names=agent_names,
@@ -2072,9 +2074,12 @@ class AgentBot:
                 with (
                     tool_execution_identity(execution_identity),
                     tool_runtime_context(tool_context),
-                    bound_knowledge_managers(request_knowledge_managers),
                 ):
-                    knowledge = self._knowledge_for_agent(self.agent_name)
+                    knowledge = self._knowledge_for_agent(
+                        self.agent_name,
+                        execution_identity=execution_identity,
+                        request_knowledge_managers=request_knowledge_managers,
+                    )
                     response_text = await ai_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2090,6 +2095,7 @@ class AgentBot:
                         show_tool_calls=self.show_tool_calls,
                         tool_trace_collector=tool_trace,
                         run_metadata_collector=run_metadata_content,
+                        execution_identity=execution_identity,
                     )
         except asyncio.CancelledError:
             # Handle cancellation - send a message showing it was stopped
@@ -2201,9 +2207,12 @@ class AgentBot:
             with (
                 tool_execution_identity(execution_identity),
                 tool_runtime_context(tool_context),
-                bound_knowledge_managers(request_knowledge_managers),
             ):
-                knowledge = self._knowledge_for_agent(agent_name)
+                knowledge = self._knowledge_for_agent(
+                    agent_name,
+                    execution_identity=execution_identity,
+                    request_knowledge_managers=request_knowledge_managers,
+                )
                 response_text = await ai_response(
                     agent_name=agent_name,
                     prompt=model_prompt,
@@ -2217,6 +2226,7 @@ class AgentBot:
                     show_tool_calls=show_tool_calls,
                     tool_trace_collector=tool_trace,
                     run_metadata_collector=run_metadata_content,
+                    execution_identity=execution_identity,
                 )
 
         response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
@@ -2377,9 +2387,12 @@ class AgentBot:
                 with (
                     tool_execution_identity(execution_identity),
                     tool_runtime_context(tool_context),
-                    bound_knowledge_managers(request_knowledge_managers),
                 ):
-                    knowledge = self._knowledge_for_agent(self.agent_name)
+                    knowledge = self._knowledge_for_agent(
+                        self.agent_name,
+                        execution_identity=execution_identity,
+                        request_knowledge_managers=request_knowledge_managers,
+                    )
                     response_stream = stream_agent_response(
                         agent_name=self.agent_name,
                         prompt=model_prompt,
@@ -2394,6 +2407,7 @@ class AgentBot:
                         reply_to_event_id=reply_to_event_id,
                         show_tool_calls=self.show_tool_calls,
                         run_metadata_collector=run_metadata_content,
+                        execution_identity=execution_identity,
                     )
                     response_extra_content = _merge_response_extra_content(run_metadata_content, attachment_ids)
 
@@ -2894,9 +2908,13 @@ class AgentBot:
                 user_id=requester_user_id,
                 session_id=session_id,
             )
-            with tool_execution_identity(execution_identity):
-                storage = create_session_storage(self.agent_name, self.config, self.runtime_paths)
-                removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
+            storage = create_session_storage(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=execution_identity,
+            )
+            removed = remove_run_by_event_id(storage, session_id, event_info.original_event_id)
             if removed:
                 self.logger.info(
                     "Removed stale run for edited message",

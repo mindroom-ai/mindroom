@@ -16,6 +16,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
+    get_tool_execution_identity,
     private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
@@ -42,6 +43,7 @@ async def add_agent_memory(
         config,
         runtime_paths_for(config),
         metadata,
+        execution_identity=get_tool_execution_identity(),
     )
 
 
@@ -59,6 +61,7 @@ def append_agent_daily_memory(
         storage_path,
         config,
         runtime_paths_for(config),
+        get_tool_execution_identity(),
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
@@ -77,6 +80,7 @@ async def search_agent_memories(
         config,
         runtime_paths_for(config),
         limit,
+        get_tool_execution_identity(),
     )
 
 
@@ -94,6 +98,7 @@ async def list_all_agent_memories(
         config,
         runtime_paths_for(config),
         limit,
+        get_tool_execution_identity(),
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
 
@@ -110,6 +115,7 @@ async def get_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
+        get_tool_execution_identity(),
     )
 
 
@@ -127,6 +133,7 @@ async def update_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
+        get_tool_execution_identity(),
     )
 
 
@@ -142,6 +149,7 @@ async def delete_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
+        get_tool_execution_identity(),
     )
 
 
@@ -157,6 +165,7 @@ async def build_memory_enhanced_prompt(
         storage_path,
         config,
         runtime_paths_for(config),
+        get_tool_execution_identity(),
     )
 
 
@@ -175,6 +184,7 @@ async def store_conversation_memory(
         session_id,
         config,
         runtime_paths_for(config),
+        execution_identity=get_tool_execution_identity(),
         **kwargs,
     )
 

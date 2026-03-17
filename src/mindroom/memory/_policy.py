@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 def use_file_memory_backend(config: Config, *, agent_name: str | None = None) -> bool:
@@ -40,15 +41,16 @@ def effective_storage_paths_for_context(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[Path]:
     """Return the distinct storage roots affected by the caller context."""
     if isinstance(caller_context, str):
-        return [_effective_storage_path_for_agent(caller_context, config, runtime_paths)]
+        return [_effective_storage_path_for_agent(caller_context, config, runtime_paths, execution_identity)]
 
     config.assert_team_agents_supported(caller_context)
     effective_paths: list[Path] = []
     for agent_name in caller_context:
-        effective_path = _effective_storage_path_for_agent(agent_name, config, runtime_paths)
+        effective_path = _effective_storage_path_for_agent(agent_name, config, runtime_paths, execution_identity)
         if effective_path not in effective_paths:
             effective_paths.append(effective_path)
     return effective_paths or [storage_path]
@@ -58,11 +60,13 @@ def _effective_storage_path_for_agent(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
     return resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
+        execution_identity=execution_identity,
     ).state_root
 
 
@@ -111,12 +115,19 @@ def storage_paths_for_scope_user_id(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[Path]:
     """Return the canonical storage roots for one memory scope."""
     if (team_members := _team_members_from_scope_user_id(scope_user_id, config)) is not None:
-        return effective_storage_paths_for_context(team_members, storage_path, config, runtime_paths)
+        return effective_storage_paths_for_context(
+            team_members,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
     if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None:
-        return [_effective_storage_path_for_agent(agent_name, config, runtime_paths)]
+        return [_effective_storage_path_for_agent(agent_name, config, runtime_paths, execution_identity)]
     msg = f"Unsupported memory scope user_id: {scope_user_id}"
     raise ValueError(msg)
 
@@ -172,6 +183,7 @@ def resolve_file_memory_resolution(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     agent_name: str | None = None,
     original_storage_path: Path | None = None,
@@ -186,6 +198,7 @@ def resolve_file_memory_resolution(
             agent_name,
             config,
             runtime_paths,
+            execution_identity=execution_identity,
         )
         resolved_storage_path = agent_runtime.state_root
         agent_memory_scope_path = agent_runtime.file_memory_root

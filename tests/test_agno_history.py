@@ -36,13 +36,13 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.bot import AgentBot
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_tracker import ResponseTracker
-from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1193,53 @@ class TestApplyContextWindowLimit:
         ):
             _apply_context_window_limit(agent, "test_agent", config, "Hello", "sid", tmp_path)
         assert agent.num_history_runs == 5
+
+    def test_passes_execution_identity_when_loading_private_session_storage(self, tmp_path: Path) -> None:
+        """Private-agent history budgeting should keep explicit execution identity when loading sessions."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "test_agent": AgentConfig(
+                        display_name="Test Agent",
+                        private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="test-model", context_window=100)},
+            ),
+            tmp_path,
+        )
+        agent = self._make_agent(num_history_runs=5)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="test_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="sid",
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+
+        with (
+            patch("mindroom.ai.create_session_storage") as mock_create_storage,
+            patch("mindroom.ai._get_agent_session", return_value=None),
+        ):
+            _apply_context_window_limit(
+                agent,
+                "test_agent",
+                config,
+                "Hello",
+                "sid",
+                runtime_paths,
+                execution_identity=execution_identity,
+            )
+
+        mock_create_storage.assert_called_once_with(
+            "test_agent",
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
 
     def test_within_budget_no_change(self, tmp_path: object) -> None:
         """Under threshold -> num_history_runs unchanged."""

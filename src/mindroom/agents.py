@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, CultureConfig, CultureMode
     from mindroom.config.main import Config
     from mindroom.config.models import DefaultsConfig
+    from mindroom.credentials import CredentialsManager
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 logger = get_logger(__name__)
@@ -90,6 +91,7 @@ class AgentToolInitContext:
 
     workspace_path: Path | None
     worker_scope: WorkerScope | None
+    routing_agent_is_private: bool
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
@@ -313,23 +315,68 @@ def _tool_base_dir_override(
     return {"base_dir": str(workspace_path)}
 
 
+def _build_registered_agent_tool(
+    tool_name: str,
+    runtime_paths: constants.RuntimePaths,
+    credentials_manager: CredentialsManager,
+    shared_storage_path: Path,
+    worker_tools: list[str],
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    workspace_path: Path | None,
+    routing_agent_is_private: bool,
+) -> Toolkit:
+    """Build one registered toolkit using the resolved routing inputs for this agent."""
+    if worker_scope == "user_agent":
+        return get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            credentials_manager=credentials_manager,
+            tool_init_overrides=_tool_base_dir_override(
+                tool_name,
+                workspace_path=workspace_path,
+            ),
+            shared_storage_root_path=shared_storage_path,
+            worker_tools_override=worker_tools,
+            worker_scope=worker_scope,
+            routing_agent_name=agent_name,
+            routing_agent_is_private=routing_agent_is_private,
+        )
+
+    return get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        tool_init_overrides=_tool_base_dir_override(
+            tool_name,
+            workspace_path=workspace_path,
+        ),
+        shared_storage_root_path=shared_storage_path,
+        worker_tools_override=worker_tools,
+        worker_scope=worker_scope,
+        routing_agent_name=agent_name,
+    )
+
+
 def build_agent_tool_init_context(
     config: Config,
     agent_name: str,
-    *,
     runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
     agent_runtime = resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
+        execution_identity=execution_identity,
         create=True,
     )
     workspace_path = agent_runtime.tool_base_dir
     return AgentToolInitContext(
         workspace_path=workspace_path,
         worker_scope=agent_runtime.worker_scope,
+        routing_agent_is_private=agent_runtime.is_private,
     )
 
 
@@ -393,18 +440,16 @@ def build_agent_toolkit(
 
         return SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths)
 
-    return get_tool_by_name(
+    return _build_registered_agent_tool(
         tool_name,
         runtime_paths,
-        credentials_manager=credentials_manager,
-        tool_init_overrides=_tool_base_dir_override(
-            tool_name,
-            workspace_path=tool_init_context.workspace_path,
-        ),
-        shared_storage_root_path=shared_storage_path,
-        worker_tools_override=worker_tools,
-        worker_scope=tool_init_context.worker_scope,
-        routing_agent_name=agent_name,
+        credentials_manager,
+        shared_storage_path,
+        worker_tools,
+        tool_init_context.worker_scope,
+        agent_name,
+        tool_init_context.workspace_path,
+        tool_init_context.routing_agent_is_private,
     )
 
 
@@ -478,7 +523,6 @@ def create_session_storage(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create persistent session storage for an agent."""
@@ -496,10 +540,10 @@ def _create_agent_state_db(
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     subdir: str,
     session_table: str,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database for one agent state category."""
     state_storage_path = resolve_agent_runtime(
@@ -650,6 +694,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
     runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     knowledge: KnowledgeProtocol | None = None,
     include_interactive_questions: bool = True,
@@ -661,6 +706,8 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name: Name of the agent to create
         config: Application configuration
         runtime_paths: Explicit runtime context for paths, env, and credentials.
+        execution_identity: Request execution identity used to resolve scoped
+            state, workspaces, worker routing, and requester-local storage.
         knowledge: Optional shared knowledge base instance for RAG-enabled agents.
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
@@ -682,6 +729,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name,
         config,
         runtime_paths,
+        execution_identity=execution_identity,
         create=True,
     )
 
@@ -701,6 +749,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         config,
         agent_name,
         runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
     )
     workspace = agent_runtime.workspace
     # Create tools

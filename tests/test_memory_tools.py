@@ -73,6 +73,7 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 metadata={"source": "explicit_tool"},
+                execution_identity=None,
             )
             assert "Memorized" in result
             assert "dark mode" in result
@@ -147,6 +148,7 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 limit=3,
+                execution_identity=None,
             )
             assert "Found 2 memory(ies)" in result
             assert "[id=abc-1]" in result
@@ -215,6 +217,7 @@ class TestMemoryTools:
                 tools._config,
                 tools._runtime_paths,
                 limit=10,
+                execution_identity=None,
             )
             assert "All memories (3)" in result
             assert "[id=m1]" in result
@@ -267,6 +270,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "[id=abc-123]" in result
             assert "User likes Python" in result
@@ -312,6 +316,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "Updated memory" in result
             assert "[id=abc-123]" in result
@@ -345,6 +350,7 @@ class TestMemoryTools:
                 tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
+                execution_identity=None,
             )
             assert "Deleted memory" in result
             assert "[id=abc-123]" in result

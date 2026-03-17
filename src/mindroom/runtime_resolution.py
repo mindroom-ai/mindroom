@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
-    get_tool_execution_identity,
     private_instance_state_root_path,
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
@@ -75,9 +74,9 @@ class ResolvedKnowledgeBinding:
 
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     agent_name: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> ResolvedWorkerExecution:
@@ -127,18 +126,16 @@ def resolve_agent_execution(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
     agent_config = config.get_agent(agent_name)
-    effective_execution_identity = execution_identity or get_tool_execution_identity()
     worker_scope = config.get_agent_worker_scope(agent_name)
     is_private = agent_config.private is not None
     resolved_worker_execution = resolve_worker_execution_scope(
         worker_scope,
         agent_name=agent_name,
-        execution_identity=effective_execution_identity,
+        execution_identity=execution_identity,
         tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
@@ -162,8 +159,8 @@ def resolve_agent_runtime(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
     create: bool = False,
 ) -> ResolvedAgentRuntime:
     """Resolve one agent's canonical runtime roots for the current execution scope."""
@@ -216,8 +213,8 @@ def resolve_knowledge_binding(
     base_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    *,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
     start_watchers: bool = True,
     create: bool = False,
 ) -> ResolvedKnowledgeBinding:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -70,6 +71,16 @@ class _TeamModeDecision(BaseModel):
         description="coordinate for delegation and synthesis, collaborate for all working on same task",
     )
     reasoning: str = Field(description="Brief explanation of why this mode was chosen")
+
+
+@dataclass(frozen=True)
+class _ResolvedTeamMembers:
+    """One resolved team-member set shared across team execution and rendering."""
+
+    requested_agent_names: list[str]
+    available_agent_names: list[str]
+    agents: list[Agent]
+    display_names: list[str]
 
 
 def _format_team_header(agent_names: list[str]) -> str:
@@ -467,6 +478,25 @@ def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
+def _resolve_team_members(
+    agent_names: list[str],
+    orchestrator: MultiAgentOrchestrator,
+) -> _ResolvedTeamMembers:
+    """Resolve the materialized team-member set for one request."""
+    assert orchestrator.config is not None
+    requested_agent_names = _requested_team_agent_names(agent_names)
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
+    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
+    display_names = [str(agent.name) for agent in agents if agent.name]
+    return _ResolvedTeamMembers(
+        requested_agent_names=requested_agent_names,
+        available_agent_names=available_agent_names,
+        agents=agents,
+        display_names=display_names,
+    )
+
+
 def _create_team_instance(
     agents: list[Agent],
     agent_names: list[str],
@@ -557,16 +587,14 @@ async def team_response(
 ) -> str:
     """Create a team and execute response."""
     assert orchestrator.config is not None
-    requested_agent_names = _requested_team_agent_names(agent_names)
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
-    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
+    team_members = _resolve_team_members(agent_names, orchestrator)
+    agents = team_members.agents
     if not agents:
         return _NO_AGENTS_RESPONSE
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, available_agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
 
@@ -617,12 +645,12 @@ async def team_response(
     if len(team_response_text) > _MAX_LOG_MESSAGE_LENGTH:
         logger.debug(f"TEAM RESPONSE (full): {team_response_text}")
 
-    team_header = _format_team_header([str(a.name) for a in agents if a.name])
+    team_header = _format_team_header(team_members.display_names)
     return team_header + team_response_text
 
 
 async def _team_response_stream_raw(
-    agent_ids: list[MatrixID],
+    team_members: _ResolvedTeamMembers,
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
@@ -637,12 +665,7 @@ async def _team_response_stream_raw(
     Returns an async iterator of Agno events when supported; otherwise yields a
     single TeamRunOutput for non-streaming providers.
     """
-    assert orchestrator.config is not None
-    agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
-    requested_agent_names = _requested_team_agent_names(agent_names)
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
-    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
+    agents = team_members.agents
 
     if not agents:
 
@@ -653,7 +676,7 @@ async def _team_response_stream_raw(
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
@@ -674,7 +697,7 @@ async def _team_response_stream_raw(
     try:
         return _start_stream(prompt, media_inputs)
     except Exception as e:
-        logger.exception(f"Error in team streaming with agents {agent_names}")
+        logger.exception(f"Error in team streaming with agents {team_members.display_names}")
         error_text = str(e)
 
         async def _error(content: str = error_text) -> AsyncIterator[TeamRunErrorEvent]:
@@ -702,17 +725,12 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     arrive so the final shape matches the non-stream style.
     """
     assert orchestrator.config is not None
-    agent_names: list[str] = []
-    display_names: list[str] = []
-
-    for mid in agent_ids:
-        agent_name = mid.agent_name(orchestrator.config, orchestrator.runtime_paths)
-        assert agent_name is not None
-        agent_names.append(agent_name)
-
-        agent_config = orchestrator.config.agents[agent_name]
-        display_name = agent_config.display_name or agent_name
-        display_names.append(display_name)
+    requested_agent_names = [
+        mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids
+    ]
+    team_members = _resolve_team_members(requested_agent_names, orchestrator)
+    agent_names = team_members.display_names
+    display_names = team_members.display_names
 
     logger.info(f"Team streaming setup - agents: {agent_names}, display names: {display_names}")
     media_inputs = media or MediaInputs()
@@ -861,7 +879,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
         retry_requested = False
 
         raw_stream = await _team_response_stream_raw(
-            agent_ids=agent_ids,
+            team_members=team_members,
             mode=mode,
             message=attempt_message,
             orchestrator=orchestrator,
@@ -967,7 +985,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
 
             if parts:
                 emitted_output = True
-                header = _format_team_header(agent_names)
+                header = _format_team_header(team_members.display_names)
                 full_text = "\n\n".join(parts)
                 chunk_tool_trace = tool_trace.copy() if show_tool_calls and tool_trace else None
                 yield StructuredStreamChunk(content=header + full_text, tool_trace=chunk_tool_trace)

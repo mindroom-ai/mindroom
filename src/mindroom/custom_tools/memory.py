@@ -20,6 +20,7 @@ from mindroom.memory.functions import (
     search_agent_memories,
     update_agent_memory,
 )
+from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -78,6 +79,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 metadata={"source": "explicit_tool"},
+                execution_identity=get_tool_execution_identity(),
             )
         except Exception as e:
             logger.exception("Failed to add memory via tool", agent=self._agent_name, error=str(e))
@@ -106,6 +108,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 limit=limit,
+                execution_identity=get_tool_execution_identity(),
             )
             if not results:
                 return "No relevant memories found."
@@ -138,6 +141,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 limit=limit,
+                execution_identity=get_tool_execution_identity(),
             )
             if not results:
                 return "No memories stored yet."
@@ -170,6 +174,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
+                execution_identity=get_tool_execution_identity(),
             )
             if result is None:
                 return f"No memory found with id={memory_id}"
@@ -199,6 +204,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
+                execution_identity=get_tool_execution_identity(),
             )
         except Exception as e:
             logger.exception(
@@ -231,6 +237,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
+                execution_identity=get_tool_execution_identity(),
             )
         except Exception as e:
             logger.exception(

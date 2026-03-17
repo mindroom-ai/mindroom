@@ -146,14 +146,14 @@ def resolve_worker_key(
 
 
 def resolve_unscoped_worker_key(
-    *,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
     """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity or get_tool_execution_identity()
+    identity = execution_identity
     tenant_key = _normalize_worker_key_part(
         tenant_id
         or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
@@ -202,9 +202,9 @@ def worker_key_agent_name(worker_key: str) -> str | None:
 
 def resolve_execution_identity_for_worker_scope(
     worker_scope: WorkerScope | None,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     agent_name: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> ToolExecutionIdentity | None:
@@ -212,14 +212,10 @@ def resolve_execution_identity_for_worker_scope(
 
     Shared-scope state can be resolved from agent identity plus tenant/account
     even when no live request context exists yet. Isolating scopes still
-    require an active execution identity.
+    require an explicit execution identity.
     """
     if execution_identity is not None:
         return execution_identity
-
-    current_identity = get_tool_execution_identity()
-    if current_identity is not None:
-        return current_identity
 
     if worker_scope != "shared" or agent_name is None:
         return None

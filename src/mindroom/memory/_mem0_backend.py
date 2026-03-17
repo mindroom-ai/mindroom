@@ -21,6 +21,7 @@ from ._shared import MEM0_REPLICA_KEY, MemoryNotFoundError, MemoryResult, Scoped
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MemoryFactory = Callable[[Path, "Config"], Awaitable[ScopedMemoryCrud]]
 
@@ -41,9 +42,16 @@ def _primary_mem0_storage_path(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Path:
     """Return the canonical mem0 storage root for one agent in the active scope."""
-    return effective_storage_paths_for_context(agent_name, storage_path, config, runtime_paths)[0]
+    return effective_storage_paths_for_context(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )[0]
 
 
 async def _get_scoped_memory_by_id(
@@ -130,9 +138,16 @@ async def _find_mem0_anchor_memory_result(
     runtime_paths: RuntimePaths,
     *,
     create_memory: _MemoryFactory,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
             memory = await create_memory(target_storage_path, config)
             if result := await _get_scoped_memory_by_id(memory, memory_id, caller_context, config):
                 return result
@@ -168,10 +183,17 @@ async def _mutate_mem0_memory_targets(
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
     create_memory: _MemoryFactory,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> int:
     mutated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+    for target_storage_path in storage_paths_for_scope_user_id(
+        scope_user_id,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ):
         memory = await create_memory(target_storage_path, config)
         target_ids = await _mem0_mutation_target_ids(
             memory,
@@ -211,12 +233,19 @@ async def add_mem0_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     metadata: dict | None,
     create_memory: _MemoryFactory,
 ) -> None:
     """Add one mem0 memory for an agent scope."""
-    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config, runtime_paths)
+    resolved_storage_path = _primary_mem0_storage_path(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     memory = await create_memory(resolved_storage_path, config)
     metadata = dict(metadata or {})
     metadata["agent"] = agent_name
@@ -235,12 +264,19 @@ async def search_mem0_agent_memories(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     limit: int,
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """Search mem0 memories visible to an agent."""
-    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config, runtime_paths)
+    resolved_storage_path = _primary_mem0_storage_path(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     memory = await create_memory(resolved_storage_path, config)
 
     results = _mem0_results(await memory.search(query, user_id=agent_scope_user_id(agent_name), limit=limit))
@@ -262,12 +298,19 @@ async def list_mem0_agent_memories(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     limit: int,
     create_memory: _MemoryFactory,
 ) -> list[MemoryResult]:
     """List mem0 memories stored for an agent."""
-    resolved_storage_path = _primary_mem0_storage_path(agent_name, storage_path, config, runtime_paths)
+    resolved_storage_path = _primary_mem0_storage_path(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     result = await create_memory(resolved_storage_path, config)
     return _mem0_results(await result.get_all(user_id=agent_scope_user_id(agent_name), limit=limit))
 
@@ -278,12 +321,19 @@ async def get_mem0_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     create_memory: _MemoryFactory,
 ) -> MemoryResult | None:
     """Return one mem0 memory visible to the caller."""
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
             memory = await create_memory(target_storage_path, config)
             result = await _get_scoped_memory_by_id(memory, memory_id, caller_context, config)
             if result is not None:
@@ -298,6 +348,7 @@ async def update_mem0_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     create_memory: _MemoryFactory,
 ) -> None:
@@ -310,6 +361,7 @@ async def update_mem0_agent_memory(
             config,
             runtime_paths,
             create_memory=create_memory,
+            execution_identity=execution_identity,
         )
     ) is None:
         raise MemoryNotFoundError(memory_id)
@@ -324,6 +376,7 @@ async def update_mem0_agent_memory(
         runtime_paths=runtime_paths,
         anchor_result=anchor_result,
         create_memory=create_memory,
+        execution_identity=execution_identity,
     )
     if updated_targets > 0:
         logger.info("Memory updated", memory_id=memory_id, storage_targets=updated_targets)
@@ -337,6 +390,7 @@ async def delete_mem0_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     create_memory: _MemoryFactory,
 ) -> None:
@@ -349,6 +403,7 @@ async def delete_mem0_agent_memory(
             config,
             runtime_paths,
             create_memory=create_memory,
+            execution_identity=execution_identity,
         )
     ) is None:
         raise MemoryNotFoundError(memory_id)
@@ -363,6 +418,7 @@ async def delete_mem0_agent_memory(
         runtime_paths=runtime_paths,
         anchor_result=anchor_result,
         create_memory=create_memory,
+        execution_identity=execution_identity,
     )
     if deleted_targets > 0:
         logger.info("Memory deleted", memory_id=memory_id, storage_targets=deleted_targets)
@@ -377,12 +433,19 @@ async def store_mem0_conversation_memory(
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     replica_key: str | None,
     create_memory: _MemoryFactory,
 ) -> None:
     """Persist conversation messages to mem0-backed memory scopes."""
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config, runtime_paths)
+    target_storage_paths = effective_storage_paths_for_context(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
     if isinstance(agent_name, list):
         scope_user_id = build_team_user_id(agent_name)

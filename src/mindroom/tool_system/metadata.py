@@ -162,6 +162,7 @@ def _build_tool_instance(
     shared_storage_root_path: Path | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
@@ -225,6 +226,7 @@ def _build_tool_instance(
         worker_tools_override=worker_tools_override,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        routing_agent_is_private=routing_agent_is_private,
         shared_storage_root_path=shared_storage_root_path,
     )
 
@@ -242,6 +244,7 @@ def get_tool_by_name(
     shared_storage_root_path: Path | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:
@@ -262,6 +265,7 @@ def get_tool_by_name(
         shared_storage_root_path=shared_storage_root_path,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        routing_agent_is_private=routing_agent_is_private,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing

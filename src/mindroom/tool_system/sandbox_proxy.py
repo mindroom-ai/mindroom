@@ -19,9 +19,10 @@ from mindroom.runtime_resolution import (
     resolve_agent_execution,
     resolve_worker_execution_scope,
 )
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
+    ToolExecutionIdentity,
     WorkerScope,
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
@@ -205,6 +206,7 @@ def _collect_credential_overrides(
     credentials_manager: CredentialsManager | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> dict[str, object]:
     if credentials_manager is None:
         return {}
@@ -219,6 +221,7 @@ def _collect_credential_overrides(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=credentials_manager,
+            execution_identity=execution_identity,
             tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
             account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
@@ -239,6 +242,7 @@ def _create_credential_lease(
     function_name: str,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> str | None:
     credential_overrides = _collect_credential_overrides(
         tool_name,
@@ -248,6 +252,7 @@ def _create_credential_lease(
         credentials_manager=credentials_manager,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        execution_identity=execution_identity,
     )
     if not credential_overrides:
         return None
@@ -275,6 +280,7 @@ def _build_worker_routing_payload(
     function_name: str,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
+    routing_agent_is_private: bool | None = None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     proxy_config = sandbox_proxy_config(runtime_paths)
     context = get_tool_runtime_context()
@@ -314,30 +320,18 @@ def _build_worker_routing_payload(
         raise RuntimeError(msg)
 
     effective_agent_name = routing_agent_name or execution_identity.agent_name
-    worker_key: str | None
-    private_agent_names: frozenset[str] | None = None
     if worker_scope == "user_agent":
-        if context is None:
-            msg = (
-                f"Worker-routed tool '{tool_name}.{function_name}' with scope '{worker_scope}' "
-                "requires runtime config context for private visibility."
-            )
-            raise RuntimeError(msg)
-        agent_execution = resolve_agent_execution(
-            effective_agent_name,
-            context.config,
-            runtime_paths,
+        worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
+            runtime_paths=runtime_paths,
+            tool_name=tool_name,
+            function_name=function_name,
+            effective_agent_name=effective_agent_name,
             execution_identity=execution_identity,
+            context=context,
+            routing_agent_is_private=routing_agent_is_private,
         )
-        if agent_execution.worker_key is None:
-            msg = (
-                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
-                "could not be resolved from the current execution identity."
-            )
-            raise RuntimeError(msg)
-        worker_key = agent_execution.worker_key
-        private_agent_names = frozenset({effective_agent_name}) if agent_execution.is_private else frozenset()
     else:
+        resolved_private_agent_names = None
         worker_key = resolve_worker_execution_scope(
             worker_scope,
             agent_name=effective_agent_name,
@@ -352,7 +346,7 @@ def _build_worker_routing_payload(
             )
             raise RuntimeError(msg)
     worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
-        WorkerSpec(worker_key, private_agent_names=private_agent_names),
+        WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
     )
     return (
         {
@@ -360,10 +354,59 @@ def _build_worker_routing_payload(
             "routing_agent_name": routing_agent_name,
             "worker_key": worker_key,
             "execution_identity": to_json_compatible(asdict(execution_identity)),
-            "private_agent_names": sorted(private_agent_names) if private_agent_names is not None else None,
+            "private_agent_names": (
+                sorted(resolved_private_agent_names) if resolved_private_agent_names is not None else None
+            ),
         },
         worker_handle,
     )
+
+
+def _resolve_user_agent_worker_payload(
+    *,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    function_name: str,
+    effective_agent_name: str,
+    execution_identity: ToolExecutionIdentity,
+    context: ToolRuntimeContext | None,
+    routing_agent_is_private: bool | None,
+) -> tuple[str, frozenset[str]]:
+    if routing_agent_is_private is None and context is None:
+        msg = (
+            f"Worker-routed tool '{tool_name}.{function_name}' with scope 'user_agent' "
+            "requires explicit private visibility or runtime config context."
+        )
+        raise RuntimeError(msg)
+
+    if routing_agent_is_private is None:
+        assert context is not None
+        agent_execution = resolve_agent_execution(
+            effective_agent_name,
+            context.config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        resolved_private_agent_names = frozenset({effective_agent_name}) if agent_execution.is_private else frozenset()
+        worker_key = agent_execution.worker_key
+    else:
+        resolved_private_agent_names = frozenset({effective_agent_name}) if routing_agent_is_private else frozenset()
+        worker_key = resolve_worker_execution_scope(
+            "user_agent",
+            agent_name=effective_agent_name,
+            execution_identity=execution_identity,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        ).worker_key
+
+    if worker_key is None:
+        msg = (
+            f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
+            "could not be resolved from the current execution identity."
+        )
+        raise RuntimeError(msg)
+
+    return worker_key, resolved_private_agent_names
 
 
 def _get_worker_manager(
@@ -492,8 +535,10 @@ def _call_proxy_sync(  # noqa: C901
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> object:
     proxy_config = sandbox_proxy_config(runtime_paths)
+    execution_identity = get_tool_execution_identity()
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -506,6 +551,7 @@ def _call_proxy_sync(  # noqa: C901
         function_name=function_name,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        routing_agent_is_private=routing_agent_is_private,
     )
     payload.update(worker_payload)
     if execution_env := _execution_env_payload(tool_name, runtime_paths=runtime_paths):
@@ -547,6 +593,7 @@ def _call_proxy_sync(  # noqa: C901
                 function_name=function_name,
                 worker_scope=worker_scope,
                 routing_agent_name=routing_agent_name,
+                execution_identity=execution_identity,
             )
             if lease_id is not None:
                 payload["lease_id"] = lease_id
@@ -583,6 +630,7 @@ def _wrap_sync_function(
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -600,6 +648,7 @@ def _wrap_sync_function(
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
+            routing_agent_is_private=routing_agent_is_private,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -617,6 +666,7 @@ def _wrap_async_function(
     tool_init_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -635,6 +685,7 @@ def _wrap_async_function(
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
+            routing_agent_is_private=routing_agent_is_private,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -652,6 +703,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     worker_tools_override: list[str] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    routing_agent_is_private: bool | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
@@ -677,6 +729,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
+            routing_agent_is_private=routing_agent_is_private,
         )
         for function_name, function in toolkit.functions.items()
     }
@@ -691,6 +744,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             tool_init_overrides=tool_init_overrides,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
+            routing_agent_is_private=routing_agent_is_private,
         )
         for function_name, function in toolkit.async_functions.items()
     }

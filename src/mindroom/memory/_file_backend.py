@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -402,15 +403,24 @@ def _find_file_anchor_memory_result(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
                 runtime_paths,
                 agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
+                execution_identity=execution_identity,
             )
             if result := _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config):
                 return result
@@ -442,16 +452,24 @@ def _mutate_file_memory_targets(
     config: Config,
     runtime_paths: RuntimePaths,
     anchor_result: MemoryResult,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> tuple[str, int]:
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+    for target_storage_path in storage_paths_for_scope_user_id(
+        scope_user_id,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ):
         resolution = resolve_file_memory_resolution(
             target_storage_path,
             config,
             runtime_paths,
             agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
+            execution_identity=execution_identity,
         )
         for target_id in dict.fromkeys(
             _file_mutation_target_ids(scope_user_id, memory_id, anchor_result, resolution, config),
@@ -467,9 +485,16 @@ def add_file_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Append one file-backed memory for an agent scope."""
-    resolution = resolve_file_memory_resolution(storage_path, config, runtime_paths, agent_name=agent_name)
+    resolution = resolve_file_memory_resolution(
+        storage_path,
+        config,
+        runtime_paths,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
     _append_scope_memory_entry(agent_scope_user_id(agent_name), content, resolution, config)
     logger.info("File memory added", agent=agent_name)
 
@@ -480,6 +505,7 @@ def append_agent_daily_file_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
@@ -490,6 +516,7 @@ def append_agent_daily_file_memory(
         runtime_paths,
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
+        execution_identity=execution_identity,
     )
     current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
@@ -510,11 +537,18 @@ def search_file_agent_memories(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     limit: int,
 ) -> list[MemoryResult]:
     """Search file-backed memories visible to an agent."""
-    agent_resolution = resolve_file_memory_resolution(storage_path, config, runtime_paths, agent_name=agent_name)
+    agent_resolution = resolve_file_memory_resolution(
+        storage_path,
+        config,
+        runtime_paths,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+    )
     results = _search_scope_memory_entries(
         agent_scope_user_id(agent_name),
         query,
@@ -524,12 +558,19 @@ def search_file_agent_memories(
     )
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        for target_storage_path in storage_paths_for_scope_user_id(team_id, storage_path, config, runtime_paths):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            team_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
             team_resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
                 runtime_paths,
                 original_storage_path=storage_path,
+                execution_identity=execution_identity,
             )
             team_results = _search_scope_memory_entries(team_id, query, team_resolution, config, limit=limit)
             for memory in team_results:
@@ -547,6 +588,7 @@ def list_file_agent_memories(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     *,
     limit: int,
     preserve_resolved_storage_path: bool = False,
@@ -558,6 +600,7 @@ def list_file_agent_memories(
         runtime_paths,
         agent_name=agent_name,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
+        execution_identity=execution_identity,
     )
     results, _ = _load_scope_id_entries(agent_scope_user_id(agent_name), resolution, config)
     return results[:limit]
@@ -569,16 +612,24 @@ def get_file_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
+        for target_storage_path in storage_paths_for_scope_user_id(
+            scope_user_id,
+            storage_path,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
                 runtime_paths,
                 agent_name=agent_name_from_scope_user_id(scope_user_id),
                 original_storage_path=storage_path,
+                execution_identity=execution_identity,
             )
             result = _get_scope_memory_by_id(scope_user_id, memory_id, resolution, config)
             if result is not None:
@@ -593,6 +644,7 @@ def update_file_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Update one file-backed memory across its replica targets."""
     if (
@@ -602,6 +654,7 @@ def update_file_agent_memory(
             storage_path,
             config,
             runtime_paths,
+            execution_identity=execution_identity,
         )
     ) is None:
         raise MemoryNotFoundError(memory_id)
@@ -613,6 +666,7 @@ def update_file_agent_memory(
         config=config,
         runtime_paths=runtime_paths,
         anchor_result=anchor_result,
+        execution_identity=execution_identity,
     )
     if updated_targets > 0:
         logger.info(
@@ -631,6 +685,7 @@ def delete_file_agent_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Delete one file-backed memory across its replica targets."""
     if (
@@ -640,6 +695,7 @@ def delete_file_agent_memory(
             storage_path,
             config,
             runtime_paths,
+            execution_identity=execution_identity,
         )
     ) is None:
         raise MemoryNotFoundError(memory_id)
@@ -651,6 +707,7 @@ def delete_file_agent_memory(
         config=config,
         runtime_paths=runtime_paths,
         anchor_result=anchor_result,
+        execution_identity=execution_identity,
     )
     if deleted_targets > 0:
         logger.info(
@@ -669,13 +726,20 @@ def store_file_conversation_memory(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Persist condensed conversation text to file-backed memory scopes."""
     condensed_prompt = " ".join(prompt.strip().split())
     if not condensed_prompt:
         return
 
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config, runtime_paths)
+    target_storage_paths = effective_storage_paths_for_context(
+        agent_name,
+        storage_path,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
 
@@ -686,6 +750,7 @@ def store_file_conversation_memory(
             runtime_paths,
             agent_name=agent_name_from_scope_user_id(scope_user_id),
             original_storage_path=storage_path,
+            execution_identity=execution_identity,
         )
         _append_scope_memory_entry(
             scope_user_id,

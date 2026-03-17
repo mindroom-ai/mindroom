@@ -19,7 +19,7 @@ from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -464,6 +464,7 @@ async def _build_existing_memory_context(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str:
     context_config = config.memory.auto_flush.extractor.include_memory_context
@@ -477,6 +478,7 @@ async def _build_existing_memory_context(
         config,
         runtime_paths,
         limit=max_memories,
+        execution_identity=execution_identity,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     if not memories:
@@ -505,6 +507,7 @@ async def _extract_memory_summary(
     agent_name: str,
     session_id: str,
     lines: list[str],
+    execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str | None:
     extractor = config.memory.auto_flush.extractor
@@ -516,6 +519,7 @@ async def _extract_memory_summary(
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
@@ -817,46 +821,47 @@ class MemoryAutoFlushWorker:
         session_id: str,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
-        with tool_execution_identity(execution_identity):
-            effective_storage_path = self.storage_path
-            session = _load_agent_session(
-                config,
-                self.runtime_paths,
-                agent_name,
-                session_id,
-                execution_identity=execution_identity,
-            )
-            if session is None:
-                return False
+        effective_storage_path = self.storage_path
+        session = _load_agent_session(
+            config,
+            self.runtime_paths,
+            agent_name,
+            session_id,
+            execution_identity=execution_identity,
+        )
+        if session is None:
+            return False
 
-            extractor = config.memory.auto_flush.extractor
-            lines = _select_recent_chat_lines(
-                session,
-                max_messages=extractor.max_messages_per_flush,
-                max_chars=extractor.max_chars_per_flush,
-            )
-            memory_summary = await _extract_memory_summary(
-                config=config,
-                runtime_paths=self.runtime_paths,
-                storage_path=effective_storage_path,
-                agent_name=agent_name,
-                session_id=session_id,
-                lines=lines,
-                preserve_resolved_storage_path=False,
-            )
-            if memory_summary is None:
-                return False
+        extractor = config.memory.auto_flush.extractor
+        lines = _select_recent_chat_lines(
+            session,
+            max_messages=extractor.max_messages_per_flush,
+            max_chars=extractor.max_chars_per_flush,
+        )
+        memory_summary = await _extract_memory_summary(
+            config=config,
+            runtime_paths=self.runtime_paths,
+            storage_path=effective_storage_path,
+            agent_name=agent_name,
+            session_id=session_id,
+            lines=lines,
+            execution_identity=execution_identity,
+            preserve_resolved_storage_path=False,
+        )
+        if memory_summary is None:
+            return False
 
-            session_updated = session.updated_at if isinstance(session.updated_at, int) else 0
-            flush_marker = f"auto_flush:{session_id}:{session_updated}"
-            memory_content = f"[{flush_marker}] {memory_summary}"
+        session_updated = session.updated_at if isinstance(session.updated_at, int) else 0
+        flush_marker = f"auto_flush:{session_id}:{session_updated}"
+        memory_content = f"[{flush_marker}] {memory_summary}"
 
-            append_agent_daily_memory(
-                memory_content,
-                agent_name=agent_name,
-                storage_path=effective_storage_path,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                preserve_resolved_storage_path=False,
-            )
-            return True
+        append_agent_daily_memory(
+            memory_content,
+            agent_name=agent_name,
+            storage_path=effective_storage_path,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
+            preserve_resolved_storage_path=False,
+        )
+        return True

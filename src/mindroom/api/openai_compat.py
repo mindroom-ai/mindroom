@@ -830,17 +830,17 @@ async def chat_completions(
                 execution_identity=execution_identity,
             )
         else:
-            with tool_execution_identity(execution_identity):
-                response = await _non_stream_completion(
-                    agent_name,
-                    prompt,
-                    session_id,
-                    config,
-                    runtime_paths,
-                    thread_history,
-                    req.user,
-                    knowledge,
-                )
+            response = await _non_stream_completion(
+                agent_name,
+                prompt,
+                session_id,
+                config,
+                runtime_paths,
+                thread_history,
+                req.user,
+                knowledge,
+                execution_identity=execution_identity,
+            )
 
     return response
 
@@ -859,6 +859,7 @@ async def _non_stream_completion(
     thread_history: list[dict[str, Any]] | None,
     user: str | None,
     knowledge: Knowledge | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion."""
     response_text = await ai_response(
@@ -872,6 +873,7 @@ async def _non_stream_completion(
         knowledge=knowledge,
         user_id=user,
         include_interactive_questions=False,
+        execution_identity=execution_identity,
     )
 
     # Detect error responses from ai_response()
@@ -1051,6 +1053,7 @@ async def _stream_completion(
             knowledge=knowledge,
             user_id=user,
             include_interactive_questions=False,
+            execution_identity=execution_identity,
         )
 
         # Peek at first event to detect errors before committing to SSE

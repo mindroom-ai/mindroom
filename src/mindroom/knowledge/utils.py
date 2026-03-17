@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -14,7 +12,7 @@ from mindroom.knowledge.manager import ensure_agent_knowledge_managers, get_know
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Mapping
 
     from agno.knowledge.document import Document
 
@@ -24,15 +22,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-
-_BOUND_KNOWLEDGE_MANAGERS: ContextVar[dict[str, KnowledgeManager] | None] = ContextVar(
-    "bound_knowledge_managers",
-    default=None,
-)
-_REQUEST_KNOWLEDGE_INIT_ATTEMPTED: ContextVar[bool] = ContextVar(
-    "request_knowledge_init_attempted",
-    default=False,
-)
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -45,38 +34,6 @@ class _KnowledgeVectorDb(Protocol):
         limit: int,
         filters: dict[str, Any] | list[Any] | None = None,
     ) -> list[Document]: ...
-
-
-def get_bound_knowledge_manager(base_id: str) -> KnowledgeManager | None:
-    """Return a request-scoped manager bound for this base ID, if any."""
-    managers = _BOUND_KNOWLEDGE_MANAGERS.get()
-    if managers is None:
-        return None
-    return managers.get(base_id)
-
-
-def request_knowledge_init_attempted() -> bool:
-    """Return whether this request already attempted to bind scoped knowledge."""
-    return _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.get()
-
-
-@contextmanager
-def bound_knowledge_managers(managers: Mapping[str, KnowledgeManager] | None) -> Iterator[None]:
-    """Bind ensured managers to the current async execution scope."""
-    if managers is None:
-        yield
-        return
-
-    attempt_token = _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.set(True)
-    current = _BOUND_KNOWLEDGE_MANAGERS.get()
-    merged = dict(current) if current is not None else {}
-    merged.update(managers)
-    token = _BOUND_KNOWLEDGE_MANAGERS.set(merged or None)
-    try:
-        yield
-    finally:
-        _BOUND_KNOWLEDGE_MANAGERS.reset(token)
-        _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.reset(attempt_token)
 
 
 async def ensure_request_knowledge_managers(
@@ -105,13 +62,14 @@ def get_knowledge_for_base(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
     manager: KnowledgeManager | None
-    manager = get_bound_knowledge_manager(base_id)
-    if manager is None and request_knowledge_init_attempted():
+    manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
+    if manager is None and request_knowledge_managers is not None and config.get_private_knowledge_base_agent(base_id):
         return None
     if manager is None:
         manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None

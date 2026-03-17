@@ -9,12 +9,13 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent, describe_agent
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class TestDelegateTools:
                 "code",
                 tools._config,
                 runtime_paths=tools._runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -201,6 +203,7 @@ class TestDelegateTools:
                 "code",
                 config,
                 runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=2,
@@ -236,6 +239,7 @@ class TestDelegateTools:
                 "code",
                 config,
                 runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -286,16 +290,18 @@ class TestDelegateKnowledge:
         ):
             result = await tools.delegate_task("researcher", "Find info about X")
 
-            mock_get.assert_called_once_with(
-                "docs",
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=None,
-            )
+            mock_get.assert_called_once()
+            args, kwargs = mock_get.call_args
+            assert args == ("docs",)
+            assert kwargs["config"] == config
+            assert kwargs["runtime_paths"] == runtime_paths
+            assert kwargs["execution_identity"] is None
+            assert set(kwargs["request_knowledge_managers"]) == {"docs"}
             mock_create.assert_called_once_with(
                 "researcher",
                 config,
                 runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=mock_knowledge,
                 include_interactive_questions=False,
                 delegation_depth=1,
@@ -336,10 +342,67 @@ class TestDelegateKnowledge:
                 "worker",
                 config,
                 runtime_paths=runtime_paths,
+                execution_identity=None,
                 knowledge=None,
                 include_interactive_questions=False,
                 delegation_depth=1,
             )
+
+    @pytest.mark.asyncio
+    async def test_delegation_passes_execution_identity_to_private_target(self, tmp_path: Path) -> None:
+        """Delegation should pass explicit execution identity through to private targets."""
+        config = _make_config(
+            {
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["worker"],
+                ),
+                "worker": AgentConfig(
+                    display_name="Worker",
+                    role="Work",
+                    private=AgentPrivateConfig(per="user_agent", root="mind_data"),
+                ),
+            },
+        )
+        config = _bind_runtime_paths(config, tmp_path)
+        runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            delegation_depth=0,
+        )
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="leader",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        mock_response = MagicMock()
+        mock_response.content = "done"
+        mock_agent = AsyncMock()
+        mock_agent.arun = AsyncMock(return_value=mock_response)
+
+        with (
+            tool_execution_identity(execution_identity),
+            patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create,
+        ):
+            await tools.delegate_task("worker", "do work")
+
+        mock_create.assert_called_once_with(
+            "worker",
+            config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=None,
+            include_interactive_questions=False,
+            delegation_depth=1,
+        )
 
 
 class TestDelegateToolRegistration:

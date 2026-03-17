@@ -6,7 +6,7 @@ import asyncio
 import gc
 import subprocess
 from typing import TYPE_CHECKING, ClassVar
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from pydantic import ValidationError
@@ -26,7 +26,7 @@ from mindroom.knowledge.manager import (
     initialize_knowledge_managers,
     shutdown_knowledge_managers,
 )
-from mindroom.knowledge.utils import bound_knowledge_managers, get_knowledge_for_base
+from mindroom.knowledge.utils import get_knowledge_for_base
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     private_instance_state_root_path,
@@ -1755,22 +1755,22 @@ async def test_request_bound_private_manager_survives_cache_eviction(
         )
         assert private_base_id in alice_managers
 
-        with bound_knowledge_managers(alice_managers):
-            await ensure_agent_knowledge_managers(
-                "mind",
-                config,
-                runtime_paths_for(config),
-                execution_identity=bob_identity,
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=bob_identity,
+        )
+        assert (
+            get_knowledge_for_base(
+                private_base_id,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                request_knowledge_managers=alice_managers,
+                execution_identity=alice_identity,
             )
-            assert (
-                get_knowledge_for_base(
-                    private_base_id,
-                    config=config,
-                    runtime_paths=runtime_paths_for(config),
-                    execution_identity=alice_identity,
-                )
-                is not None
-            )
+            is not None
+        )
 
         assert (
             get_knowledge_manager(
@@ -1828,18 +1828,42 @@ async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_pr
             runtime_paths_for(config),
             execution_identity=alice_identity,
         )
-        with bound_knowledge_managers({}):
-            assert (
-                get_knowledge_for_base(
-                    private_base_id,
-                    config=config,
-                    runtime_paths=runtime_paths_for(config),
-                    execution_identity=alice_identity,
-                )
-                is None
+        assert (
+            get_knowledge_for_base(
+                private_base_id,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                request_knowledge_managers={},
+                execution_identity=alice_identity,
             )
+            is None
+        )
     finally:
         await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_degraded_request_scoped_knowledge_preserves_shared_manager_fallback(
+    tmp_path: Path,
+) -> None:
+    """An empty request-scoped binding should not suppress shared knowledge."""
+    shared_root = tmp_path / "shared-docs"
+    shared_root.mkdir()
+    config = _make_config(shared_root)
+    shared_knowledge = object()
+    shared_manager = MagicMock()
+    shared_manager.get_knowledge.return_value = shared_knowledge
+
+    assert (
+        get_knowledge_for_base(
+            "research",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            request_knowledge_managers={},
+            shared_manager_lookup=lambda base_id: shared_manager if base_id == "research" else None,
+        )
+        is shared_knowledge
+    )
 
 
 @pytest.mark.asyncio

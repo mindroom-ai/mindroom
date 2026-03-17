@@ -161,20 +161,42 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
         tool_execution_identity(execution_identity),
     ):
-        await add_agent_memory("Private note", "general", storage_path, config, runtime_paths_for(config))
+        await add_agent_memory(
+            "Private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
         search_results = await search_agent_memories(
             "Private note",
             "general",
             storage_path,
             config,
             runtime_paths_for(config),
+            execution_identity=execution_identity,
             limit=10,
         )
-        listed = await list_all_agent_memories("general", storage_path, config, runtime_paths_for(config), limit=10)
+        listed = await list_all_agent_memories(
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+            limit=10,
+        )
 
         assert len(listed) == 1
         memory_id = listed[0]["id"]
-        loaded = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        loaded = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
         assert loaded is not None
 
         await update_agent_memory(
@@ -184,13 +206,35 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
             storage_path,
             config,
             runtime_paths_for(config),
+            execution_identity=execution_identity,
         )
-        updated = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        updated = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
         assert updated is not None
         assert updated["memory"] == "Updated private note"
 
-        await delete_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
-        deleted = await get_agent_memory(memory_id, "general", storage_path, config, runtime_paths_for(config))
+        await delete_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        deleted = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
         assert deleted is None
 
     expected_private_path = private_instance_state_root_path(

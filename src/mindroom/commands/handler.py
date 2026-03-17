@@ -213,9 +213,15 @@ def _collect_agent_toolkits(
     config: Config,
     agent_name: str,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[tuple[str, Toolkit]]:
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    tool_init_context = build_agent_tool_init_context(config, agent_name, runtime_paths=runtime_paths)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
@@ -394,6 +400,7 @@ async def _run_skill_command_tool(
                 config,
                 agent_name,
                 effective_runtime_paths,
+                execution_identity=execution_identity,
             )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:

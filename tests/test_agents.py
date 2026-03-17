@@ -1675,47 +1675,48 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     config = _bind_runtime_paths(config, runtime_paths)
     assert template_dir == (config_dir / "mind_template").resolve()
 
-    with tool_execution_identity(alice_identity):
-        create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
+    create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=alice_identity,
+    )
+    alice_worker_key = resolve_worker_key("user", alice_identity)
+    assert alice_worker_key is not None
+    alice_workspace = (
+        private_instance_state_root_path(
+            tmp_path,
+            worker_key=alice_worker_key,
+            agent_name="general",
         )
-        alice_worker_key = resolve_worker_key("user", alice_identity)
-        assert alice_worker_key is not None
-        alice_workspace = (
-            private_instance_state_root_path(
-                tmp_path,
-                worker_key=alice_worker_key,
-                agent_name="general",
-            )
-            / "mind_data"
-        )
-        assert (alice_workspace / "USER.md").exists()
-        assert (alice_workspace / "MEMORY.md").exists()
-        (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
-        alice_agent = create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+        / "mind_data"
+    )
+    assert (alice_workspace / "USER.md").exists()
+    assert (alice_workspace / "MEMORY.md").exists()
+    (alice_workspace / "USER.md").write_text("Alice private root context.", encoding="utf-8")
+    alice_agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=alice_identity,
+    )
 
-    with tool_execution_identity(bob_identity):
-        bob_agent = create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
+    bob_agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=bob_identity,
+    )
+    bob_worker_key = resolve_worker_key("user", bob_identity)
+    assert bob_worker_key is not None
+    bob_workspace = (
+        private_instance_state_root_path(
+            tmp_path,
+            worker_key=bob_worker_key,
+            agent_name="general",
         )
-        bob_worker_key = resolve_worker_key("user", bob_identity)
-        assert bob_worker_key is not None
-        bob_workspace = (
-            private_instance_state_root_path(
-                tmp_path,
-                worker_key=bob_worker_key,
-                agent_name="general",
-            )
-            / "mind_data"
-        )
+        / "mind_data"
+    )
 
     assert alice_workspace != bob_workspace
     assert "Alice private root context." in alice_agent.role
@@ -1761,12 +1762,12 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
     runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
     config = _bind_runtime_paths(config, runtime_paths)
 
-    with tool_execution_identity(identity):
-        agent = create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+    agent = create_agent(
+        "general",
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
 
     assert "Template user." not in agent.role
 
@@ -2561,18 +2562,18 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
     )
 
     with patch("mindroom.ai.get_model_instance", return_value=model):
-        with tool_execution_identity(alice_identity):
-            _create_agent_for_test(
-                "general",
-                config=bound_config,
-                include_interactive_questions=False,
-            )
-        with tool_execution_identity(bob_identity):
-            _create_agent_for_test(
-                "general",
-                config=bound_config,
-                include_interactive_questions=False,
-            )
+        _create_agent_for_test(
+            "general",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=alice_identity,
+        )
+        _create_agent_for_test(
+            "general",
+            config=bound_config,
+            include_interactive_questions=False,
+            execution_identity=bob_identity,
+        )
 
     assert mock_culture_manager_class.call_count == 2
     culture_db_calls = [

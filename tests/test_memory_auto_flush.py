@@ -22,7 +22,6 @@ from mindroom.memory.functions import add_agent_memory, append_agent_daily_memor
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
-    get_tool_execution_identity,
     private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
@@ -716,10 +715,10 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     def _fake_append_daily_memory(
         content: str,
         agent_name: str,
+        execution_identity: ToolExecutionIdentity | None = None,
         **_: object,
     ) -> dict[str, str]:
-        identity = get_tool_execution_identity()
-        writes.append((agent_name, identity.requester_id if identity is not None else None))
+        writes.append((agent_name, execution_identity.requester_id if execution_identity is not None else None))
         return {"id": "m_test", "memory": content, "user_id": f"agent_{agent_name}"}
 
     monkeypatch.setattr("mindroom.memory.auto_flush.append_agent_daily_memory", _fake_append_daily_memory)
