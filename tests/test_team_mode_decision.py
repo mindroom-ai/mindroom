@@ -35,6 +35,12 @@ async def decide_team_formation_for_test(**kwargs: object) -> TeamFormationDecis
             raise TypeError(msg)
         runtime_paths = runtime_paths_for(config)
     kwargs["runtime_paths"] = runtime_paths
+    room = kwargs.get("room")
+    if isinstance(config, Config) and isinstance(room, MagicMock) and "users" not in room.__dict__:
+        # Team-formation tests should default to all configured agents being visible in the room.
+        room.users = {
+            agent_id.full_id: None for agent_id in config.get_ids(runtime_paths).values() if agent_id is not None
+        }
     return await decide_team_formation(**kwargs)
 
 

@@ -248,7 +248,7 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
 class TeamFormationDecision:
     """Result of decide_team_formation."""
 
-    kind: Literal["team", "none", "reject"]
+    kind: Literal["team", "individual", "none", "reject"]
     agents: list[MatrixID]
     mode: TeamMode
     rejection_message: str | None = None
@@ -260,13 +260,18 @@ class TeamFormationDecision:
 
     @classmethod
     def reject(cls, *, agents: list[MatrixID], reason: str) -> TeamFormationDecision:
-        """Return the explicit-rejection outcome."""
+        """Return the explicit-rejection outcome owned by visible responder bots."""
         return cls(kind="reject", agents=agents, mode=TeamMode.COLLABORATE, rejection_message=reason)
 
     @classmethod
     def team(cls, *, agents: list[MatrixID], mode: TeamMode) -> TeamFormationDecision:
         """Return the successful team-formation outcome."""
         return cls(kind="team", agents=agents, mode=mode)
+
+    @classmethod
+    def individual(cls, *, agent: MatrixID) -> TeamFormationDecision:
+        """Return the single-agent fallback outcome after ad hoc filtering."""
+        return cls(kind="individual", agents=[agent], mode=TeamMode.COLLABORATE)
 
 
 class _FilteredTeamMembers(NamedTuple):
@@ -375,7 +380,7 @@ async def decide_team_formation(
         use_ai_decision: Whether to use AI for mode selection
         is_dm_room: Whether this is a DM room
         is_thread: Whether the current message is in a thread
-        available_agents_in_room: Optional pre-filtered room agents for DM fallback logic
+        available_agents_in_room: Optional pre-filtered room agents for sender-visible availability
 
     Returns:
         TeamFormationDecision with team formation decision
@@ -398,24 +403,35 @@ async def decide_team_formation(
         return TeamFormationDecision.none()
 
     if config is not None:
-        requested_team_agents = [
-            agent_id
-            for agent_id in team_agents
-            if (agent_id.agent_name(config, runtime_paths) or agent_id.username) != ROUTER_AGENT_NAME
-        ]
+        room_filtered_team_members = _filter_room_available_team_agents(
+            team_agents,
+            room,
+            config,
+            runtime_paths,
+            allow_partial=candidate_team_members.allow_partial,
+            available_agents_in_room=available_agents_in_room,
+        )
+        if room_filtered_team_members.rejection_message is not None:
+            return TeamFormationDecision.reject(
+                agents=room_filtered_team_members.agents,
+                reason=room_filtered_team_members.rejection_message,
+            )
+        team_agents = room_filtered_team_members.agents
         filtered_team_members = _filter_supported_team_agents(
             team_agents,
             config,
             runtime_paths,
             allow_partial=candidate_team_members.allow_partial,
         )
+        if filtered_team_members.rejection_message is not None:
+            return TeamFormationDecision.reject(
+                agents=filtered_team_members.agents,
+                reason=filtered_team_members.rejection_message,
+            )
         team_agents = filtered_team_members.agents
         if len(team_agents) < 2:
-            if filtered_team_members.rejection_message is not None:
-                return TeamFormationDecision.reject(
-                    agents=requested_team_agents,
-                    reason=filtered_team_members.rejection_message,
-                )
+            if candidate_team_members.allow_partial and len(team_agents) == 1:
+                return TeamFormationDecision.individual(agent=team_agents[0])
             return TeamFormationDecision.none()
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
@@ -466,6 +482,56 @@ def _candidate_team_agents(
 
     logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
     return _CandidateTeamMembers(available_agents, True)
+
+
+def _room_unavailable_team_agents_message(agent_names: list[str]) -> str:
+    """Return the rejection message for team members that are not available in the room."""
+    if len(agent_names) == 1:
+        return f"Team request includes agent '{agent_names[0]}' that is not available in this room."
+    return (
+        "Team request includes agents "
+        + ", ".join(f"'{agent_name}'" for agent_name in agent_names)
+        + " that are not available in this room."
+    )
+
+
+def _filter_room_available_team_agents(
+    agent_ids: list[MatrixID],
+    room: nio.MatrixRoom,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_partial: bool,
+    available_agents_in_room: list[MatrixID] | None,
+) -> _FilteredTeamMembers:
+    """Return the room-visible team members from one candidate set."""
+    room_available_agents = available_agents_in_room
+    if room_available_agents is None:
+        room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
+    available_agent_ids = {agent_id.full_id for agent_id in room_available_agents}
+    filtered_agents = [agent_id for agent_id in agent_ids if agent_id.full_id in available_agent_ids]
+    if len(filtered_agents) == len(agent_ids):
+        return _FilteredTeamMembers(filtered_agents, None)
+
+    unavailable_agents = [
+        agent_id.agent_name(config, runtime_paths) or agent_id.username
+        for agent_id in agent_ids
+        if agent_id.full_id not in available_agent_ids
+    ]
+    if allow_partial:
+        logger.info(
+            "Skipping unavailable team members during ad hoc team formation",
+            skipped_agents=sorted(unavailable_agents),
+        )
+        return _FilteredTeamMembers(filtered_agents, None)
+
+    rejection_agents = filtered_agents or room_available_agents
+    rejection_message = _room_unavailable_team_agents_message(unavailable_agents)
+    logger.info(
+        "Rejecting team formation because requested members are not available in the room",
+        unavailable_agents=sorted(unavailable_agents),
+    )
+    return _FilteredTeamMembers(rejection_agents, rejection_message)
 
 
 def _build_prompt_with_context(
@@ -533,7 +599,7 @@ def _filter_supported_team_agents(
                 for agent_name, private_targets in unsupported_agents.items()
             },
         )
-        return _FilteredTeamMembers([], rejection_message)
+        return _FilteredTeamMembers([agent_id for agent_id, _ in candidate_agents], rejection_message)
     if unsupported_agents:
         logger.info(
             "Skipping unsupported team members during ad hoc team formation",

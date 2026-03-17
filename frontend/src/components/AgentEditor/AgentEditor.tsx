@@ -69,8 +69,8 @@ export function AgentEditor() {
 
   // Fetch tools and skills from backend
   const selectedExecutionScope = useMemo(
-    () => (selectedAgent ? getAgentExecutionScope(selectedAgent) : null),
-    [selectedAgent]
+    () => (selectedAgent ? getAgentExecutionScope(config, selectedAgent) : null),
+    [config, selectedAgent]
   );
   const { tools: backendTools, loading: toolsLoading } = useTools(
     selectedAgentId,

@@ -77,7 +77,26 @@ def validate_workspace_template_dir(template_dir: Path) -> Path:
     if not resolved_template_dir.is_dir():
         msg = f"Workspace template directory does not exist: {resolved_template_dir}"
         raise ValueError(msg)
+    for source_path, _ in _iter_workspace_template_entries(resolved_template_dir):
+        if source_path.is_symlink():
+            msg = f"Workspace template directory must not contain symlinks: {source_path}"
+            raise ValueError(msg)
     return resolved_template_dir
+
+
+def _iter_workspace_template_entries(template_dir: Path) -> list[tuple[Path, Path]]:
+    """Return template entries in deterministic order without following symlinks."""
+    entries: list[tuple[Path, Path]] = []
+
+    def _walk(current_dir: Path) -> None:
+        for source_path in sorted(current_dir.iterdir()):
+            relative_path = source_path.relative_to(template_dir)
+            entries.append((source_path, relative_path))
+            if source_path.is_dir() and not source_path.is_symlink():
+                _walk(source_path)
+
+    _walk(template_dir)
+    return entries
 
 
 def _copy_workspace_template(
@@ -90,9 +109,13 @@ def _copy_workspace_template(
     workspace_path.mkdir(parents=True, exist_ok=True)
     resolved_template_dir = validate_workspace_template_dir(template_dir)
 
-    for source_path in sorted(resolved_template_dir.rglob("*")):
-        relative_path = source_path.relative_to(resolved_template_dir)
-        destination_path = workspace_path / relative_path
+    for source_path, relative_path in _iter_workspace_template_entries(resolved_template_dir):
+        destination_path = resolve_relative_path_within_root(
+            workspace_path,
+            relative_path,
+            field_name="workspace template destination",
+            root_label="workspace root",
+        )
         if source_path.is_dir():
             destination_path.mkdir(parents=True, exist_ok=True)
             continue

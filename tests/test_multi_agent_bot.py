@@ -2798,6 +2798,52 @@ class TestAgentBot:
         mock_should_respond.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_honors_single_agent_team_fallback(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team formation may degrade to one responder without falling back through should_agent_respond."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        context = _MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        with (
+            patch.object(
+                bot,
+                "_decide_team_for_sender",
+                new=AsyncMock(return_value=TeamFormationDecision.individual(agent=bot.matrix_id)),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        ):
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "help me",
+                True,
+            )
+
+        assert action.kind == "individual"
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
         self,
         mock_agent_user: AgentMatrixUser,

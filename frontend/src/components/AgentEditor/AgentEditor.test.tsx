@@ -150,6 +150,30 @@ describe('AgentEditor', () => {
     expect(useTools).toHaveBeenCalledWith('test_agent', null);
   });
 
+  it('requests tools using inherited defaults.worker_scope', () => {
+    const inheritedScopeAgent = {
+      ...mockAgent,
+      worker_scope: undefined,
+      private: undefined,
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [inheritedScopeAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          worker_scope: 'user',
+        },
+      },
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    expect(useTools).toHaveBeenCalledWith('test_agent', 'user');
+  });
+
   it('shows selectable setup-required tools instead of hiding them', () => {
     (useTools as any).mockReturnValue({
       tools: [

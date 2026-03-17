@@ -1487,7 +1487,7 @@ class AgentBot:
 
     def _team_response_action(self, form_team: TeamFormationDecision) -> _ResponseAction | None:
         """Return the action implied by one team-formation decision, if any."""
-        if form_team.kind not in {"team", "reject"}:
+        if form_team.kind not in {"team", "individual", "reject"}:
             return None
         if not form_team.agents:
             return _ResponseAction(kind="skip")
@@ -1496,6 +1496,8 @@ class AgentBot:
             return _ResponseAction(kind="skip")
         if form_team.kind == "team":
             return _ResponseAction(kind="team", form_team=form_team)
+        if form_team.kind == "individual":
+            return _ResponseAction(kind="individual")
         return _ResponseAction(
             kind="reject",
             form_team=form_team,
@@ -1614,14 +1616,12 @@ class AgentBot:
             self.config,
             self.runtime_paths,
         )
-        available_agents_in_room: list[MatrixID] | None = None
-        if is_dm:
-            available_agents_in_room = get_available_agents_for_sender(
-                room,
-                requester_user_id,
-                self.config,
-                self.runtime_paths,
-            )
+        available_agents_in_room = get_available_agents_for_sender(
+            room,
+            requester_user_id,
+            self.config,
+            self.runtime_paths,
+        )
         return await decide_team_formation(
             self.matrix_id,
             filter_agents_by_sender_permissions(

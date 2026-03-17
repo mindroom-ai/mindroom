@@ -46,23 +46,23 @@ import { FilterSelector } from '@/components/shared/FilterSelector';
 const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
 
 export function Integrations() {
-  const { agents } = useConfigStore();
+  const { agents, config } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => getAgentExecutionScope(agent) != null)
+        .filter(agent => getAgentExecutionScope(config, agent) != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [agents]
+    [agents, config]
   );
   const selectedScopeAgent = useMemo(
     () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
     [scopedAgents, scopeAgentName]
   );
   const selectedExecutionScope =
-    selectedScopeAgent != null ? getAgentExecutionScope(selectedScopeAgent) : null;
+    selectedScopeAgent != null ? getAgentExecutionScope(config, selectedScopeAgent) : null;
   const selectedScopeLabel =
-    selectedScopeAgent != null ? getAgentScopeLabel(selectedScopeAgent) : null;
+    selectedScopeAgent != null ? getAgentScopeLabel(config, selectedScopeAgent) : null;
   const hidesSharedOnlyIntegrations =
     selectedScopeAgent !== null &&
     selectedExecutionScope !== null &&

@@ -181,6 +181,7 @@ export interface Config {
     learning?: boolean;
     learning_mode?: LearningMode;
     show_tool_calls?: boolean;
+    worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
     tools?: string[];
     enable_streaming?: boolean;
@@ -202,17 +203,22 @@ export interface Config {
 }
 
 export function getAgentExecutionScope(
+  config: Pick<Config, 'defaults'> | null | undefined,
   agent: Pick<Agent, 'private' | 'worker_scope'>
 ): WorkerScope | null {
-  return agent.private?.per ?? agent.worker_scope ?? null;
+  return agent.private?.per ?? agent.worker_scope ?? config?.defaults.worker_scope ?? null;
 }
 
-export function getAgentScopeLabel(agent: Pick<Agent, 'private' | 'worker_scope'>): string | null {
+export function getAgentScopeLabel(
+  config: Pick<Config, 'defaults'> | null | undefined,
+  agent: Pick<Agent, 'private' | 'worker_scope'>
+): string | null {
   if (agent.private != null) {
     return `private.per=${agent.private.per}`;
   }
-  if (agent.worker_scope != null) {
-    return `worker_scope=${agent.worker_scope}`;
+  const executionScope = getAgentExecutionScope(config, agent);
+  if (executionScope != null) {
+    return `worker_scope=${executionScope}`;
   }
   return null;
 }
