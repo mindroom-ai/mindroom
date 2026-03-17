@@ -16,14 +16,16 @@ import httpx
 
 from mindroom.constants import execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
-from mindroom.runtime_resolution import resolve_agent_runtime, resolved_worker_private_agent_names
+from mindroom.runtime_resolution import (
+    resolve_agent_execution,
+    resolve_worker_execution_scope,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     WorkerScope,
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
-    resolve_worker_key,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -330,22 +332,27 @@ def _build_worker_routing_payload(
                 "requires runtime config context for private visibility."
             )
             raise RuntimeError(msg)
-        agent_runtime = resolve_agent_runtime(
+        agent_execution = resolve_agent_execution(
             effective_agent_name,
             context.config,
             runtime_paths,
             execution_identity=execution_identity,
         )
-        if agent_runtime.worker_key is None:
+        if agent_execution.worker_key is None:
             msg = (
                 f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
                 "could not be resolved from the current execution identity."
             )
             raise RuntimeError(msg)
-        worker_key = agent_runtime.worker_key
-        private_agent_names = resolved_worker_private_agent_names(agent_runtime)
+        worker_key = agent_execution.worker_key
+        private_agent_names = frozenset({effective_agent_name}) if agent_execution.is_private else frozenset()
     else:
-        worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=effective_agent_name)
+        worker_key = resolve_worker_execution_scope(
+            worker_scope,
+            runtime_paths,
+            agent_name=effective_agent_name,
+            execution_identity=execution_identity,
+        ).worker_key
         if worker_key is None:
             msg = (
                 f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "

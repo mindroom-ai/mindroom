@@ -27,6 +27,15 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class ResolvedWorkerExecution:
+    """Resolved worker execution scope from explicit worker-scope policy."""
+
+    worker_scope: WorkerScope | None
+    execution_identity: ToolExecutionIdentity | None
+    worker_key: str | None
+
+
+@dataclass(frozen=True)
 class ResolvedAgentExecution:
     """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
 
@@ -63,20 +72,32 @@ class ResolvedKnowledgeBinding:
     incremental_sync_on_access: bool
 
 
-def _resolved_execution_identity(
-    *,
-    agent_name: str,
-    config: Config,
+def resolve_worker_execution_scope(
+    worker_scope: WorkerScope | None,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> ToolExecutionIdentity | None:
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    return resolve_execution_identity_for_worker_scope(
+    *,
+    agent_name: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> ResolvedWorkerExecution:
+    """Resolve worker execution identity and key from explicit scope policy."""
+    resolved_execution_identity = resolve_execution_identity_for_worker_scope(
         worker_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
         tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
+    worker_key: str | None = None
+    if worker_scope is not None and resolved_execution_identity is not None:
+        worker_key = resolve_worker_key(
+            worker_scope,
+            resolved_execution_identity,
+            agent_name=agent_name,
+        )
+    return ResolvedWorkerExecution(
+        worker_scope=worker_scope,
+        execution_identity=resolved_execution_identity,
+        worker_key=worker_key,
     )
 
 
@@ -100,15 +121,6 @@ def _resolved_private_state_root(
     return resolved_state_root
 
 
-def resolved_worker_private_agent_names(agent_runtime: ResolvedAgentRuntime) -> frozenset[str] | None:
-    """Return explicit user-agent visibility derived from one resolved runtime."""
-    if agent_runtime.worker_scope != "user_agent":
-        return None
-    if agent_runtime.is_private:
-        return frozenset({agent_runtime.agent_name})
-    return frozenset()
-
-
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
@@ -121,33 +133,25 @@ def resolve_agent_execution(
     effective_execution_identity = execution_identity or get_tool_execution_identity()
     worker_scope = config.get_agent_worker_scope(agent_name)
     is_private = agent_config.private is not None
-    resolved_execution_identity = _resolved_execution_identity(
-        agent_name=agent_name,
-        config=config,
+    resolved_worker_execution = resolve_worker_execution_scope(
+        worker_scope,
         runtime_paths=runtime_paths,
+        agent_name=agent_name,
         execution_identity=effective_execution_identity,
     )
-
-    worker_key: str | None = None
-    if worker_scope is not None and resolved_execution_identity is not None:
-        worker_key = resolve_worker_key(
-            worker_scope,
-            resolved_execution_identity,
-            agent_name=agent_name,
-        )
     if is_private:
-        if resolved_execution_identity is None:
+        if resolved_worker_execution.execution_identity is None:
             msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
             raise ValueError(msg)
-        if worker_key is None:
+        if resolved_worker_execution.worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{worker_scope}'"
             raise ValueError(msg)
     return ResolvedAgentExecution(
         agent_name=agent_name,
         is_private=is_private,
         worker_scope=worker_scope,
-        execution_identity=resolved_execution_identity,
-        worker_key=worker_key,
+        execution_identity=resolved_worker_execution.execution_identity,
+        worker_key=resolved_worker_execution.worker_key,
     )
 
 

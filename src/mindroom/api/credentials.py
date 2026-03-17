@@ -18,12 +18,12 @@ from mindroom.credentials import (
     merge_scoped_credentials,
     validate_service_name,
 )
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
     WorkerScope,
     requires_shared_only_integration_scope,
-    resolve_worker_key,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
 )
@@ -243,7 +243,12 @@ def resolve_request_credentials_target(
             )
 
     execution_identity = _build_dashboard_execution_identity(request, agent_name)
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=agent_name)
+    worker_key = resolve_agent_execution(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).worker_key
     if worker_key is None:
         raise HTTPException(
             status_code=400,
