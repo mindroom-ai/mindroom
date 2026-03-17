@@ -13,8 +13,8 @@ from mindroom import constants
 from mindroom.config.main import Config, load_config
 from mindroom.knowledge.manager import (
     KnowledgeManager,
-    get_knowledge_manager,
-    initialize_knowledge_managers,
+    get_shared_knowledge_manager_for_config,
+    initialize_shared_knowledge_managers,
 )
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
@@ -89,7 +89,7 @@ def _list_file_info(root: Path, file_paths: list[Path] | None = None) -> tuple[l
 
 
 async def _ensure_managers(config: Config, runtime_paths: constants.RuntimePaths) -> dict[str, KnowledgeManager]:
-    return await initialize_knowledge_managers(
+    return await initialize_shared_knowledge_managers(
         config,
         runtime_paths,
         start_watchers=False,
@@ -102,8 +102,12 @@ async def _ensure_manager(
     base_id: str,
     runtime_paths: constants.RuntimePaths,
 ) -> KnowledgeManager | None:
-    existing = get_knowledge_manager(base_id, config=config, runtime_paths=runtime_paths)
-    if existing is not None and existing.matches(config, runtime_paths):
+    existing = get_shared_knowledge_manager_for_config(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if existing is not None:
         return existing
     managers = await _ensure_managers(config, runtime_paths)
     return managers.get(base_id)

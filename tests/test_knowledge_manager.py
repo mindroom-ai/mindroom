@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import subprocess
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -19,12 +18,12 @@ from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     _create_embedder,
-    _knowledge_manager_init_locks,
-    _knowledge_managers,
+    _shared_knowledge_managers,
     ensure_agent_knowledge_managers,
-    get_knowledge_manager,
-    initialize_knowledge_managers,
-    shutdown_knowledge_managers,
+    get_shared_knowledge_manager,
+    get_shared_knowledge_manager_for_config,
+    initialize_shared_knowledge_managers,
+    shutdown_shared_knowledge_managers,
 )
 from mindroom.knowledge.utils import get_knowledge_for_base
 from mindroom.tool_system.worker_routing import (
@@ -660,7 +659,7 @@ async def test_sync_indexed_files_does_not_suppress_retry_for_previously_indexed
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_maintains_registry(
+async def test_initialize_shared_knowledge_managers_maintains_registry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -679,9 +678,9 @@ async def test_initialize_knowledge_managers_maintains_registry(
     )
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research", "legal"}
-    assert get_knowledge_manager("research") is managers["research"]
+    assert get_shared_knowledge_manager("research") is managers["research"]
 
     updated_config = Config(
         agents={},
@@ -691,15 +690,15 @@ async def test_initialize_knowledge_managers_maintains_registry(
         },
     )
 
-    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research"}
-    assert get_knowledge_manager("legal") is None
+    assert get_shared_knowledge_manager("legal") is None
 
-    await shutdown_knowledge_managers()
+    await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
+async def test_initialize_shared_knowledge_managers_full_reindex_on_settings_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -717,7 +716,7 @@ async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
     )
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     original_manager = managers["research"]
 
     # Change chunk_size to trigger an index-affecting settings mismatch.
@@ -738,17 +737,17 @@ async def test_initialize_knowledge_managers_full_reindex_on_settings_change(
     monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
     monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
 
-    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     new_manager = managers["research"]
     assert new_manager is not original_manager
     initialize.assert_awaited_once()
     sync_indexed_files.assert_not_awaited()
 
-    await shutdown_knowledge_managers()
+    await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_non_index_setting_change_uses_incremental_sync(
+async def test_initialize_shared_knowledge_managers_non_index_setting_change_reuses_manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -766,7 +765,7 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     )
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
 
-    managers = await initialize_knowledge_managers(config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     original_manager = managers["research"]
 
     updated_config = Config(
@@ -782,13 +781,13 @@ async def test_initialize_knowledge_managers_non_index_setting_change_uses_incre
     monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
     monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
 
-    managers = await initialize_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
+    managers = await initialize_shared_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     new_manager = managers["research"]
-    assert new_manager is not original_manager
+    assert new_manager is original_manager
     initialize.assert_not_awaited()
     sync_indexed_files.assert_awaited_once()
 
-    await shutdown_knowledge_managers()
+    await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -833,33 +832,23 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
     )
 
     try:
-        await ensure_agent_knowledge_managers(
+        alice_managers = await ensure_agent_knowledge_managers(
             "mind",
             config,
             runtime_paths_for(config),
             execution_identity=alice_identity,
         )
-        await ensure_agent_knowledge_managers(
+        bob_managers = await ensure_agent_knowledge_managers(
             "mind",
             config,
             runtime_paths_for(config),
             execution_identity=bob_identity,
         )
 
-        assert get_knowledge_manager(private_base_id) is None
+        assert get_shared_knowledge_manager(private_base_id) is None
 
-        alice_manager = get_knowledge_manager(
-            private_base_id,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            execution_identity=alice_identity,
-        )
-        bob_manager = get_knowledge_manager(
-            private_base_id,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            execution_identity=bob_identity,
-        )
+        alice_manager = alice_managers[private_base_id]
+        bob_manager = bob_managers[private_base_id]
 
         assert alice_manager is not None
         assert bob_manager is not None
@@ -893,7 +882,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
         assert (bob_workspace / "SOUL.md").exists()
         assert (bob_workspace / "MEMORY.md").exists()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -943,7 +932,7 @@ async def test_shared_knowledge_missing_dotted_directory_path_is_not_misclassifi
             },
         ]
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -988,7 +977,7 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
         assert sync_indexed_files.await_count == 2
         start_watcher.assert_not_awaited()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1036,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
         sync_indexed_files.assert_not_awaited()
         start_watcher.assert_not_awaited()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1068,7 +1057,7 @@ async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch
     monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
 
     try:
-        await initialize_knowledge_managers(
+        await initialize_shared_knowledge_managers(
             config,
             runtime_paths,
             start_watchers=True,
@@ -1078,16 +1067,16 @@ async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch
         start_watcher.assert_awaited_once()
         sync_git_repository.assert_awaited_once()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
+async def test_private_request_knowledge_managers_are_not_registered_globally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Static manager initialization should not tear down live scoped private managers."""
+    """Request-scoped private knowledge should stay out of the shared registry."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
@@ -1122,22 +1111,18 @@ async def test_initialize_knowledge_managers_keeps_private_scoped_managers(
         )
         scoped_manager = managers[private_base_id]
 
-        static_managers = await initialize_knowledge_managers(
-            config,
-            _runtime_paths(tmp_path / "config.yaml", tmp_path),
-            reindex_on_create=False,
-        )
-        resolved_manager = get_knowledge_manager(
+        resolved_manager = get_shared_knowledge_manager(private_base_id)
+        resolved_for_config = get_shared_knowledge_manager_for_config(
             private_base_id,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            execution_identity=identity,
         )
 
-        assert static_managers == {}
-        assert resolved_manager is scoped_manager
+        assert resolved_manager is None
+        assert resolved_for_config is None
+        assert scoped_manager is managers[private_base_id]
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1174,7 +1159,7 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
 
         assert knowledge is manager.get_knowledge()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1212,14 +1197,14 @@ async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager
     )
 
     try:
-        await initialize_knowledge_managers(config_a, runtime_paths_for(config_a))
+        await initialize_shared_knowledge_managers(config_a, runtime_paths_for(config_a))
         assert get_knowledge_for_base("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is None
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
+async def test_initialize_shared_knowledge_managers_refreshes_runtime_paths_on_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1249,12 +1234,12 @@ async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
     )
 
     try:
-        managers_a = await initialize_knowledge_managers(
+        managers_a = await initialize_shared_knowledge_managers(
             config_a,
             runtime_paths_for(config_a),
             reindex_on_create=False,
         )
-        managers_b = await initialize_knowledge_managers(
+        managers_b = await initialize_shared_knowledge_managers(
             config_b,
             runtime_paths_for(config_b),
             reindex_on_create=False,
@@ -1264,11 +1249,11 @@ async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
         assert managers_b["docs"].runtime_paths.env_path == runtime_paths_for(config_b).env_path
         assert managers_b["docs"].runtime_paths.config_path == runtime_paths_for(config_b).config_path
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_initialize_knowledge_managers_refreshes_shared_managers_on_reuse_without_watchers(
+async def test_initialize_shared_knowledge_managers_refreshes_shared_managers_on_reuse_without_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1290,7 +1275,7 @@ async def test_initialize_knowledge_managers_refreshes_shared_managers_on_reuse_
     )
 
     try:
-        managers = await initialize_knowledge_managers(
+        managers = await initialize_shared_knowledge_managers(
             config,
             runtime_paths_for(config),
             start_watchers=False,
@@ -1299,7 +1284,7 @@ async def test_initialize_knowledge_managers_refreshes_shared_managers_on_reuse_
         sync_mock = AsyncMock(return_value={"added": 0, "updated": 0, "removed": 0})
         monkeypatch.setattr(managers["docs"], "sync_indexed_files", sync_mock)
 
-        await initialize_knowledge_managers(
+        await initialize_shared_knowledge_managers(
             config,
             runtime_paths_for(config),
             start_watchers=False,
@@ -1308,7 +1293,7 @@ async def test_initialize_knowledge_managers_refreshes_shared_managers_on_reuse_
 
         sync_mock.assert_awaited_once()
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1349,13 +1334,25 @@ async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys
         first = await ensure_agent_knowledge_managers("researcher", config_a, runtime_paths_for(config_a))
         second = await ensure_agent_knowledge_managers("researcher", config_b, runtime_paths_for(config_b))
 
-        assert get_knowledge_manager("docs", config=config_a, runtime_paths=runtime_paths_for(config_a)) is None
         assert (
-            get_knowledge_manager("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is second["docs"]
+            get_shared_knowledge_manager_for_config(
+                "docs",
+                config=config_a,
+                runtime_paths=runtime_paths_for(config_a),
+            )
+            is None
+        )
+        assert (
+            get_shared_knowledge_manager_for_config(
+                "docs",
+                config=config_b,
+                runtime_paths=runtime_paths_for(config_b),
+            )
+            is second["docs"]
         )
         assert first["docs"] is not second["docs"]
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1424,30 +1421,41 @@ async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_c
 
         new_manager = new_result["docs"]
         assert old_result["docs"] is not new_manager
-        assert len(_knowledge_managers) == 1
-        remaining_key = next(iter(_knowledge_managers))
-        assert remaining_key.base_id == "docs"
-        assert remaining_key.knowledge_path == str(docs_b.resolve())
-        assert get_knowledge_manager("docs", config=config_a, runtime_paths=runtime_paths_for(config_a)) is None
-        assert get_knowledge_manager("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is new_manager
+        assert _shared_knowledge_managers == {"docs": new_manager}
+        assert (
+            get_shared_knowledge_manager_for_config(
+                "docs",
+                config=config_a,
+                runtime_paths=runtime_paths_for(config_a),
+            )
+            is None
+        )
+        assert (
+            get_shared_knowledge_manager_for_config(
+                "docs",
+                config=config_b,
+                runtime_paths=runtime_paths_for(config_b),
+            )
+            is new_manager
+        )
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_ensure_agent_knowledge_managers_removes_stale_private_key_for_same_requester(
+async def test_private_request_knowledge_managers_are_created_fresh_per_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Request-time private ensures should discard superseded keys for the same requester root."""
+    """Each private ensure should build a fresh request-owned manager."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
 
     template_dir = build_private_template_dir()
     runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path)
-    config_a = bind_runtime_paths(
+    config = bind_runtime_paths(
         Config(
             agents={
                 "mind": AgentConfig(
@@ -1465,25 +1473,7 @@ async def test_ensure_agent_knowledge_managers_removes_stale_private_key_for_sam
         ),
         runtime_paths,
     )
-    config_b = bind_runtime_paths(
-        Config(
-            agents={
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    private=AgentPrivateConfig(
-                        per="user_agent",
-                        root="mind_data",
-                        template_dir=str(template_dir),
-                        context_files=["SOUL.md"],
-                        knowledge=AgentPrivateKnowledgeConfig(path="memory-next", watch=False),
-                    ),
-                ),
-            },
-            models={},
-        ),
-        runtime_paths,
-    )
-    private_base_id = config_a.get_agent_private_knowledge_base_id("mind")
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -1498,291 +1488,33 @@ async def test_ensure_agent_knowledge_managers_removes_stale_private_key_for_sam
     try:
         first = await ensure_agent_knowledge_managers(
             "mind",
-            config_a,
-            runtime_paths_for(config_a),
+            config,
+            runtime_paths_for(config),
             execution_identity=identity,
         )
         second = await ensure_agent_knowledge_managers(
             "mind",
-            config_b,
-            runtime_paths_for(config_b),
+            config,
+            runtime_paths_for(config),
             execution_identity=identity,
         )
 
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config_a,
-                runtime_paths=runtime_paths_for(config_a),
-                execution_identity=identity,
-            )
-            is None
-        )
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config_b,
-                runtime_paths=runtime_paths_for(config_b),
-                execution_identity=identity,
-            )
-            is second[private_base_id]
-        )
         assert first[private_base_id] is not second[private_base_id]
+        assert get_shared_knowledge_manager(private_base_id) is None
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
-async def test_ensure_agent_knowledge_managers_initializes_private_scope_once_under_concurrency(
+async def test_request_bound_private_manager_stays_usable_after_later_private_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
-    """Concurrent first use should not initialize the same scoped private manager twice."""
+    """A request map should keep working after later private requests build other managers."""
     _DummyChromaDb.metadatas = []
     monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
     monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
-
-    template_dir = build_private_template_dir()
-    config = Config(
-        agents={
-            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
-        },
-        models={},
-    )
-    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
-    started = asyncio.Event()
-    release = asyncio.Event()
-    initialize_calls = 0
-
-    async def fake_initialize(_self: KnowledgeManager) -> None:
-        nonlocal initialize_calls
-        initialize_calls += 1
-        started.set()
-        await release.wait()
-
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
-    assert private_base_id is not None
-
-    try:
-        with patch.object(KnowledgeManager, "initialize", new=fake_initialize):
-            first = asyncio.create_task(
-                ensure_agent_knowledge_managers(
-                    "mind",
-                    config,
-                    runtime_paths_for(config),
-                    execution_identity=identity,
-                    reindex_on_create=True,
-                ),
-            )
-            await started.wait()
-            second = asyncio.create_task(
-                ensure_agent_knowledge_managers(
-                    "mind",
-                    config,
-                    runtime_paths_for(config),
-                    execution_identity=identity,
-                    reindex_on_create=True,
-                ),
-            )
-            await asyncio.sleep(0)
-            release.set()
-            first_result, second_result = await asyncio.gather(first, second)
-
-        assert initialize_calls == 1
-        assert first_result[private_base_id] is second_result[private_base_id]
-    finally:
-        await shutdown_knowledge_managers()
-
-
-@pytest.mark.asyncio
-async def test_initialize_knowledge_managers_removes_private_scoped_managers_when_private_knowledge_is_removed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_private_template_dir: Callable[..., Path],
-) -> None:
-    """Config reload should tear down scoped private managers once the agent drops private knowledge."""
-    _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
-
-    template_dir = build_private_template_dir()
-    config_with_private = Config(
-        agents={
-            "mind": _mind_private_agent(watch=False, template_dir=str(template_dir)),
-        },
-        models={},
-    )
-    config_without_private = Config(
-        agents={
-            "mind": AgentConfig(display_name="Mind"),
-        },
-        models={},
-    )
-    config_with_private = bind_runtime_paths(config_with_private, _runtime_paths(tmp_path / "config.yaml", tmp_path))
-    config_without_private = bind_runtime_paths(
-        config_without_private,
-        _runtime_paths(tmp_path / "config.yaml", tmp_path),
-    )
-    private_base_id = config_with_private.get_agent_private_knowledge_base_id("mind")
-    assert private_base_id is not None
-
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="mind",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-
-    try:
-        await ensure_agent_knowledge_managers(
-            "mind",
-            config_with_private,
-            runtime_paths_for(config_with_private),
-            execution_identity=identity,
-        )
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config_with_private,
-                runtime_paths=runtime_paths_for(config_with_private),
-                execution_identity=identity,
-            )
-            is not None
-        )
-
-        await initialize_knowledge_managers(
-            config_without_private,
-            _runtime_paths(tmp_path / "config.yaml", tmp_path),
-            reindex_on_create=False,
-        )
-
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config_with_private,
-                runtime_paths=runtime_paths_for(config_with_private),
-                execution_identity=identity,
-            )
-            is None
-        )
-        assert get_knowledge_manager(private_base_id) is None
-    finally:
-        await shutdown_knowledge_managers()
-
-
-@pytest.mark.asyncio
-async def test_private_scoped_knowledge_manager_cache_is_bounded(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_private_template_dir: Callable[..., Path],
-) -> None:
-    """Older scoped private managers should be evicted instead of accumulating forever."""
-    _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
-    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 2)
-
-    template_dir = build_private_template_dir()
-    config = Config(
-        agents={
-            "mind": AgentConfig(
-                display_name="Mind",
-                memory_backend="file",
-                private=AgentPrivateConfig(
-                    per="user_agent",
-                    root="mind_data",
-                    template_dir=str(template_dir),
-                    context_files=["SOUL.md"],
-                    knowledge=AgentPrivateKnowledgeConfig(path="memory", watch=False),
-                ),
-            ),
-        },
-        models={},
-    )
-    config = bind_runtime_paths(config, _runtime_paths(tmp_path / "config.yaml", tmp_path))
-    private_base_id = config.get_agent_private_knowledge_base_id("mind")
-    assert private_base_id is not None
-
-    identities = [
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id=requester_id,
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id=f"session-{requester_id}",
-        )
-        for requester_id in ("@alice:example.org", "@bob:example.org", "@carol:example.org")
-    ]
-
-    try:
-        for identity in identities:
-            await ensure_agent_knowledge_managers(
-                "mind",
-                config,
-                runtime_paths_for(config),
-                execution_identity=identity,
-            )
-
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                execution_identity=identities[0],
-            )
-            is None
-        )
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                execution_identity=identities[1],
-            )
-            is not None
-        )
-        assert (
-            get_knowledge_manager(
-                private_base_id,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                execution_identity=identities[2],
-            )
-            is not None
-        )
-        gc.collect()
-        assert len(_knowledge_manager_init_locks) <= 2
-    finally:
-        await shutdown_knowledge_managers()
-
-
-@pytest.mark.asyncio
-async def test_request_bound_private_manager_survives_cache_eviction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_private_template_dir: Callable[..., Path],
-) -> None:
-    """An in-flight request should keep using the manager it already ensured."""
-    _DummyChromaDb.metadatas = []
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
-    monkeypatch.setattr("mindroom.knowledge.manager._SCOPED_PRIVATE_MANAGER_CACHE_LIMIT", 1)
-
     template_dir = build_private_template_dir()
     config = Config(
         agents={
@@ -1844,22 +1576,21 @@ async def test_request_bound_private_manager_survives_cache_eviction(
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 request_knowledge_managers=alice_managers,
-                execution_identity=alice_identity,
             )
             is not None
         )
 
         assert (
-            get_knowledge_manager(
+            get_knowledge_for_base(
                 private_base_id,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
-                execution_identity=alice_identity,
+                request_knowledge_managers={},
             )
             is None
         )
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio
@@ -1911,12 +1642,11 @@ async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_pr
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 request_knowledge_managers={},
-                execution_identity=alice_identity,
             )
             is None
         )
     finally:
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio

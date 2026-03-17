@@ -438,7 +438,6 @@ class AgentBot:
     def _knowledge_for_agent(
         self,
         agent_name: str,
-        execution_identity: ToolExecutionIdentity | None = None,
         *,
         request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     ) -> Knowledge | None:
@@ -455,7 +454,6 @@ class AgentBot:
             self.runtime_paths,
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=_shared_manager,
-            execution_identity=execution_identity,
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,
@@ -506,7 +504,7 @@ class AgentBot:
             )
             raise ValueError(msg)
         execution_identity = self._build_shared_execution_identity()
-        knowledge = self._knowledge_for_agent(self.agent_name, execution_identity=execution_identity)
+        knowledge = self._knowledge_for_agent(self.agent_name)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
@@ -2097,7 +2095,6 @@ class AgentBot:
                 ):
                     knowledge = self._knowledge_for_agent(
                         self.agent_name,
-                        execution_identity=execution_identity,
                         request_knowledge_managers=request_knowledge_managers,
                     )
                     response_text = await ai_response(
@@ -2230,7 +2227,6 @@ class AgentBot:
             ):
                 knowledge = self._knowledge_for_agent(
                     agent_name,
-                    execution_identity=execution_identity,
                     request_knowledge_managers=request_knowledge_managers,
                 )
                 response_text = await ai_response(
@@ -2410,7 +2406,6 @@ class AgentBot:
                 ):
                     knowledge = self._knowledge_for_agent(
                         self.agent_name,
-                        execution_identity=execution_identity,
                         request_knowledge_managers=request_knowledge_managers,
                     )
                     response_stream = stream_agent_response(

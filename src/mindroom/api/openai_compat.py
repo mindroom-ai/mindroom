@@ -36,7 +36,7 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.knowledge.manager import initialize_knowledge_managers
+from mindroom.knowledge.manager import initialize_shared_knowledge_managers
 from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
@@ -596,12 +596,12 @@ async def _resolve_auto_route(
 async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePaths) -> None:
     """Initialize knowledge managers if needed.
 
-    Safe to call multiple times — `initialize_knowledge_managers` is
+    Safe to call multiple times — `initialize_shared_knowledge_managers` is
     idempotent and reuses existing managers that match the config.
     """
     if not config.knowledge_bases:
         return
-    await initialize_knowledge_managers(
+    await initialize_shared_knowledge_managers(
         config=config,
         runtime_paths=runtime_paths,
         start_watchers=False,

@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from agno.knowledge.knowledge import Knowledge
 
-from mindroom.knowledge.manager import ensure_agent_knowledge_managers, get_knowledge_manager
+from mindroom.knowledge.manager import (
+    ensure_agent_knowledge_managers,
+    get_shared_knowledge_manager_for_config,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -64,21 +67,25 @@ def get_knowledge_for_base(
     runtime_paths: RuntimePaths,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Knowledge | None:
     """Resolve one configured base ID to its current Knowledge instance."""
-    manager: KnowledgeManager | None
-    manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
-    if manager is None and request_knowledge_managers is not None and config.get_private_knowledge_base_agent(base_id):
+    request_manager = request_knowledge_managers.get(base_id) if request_knowledge_managers is not None else None
+    if request_manager is not None:
+        return request_manager.get_knowledge()
+    if config.get_private_knowledge_base_agent(base_id):
         return None
+
+    manager: KnowledgeManager | None
+    manager = None
     if manager is None:
         manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
+    if manager is not None and not manager.matches(config, runtime_paths):
+        return None
     if manager is None:
-        manager = get_knowledge_manager(
+        manager = get_shared_knowledge_manager_for_config(
             base_id,
             config=config,
             runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
         )
     return manager.get_knowledge() if manager is not None else None
 
@@ -89,7 +96,6 @@ def get_agent_knowledge(
     runtime_paths: RuntimePaths,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
     shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
     on_missing_bases: Callable[[list[str]], None] | None = None,
 ) -> Knowledge | None:
     """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
@@ -102,7 +108,6 @@ def get_agent_knowledge(
             runtime_paths=runtime_paths,
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=shared_manager_lookup,
-            execution_identity=execution_identity,
         ),
         on_missing_bases=on_missing_bases,
     )

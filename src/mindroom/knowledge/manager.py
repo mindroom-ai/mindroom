@@ -8,7 +8,6 @@ import json
 import re
 import time
 import weakref
-from collections import OrderedDict
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -1094,21 +1093,12 @@ class KnowledgeManager:
             await self.remove_file(resolved_path)
 
 
-_knowledge_managers: dict[KnowledgeManagerKey, KnowledgeManager] = {}
-_static_knowledge_manager_keys: dict[str, KnowledgeManagerKey] = {}
-_scoped_private_manager_lru: OrderedDict[KnowledgeManagerKey, None] = OrderedDict()
-_knowledge_manager_init_locks: weakref.WeakValueDictionary[KnowledgeManagerKey, asyncio.Lock] = (
-    weakref.WeakValueDictionary()
-)
-_knowledge_manager_replacement_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
-    weakref.WeakValueDictionary()
-)
-_SCOPED_PRIVATE_MANAGER_CACHE_LIMIT = 128
+_shared_knowledge_managers: dict[str, KnowledgeManager] = {}
+_shared_knowledge_manager_init_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
 
-async def _stop_and_remove_manager(key: KnowledgeManagerKey) -> None:
-    _scoped_private_manager_lru.pop(key, None)
-    manager = _knowledge_managers.pop(key, None)
+async def _stop_and_remove_shared_manager(base_id: str) -> None:
+    manager = _shared_knowledge_managers.pop(base_id, None)
     if manager is None:
         return
     await manager.stop_watcher()
@@ -1120,119 +1110,138 @@ async def _sync_manager_without_full_reindex(manager: KnowledgeManager) -> dict[
     return await manager.sync_indexed_files()
 
 
-def _knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
-    lock = _knowledge_manager_init_locks.get(key)
+def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
+    lock = _shared_knowledge_manager_init_locks.get(base_id)
     if lock is None:
         lock = asyncio.Lock()
-        _knowledge_manager_init_locks[key] = lock
+        _shared_knowledge_manager_init_locks[base_id] = lock
     return lock
 
 
-def _knowledge_manager_replacement_lock_key(
-    base_id: str,
-    key: KnowledgeManagerKey,
+def _shared_binding_matches_current_manager(
+    manager: KnowledgeManager,
     *,
-    request_scoped: bool,
-) -> tuple[str, str]:
-    if not request_scoped:
-        return base_id, ""
-    return base_id, key.storage_path
-
-
-def _knowledge_manager_replacement_lock(lock_key: tuple[str, str]) -> asyncio.Lock:
-    lock = _knowledge_manager_replacement_locks.get(lock_key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _knowledge_manager_replacement_locks[lock_key] = lock
-    return lock
-
-
-async def _touch_scoped_private_manager_key(
-    key: KnowledgeManagerKey,
-    *,
-    request_scoped: bool,
-) -> None:
-    if not request_scoped:
-        return
-
-    _scoped_private_manager_lru.pop(key, None)
-    _scoped_private_manager_lru[key] = None
-
-    while len(_scoped_private_manager_lru) > _SCOPED_PRIVATE_MANAGER_CACHE_LIMIT:
-        oldest_key = next(iter(_scoped_private_manager_lru))
-        _scoped_private_manager_lru.pop(oldest_key, None)
-        await _stop_and_remove_manager(oldest_key)
-
-
-async def _ensure_knowledge_manager(
-    *,
-    key: KnowledgeManagerKey,
     base_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage_path: Path,
-    knowledge_path: Path,
-    request_scoped: bool,
-    start_background_watchers: bool,
-    incremental_sync_on_access: bool,
+) -> bool:
+    try:
+        binding = _resolve_knowledge_manager_binding(
+            config,
+            runtime_paths,
+            base_id,
+            start_watchers=False,
+        )
+    except ValueError:
+        return False
+    if binding.request_scoped:
+        return False
+    return manager.matches(config, binding.storage_root, binding.knowledge_path)
+
+
+async def _create_knowledge_manager(
+    *,
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    binding: ResolvedKnowledgeBinding,
     reindex_on_create: bool,
 ) -> KnowledgeManager:
-    async with _knowledge_manager_init_lock(key):
-        existing = _knowledge_managers.get(key)
-        if existing is not None and existing.matches(config, storage_path, knowledge_path):
-            existing._refresh_settings(config, runtime_paths, storage_path, knowledge_path)
-            if incremental_sync_on_access:
+    manager = KnowledgeManager(
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=binding.storage_root,
+        knowledge_path=binding.knowledge_path,
+    )
+    if reindex_on_create:
+        await manager.initialize()
+    else:
+        sync_result = await _sync_manager_without_full_reindex(manager)
+        sync_log_context: dict[str, object] = {
+            "base_id": base_id,
+            "path": str(manager.knowledge_path),
+        }
+        if manager._git_config() is not None:
+            sync_log_context.update(
+                {
+                    "updated": sync_result["updated"],
+                    "changed_count": sync_result["changed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        else:
+            sync_log_context.update(
+                {
+                    "loaded_count": sync_result["loaded_count"],
+                    "indexed_count": sync_result["indexed_count"],
+                    "removed_count": sync_result["removed_count"],
+                },
+            )
+        logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
+
+    if binding.start_background_watchers:
+        await manager.start_watcher()
+    return manager
+
+
+async def _get_or_create_shared_knowledge_manager(
+    *,
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    binding: ResolvedKnowledgeBinding,
+    reindex_on_create: bool,
+) -> KnowledgeManager:
+    async with _shared_knowledge_manager_init_lock(base_id):
+        existing = _shared_knowledge_managers.get(base_id)
+        if existing is not None:
+            if existing.needs_full_reindex(config, binding.storage_root, binding.knowledge_path):
+                await existing.stop_watcher()
+                manager = await _create_knowledge_manager(
+                    base_id=base_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    binding=binding,
+                    reindex_on_create=True,
+                )
+                _shared_knowledge_managers[base_id] = manager
+                return manager
+
+            existing._refresh_settings(config, runtime_paths, binding.storage_root, binding.knowledge_path)
+            if binding.incremental_sync_on_access:
                 await _sync_manager_without_full_reindex(existing)
-            if start_background_watchers:
+            if binding.start_background_watchers:
                 await existing.start_watcher()
-            await _touch_scoped_private_manager_key(key, request_scoped=request_scoped)
             return existing
 
-        full_reindex_required = (
-            existing.needs_full_reindex(config, storage_path, knowledge_path) if existing is not None else False
-        )
-        if existing is not None:
-            await existing.stop_watcher()
-
-        manager = KnowledgeManager(
+        manager = await _create_knowledge_manager(
             base_id=base_id,
             config=config,
             runtime_paths=runtime_paths,
-            storage_path=storage_path,
-            knowledge_path=knowledge_path,
+            binding=binding,
+            reindex_on_create=reindex_on_create,
         )
-        if reindex_on_create or full_reindex_required:
-            await manager.initialize()
-        else:
-            sync_result = await _sync_manager_without_full_reindex(manager)
-            sync_log_context: dict[str, object] = {
-                "base_id": base_id,
-                "path": str(manager.knowledge_path),
-            }
-            if manager._git_config() is not None:
-                sync_log_context.update(
-                    {
-                        "updated": sync_result["updated"],
-                        "changed_count": sync_result["changed_count"],
-                        "removed_count": sync_result["removed_count"],
-                    },
-                )
-            else:
-                sync_log_context.update(
-                    {
-                        "loaded_count": sync_result["loaded_count"],
-                        "indexed_count": sync_result["indexed_count"],
-                        "removed_count": sync_result["removed_count"],
-                    },
-                )
-            logger.info("Knowledge manager initialized without full reindex", **sync_log_context)
-
-        if start_background_watchers:
-            await manager.start_watcher()
-
-        _knowledge_managers[key] = manager
-        await _touch_scoped_private_manager_key(key, request_scoped=request_scoped)
+        _shared_knowledge_managers[base_id] = manager
         return manager
+
+
+async def create_request_knowledge_manager(
+    *,
+    base_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    binding: ResolvedKnowledgeBinding,
+    reindex_on_create: bool,
+) -> KnowledgeManager:
+    """Create one request-owned knowledge manager without registering it globally."""
+    return await _create_knowledge_manager(
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        binding=binding,
+        reindex_on_create=reindex_on_create,
+    )
 
 
 async def ensure_agent_knowledge_managers(
@@ -1253,7 +1262,7 @@ async def ensure_agent_knowledge_managers(
 
     managers: dict[str, KnowledgeManager] = {}
     for base_id in base_ids:
-        key, binding = _knowledge_manager_key(
+        binding = _resolve_knowledge_manager_binding(
             config,
             runtime_paths,
             base_id,
@@ -1261,136 +1270,89 @@ async def ensure_agent_knowledge_managers(
             start_watchers=start_watchers,
             create=True,
         )
-        async with _knowledge_manager_replacement_lock(
-            _knowledge_manager_replacement_lock_key(
-                base_id,
-                key,
-                request_scoped=binding.request_scoped,
-            ),
-        ):
-            for other_key in _stale_request_manager_keys(
-                base_id,
-                key,
-                request_scoped=binding.request_scoped,
-            ):
-                await _stop_and_remove_manager(other_key)
-            managers[base_id] = await _ensure_knowledge_manager(
-                key=key,
+        if binding.request_scoped:
+            managers[base_id] = await create_request_knowledge_manager(
                 base_id=base_id,
                 config=config,
                 runtime_paths=runtime_paths,
-                storage_path=binding.storage_root,
-                knowledge_path=binding.knowledge_path,
-                request_scoped=binding.request_scoped,
-                start_background_watchers=binding.start_background_watchers,
-                incremental_sync_on_access=binding.incremental_sync_on_access,
+                binding=binding,
                 reindex_on_create=reindex_on_create,
             )
+            continue
+
+        managers[base_id] = await _get_or_create_shared_knowledge_manager(
+            base_id=base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            binding=binding,
+            reindex_on_create=reindex_on_create,
+        )
     return managers
 
 
-def _stale_request_manager_keys(
-    base_id: str,
-    key: KnowledgeManagerKey,
-    *,
-    request_scoped: bool,
-) -> list[KnowledgeManagerKey]:
-    """Return stale request-time manager keys superseded by the current effective key."""
-    if not request_scoped:
-        return [candidate for candidate in _knowledge_managers if candidate.base_id == base_id and candidate != key]
-    return [
-        candidate
-        for candidate in _knowledge_managers
-        if candidate.base_id == base_id and candidate.storage_path == key.storage_path and candidate != key
-    ]
-
-
-async def initialize_knowledge_managers(
+async def initialize_shared_knowledge_managers(
     config: Config,
     runtime_paths: RuntimePaths,
     start_watchers: bool = False,
     reindex_on_create: bool = True,
 ) -> dict[str, KnowledgeManager]:
-    """Initialize process-wide knowledge managers for all configured knowledge bases."""
+    """Initialize process-global shared knowledge managers for configured shared bases only."""
     configured_base_ids = set(config.knowledge_bases)
-    for key in list(_knowledge_managers):
-        if key.base_id not in configured_base_ids and config.get_private_knowledge_base_agent(key.base_id) is None:
-            await _stop_and_remove_manager(key)
-    for base_id, key in list(_static_knowledge_manager_keys.items()):
-        if base_id not in configured_base_ids:
-            await _stop_and_remove_manager(key)
-
-    _static_knowledge_manager_keys.clear()
+    managers: dict[str, KnowledgeManager] = {}
 
     for base_id in sorted(configured_base_ids):
-        key, binding = _knowledge_manager_key(
+        binding = _resolve_knowledge_manager_binding(
             config,
             runtime_paths,
             base_id,
             start_watchers=start_watchers,
             create=True,
         )
-
-        for other_key in [
-            candidate for candidate in _knowledge_managers if candidate.base_id == base_id and candidate != key
-        ]:
-            await _stop_and_remove_manager(other_key)
-
-        await _ensure_knowledge_manager(
-            key=key,
+        if binding.request_scoped:
+            continue
+        managers[base_id] = await _get_or_create_shared_knowledge_manager(
             base_id=base_id,
             config=config,
             runtime_paths=runtime_paths,
-            storage_path=binding.storage_root,
-            knowledge_path=binding.knowledge_path,
-            request_scoped=binding.request_scoped,
-            start_background_watchers=binding.start_background_watchers,
-            incremental_sync_on_access=binding.incremental_sync_on_access,
+            binding=binding,
             reindex_on_create=reindex_on_create,
         )
-        _static_knowledge_manager_keys[base_id] = key
 
-    return {
-        base_id: _knowledge_managers[key]
-        for base_id, key in _static_knowledge_manager_keys.items()
-        if key in _knowledge_managers
-    }
+    for base_id in [candidate for candidate in list(_shared_knowledge_managers) if candidate not in managers]:
+        await _stop_and_remove_shared_manager(base_id)
+
+    return managers
 
 
-def get_knowledge_manager(
+def get_shared_knowledge_manager(base_id: str) -> KnowledgeManager | None:
+    """Return the current shared knowledge manager for a base ID, if one exists."""
+    return _shared_knowledge_managers.get(base_id)
+
+
+def get_shared_knowledge_manager_for_config(
     base_id: str,
     *,
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> KnowledgeManager | None:
-    """Get one process-wide knowledge manager by effective base/storage/path key."""
-    if config is not None and runtime_paths is not None:
-        try:
-            key, _binding = _knowledge_manager_key(
-                config,
-                runtime_paths,
-                base_id,
-                execution_identity=execution_identity,
-                start_watchers=True,
-            )
-        except ValueError:
-            return None
-        return _knowledge_managers.get(key)
-
-    if base_id in _static_knowledge_manager_keys:
-        return _knowledge_managers.get(_static_knowledge_manager_keys[base_id])
-
-    return None
+    """Return the shared manager only when it still matches the current shared binding."""
+    manager = get_shared_knowledge_manager(base_id)
+    if manager is None:
+        return None
+    if not _shared_binding_matches_current_manager(
+        manager,
+        base_id=base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        return None
+    return manager
 
 
-async def shutdown_knowledge_managers() -> None:
-    """Shutdown and clear all process-wide knowledge managers."""
-    for key in list(_knowledge_managers):
-        await _stop_and_remove_manager(key)
+async def shutdown_shared_knowledge_managers() -> None:
+    """Shutdown and clear all process-global shared knowledge managers."""
+    for base_id in list(_shared_knowledge_managers):
+        await _stop_and_remove_shared_manager(base_id)
 
-    _static_knowledge_manager_keys.clear()
-    _scoped_private_manager_lru.clear()
-    _knowledge_manager_init_locks.clear()
-    _knowledge_manager_replacement_locks.clear()
-    _knowledge_managers.clear()
+    _shared_knowledge_manager_init_locks.clear()
+    _shared_knowledge_managers.clear()

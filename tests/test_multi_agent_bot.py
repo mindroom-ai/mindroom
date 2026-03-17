@@ -1123,11 +1123,7 @@ class TestAgentBot:
         args, kwargs = bot._knowledge_for_agent.call_args
         assert args == ("calculator",)
         assert kwargs["request_knowledge_managers"] == {}
-        execution_identity = kwargs["execution_identity"]
-        assert execution_identity is not None
-        assert execution_identity.requester_id == "@user:localhost"
-        assert execution_identity.room_id == "!test:localhost"
-        assert execution_identity.resolved_thread_id == "$event456"
+        assert "execution_identity" not in kwargs
 
     @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(

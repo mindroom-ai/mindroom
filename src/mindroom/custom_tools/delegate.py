@@ -12,8 +12,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.agents import create_agent, describe_agent
-from mindroom.knowledge.manager import ensure_agent_knowledge_managers
-from mindroom.knowledge.utils import get_agent_knowledge
+from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -86,10 +85,10 @@ class DelegateTools(Toolkit):
             return "Cannot delegate an empty task. Please provide a task description."
 
         try:
-            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_agent_knowledge_managers(
-                agent_name,
-                self._config,
-                self._runtime_paths,
+            request_knowledge_managers: dict[str, KnowledgeManager] = await ensure_request_knowledge_managers(
+                [agent_name],
+                config=self._config,
+                runtime_paths=self._runtime_paths,
                 execution_identity=self._execution_identity,
             )
 
@@ -98,7 +97,6 @@ class DelegateTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 request_knowledge_managers=request_knowledge_managers,
-                execution_identity=self._execution_identity,
             )
             agent = create_agent(
                 agent_name,

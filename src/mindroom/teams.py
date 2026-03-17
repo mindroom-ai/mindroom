@@ -560,7 +560,6 @@ def _get_agents_from_orchestrator(
             orchestrator.runtime_paths,
             request_knowledge_managers=request_knowledge_managers,
             shared_manager_lookup=_shared_manager,
-            execution_identity=execution_identity,
             on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
                 agent_name,
                 missing_base_ids,

@@ -293,8 +293,8 @@ class TestDelegateKnowledge:
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
             assert args == ("researcher", config, runtime_paths)
-            assert kwargs["execution_identity"] is None
             assert set(kwargs["request_knowledge_managers"]) == {"docs"}
+            assert "execution_identity" not in kwargs
             mock_create.assert_called_once_with(
                 "researcher",
                 config,

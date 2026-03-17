@@ -15,7 +15,7 @@ from mindroom.api import main
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
+from mindroom.knowledge.manager import initialize_shared_knowledge_managers, shutdown_shared_knowledge_managers
 
 
 def _knowledge_config(
@@ -71,7 +71,7 @@ def test_knowledge_bases_list_initializes_managers_with_full_reindex(
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
         patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
         ) as init_managers,
     ):
@@ -124,7 +124,7 @@ def test_knowledge_files_list_uses_manager_filters_when_available(
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
         patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
         ) as init_managers,
     ):
@@ -182,7 +182,7 @@ def test_knowledge_upload_initializes_manager_with_full_reindex(
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
         patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
         ) as init_managers,
     ):
@@ -213,7 +213,7 @@ def test_knowledge_delete_initializes_manager_with_full_reindex(
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
         patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
         ) as init_managers,
     ):
@@ -271,7 +271,7 @@ def test_reindex_syncs_git_before_reindex_for_git_bases(test_client: TestClient,
     with (
         patch("mindroom.api.knowledge._load_runtime_config", return_value=(config, runtime_paths)),
         patch(
-            "mindroom.api.knowledge.initialize_knowledge_managers",
+            "mindroom.api.knowledge.initialize_shared_knowledge_managers",
             new=AsyncMock(return_value={"research": manager}),
         ),
     ):
@@ -297,7 +297,7 @@ def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path)
 
     async def _run() -> None:
         try:
-            await initialize_knowledge_managers(
+            await initialize_shared_knowledge_managers(
                 config_old,
                 runtime_paths,
                 start_watchers=False,
@@ -307,6 +307,6 @@ def test_ensure_manager_reloads_when_knowledge_base_path_changes(tmp_path: Path)
             assert manager is not None
             assert manager.knowledge_path == new_path.resolve()
         finally:
-            await shutdown_knowledge_managers()
+            await shutdown_shared_knowledge_managers()
 
     asyncio.run(_run())

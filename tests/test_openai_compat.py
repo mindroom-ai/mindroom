@@ -2514,7 +2514,7 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils.get_knowledge_for_base", return_value=mock_knowledge),
         ):
             mock_ai.return_value = "Response with knowledge"
@@ -2561,7 +2561,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils.get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
         ):
             mock_ai.return_value = "Response with keyed knowledge"
@@ -2583,7 +2583,7 @@ class TestKnowledgeIntegration:
         """Knowledge is None when agent has no knowledge_bases."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
         ):
             mock_ai.return_value = "Response"
 
@@ -2601,7 +2601,10 @@ class TestKnowledgeIntegration:
         """_ensure_knowledge_initialized is called for configs with knowledge_bases."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock) as mock_init,
+            patch(
+                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
+                new_callable=AsyncMock,
+            ) as mock_init,
         ):
             mock_ai.return_value = "Response"
 
@@ -2620,7 +2623,7 @@ class TestKnowledgeIntegration:
         """When knowledge manager is not found, knowledge is None."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils.get_knowledge_for_base", return_value=None),
         ):
             mock_ai.return_value = "Response without knowledge"
@@ -2647,7 +2650,7 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils.get_knowledge_for_base", return_value=mock_knowledge),
         ):
             response = knowledge_app_client.post(
@@ -2700,7 +2703,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
             patch("mindroom.knowledge.utils.get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
         ):
             mock_ai.return_value = "Merged knowledge response"
@@ -2728,7 +2731,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.initialize_knowledge_managers",
+                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("DB connection failed"),
             ),
