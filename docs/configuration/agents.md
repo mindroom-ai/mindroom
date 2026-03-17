@@ -128,7 +128,7 @@ agents:
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
 | `learning_mode` | string | `null` | `always`: agent automatically learns from every interaction. `agentic`: agent decides when to learn via a tool call. Inherits from `defaults.learning_mode` (default: `"always"`) |
 | `memory_backend` | string | `null` | Memory backend override for this agent (`"mem0"` or `"file"`). Inherits from global `memory.backend` when omitted |
-| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge |
+| `private` | object | `null` | Optional requester-private state for one shared agent definition. `private.per` replaces `worker_scope` for that agent, `private.root` defaults to `<agent_name>_data`, `private.template_dir` copies a local template into each requester root on first use, `private.context_files` loads private-root-relative files into role context, and `private.knowledge` adds requester-local knowledge indexed from that private root. `private` does not implicitly enable file memory, context files, or private knowledge, and private agents cannot participate in teams yet |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases` — gives the agent RAG access to the indexed documents |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
@@ -212,6 +212,8 @@ For more details on storage layout and isolation, see [Sandbox Proxy Isolation](
 Use `private` when one shared agent definition should behave like a template that materializes a separate requester-local instance at runtime.
 The YAML definition stays shared.
 The private root, copied files, file-memory workspace, and private knowledge path do not.
+Private agents cannot participate in teams yet.
+That restriction also applies transitively: a shared team member that reaches a private agent through `delegate_to` is rejected.
 
 ```yaml
 knowledge_bases:
@@ -290,6 +292,8 @@ For a `mind` agent with `private.per: user`, different users get different priva
 - `private` does not automatically enable file memory.
 - `private` does not automatically load any context files.
 - `private` does not automatically create a private knowledge base.
+- Private agents cannot participate in teams yet.
+- Shared team members that reach a private agent through `delegate_to` are rejected for the same reason.
 - If `private.template_dir` is omitted, MindRoom still creates the private root.
 - Private agents require an active requester-scoped runtime context.
 - MindRoom raises an error instead of silently falling back to a shared config-relative path when that requester scope is missing.
