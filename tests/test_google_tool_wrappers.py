@@ -12,6 +12,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.gmail import GmailTools
 from mindroom.custom_tools.google_calendar import GoogleCalendarTools
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,8 +42,13 @@ def test_google_wrappers_reject_isolating_worker_scopes(
         tool_class(
             runtime_paths=runtime_paths,
             credentials_manager=MagicMock(),
-            worker_scope=worker_scope,
-            routing_agent_name="general",
+            worker_target=resolve_worker_target(
+                worker_scope,
+                "general",
+                execution_identity=None,
+                tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+                account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            ),
         )
 
 

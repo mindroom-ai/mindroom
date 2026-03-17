@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.metadata import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolManagedInitArg,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 
 if TYPE_CHECKING:
     from mindroom.custom_tools.browser import BrowserTools
@@ -24,6 +31,7 @@ if TYPE_CHECKING:
     icon_color="text-orange-500",
     dependencies=["playwright"],
     docs_url="https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     config_fields=[
         ConfigField(
             name="output_dir",

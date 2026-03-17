@@ -110,6 +110,7 @@ class KubernetesWorkerBackend:
                 state_subpath=state_subpath,
                 annotations=annotations,
                 replicas=1,
+                private_agent_names=spec.private_agent_names,
             )
             try:
                 deployment = self._resources.wait_for_ready(

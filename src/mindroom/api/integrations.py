@@ -19,6 +19,7 @@ from mindroom.tool_system.dependencies import ensure_tool_deps
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import WorkerScope
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -91,9 +92,22 @@ def _get_spotify_credentials(request: Request, agent_name: str | None = None) ->
     return credentials if credentials else {}
 
 
-def _save_spotify_credentials(credentials: dict[str, Any], request: Request, agent_name: str | None = None) -> None:
+def _save_spotify_credentials(
+    credentials: dict[str, Any],
+    request: Request,
+    agent_name: str | None = None,
+    *,
+    execution_scope_override_provided: bool | None = None,
+    execution_scope_override: WorkerScope | None = None,
+) -> None:
     """Save Spotify credentials."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("spotify",))
+    target = resolve_request_credentials_target(
+        request,
+        agent_name=agent_name,
+        service_names=("spotify",),
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
+    )
     credentials_to_save = dict(credentials)
     credentials_to_save.setdefault("_source", "ui")
     target.target_manager.save_credentials("spotify", credentials_to_save)
@@ -202,7 +216,13 @@ async def spotify_callback(request: Request, code: str) -> RedirectResponse:
             "expires_at": token_info.get("expires_at"),
             "username": user["display_name"],
         }
-        _save_spotify_credentials(credentials, request, agent_name)
+        _save_spotify_credentials(
+            credentials,
+            request,
+            agent_name,
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
 
         return RedirectResponse(url=f"{get_dashboard_url(request)}/?spotify=connected")
     except Exception as e:

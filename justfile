@@ -199,7 +199,7 @@ test-saas-frontend:
 # Core frontend tests (vitest)
 # Run core frontend tests (vitest)
 test-front:
-    cd frontend && bun install && bun test
+    cd frontend && bun install && bun run test --run
 
 # Core backend tests (pytest in repo)
 # Run core backend tests (pytest) with optional arguments

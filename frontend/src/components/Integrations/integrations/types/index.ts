@@ -1,3 +1,5 @@
+import type { WorkerScope } from '@/types/config';
+
 /**
  * Core type definitions for all integrations
  */
@@ -19,6 +21,7 @@ export interface Integration {
 
 export interface IntegrationScope {
   agentName?: string | null;
+  executionScope?: WorkerScope | null;
 }
 
 export interface IntegrationConfig {
@@ -44,6 +47,7 @@ export interface IntegrationConfig {
     onClose: () => void;
     onSuccess?: () => void;
     agentName?: string | null;
+    executionScope?: WorkerScope | null;
   }>;
 
   /**

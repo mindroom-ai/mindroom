@@ -2,10 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/lib/api', () => ({
   API_BASE_URL: 'https://backend.example.test',
-  withAgentName: (url: string, agentName?: string | null) => {
+  withAgentExecutionScope: (
+    url: string,
+    agentName?: string | null,
+    executionScope?: string | null
+  ) => {
     const parsed = new URL(url);
     if (agentName) {
       parsed.searchParams.set('agent_name', agentName);
+    }
+    if (executionScope) {
+      parsed.searchParams.set('execution_scope', executionScope);
     }
     return parsed.toString();
   },
@@ -84,29 +91,32 @@ describe('HomeAssistantIntegrationProvider', () => {
       expect(status.connected).toBe(false);
     });
 
-    it('appends agent_name when checking scoped status', async () => {
+    it('appends agent_name and execution_scope when checking scoped status', async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
         json: async () => ({ connected: false }),
       });
 
-      await homeAssistantIntegration.loadStatus!({ agentName: 'code' });
+      await homeAssistantIntegration.loadStatus!({ agentName: 'code', executionScope: 'shared' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://backend.example.test/api/homeassistant/status?agent_name=code'
+        'https://backend.example.test/api/homeassistant/status?agent_name=code&execution_scope=shared'
       );
     });
   });
 
   describe('disconnect', () => {
-    it('appends agent_name to the API_BASE_URL-backed disconnect request', async () => {
+    it('appends agent_name and execution_scope to the disconnect request', async () => {
       (global.fetch as any).mockResolvedValueOnce({ ok: true });
 
-      const config = homeAssistantIntegration.getConfig({ agentName: 'code' });
+      const config = homeAssistantIntegration.getConfig({
+        agentName: 'code',
+        executionScope: 'shared',
+      });
       await config.onDisconnect!('homeassistant');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://backend.example.test/api/homeassistant/disconnect?agent_name=code',
+        'https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared',
         expect.objectContaining({ method: 'POST' })
       );
     });

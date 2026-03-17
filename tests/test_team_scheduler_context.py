@@ -85,6 +85,8 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         assert get_tool_runtime_context() is not None
+        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["user_id"] == "@user:localhost"
         return "team non-streaming response"
 
     bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)
@@ -134,6 +136,8 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
 
     async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
         assert get_tool_runtime_context() is not None
+        assert _kwargs["session_id"] == "!team:localhost:$thread_root"
+        assert _kwargs["user_id"] == "@user:localhost"
         yield "stream chunk"
 
     bot._run_cancellable_response = AsyncMock(side_effect=fake_run_cancellable_response)

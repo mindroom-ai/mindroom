@@ -84,7 +84,7 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
         plugins = load_plugins(config, runtime_paths_for(config))
         assert [plugin.name for plugin in plugins] == ["demo-plugin"]
         assert "demo_plugin" in _TOOL_REGISTRY
-        tool = get_tool_by_name("demo_plugin", runtime_paths_for(config))
+        tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:
@@ -157,7 +157,7 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
         assert [plugin.name for plugin in plugins] == ["demo-pkg"]
         assert plugins[0].root == plugin_root.resolve()
         assert "demo_pkg_tool" in _TOOL_REGISTRY
-        tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config))
+        tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config), worker_target=None)
         assert tool.name == "demo_pkg"
         assert (plugin_root / "skills").resolve() in _get_plugin_skill_roots()
     finally:

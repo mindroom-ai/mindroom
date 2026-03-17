@@ -29,9 +29,15 @@ const mockTools = [
     dependencies: null,
   },
 ];
+let mockStatusAuthoritative = true;
 
 vi.mock('@/hooks/useTools', () => ({
-  useTools: () => ({ tools: mockTools, loading: false, refetch: vi.fn() }),
+  useTools: () => ({
+    tools: mockTools,
+    loading: false,
+    refetch: vi.fn(),
+    statusAuthoritative: mockStatusAuthoritative,
+  }),
   mapToolToIntegration: (tool: any) => ({
     id: tool.name,
     name: tool.display_name,
@@ -59,7 +65,7 @@ vi.mock('./iconMapping', () => ({
 // Mock API base URL
 vi.mock('@/lib/api', () => ({
   API_BASE_URL: 'http://localhost:8080',
-  withAgentName: (url: string) => url,
+  withAgentExecutionScope: (url: string) => url,
 }));
 
 // Mock EnhancedConfigDialog
@@ -187,6 +193,7 @@ describe('Integrations', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockToast.mockReset();
+    mockStatusAuthoritative = true;
     useConfigStore.setState({ agents: [] });
     Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
       configurable: true,
@@ -403,7 +410,7 @@ describe('Integrations', () => {
     }
   });
 
-  it('lists only explicitly worker-scoped agents in the scope selector', async () => {
+  it('lists worker-scoped and private agents in the scope selector', async () => {
     useConfigStore.setState({
       agents: [
         {
@@ -426,6 +433,18 @@ describe('Integrations', () => {
           rooms: ['lobby'],
           worker_scope: 'shared',
         },
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user_agent',
+          },
+        },
       ],
     });
 
@@ -436,9 +455,108 @@ describe('Integrations', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
     });
 
     expect(screen.queryByText('Unscoped Agent')).not.toBeInTheDocument();
+  });
+
+  it('treats defaults.worker_scope as inherited execution scope in the selector', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'general',
+          display_name: 'Inherited Scope Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['lobby'],
+          worker_scope: null,
+        },
+      ],
+      config: {
+        memory: {
+          backend: 'mem0',
+          embedder: {
+            provider: 'openai',
+            config: { model: 'text-embedding-3-small' },
+          },
+        },
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        agents: {
+          general: {
+            display_name: 'Inherited Scope Agent',
+            role: 'test',
+            tools: ['gmail'],
+            skills: [],
+            instructions: [],
+            rooms: ['lobby'],
+          },
+        },
+        defaults: {
+          markdown: true,
+          worker_scope: 'user',
+        },
+        router: {
+          model: 'default',
+        },
+      },
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Inherited Scope Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Inherited Scope Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Configuring tools for Inherited Scope Agent (worker_scope=user).')
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('shows requester-scoped status as preview only', async () => {
+    mockStatusAuthoritative = false;
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Requester-scoped tool status is preview only/i)).toBeInTheDocument();
+    });
   });
 
   it('hides shared-only integrations for isolating worker scopes', async () => {
@@ -488,5 +606,48 @@ describe('Integrations', () => {
     for (const button of screen.getAllByRole('button', { name: /shared-only config/i })) {
       expect(button).toBeDisabled();
     }
+  });
+
+  it('treats private agents as isolating scopes in integrations', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Configuring tools for Private Agent (private.per=user).')
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/dashboard credential setup, editing, and disconnect are only supported/i)
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
+    expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
+    expect(screen.getByText('Weather')).toBeInTheDocument();
   });
 });

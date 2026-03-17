@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.agents import build_agent_tool_init_context, build_agent_toolkit, get_agent_toolkit_names
@@ -23,10 +23,15 @@ from mindroom.scheduling import (
 )
 from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
 from mindroom.tool_system.skills import resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_tool_execution_identity,
+    tool_execution_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+    from pathlib import Path
 
     import nio
     import structlog
@@ -34,7 +39,6 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_tracker import ResponseTracker
 
@@ -57,6 +61,7 @@ class CommandHandlerContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    storage_path: Path
     logger: structlog.stdlib.BoundLogger
     response_tracker: ResponseTracker
     derive_conversation_context: Callable[[str, EventInfo], Awaitable[tuple[bool, str | None, list[dict[str, Any]]]]]
@@ -212,10 +217,15 @@ def _collect_agent_toolkits(
     config: Config,
     agent_name: str,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> list[tuple[str, Toolkit]]:
-    resolved_storage_path = runtime_paths.storage_root
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    tool_init_context = build_agent_tool_init_context(config, agent_name, storage_path=resolved_storage_path)
+    tool_init_context = build_agent_tool_init_context(
+        config,
+        agent_name,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+    )
     toolkits: list[tuple[str, Toolkit]] = []
     for tool_name in get_agent_toolkit_names(agent_name, config):
         try:
@@ -226,6 +236,7 @@ def _collect_agent_toolkits(
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
+                execution_identity=execution_identity,
             )
             if toolkit is None:
                 continue
@@ -360,6 +371,7 @@ async def _run_skill_command_tool(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
+    storage_path: Path | None = None,
     command_tool: str,
     skill_name: str,
     args_text: str,
@@ -368,26 +380,30 @@ async def _run_skill_command_tool(
     room_id: str | None = None,
     thread_id: str | None = None,
 ) -> str:
-    execution_identity: ToolExecutionIdentity | None = None
-    if requester_user_id is not None and room_id is not None:
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name=agent_name,
-            requester_id=requester_user_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            resolved_thread_id=thread_id,
-            session_id=create_session_id(room_id, thread_id),
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        )
+    session_id = create_session_id(room_id, thread_id) if room_id is not None else None
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_user_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        resolved_thread_id=thread_id,
+        session_id=session_id,
+    )
+    effective_runtime_paths = (
+        runtime_paths
+        if storage_path is None or storage_path == runtime_paths.storage_root
+        else replace(runtime_paths, storage_root=storage_path)
+    )
 
     try:
         with tool_execution_identity(execution_identity):
             toolkits = _collect_agent_toolkits(
                 config,
                 agent_name,
-                runtime_paths,
+                effective_runtime_paths,
+                execution_identity=execution_identity,
             )
             function, toolkit, error = _resolve_tool_dispatch_target(toolkits, command_tool)
             if error:
@@ -597,6 +613,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                         config=context.config,
                         runtime_paths=context.runtime_paths,
                         agent_name=target_agent,
+                        storage_path=context.storage_path,
                         command_tool=spec.dispatch.tool_name,
                         skill_name=spec.name,
                         args_text=args_text,

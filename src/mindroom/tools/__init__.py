@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.metadata import ConfigField, SetupType, ToolCategory, ToolStatus, register_tool_with_metadata
+from mindroom.tool_system.metadata import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolManagedInitArg,
+    ToolStatus,
+    register_tool_with_metadata,
+)
 from mindroom.tools import delegate as _delegate_registration  # noqa: F401
 from mindroom.tools import memory as _memory_registration  # noqa: F401
 from mindroom.tools import self_config as _self_config_registration  # noqa: F401
@@ -265,6 +272,10 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    managed_init_args=(
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
     config_fields=[
         ConfigField(
             name="HOMEASSISTANT_URL",

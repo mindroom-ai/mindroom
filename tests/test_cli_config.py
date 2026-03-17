@@ -120,15 +120,14 @@ class TestConfigInit:
         assert mind["include_default_tools"] is False
         assert mind["learning"] is False
         assert mind["memory_backend"] == "file"
-        assert mind["memory_file_path"] == "mind_data"
         assert mind["rooms"] == ["personal"]
         assert mind["context_files"] == [
-            "mind_data/SOUL.md",
-            "mind_data/AGENTS.md",
-            "mind_data/USER.md",
-            "mind_data/IDENTITY.md",
-            "mind_data/TOOLS.md",
-            "mind_data/HEARTBEAT.md",
+            "SOUL.md",
+            "AGENTS.md",
+            "USER.md",
+            "IDENTITY.md",
+            "TOOLS.md",
+            "HEARTBEAT.md",
         ]
         assert mind["knowledge_bases"] == ["mind_memory"]
         assert mind["tools"] == [
@@ -143,7 +142,7 @@ class TestConfigInit:
         ]
         assert mind["skills"] == ["mindroom-docs"]
         assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
         )
         assert config["knowledge_bases"]["mind_memory"]["watch"] is True
         assert config["memory"]["backend"] == "file"
@@ -157,12 +156,12 @@ class TestConfigInit:
         assert f"MINDROOM_STORAGE_PATH={(tmp_path / 'mindroom_data').resolve()}" in env_content
 
     def test_init_full_profile_creates_mind_workspace_files(self, tmp_path: Path) -> None:
-        """Full template should scaffold the required mind_data files."""
+        """Full template should scaffold the required canonical workspace files."""
         target = tmp_path / "config.yaml"
         result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "openai"])
         assert result.exit_code == 0
 
-        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace"
         assert workspace.exists()
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
@@ -188,13 +187,13 @@ class TestConfigInit:
         assert result.exit_code == 0
 
         config = yaml.safe_load(target.read_text())
-        workspace = storage_root / "agents" / "mind" / "workspace" / "mind_data"
+        workspace = storage_root / "agents" / "mind" / "workspace"
         assert workspace.exists()
         assert (workspace / "memory").exists()
         assert (workspace / "SOUL.md").exists()
         assert (workspace / "MEMORY.md").exists()
         assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+            "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
         )
 
         env_content = (tmp_path / ".env").read_text()
@@ -219,13 +218,10 @@ class TestConfigInit:
             config.knowledge_bases["mind_memory"].path,
             runtime_paths,
         )
-        assert (
-            resolved_knowledge_path
-            == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "mind_data" / "memory"
-        )
+        assert resolved_knowledge_path == runtime_storage.resolve() / "agents" / "mind" / "workspace" / "memory"
 
         ensure_default_agent_workspaces(config, runtime_storage)
-        runtime_workspace = runtime_storage / "agents" / "mind" / "workspace" / "mind_data"
+        runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
         assert (runtime_workspace / "SOUL.md").exists()
         assert (runtime_workspace / "AGENTS.md").exists()
         assert (runtime_workspace / "USER.md").exists()
@@ -233,6 +229,12 @@ class TestConfigInit:
         assert (runtime_workspace / "TOOLS.md").exists()
         assert (runtime_workspace / "HEARTBEAT.md").exists()
         assert (runtime_workspace / "MEMORY.md").exists()
+        template_memory = (
+            Path(__file__).resolve().parents[1] / "src" / "mindroom" / "cli" / "templates" / "mind_data" / "MEMORY.md"
+        )
+        assert (runtime_workspace / "MEMORY.md").read_text(encoding="utf-8") == template_memory.read_text(
+            encoding="utf-8",
+        )
 
     def test_init_without_path_uses_detected_default_location(
         self,
@@ -268,11 +270,9 @@ class TestConfigInit:
 
         assert result.exit_code == 0
         config = yaml.safe_load(target.read_text())
-        assert config["knowledge_bases"]["mind_memory"]["path"] == (
-            "./mindroom_data/agents/mind/workspace/mind_data/memory"
-        )
+        assert config["knowledge_bases"]["mind_memory"]["path"] == ("./mindroom_data/agents/mind/workspace/memory")
         assert "${MINDROOM_STORAGE_PATH}" not in target.read_text()
-        assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data").exists()
+        assert (tmp_path / "mindroom_data" / "agents" / "mind" / "workspace").exists()
         assert env_path.read_text() == "ANTHROPIC_API_KEY=sk-existing\n"
 
     def test_init_minimal(self, tmp_path: Path) -> None:
@@ -411,7 +411,7 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace" / "mind_data"
+        workspace = tmp_path / "mindroom_data" / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
         runtime_paths = constants_module.resolve_runtime_paths(config_path=target)
@@ -443,7 +443,7 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        workspace = custom_root / "agents" / "mind" / "workspace" / "mind_data"
+        workspace = custom_root / "agents" / "mind" / "workspace"
         assert (workspace / "SOUL.md").exists()
         config = yaml.safe_load(target.read_text(encoding="utf-8"))
         runtime_paths = constants_module.resolve_runtime_paths(config_path=target)

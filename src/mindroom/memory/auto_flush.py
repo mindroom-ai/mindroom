@@ -18,6 +18,8 @@ from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
-
 logger = get_logger(__name__)
 
 _FLUSH_STATE_FILENAME = "memory_flush_state.json"
@@ -39,6 +40,8 @@ class _FlushSessionEntry(TypedDict, total=False):
 
     agent_name: str
     session_id: str
+    worker_key: str | None
+    execution_identity: _SerializedExecutionIdentity | None
     dirty: bool
     in_flight: bool
     first_dirty_at: int
@@ -60,6 +63,20 @@ class _FlushState(TypedDict):
     sessions: dict[str, _FlushSessionEntry]
 
 
+class _SerializedExecutionIdentity(TypedDict):
+    """JSON-safe execution identity for persisted flush entries."""
+
+    channel: str
+    agent_name: str
+    requester_id: str | None
+    room_id: str | None
+    thread_id: str | None
+    resolved_thread_id: str | None
+    session_id: str | None
+    tenant_id: str | None
+    account_id: str | None
+
+
 def _state_path(storage_path: Path) -> Path:
     root = storage_path.expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -74,8 +91,79 @@ def _empty_state() -> _FlushState:
     return {"version": 1, "sessions": {}}
 
 
-def _session_key(agent_name: str, session_id: str) -> str:
-    return f"{agent_name}:{session_id}"
+def _session_key(agent_name: str, session_id: str, worker_key: str | None = None) -> str:
+    if worker_key is None:
+        return f"{agent_name}:{session_id}"
+    return f"{agent_name}:{worker_key}:{session_id}"
+
+
+def _serialize_execution_identity(identity: ToolExecutionIdentity) -> _SerializedExecutionIdentity:
+    return {
+        "channel": identity.channel,
+        "agent_name": identity.agent_name,
+        "requester_id": identity.requester_id,
+        "room_id": identity.room_id,
+        "thread_id": identity.thread_id,
+        "resolved_thread_id": identity.resolved_thread_id,
+        "session_id": identity.session_id,
+        "tenant_id": identity.tenant_id,
+        "account_id": identity.account_id,
+    }
+
+
+def _deserialize_execution_identity(raw_identity: object) -> ToolExecutionIdentity | None:
+    if not isinstance(raw_identity, dict):
+        return None
+    payload = cast("dict[str, object]", raw_identity)
+    channel = payload.get("channel")
+    agent_name = payload.get("agent_name")
+    if not isinstance(channel, str) or not isinstance(agent_name, str):
+        return None
+    optional_keys = (
+        "requester_id",
+        "room_id",
+        "thread_id",
+        "resolved_thread_id",
+        "session_id",
+        "tenant_id",
+        "account_id",
+    )
+    optional_values: dict[str, str | None] = {}
+    for key in optional_keys:
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            return None
+        optional_values[key] = value
+    return ToolExecutionIdentity(
+        channel=cast("Any", channel),
+        agent_name=agent_name,
+        requester_id=optional_values["requester_id"],
+        room_id=optional_values["room_id"],
+        thread_id=optional_values["thread_id"],
+        resolved_thread_id=optional_values["resolved_thread_id"],
+        session_id=optional_values["session_id"],
+        tenant_id=optional_values["tenant_id"],
+        account_id=optional_values["account_id"],
+    )
+
+
+def _resolve_flush_scope(
+    config: Config,
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None,
+) -> tuple[str | None, _SerializedExecutionIdentity | None]:
+    resolved_execution = resolve_agent_execution(
+        agent_name,
+        config,
+        execution_identity=execution_identity,
+    )
+    if not resolved_execution.is_private:
+        return None, None
+    resolved_identity = resolved_execution.execution_identity
+    if resolved_identity is None:
+        msg = f"Private agent '{agent_name}' requires an execution identity for memory auto-flush"
+        raise ValueError(msg)
+    return resolved_execution.worker_key, _serialize_execution_identity(resolved_identity)
 
 
 def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
@@ -84,9 +172,34 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
     entry = dict(cast("dict[str, object]", raw_entry))
     entry.pop("room_id", None)
     entry.pop("thread_id", None)
-    # Drop stale persisted worker_key metadata from pre-canonical agent-state flush files.
-    entry.pop("worker_key", None)
+    worker_key = entry.get("worker_key")
+    if worker_key is not None and not isinstance(worker_key, str):
+        entry.pop("worker_key", None)
+    execution_identity = entry.get("execution_identity")
+    if execution_identity is not None and _deserialize_execution_identity(execution_identity) is None:
+        entry.pop("execution_identity", None)
     return cast("_FlushSessionEntry", entry)
+
+
+def _stale_private_session_entry(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    entry: _FlushSessionEntry,
+) -> bool:
+    _ = runtime_paths
+    agent_config = config.agents.get(agent_name)
+    worker_key = entry.get("worker_key")
+    execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
+    if agent_config is None or agent_config.private is None:
+        return worker_key is not None or execution_identity is not None
+    if not isinstance(worker_key, str) or execution_identity is None:
+        return True
+    try:
+        resolved_worker_key, _ = _resolve_flush_scope(config, agent_name, execution_identity)
+    except ValueError:
+        return True
+    return resolved_worker_key != worker_key
 
 
 def _read_state_unlocked(storage_path: Path) -> _FlushState:
@@ -143,16 +256,20 @@ def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
 def mark_auto_flush_dirty_session(
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     session_id: str,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
+    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
     now = _now_ts()
-    key = _session_key(agent_name, session_id)
+    worker_key, serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
+    key = _session_key(agent_name, session_id, worker_key)
 
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
@@ -169,6 +286,8 @@ def mark_auto_flush_dirty_session(
             **existing,
             "agent_name": agent_name,
             "session_id": session_id,
+            "worker_key": worker_key,
+            "execution_identity": serialized_identity,
             "dirty": True,
             "dirty_revision": dirty_revision + 1,
             # Keep in-flight status if a flush is already running for this key.
@@ -185,11 +304,14 @@ def mark_auto_flush_dirty_session(
 def reprioritize_auto_flush_sessions(
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     active_session_id: str,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Raise priority of other dirty sessions for the same agent."""
+    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
@@ -198,6 +320,7 @@ def reprioritize_auto_flush_sessions(
         return
 
     now = _now_ts()
+    worker_key, _serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
         sessions = state["sessions"]
@@ -206,6 +329,7 @@ def reprioritize_auto_flush_sessions(
             for key, entry in sessions.items()
             if entry.get("agent_name") == agent_name
             and entry.get("session_id") != active_session_id
+            and entry.get("worker_key") == worker_key
             and entry.get("dirty", False)
         ]
         candidates.sort(key=lambda item: item[1].get("first_dirty_at", now))
@@ -227,11 +351,19 @@ def _coerce_agent_session(raw_session: object) -> AgentSession | None:
 
 
 def _load_agent_session(
-    storage_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     session_id: str,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> AgentSession | None:
-    storage = create_session_storage(agent_name, storage_path)
+    storage = create_session_storage(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
     raw_session = storage.get_session(session_id, SessionType.AGENT)
     return _coerce_agent_session(raw_session)
 
@@ -240,6 +372,14 @@ def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
     boosted = entry.get("priority_boost_at")
     priority_rank = 0 if isinstance(boosted, int) and boosted > 0 else 1
     return (priority_rank, entry.get("first_dirty_at", now))
+
+
+def _flush_batch_key(config: Config, agent_name: str, entry: _FlushSessionEntry) -> str:
+    agent_config = config.agents.get(agent_name)
+    worker_key = entry.get("worker_key")
+    if agent_config is not None and agent_config.private is not None and isinstance(worker_key, str):
+        return f"{agent_name}:{worker_key}"
+    return agent_name
 
 
 def _select_recent_chat_lines(
@@ -320,6 +460,7 @@ async def _build_existing_memory_context(
     storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str:
     context_config = config.memory.auto_flush.extractor.include_memory_context
@@ -333,6 +474,7 @@ async def _build_existing_memory_context(
         config,
         runtime_paths,
         limit=max_memories,
+        execution_identity=execution_identity,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     if not memories:
@@ -361,6 +503,7 @@ async def _extract_memory_summary(
     agent_name: str,
     session_id: str,
     lines: list[str],
+    execution_identity: ToolExecutionIdentity | None = None,
     preserve_resolved_storage_path: bool = False,
 ) -> str | None:
     extractor = config.memory.auto_flush.extractor
@@ -372,6 +515,7 @@ async def _extract_memory_summary(
         storage_path=storage_path,
         config=config,
         runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
     existing_block = (
@@ -468,6 +612,14 @@ class MemoryAutoFlushWorker:
             ]
             for key in non_file_agent_keys:
                 del sessions[key]
+            stale_private_entry_keys = [
+                key
+                for key, entry in sessions.items()
+                if isinstance(entry.get("agent_name"), str)
+                and _stale_private_session_entry(config, self.runtime_paths, entry["agent_name"], entry)
+            ]
+            for key in stale_private_entry_keys:
+                del sessions[key]
             _write_state_unlocked(self.storage_path, state)
 
         with _STATE_LOCK:
@@ -495,14 +647,17 @@ class MemoryAutoFlushWorker:
             if not isinstance(agent_name, str) or not isinstance(session_id, str):
                 continue
 
-            agent_scope_key = agent_name
-            if per_agent_count.get(agent_scope_key, 0) >= max_per_agent:
+            batch_key = _flush_batch_key(config, agent_name, entry)
+            if per_agent_count.get(batch_key, 0) >= max_per_agent:
                 continue
+            entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
 
             session = _load_agent_session(
-                self.storage_path,
+                config,
+                self.runtime_paths,
                 agent_name,
                 session_id,
+                execution_identity=entry_execution_identity,
             )
             if session is None:
                 continue
@@ -527,7 +682,7 @@ class MemoryAutoFlushWorker:
                 continue
 
             selected_keys.append(key)
-            per_agent_count[agent_scope_key] = per_agent_count.get(agent_scope_key, 0) + 1
+            per_agent_count[batch_key] = per_agent_count.get(batch_key, 0) + 1
             with _STATE_LOCK:
                 latest_state = _read_state_unlocked(self.storage_path)
                 latest_entry = latest_state["sessions"].get(key, entry)
@@ -557,11 +712,17 @@ class MemoryAutoFlushWorker:
         session_updated_at = entry.get("last_session_updated_at")
         if not isinstance(agent_name, str) or not isinstance(session_id, str):
             return
+        entry_execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
 
         wrote_memory = False
         try:
             wrote_memory = await asyncio.wait_for(
-                self._flush_session(config, agent_name=agent_name, session_id=session_id),
+                self._flush_session(
+                    config,
+                    agent_name=agent_name,
+                    session_id=session_id,
+                    execution_identity=entry_execution_identity,
+                ),
                 timeout=settings.extractor.max_extraction_seconds,
             )
         except TimeoutError:
@@ -600,9 +761,11 @@ class MemoryAutoFlushWorker:
 
         latest_session_updated_at: int | None = None
         latest_session = _load_agent_session(
-            self.storage_path,
+            config,
+            self.runtime_paths,
             agent_name,
             session_id,
+            execution_identity=entry_execution_identity,
         )
         if latest_session is not None and isinstance(latest_session.updated_at, int):
             latest_session_updated_at = latest_session.updated_at
@@ -652,12 +815,15 @@ class MemoryAutoFlushWorker:
         *,
         agent_name: str,
         session_id: str,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> bool:
         effective_storage_path = self.storage_path
         session = _load_agent_session(
-            self.storage_path,
+            config,
+            self.runtime_paths,
             agent_name,
             session_id,
+            execution_identity=execution_identity,
         )
         if session is None:
             return False
@@ -675,6 +841,7 @@ class MemoryAutoFlushWorker:
             agent_name=agent_name,
             session_id=session_id,
             lines=lines,
+            execution_identity=execution_identity,
             preserve_resolved_storage_path=False,
         )
         if memory_summary is None:
@@ -690,6 +857,7 @@ class MemoryAutoFlushWorker:
             storage_path=effective_storage_path,
             config=config,
             runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
             preserve_resolved_storage_path=False,
         )
         return True

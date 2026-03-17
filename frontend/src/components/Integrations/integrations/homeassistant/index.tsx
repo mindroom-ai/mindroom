@@ -1,7 +1,7 @@
 import { SiHomeassistant } from 'react-icons/si';
 import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from '@/components/HomeAssistantIntegration/HomeAssistantIntegration';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -17,11 +17,16 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
 
   getConfig(scope?: IntegrationScope): IntegrationConfig {
     const agentName = scope?.agentName ?? null;
+    const executionScope = scope?.executionScope;
     return {
       integration: this.integration,
       onDisconnect: async () => {
         const response = await fetch(
-          withAgentName(`${API_BASE_URL}/api/homeassistant/disconnect`, agentName),
+          withAgentExecutionScope(
+            `${API_BASE_URL}/api/homeassistant/disconnect`,
+            agentName,
+            executionScope
+          ),
           {
             method: 'POST',
           }
@@ -31,16 +36,25 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
         }
       },
       ConfigComponent: props => (
-        <HomeAssistantIntegrationComponent onSuccess={props.onSuccess} agentName={agentName} />
+        <HomeAssistantIntegrationComponent
+          onSuccess={props.onSuccess}
+          agentName={agentName}
+          executionScope={executionScope}
+        />
       ),
     };
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
     const agentName = scope?.agentName ?? null;
+    const executionScope = scope?.executionScope;
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/homeassistant/status`, agentName)
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/homeassistant/status`,
+          agentName,
+          executionScope
+        )
       );
       if (response.ok) {
         const data = await response.json();

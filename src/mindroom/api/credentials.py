@@ -6,11 +6,12 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.credentials import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -18,14 +19,15 @@ from mindroom.credentials import (
     validate_service_name,
 )
 from mindroom.tool_system.worker_routing import (
-    SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
     WorkerScope,
-    requires_shared_only_integration_scope,
-    resolve_worker_key,
+    require_worker_key_for_scope,
     unsupported_shared_only_integration_message,
-    worker_scope_allows_shared_only_integrations,
+    unsupported_shared_only_integration_names,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -39,6 +41,8 @@ class _PendingOAuthState:
     service: str
     user_id: str
     agent_name: str | None
+    execution_scope_override_provided: bool
+    execution_scope_override: WorkerScope | None
     payload: dict[str, str] | None
     created_at: float
 
@@ -67,6 +71,17 @@ class RequestCredentialsTarget:
     worker_scope: WorkerScope | None
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
+
+
+@dataclass(frozen=True)
+class DashboardAgentExecutionScopeResolution:
+    """Resolved dashboard scope request for one agent selection."""
+
+    agent_name: str | None
+    persisted_execution_scope: WorkerScope | None
+    requested_execution_scope: WorkerScope | None
+    execution_scope_override_provided: bool
+    draft_scope_preview: bool
 
 
 def _request_auth_user(request: Request) -> dict[str, Any] | None:
@@ -101,12 +116,15 @@ def issue_pending_oauth_state(
 ) -> str:
     """Create a short-lived server-side OAuth state bound to the current user and target."""
     user_id = _require_auth_user_id(request)
+    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     state = secrets.token_urlsafe(24)
     now = time.time()
     pending = _PendingOAuthState(
         service=service,
         user_id=user_id,
         agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
         payload=payload,
         created_at=now,
     )
@@ -142,7 +160,14 @@ def consume_pending_oauth_request(
     return _consume_pending_oauth_request(request, service, state)
 
 
-def _build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+def build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
+    """Build one dashboard-scoped execution identity for API credential and tool lookups.
+
+    This is a boundary helper for dashboard/API requests only.
+    It uses the authenticated dashboard user as the requester, not any Matrix sender,
+    and it exists solely so dashboard previews hit the same scoped-runtime seams as
+    live requests once an execution scope is chosen.
+    """
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     auth_user = _request_auth_user(request) or {}
@@ -169,6 +194,95 @@ def dashboard_supports_worker_credentials(worker_scope: WorkerScope | None) -> b
     return worker_scope in (None, "shared")
 
 
+def _dashboard_scope_label(
+    *,
+    config_labeled_scope: str,
+    execution_scope: WorkerScope | None,
+    execution_scope_override_provided: bool,
+) -> str:
+    """Return the user-facing scope label for one dashboard request."""
+    if execution_scope_override_provided:
+        if execution_scope is None:
+            return "execution_scope=unscoped"
+        return f"execution_scope={execution_scope}"
+    return config_labeled_scope
+
+
+def resolve_dashboard_execution_scope_override(
+    request: Request,
+) -> tuple[bool, WorkerScope | None]:
+    """Return the explicit dashboard execution-scope override, if one was provided."""
+    raw_execution_scope = request.query_params.get("execution_scope")
+    if raw_execution_scope is None or raw_execution_scope == "":
+        return False, None
+    if raw_execution_scope == "unscoped":
+        return True, None
+    if raw_execution_scope in {"shared", "user", "user_agent"}:
+        return True, cast("WorkerScope", raw_execution_scope)
+    raise HTTPException(
+        status_code=400,
+        detail=("Query parameter 'execution_scope' must be one of 'shared', 'user', 'user_agent', or 'unscoped'."),
+    )
+
+
+def resolve_dashboard_agent_execution_scope_request(
+    *,
+    config: Config,
+    agent_name: str | None,
+    execution_scope_override_provided: bool,
+    execution_scope_override: WorkerScope | None,
+    allow_draft_override: bool,
+) -> DashboardAgentExecutionScopeResolution:
+    """Resolve one dashboard execution-scope request against persisted agent config.
+
+    Tools may preview draft execution scopes, but persistent credential writes must
+    stay bound to the saved config. This helper keeps that policy in one place.
+    """
+    if agent_name is None:
+        if execution_scope_override_provided:
+            raise HTTPException(
+                status_code=400,
+                detail="Query parameter 'execution_scope' requires agent_name on the dashboard API.",
+            )
+        return DashboardAgentExecutionScopeResolution(
+            agent_name=None,
+            persisted_execution_scope=None,
+            requested_execution_scope=None,
+            execution_scope_override_provided=False,
+            draft_scope_preview=False,
+        )
+
+    if agent_name not in config.agents:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+
+    persisted_execution_scope = config.get_agent_execution_scope(agent_name)
+    requested_execution_scope = (
+        execution_scope_override if execution_scope_override_provided else persisted_execution_scope
+    )
+    draft_scope_preview = execution_scope_override_provided and requested_execution_scope != persisted_execution_scope
+    if draft_scope_preview and not allow_draft_override:
+        requested_scope_label = _dashboard_scope_label(
+            config_labeled_scope=config.get_agent_scope_label(agent_name),
+            execution_scope=requested_execution_scope,
+            execution_scope_override_provided=True,
+        )
+        persisted_scope_label = config.get_agent_scope_label(agent_name) or "execution_scope=unscoped"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Save the configuration before managing credentials for agent '{agent_name}' with "
+                f"{requested_scope_label}. Persisted scope is {persisted_scope_label}."
+            ),
+        )
+    return DashboardAgentExecutionScopeResolution(
+        agent_name=agent_name,
+        persisted_execution_scope=persisted_execution_scope,
+        requested_execution_scope=requested_execution_scope,
+        execution_scope_override_provided=execution_scope_override_provided,
+        draft_scope_preview=draft_scope_preview,
+    )
+
+
 def _reject_raw_worker_targeting(request: Request) -> None:
     for param_name in ("worker_key", "source_worker_key"):
         if request.query_params.get(param_name):
@@ -187,16 +301,24 @@ def resolve_request_credentials_target(
     agent_name: str | None = None,
     credentials_manager: CredentialsManager | None = None,
     service_names: tuple[str, ...] = (),
+    execution_scope_override_provided: bool | None = None,
+    execution_scope_override: WorkerScope | None = None,
 ) -> RequestCredentialsTarget:
     """Resolve the credential storage target for one authenticated dashboard request."""
-    from mindroom.api.main import api_runtime_paths, load_runtime_config  # noqa: PLC0415
+    from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     _reject_raw_worker_targeting(request)
     runtime_paths = api_runtime_paths(request)
 
     base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
+    if execution_scope_override_provided is None:
+        execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(
+            request,
+        )
 
-    if not agent_name:
+    # Plain dashboard credential reads/writes with no agent selection remain global and
+    # must not start depending on a persisted config file.
+    if agent_name is None and not execution_scope_override_provided:
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
@@ -205,55 +327,70 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    config, _ = load_runtime_config(runtime_paths)
-    if agent_name not in config.agents:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
-
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    if worker_scope is None:
+    config, _ = config_lifecycle.load_runtime_config(runtime_paths)
+    scope_request = resolve_dashboard_agent_execution_scope_request(
+        config=config,
+        agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
+        allow_draft_override=False,
+    )
+    if scope_request.agent_name is None:
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
             worker_scope=None,
-            agent_name=agent_name,
+            agent_name=None,
+            execution_identity=None,
+        )
+    execution_scope = scope_request.requested_execution_scope
+    if execution_scope is None:
+        return RequestCredentialsTarget(
+            base_manager=base_manager,
+            target_manager=base_manager,
+            worker_scope=None,
+            agent_name=scope_request.agent_name,
             execution_identity=None,
         )
 
-    if not dashboard_supports_worker_credentials(worker_scope):
+    scope_label = _dashboard_scope_label(
+        config_labeled_scope=config.get_agent_scope_label(scope_request.agent_name),
+        execution_scope=execution_scope,
+        execution_scope_override_provided=execution_scope_override_provided,
+    )
+    if not dashboard_supports_worker_credentials(execution_scope):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Dashboard credential management does not support "
-                f"worker_scope={worker_scope} for agent '{agent_name}'."
+                f"Dashboard credential management does not support {scope_label} "
+                f"for agent '{scope_request.agent_name}'."
             ),
         )
 
-    if not worker_scope_allows_shared_only_integrations(worker_scope):
-        for service_name in service_names:
-            if not requires_shared_only_integration_scope(service_name):
-                continue
-            raise HTTPException(
-                status_code=400,
-                detail=unsupported_shared_only_integration_message(
-                    service_name,
-                    worker_scope,
-                    agent_name=agent_name,
-                ),
-            )
-
-    execution_identity = _build_dashboard_execution_identity(request, agent_name)
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=agent_name)
-    if worker_key is None:
+    unsupported_services = unsupported_shared_only_integration_names(list(service_names), execution_scope)
+    if unsupported_services:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not resolve worker credentials for agent '{agent_name}'.",
+            detail=unsupported_shared_only_integration_message(
+                unsupported_services[0],
+                execution_scope,
+                agent_name=scope_request.agent_name,
+                scope_label=scope_label,
+            ),
         )
 
+    execution_identity = build_dashboard_execution_identity(request, scope_request.agent_name)
+    worker_key = require_worker_key_for_scope(
+        execution_scope,
+        execution_identity=execution_identity,
+        agent_name=scope_request.agent_name,
+        failure_message=f"Could not resolve worker credentials for agent '{scope_request.agent_name}'.",
+    )
     return RequestCredentialsTarget(
         base_manager=base_manager,
         target_manager=base_manager.for_worker(worker_key),
-        worker_scope=worker_scope,
-        agent_name=agent_name,
+        worker_scope=execution_scope,
+        agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
     )
 
@@ -309,8 +446,7 @@ async def list_services(
         and credentials.get("_source") == "env"
     }
     services = worker_services | env_services
-    if not worker_scope_allows_shared_only_integrations(target.worker_scope):
-        services -= SHARED_ONLY_INTEGRATION_NAMES
+    services -= set(unsupported_shared_only_integration_names(sorted(services), target.worker_scope))
     return sorted(services)
 
 

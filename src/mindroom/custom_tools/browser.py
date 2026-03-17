@@ -1026,11 +1026,10 @@ class BrowserTools(Toolkit):
             return self._output_dir
 
         context = get_tool_runtime_context()
-        if context is None or context.storage_path is None:
-            msg = "BrowserTools requires explicit output_dir or tool runtime context with storage_path"
-            raise RuntimeError(msg)
-
-        self._output_dir = (context.storage_path / "browser").resolve()
+        storage_root = context.storage_path if context is not None and context.storage_path is not None else None
+        if storage_root is None:
+            storage_root = self._runtime_paths.storage_root
+        self._output_dir = (storage_root / "browser").resolve()
         self._output_dir.mkdir(parents=True, exist_ok=True)
         return self._output_dir
 

@@ -5,7 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { API_ENDPOINTS, withAgentName } from '@/lib/api';
+import { API_ENDPOINTS, withAgentExecutionScope } from '@/lib/api';
+import type { WorkerScope } from '@/types/config';
 
 interface GoogleStatus {
   connected: boolean;
@@ -24,13 +25,18 @@ const serviceIcons = {
 interface GoogleIntegrationProps {
   onSuccess?: () => void;
   agentName?: string | null;
+  executionScope?: WorkerScope | null;
 }
 
 const GOOGLE_ADMIN_SETUP_DOCS_URL = 'https://docs.mindroom.chat/deployment/google-services-oauth/';
 const GOOGLE_USER_SETUP_DOCS_URL =
   'https://docs.mindroom.chat/deployment/google-services-user-oauth/';
 
-export function GoogleIntegration({ onSuccess, agentName }: GoogleIntegrationProps = {}) {
+export function GoogleIntegration({
+  onSuccess,
+  agentName,
+  executionScope,
+}: GoogleIntegrationProps = {}) {
   const [status, setStatus] = useState<GoogleStatus>({
     connected: false,
     services: [],
@@ -64,7 +70,9 @@ export function GoogleIntegration({ onSuccess, agentName }: GoogleIntegrationPro
 
   const checkGoogleStatus = async () => {
     try {
-      const response = await fetch(withAgentName(API_ENDPOINTS.google.status, agentName));
+      const response = await fetch(
+        withAgentExecutionScope(API_ENDPOINTS.google.status, agentName, executionScope)
+      );
       const data = await response.json();
       setStatus({
         connected: data.connected,
@@ -83,9 +91,12 @@ export function GoogleIntegration({ onSuccess, agentName }: GoogleIntegrationPro
   const connectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(withAgentName(API_ENDPOINTS.google.connect, agentName), {
-        method: 'POST',
-      });
+      const response = await fetch(
+        withAgentExecutionScope(API_ENDPOINTS.google.connect, agentName, executionScope),
+        {
+          method: 'POST',
+        }
+      );
 
       if (!response.ok) {
         const error = await response.json();
@@ -147,9 +158,12 @@ export function GoogleIntegration({ onSuccess, agentName }: GoogleIntegrationPro
   const disconnectGoogle = async () => {
     setLoading(true);
     try {
-      const response = await fetch(withAgentName(API_ENDPOINTS.google.disconnect, agentName), {
-        method: 'POST',
-      });
+      const response = await fetch(
+        withAgentExecutionScope(API_ENDPOINTS.google.disconnect, agentName, executionScope),
+        {
+          method: 'POST',
+        }
+      );
 
       if (response.ok) {
         setStatus(prev => ({

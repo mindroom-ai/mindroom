@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchJSON, withAgentName } from '@/lib/api';
+import { API_ENDPOINTS, fetchJSON, withAgentExecutionScope } from '@/lib/api';
+import type { WorkerScope } from '@/types/config';
 import { useFetchData } from './useFetchData';
 
 export interface ToolInfo {
@@ -16,26 +17,35 @@ export interface ToolInfo {
   auth_provider?: string | null;
   docs_url?: string | null;
   helper_text?: string | null;
+  dashboard_configuration_supported?: boolean;
+  execution_scope_supported?: boolean;
 }
 
 export interface ToolsResponse {
   tools: ToolInfo[];
+  status_authoritative?: boolean;
 }
 
-const DEFAULT: ToolInfo[] = [];
+const DEFAULT_RESPONSE: ToolsResponse = {
+  tools: [],
+  status_authoritative: true,
+};
 
-export function useTools(agentName?: string | null) {
+export function useTools(agentName?: string | null, executionScope?: WorkerScope | null) {
   const fetcher = useMemo(
     () => async () => {
-      const response = (await fetchJSON<ToolsResponse>(
-        withAgentName(API_ENDPOINTS.tools, agentName)
+      return (await fetchJSON<ToolsResponse>(
+        withAgentExecutionScope(API_ENDPOINTS.tools, agentName, executionScope)
       )) as ToolsResponse;
-      return response.tools;
     },
-    [agentName]
+    [agentName, executionScope]
   );
-  const { data: tools, ...rest } = useFetchData(fetcher, DEFAULT);
-  return { tools, ...rest };
+  const { data: response, ...rest } = useFetchData(fetcher, DEFAULT_RESPONSE);
+  return {
+    tools: response.tools,
+    statusAuthoritative: response.status_authoritative ?? true,
+    ...rest,
+  };
 }
 
 // Helper function to map backend tool to frontend integration format

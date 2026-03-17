@@ -35,6 +35,7 @@ def _mock_bot(tmp_path: Path) -> MagicMock:
     bot.config = _runtime_bound_config()
     bot.runtime_paths = runtime_paths_for(bot.config)
     bot._build_runtime_tool_contexts = MagicMock(return_value=(None, None))
+    bot._ensure_request_knowledge_managers = AsyncMock(return_value={})
     return bot
 
 
@@ -247,3 +248,36 @@ class TestAIErrorDisplay:
                     assert "unavailable" in displayed_msg
                 elif "Invalid model" in error_msg:
                     assert "Invalid model" in displayed_msg
+
+    @pytest.mark.asyncio
+    async def test_knowledge_init_failure_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+        """Matrix reply paths should continue when request-scoped knowledge init fails."""
+        bot = _mock_bot(tmp_path)
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._send_response = AsyncMock(return_value="$response_id")
+        bot._ensure_request_knowledge_managers = AgentBot._ensure_request_knowledge_managers.__get__(bot, AgentBot)
+
+        process_method = AgentBot._process_and_respond
+
+        with (
+            patch(
+                "mindroom.bot.ensure_request_knowledge_managers",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("knowledge init failed"),
+            ),
+            patch("mindroom.bot.ai_response", new_callable=AsyncMock) as mock_ai,
+        ):
+            mock_ai.return_value = "Response without knowledge"
+
+            event_id = await process_method(
+                bot,
+                room_id="!test:localhost",
+                prompt="Help me with something",
+                reply_to_event_id="$user_msg",
+                thread_id=None,
+                thread_history=[],
+            )
+
+        assert event_id == "$response_id"
+        assert mock_ai.call_args.kwargs["knowledge"] is None
+        bot.logger.exception.assert_called_once()

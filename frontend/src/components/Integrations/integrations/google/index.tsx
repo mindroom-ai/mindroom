@@ -1,7 +1,7 @@
 import { FaGoogle } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
 import { GoogleIntegration as GoogleIntegrationComponent } from '@/components/GoogleIntegration/GoogleIntegration';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 
 class GoogleIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -17,11 +17,16 @@ class GoogleIntegrationProvider implements IntegrationProvider {
 
   getConfig(scope?: IntegrationScope): IntegrationConfig {
     const agentName = scope?.agentName ?? null;
+    const executionScope = scope?.executionScope;
     return {
       integration: this.integration,
       onDisconnect: async () => {
         const response = await fetch(
-          withAgentName(`${API_BASE_URL}/api/google/disconnect`, agentName),
+          withAgentExecutionScope(
+            `${API_BASE_URL}/api/google/disconnect`,
+            agentName,
+            executionScope
+          ),
           {
             method: 'POST',
           }
@@ -31,15 +36,22 @@ class GoogleIntegrationProvider implements IntegrationProvider {
         }
       },
       ConfigComponent: props => (
-        <GoogleIntegrationComponent onSuccess={props.onSuccess} agentName={agentName} />
+        <GoogleIntegrationComponent
+          onSuccess={props.onSuccess}
+          agentName={agentName}
+          executionScope={executionScope}
+        />
       ),
     };
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
     const agentName = scope?.agentName ?? null;
+    const executionScope = scope?.executionScope;
     try {
-      const response = await fetch(withAgentName(`${API_BASE_URL}/api/google/status`, agentName));
+      const response = await fetch(
+        withAgentExecutionScope(`${API_BASE_URL}/api/google/status`, agentName, executionScope)
+      );
       if (response.ok) {
         const data = await response.json();
         if (data.connected) {

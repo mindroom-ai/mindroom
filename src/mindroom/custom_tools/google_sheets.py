@@ -16,7 +16,7 @@ from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
@@ -30,8 +30,7 @@ class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
         *,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize Google Sheets tools with MindRoom credentials.
@@ -46,8 +45,7 @@ class GoogleSheetsTools(ScopedGoogleOAuthMixin, AgnoGoogleSheetsTools):
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         creds = self._initialize_google_oauth(
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
+            worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
         )

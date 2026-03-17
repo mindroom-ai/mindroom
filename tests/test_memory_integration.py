@@ -85,7 +85,14 @@ class TestMemoryIntegration:
             assert response == "Test response"
 
             # Verify memory enhancement was applied
-            mock_build.assert_called_once_with("What is 2+2?", "general", tmp_path, config, runtime_paths)
+            mock_build.assert_called_once_with(
+                "What is 2+2?",
+                "general",
+                tmp_path,
+                config,
+                runtime_paths,
+                execution_identity=None,
+            )
 
             # Verify enhanced prompt was used
             mock_agent_run.assert_called_once()
@@ -120,7 +127,14 @@ class TestMemoryIntegration:
             )
 
             # Verify memory enhancement remains agent-scoped
-            mock_build.assert_called_once_with("Hello", "general", tmp_path, config, runtime_paths)
+            mock_build.assert_called_once_with(
+                "Hello",
+                "general",
+                tmp_path,
+                config,
+                runtime_paths,
+                execution_identity=None,
+            )
 
             # Note: Memory storage now happens at the bot level, not in ai_response
 

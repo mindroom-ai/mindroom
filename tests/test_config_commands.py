@@ -234,6 +234,7 @@ async def test_handle_command_threads_config_path_to_config_commands(tmp_path: P
         client=AsyncMock(),
         config=MagicMock(),
         runtime_paths=resolve_runtime_paths(config_path=config_path, storage_path=tmp_path),
+        storage_path=tmp_path,
         logger=MagicMock(),
         response_tracker=MagicMock(),
         derive_conversation_context=AsyncMock(return_value=(False, None, [])),

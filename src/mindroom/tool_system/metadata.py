@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import importlib
-import inspect
 import os
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -18,10 +17,9 @@ from mindroom.tool_system.dependencies import auto_install_tool_extra, check_dep
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy
 from mindroom.tool_system.worker_routing import (
-    WorkerScope,
-    requires_shared_only_integration_scope,
+    ResolvedWorkerTarget,
+    supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
-    worker_scope_allows_shared_only_integrations,
 )
 
 if TYPE_CHECKING:
@@ -32,7 +30,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir"})
@@ -114,35 +111,27 @@ def _build_tool_config_init_kwargs(
     return init_kwargs
 
 
-def _add_worker_context_init_kwargs(
-    tool_class: type[Toolkit],
+def _build_managed_tool_init_kwargs(
+    metadata: ToolMetadata,
     *,
-    init_kwargs: dict[str, object],
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
-    runtime_overrides: dict[str, object] | None,
-    worker_scope: WorkerScope | None,
-    routing_agent_name: str | None,
-) -> None:
-    """Inject worker-routing constructor args when a toolkit supports them."""
-    init_signature = inspect.signature(tool_class.__init__)
-    if "runtime_paths" in init_signature.parameters:
-        init_kwargs["runtime_paths"] = runtime_paths
-    if credentials_manager is not None and "credentials_manager" in init_signature.parameters:
-        init_kwargs["credentials_manager"] = credentials_manager
-    if runtime_overrides:
-        for key, value in runtime_overrides.items():
-            if key in init_signature.parameters and key not in init_kwargs:
-                init_kwargs[key] = value
-    if "worker_scope" in init_signature.parameters:
-        init_kwargs["worker_scope"] = worker_scope
-    if "routing_agent_name" in init_signature.parameters:
-        init_kwargs["routing_agent_name"] = routing_agent_name
+    worker_target: ResolvedWorkerTarget | None,
+) -> dict[str, object]:
+    """Build declared MindRoom-managed constructor kwargs for one tool."""
+    init_kwargs: dict[str, object] = {}
+    for init_arg in metadata.managed_init_args:
+        if init_arg == ToolManagedInitArg.RUNTIME_PATHS:
+            init_kwargs[init_arg.value] = runtime_paths
+        elif init_arg == ToolManagedInitArg.CREDENTIALS_MANAGER:
+            init_kwargs[init_arg.value] = credentials_manager
+        elif init_arg == ToolManagedInitArg.WORKER_TARGET:
+            init_kwargs[init_arg.value] = worker_target
+    return init_kwargs
 
 
 def _resolve_tool_credentials_manager(
-    tool_name: str,
-    tool_class: type[Toolkit],
+    metadata: ToolMetadata,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
 ) -> CredentialsManager | None:
@@ -150,12 +139,7 @@ def _resolve_tool_credentials_manager(
     if credentials_manager is not None:
         return credentials_manager
 
-    metadata = TOOL_METADATA[tool_name]
-    if metadata.config_fields:
-        return get_runtime_credentials_manager(runtime_paths)
-
-    init_signature = inspect.signature(tool_class.__init__)
-    if "credentials_manager" in init_signature.parameters:
+    if metadata.config_fields or ToolManagedInitArg.CREDENTIALS_MANAGER in metadata.managed_init_args:
         return get_runtime_credentials_manager(runtime_paths)
     return None
 
@@ -170,13 +154,13 @@ def _build_tool_instance(
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
-    worker_scope: WorkerScope | None = None,
-    routing_agent_name: str | None = None,
+    shared_storage_root_path: Path | None = None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
-    if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
-        worker_scope,
-    ):
+    worker_scope = worker_target.worker_scope if worker_target is not None else None
+    routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
         msg = unsupported_shared_only_integration_message(
             tool_name,
             worker_scope,
@@ -185,28 +169,24 @@ def _build_tool_instance(
         )
         raise ValueError(msg)
 
+    metadata = TOOL_METADATA[tool_name]
     tool_class = _TOOL_REGISTRY[tool_name]()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
-        tool_name,
-        tool_class,
+        metadata,
         runtime_paths,
         credentials_manager,
     )
     credentials = (
         load_scoped_credentials(
             tool_name,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
             credentials_manager=resolved_credentials_manager,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            worker_target=worker_target,
         )
         if resolved_credentials_manager is not None
         else {}
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
-    metadata = TOOL_METADATA[tool_name]
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         metadata,
@@ -214,24 +194,18 @@ def _build_tool_instance(
         tool_init_overrides=safe_tool_init_overrides,
         runtime_overrides=runtime_overrides,
     )
-    _add_worker_context_init_kwargs(
-        tool_class,
-        init_kwargs=init_kwargs,
-        runtime_paths=runtime_paths,
-        credentials_manager=resolved_credentials_manager,
-        runtime_overrides=runtime_overrides,
-        worker_scope=worker_scope,
-        routing_agent_name=routing_agent_name,
+    init_kwargs.update(
+        _build_managed_tool_init_kwargs(
+            metadata,
+            runtime_paths=runtime_paths,
+            credentials_manager=resolved_credentials_manager,
+            worker_target=worker_target,
+        ),
     )
 
     toolkit = cast("Any", tool_class)(**init_kwargs)
     if disable_sandbox_proxy:
         return toolkit
-    shared_storage_root_path = None
-    if isinstance(runtime_overrides, dict):
-        candidate_shared_storage_root = runtime_overrides.get("shared_storage_root")
-        if isinstance(candidate_shared_storage_root, Path):
-            shared_storage_root_path = candidate_shared_storage_root
     return maybe_wrap_toolkit_for_sandbox_proxy(
         tool_name,
         toolkit,
@@ -239,9 +213,8 @@ def _build_tool_instance(
         credentials_manager=resolved_credentials_manager,
         tool_init_overrides=safe_tool_init_overrides,
         worker_tools_override=worker_tools_override,
-        worker_scope=worker_scope,
-        routing_agent_name=routing_agent_name,
         shared_storage_root_path=shared_storage_root_path,
+        worker_target=worker_target,
     )
 
 
@@ -255,8 +228,8 @@ def get_tool_by_name(
     tool_init_overrides: dict[str, object] | None = None,
     worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
-    worker_scope: WorkerScope | None = None,
-    routing_agent_name: str | None = None,
+    shared_storage_root_path: Path | None = None,
+    worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:
@@ -274,8 +247,8 @@ def get_tool_by_name(
         tool_init_overrides=tool_init_overrides,
         worker_tools_override=worker_tools_override,
         runtime_overrides=runtime_overrides,
-        worker_scope=worker_scope,
-        routing_agent_name=routing_agent_name,
+        shared_storage_root_path=shared_storage_root_path,
+        worker_target=worker_target,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing
@@ -349,6 +322,14 @@ class ToolExecutionTarget(str, Enum):
     WORKER = "worker"
 
 
+class ToolManagedInitArg(str, Enum):
+    """Explicit MindRoom-managed constructor inputs."""
+
+    RUNTIME_PATHS = "runtime_paths"
+    CREDENTIALS_MANAGER = "credentials_manager"
+    WORKER_TARGET = "worker_target"
+
+
 @dataclass
 class ConfigField:
     """Definition of a configuration field."""
@@ -382,6 +363,7 @@ class ToolMetadata:
     auth_provider: str | None = None  # Name of integration that provides auth (e.g., "google")
     docs_url: str | None = None  # Documentation URL
     helper_text: str | None = None  # Additional help text for setup
+    managed_init_args: tuple[ToolManagedInitArg, ...] = ()  # Explicit MindRoom-managed constructor kwargs
     factory: Callable | None = None  # Factory function to create tool instance
 
 
@@ -405,6 +387,7 @@ def register_tool_with_metadata(
     auth_provider: str | None = None,
     docs_url: str | None = None,
     helper_text: str | None = None,
+    managed_init_args: tuple[ToolManagedInitArg, ...] = (),
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Decorator to register a tool with metadata.
 
@@ -426,6 +409,7 @@ def register_tool_with_metadata(
         auth_provider: Name of integration that provides authentication
         docs_url: Link to documentation
         helper_text: Additional setup instructions
+        managed_init_args: Explicit MindRoom-managed constructor kwargs
 
     Returns:
         Decorator function
@@ -449,6 +433,7 @@ def register_tool_with_metadata(
             auth_provider=auth_provider,
             docs_url=docs_url,
             helper_text=helper_text,
+            managed_init_args=managed_init_args,
             factory=func,
         )
 
@@ -496,6 +481,7 @@ def export_tools_metadata() -> list[dict[str, Any]]:
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
         tool_dict["default_execution_target"] = metadata.default_execution_target.value
+        tool_dict.pop("managed_init_args", None)
         tool_dict.pop("factory", None)
         tools.append(tool_dict)
 

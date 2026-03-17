@@ -14,10 +14,18 @@ import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import (
+    ResolvedWorkerTarget,
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    resolve_worker_target,
+)
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
@@ -70,6 +78,24 @@ def _configure_proxy_runtime(
             json.dumps({key: list(value) for key, value in credential_policy.items()}),
         )
     return _runtime_paths_from_env()
+
+
+def _worker_target(
+    runtime_paths: RuntimePaths,
+    worker_scope: str | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    private_agent_names: frozenset[str] | None = None,
+) -> ResolvedWorkerTarget:
+    return resolve_worker_target(
+        worker_scope,
+        routing_agent_name,
+        execution_identity=execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        private_agent_names=private_agent_names,
+    )
 
 
 class _FakeResponse:
@@ -130,7 +156,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         _recording_client_class(captured=captured),
     )
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -162,7 +188,7 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -194,7 +220,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         ),
     )
 
-    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials)
+    tool = get_tool_by_name("calculator", runtime_paths, credentials_manager=fake_credentials, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     result = entrypoint(1, 2)
@@ -214,13 +240,23 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
 def test_get_tool_by_name_rejects_unsafe_tool_init_overrides() -> None:
     """Tool init overrides should allow only the explicit safe whitelist."""
     with pytest.raises(ToolInitOverrideError, match="api_key"):
-        get_tool_by_name("openai", _TEST_RUNTIME_PATHS, tool_init_overrides={"api_key": "sk-test"})
+        get_tool_by_name(
+            "openai",
+            _TEST_RUNTIME_PATHS,
+            tool_init_overrides={"api_key": "sk-test"},
+            worker_target=None,
+        )
 
 
 def test_get_tool_by_name_rejects_invalid_base_dir_override_type() -> None:
     """base_dir overrides should be validated before toolkit construction."""
     with pytest.raises(ToolInitOverrideError, match="base_dir"):
-        get_tool_by_name("coding", _TEST_RUNTIME_PATHS, tool_init_overrides={"base_dir": {"bad": "value"}})
+        get_tool_by_name(
+            "coding",
+            _TEST_RUNTIME_PATHS,
+            tool_init_overrides={"base_dir": {"bad": "value"}},
+            worker_target=None,
+        )
 
 
 def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path) -> None:
@@ -242,9 +278,10 @@ def test_get_tool_by_name_loads_persisted_non_secret_file_config(tmp_path: Path)
             "enable_delete_file": True,
         },
         credentials_manager=credentials_manager,
+        worker_target=None,
     )
 
-    tool = get_tool_by_name("file", runtime_paths)
+    tool = get_tool_by_name("file", runtime_paths, worker_target=None)
 
     assert tool.base_dir == workspace.resolve()
     assert "delete_file" in tool.functions
@@ -271,6 +308,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
             "location": "us-central1",
         },
         credentials_manager=credentials_manager,
+        worker_target=None,
     )
     captured: dict[str, object] = {}
 
@@ -281,7 +319,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
 
     monkeypatch.setattr("agno.tools.google_bigquery.bigquery.Client", _FakeBigQueryClient)
 
-    tool = get_tool_by_name("google_bigquery", runtime_paths)
+    tool = get_tool_by_name("google_bigquery", runtime_paths, worker_target=None)
 
     assert tool.dataset == "demo_dataset"
     assert tool.project == "demo-project"
@@ -307,7 +345,7 @@ def test_get_tool_by_name_requires_explicit_clickup_config(tmp_path: Path) -> No
     )
 
     with pytest.raises(ValueError, match="CLICKUP_API_KEY not set"):
-        get_tool_by_name("clickup", runtime_paths)
+        get_tool_by_name("clickup", runtime_paths, worker_target=None)
 
 
 def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution(tmp_path: Path) -> None:
@@ -326,7 +364,7 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_direct_python_execution
         },
     )
 
-    tool = get_tool_by_name("python", runtime_paths)
+    tool = get_tool_by_name("python", runtime_paths, worker_target=None)
     entrypoint = tool.functions["run_python_code"].entrypoint
     assert entrypoint is not None
 
@@ -358,7 +396,12 @@ def test_get_tool_by_name_does_not_expose_runtime_env_to_file_backed_python_exec
         },
     )
 
-    tool = get_tool_by_name("python", runtime_paths, tool_init_overrides={"base_dir": str(tmp_path)})
+    tool = get_tool_by_name(
+        "python",
+        runtime_paths,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        worker_target=None,
+    )
     save_entrypoint = tool.functions["save_to_file_and_run"].entrypoint
     run_file_entrypoint = tool.functions["run_python_file_return_variable"].entrypoint
     assert save_entrypoint is not None
@@ -396,7 +439,7 @@ def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path)
         process_env={},
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -424,7 +467,7 @@ def test_local_shell_does_not_inherit_filtered_process_env(
         process_env={},
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True)
+    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -469,7 +512,7 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
         process_env=dict(os.environ),
     )
 
-    shell_tool = get_tool_by_name("shell", runtime_paths)
+    shell_tool = get_tool_by_name("shell", runtime_paths, worker_target=None)
     shell_entrypoint = shell_tool.functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
     result = shell_entrypoint(["bash", "-lc", "printf '%s' \"$TEST_EXECUTION_ENV\""])
@@ -480,7 +523,7 @@ def test_proxy_forwards_execution_env_only_for_execution_tools(
     assert "MINDROOM_SANDBOX_PROXY_TOKEN" not in captured["json"]["execution_env"]
 
     captured.clear()
-    calculator = get_tool_by_name("calculator", runtime_paths)
+    calculator = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     calculator_entrypoint = calculator.functions["add"].entrypoint
     assert calculator_entrypoint is not None
     calculator_entrypoint(1, 2)
@@ -560,7 +603,7 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name("calculator", runtime_paths)
+    tool = get_tool_by_name("calculator", runtime_paths, worker_target=None)
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
@@ -630,13 +673,11 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         runtime_paths,
         credentials_manager=fake_credentials,
         worker_tools_override=["calculator"],
-        worker_scope="user",
-        routing_agent_name="code",
+        worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
     )
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
-    with tool_execution_identity(execution_identity):
-        result = entrypoint(1, 2)
+    result = entrypoint(1, 2)
 
     assert result == "proxied"
     lease_url, lease_payload = captured_calls[0]
@@ -680,16 +721,6 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name(
-        "calculator",
-        runtime_paths,
-        worker_tools_override=["calculator"],
-        worker_scope="user_agent",
-        routing_agent_name="code",
-    )
-    entrypoint = tool.functions["add"].entrypoint
-    assert entrypoint is not None
-
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="shared_agent",
@@ -699,10 +730,44 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        worker_tools_override=["calculator"],
+        worker_target=_worker_target(
+            runtime_paths,
+            "user_agent",
+            "code",
+            execution_identity,
+            private_agent_names=frozenset({"code"}),
+        ),
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    with tool_execution_identity(execution_identity):
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="alice",
+        client=object(),
+        config=Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    private=AgentPrivateConfig(per="user_agent"),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths=runtime_paths,
+    )
+
+    with tool_runtime_context(runtime_context):
         result = entrypoint(1, 2)
 
     assert result == "sandbox-result"
@@ -720,6 +785,99 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         "tenant_id": None,
         "account_id": None,
     }
+    assert captured["json"]["private_agent_names"] == ["code"]
+
+
+def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared user-agent workers should still send explicit empty private visibility."""
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "result": "sandbox-result"}
+
+    class _FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="shared_agent",
+        requester_id="alice",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        worker_tools_override=["calculator"],
+        worker_target=_worker_target(
+            runtime_paths,
+            "user_agent",
+            "code",
+            execution_identity,
+            private_agent_names=frozenset(),
+        ),
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+    expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
+    assert expected_worker_key is not None
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="alice",
+        client=object(),
+        config=Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    worker_scope="user_agent",
+                ),
+            },
+            models={},
+        ),
+        runtime_paths=runtime_paths,
+    )
+
+    with tool_runtime_context(runtime_context):
+        result = entrypoint(1, 2)
+
+    assert result == "sandbox-result"
+    assert captured["json"]["worker_key"] == expected_worker_key
+    assert captured["json"]["private_agent_names"] == []
 
 
 def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -762,8 +920,7 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(monkeypa
         runtime_paths=_TEST_RUNTIME_PATHS,
         tool_name="shell",
         function_name="run_shell_command",
-        worker_scope=None,
-        routing_agent_name="code",
+        worker_target=_worker_target(_TEST_RUNTIME_PATHS, None, "code", None),
     )
 
     assert payload["worker_key"] == "v1:default:unscoped:code"
@@ -811,14 +968,12 @@ def test_scoped_dedicated_worker_payload_preserves_resolved_worker_key(monkeypat
         session_id="session-1",
     )
 
-    with tool_execution_identity(execution_identity):
-        payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
-            runtime_paths=_TEST_RUNTIME_PATHS,
-            tool_name="shell",
-            function_name="run_shell_command",
-            worker_scope="user",
-            routing_agent_name="code",
-        )
+    payload, worker_handle = sandbox_proxy_module._build_worker_routing_payload(
+        runtime_paths=_TEST_RUNTIME_PATHS,
+        tool_name="shell",
+        function_name="run_shell_command",
+        worker_target=_worker_target(_TEST_RUNTIME_PATHS, "user", "code", execution_identity),
+    )
 
     assert payload["worker_key"] == "v1:default:user:@alice:example.org"
     assert worker_handle is ensured_handle
@@ -1128,8 +1283,7 @@ def test_kubernetes_backend_misconfiguration_raises_instead_of_running_locally(
         "shell",
         runtime_paths,
         worker_tools_override=["shell"],
-        worker_scope=None,
-        routing_agent_name="code",
+        worker_target=_worker_target(runtime_paths, None, "code", None),
     )
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
@@ -1236,8 +1390,7 @@ def test_docker_backend_misconfiguration_raises_instead_of_running_locally(
         "shell",
         runtime_paths,
         worker_tools_override=["shell"],
-        worker_scope=None,
-        routing_agent_name="code",
+        worker_target=_worker_target(runtime_paths, None, "code", None),
     )
     entrypoint = tool.functions["run_shell_command"].entrypoint
     assert entrypoint is not None
@@ -1429,8 +1582,7 @@ class TestWorkerToolsOverride:
             runtime_paths,
             credentials_manager=fake_credentials,
             worker_tools_override=["homeassistant"],
-            worker_scope="shared",
-            routing_agent_name="general",
+            worker_target=_worker_target(runtime_paths, "shared", "general", None),
         )
         entrypoint = tool.async_functions["list_entities"].entrypoint
         assert entrypoint is not None
@@ -1455,7 +1607,12 @@ class TestWorkerToolsOverride:
         )
 
         # Override says sandbox calculator
-        tool = get_tool_by_name("calculator", runtime_paths, worker_tools_override=["calculator"])
+        tool = get_tool_by_name(
+            "calculator",
+            runtime_paths,
+            worker_tools_override=["calculator"],
+            worker_target=None,
+        )
         entrypoint = tool.functions["add"].entrypoint
         assert entrypoint is not None
         result = entrypoint(1, 2)
@@ -1483,6 +1640,7 @@ class TestWorkerToolsOverride:
             runtime_paths,
             tool_init_overrides={"base_dir": "/workspace/demo"},
             worker_tools_override=["coding"],
+            worker_target=None,
         )
         entrypoint = tool.functions["ls"].entrypoint
         assert entrypoint is not None
@@ -1508,22 +1666,6 @@ class TestWorkerToolsOverride:
             execution_mode="off",
             credential_policy={},
         )
-        monkeypatch.setattr(
-            "mindroom.tool_system.sandbox_proxy.httpx.Client",
-            _recording_client_class(captured=captured),
-        )
-        tool = get_tool_by_name(
-            "coding",
-            runtime_paths,
-            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
-            runtime_overrides={"shared_storage_root": Path("/srv/mindroom")},
-            worker_tools_override=["coding"],
-            worker_scope="shared",
-            routing_agent_name="general",
-        )
-        entrypoint = tool.functions["ls"].entrypoint
-        assert entrypoint is not None
-
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
@@ -1533,12 +1675,25 @@ class TestWorkerToolsOverride:
             resolved_thread_id="$thread",
             session_id="session-1",
         )
-        with tool_execution_identity(execution_identity):
-            result = entrypoint(path=".")
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+        tool = get_tool_by_name(
+            "coding",
+            runtime_paths,
+            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace"},
+            shared_storage_root_path=Path("/srv/mindroom"),
+            worker_tools_override=["coding"],
+            worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+        result = entrypoint(path=".")
 
         assert result == "sandbox-result"
         assert captured["url"].endswith("/api/sandbox-runner/execute")
-        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace/mind_data"}
+        assert captured["json"]["tool_init_overrides"] == {"base_dir": "agents/general/workspace"}
 
     def test_proxy_preserves_storage_root_absolute_base_dir_without_worker_key(
         self,
@@ -1568,6 +1723,7 @@ class TestWorkerToolsOverride:
             runtime_paths,
             tool_init_overrides={"base_dir": str(base_dir)},
             worker_tools_override=["coding"],
+            worker_target=None,
         )
         entrypoint = tool.functions["ls"].entrypoint
         assert entrypoint is not None
@@ -1596,6 +1752,15 @@ class TestWorkerToolsOverride:
             execution_mode="off",
             credential_policy={},
         )
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
         monkeypatch.setattr(
             "mindroom.tool_system.sandbox_proxy.httpx.Client",
             _recording_client_class(captured=captured),
@@ -1606,23 +1771,11 @@ class TestWorkerToolsOverride:
             runtime_paths,
             tool_init_overrides={"base_dir": str(unrelated_base_dir)},
             worker_tools_override=["coding"],
-            worker_scope="shared",
-            routing_agent_name="general",
+            worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
         )
         entrypoint = tool.functions["ls"].entrypoint
         assert entrypoint is not None
-
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id="session-1",
-        )
-        with tool_execution_identity(execution_identity):
-            result = entrypoint(path=".")
+        result = entrypoint(path=".")
 
         assert result == "sandbox-result"
         assert captured["json"]["tool_init_overrides"] == {

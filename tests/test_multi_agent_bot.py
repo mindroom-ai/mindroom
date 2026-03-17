@@ -22,8 +22,15 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
-from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
-from mindroom.config.agent import AgentConfig
+from mindroom.bot import (
+    AgentBot,
+    MultiKnowledgeVectorDb,
+    _DispatchPayload,
+    _MessageContext,
+    _PreparedDispatch,
+    _ResponseAction,
+)
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -35,6 +42,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -50,7 +58,7 @@ from mindroom.orchestrator import (
     main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
-from mindroom.teams import TeamFormationDecision, TeamMode
+from mindroom.teams import TeamFormationDecision
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     TEST_PASSWORD,
@@ -70,6 +78,22 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
         config,
         test_runtime_paths(runtime_root),
     )
+
+
+def _mock_shared_knowledge_manager(
+    *,
+    base_id: str,
+    storage_root: Path,
+    knowledge_path: Path,
+    knowledge: object,
+) -> KnowledgeManager:
+    manager = MagicMock(spec=KnowledgeManager)
+    manager.base_id = base_id
+    manager.storage_path = storage_root
+    manager.knowledge_path = knowledge_path
+    manager.matches.return_value = True
+    manager.get_knowledge.return_value = knowledge
+    return manager
 
 
 @dataclass
@@ -307,11 +331,44 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
-        manager = MagicMock()
-        manager.get_knowledge.return_value = expected_knowledge
+        manager = _mock_shared_knowledge_manager(
+            base_id="research",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb").resolve(),
+            knowledge=expected_knowledge,
+        )
         bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
         assert bot._knowledge_for_agent("calculator") is expected_knowledge
+
+    def test_agent_property_rejects_private_agent_without_request_identity(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot.agent should fail fast for private agents with no request scope."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        role="Math assistant",
+                        rooms=[],
+                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        with pytest.raises(
+            ValueError,
+            match="AgentBot\\.agent is only available for shared agents",
+        ):
+            _ = bot.agent
 
     def test_knowledge_for_agent_merges_multiple_assigned_bases(
         self,
@@ -345,10 +402,18 @@ class TestAgentBot:
         ]
         legal_knowledge = Knowledge(vector_db=legal_vector_db)
 
-        research_manager = MagicMock()
-        research_manager.get_knowledge.return_value = research_knowledge
-        legal_manager = MagicMock()
-        legal_manager.get_knowledge.return_value = legal_knowledge
+        research_manager = _mock_shared_knowledge_manager(
+            base_id="research",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb_research").resolve(),
+            knowledge=research_knowledge,
+        )
+        legal_manager = _mock_shared_knowledge_manager(
+            base_id="legal",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb_legal").resolve(),
+            knowledge=legal_knowledge,
+        )
 
         bot.orchestrator = MagicMock(knowledge_managers={"research": research_manager, "legal": legal_manager})
 
@@ -364,6 +429,39 @@ class TestAgentBot:
         ]
         research_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
         legal_vector_db.search.assert_called_once_with(query="knowledge query", limit=4, filters=None)
+
+    def test_knowledge_for_agent_prefers_request_bound_manager(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Request-bound managers should win over later cache lookups."""
+        config = self.create_config_with_knowledge_bases(
+            assigned_bases=["research"],
+            knowledge_bases={
+                "research": KnowledgeBaseConfig(path=str(tmp_path / "kb"), watch=False),
+            },
+            runtime_root=tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        cached_manager = MagicMock()
+        cached_manager.get_knowledge.return_value = object()
+        bot.orchestrator = MagicMock(knowledge_managers={"research": cached_manager})
+
+        expected_knowledge = object()
+        bound_manager = MagicMock()
+        bound_manager.get_knowledge.return_value = expected_knowledge
+
+        assert (
+            bot._knowledge_for_agent(
+                "calculator",
+                request_knowledge_managers={"research": bound_manager},
+            )
+            is expected_knowledge
+        )
+
+        bound_manager.get_knowledge.assert_called_once_with()
+        cached_manager.get_knowledge.assert_not_called()
 
     def test_multi_knowledge_vector_db_interleaves_sync_results(self) -> None:
         """Round-robin merge should include top results from each knowledge base."""
@@ -1010,6 +1108,60 @@ class TestAgentBot:
         assert "reply_to_event_id: $event456" in model_prompt
 
     @pytest.mark.asyncio
+    async def test_process_and_respond_streaming_resolves_knowledge_once(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Streaming should resolve knowledge only inside the request-scoped context."""
+
+        @asynccontextmanager
+        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
+            yield
+
+        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+            yield "chunk"
+
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = AsyncMock()
+        bot._knowledge_for_agent = MagicMock(return_value=None)
+        bot._handle_interactive_question = AsyncMock()
+
+        with (
+            patch("mindroom.bot.typing_indicator", noop_typing_indicator),
+            patch("mindroom.bot.stream_agent_response", new_callable=AsyncMock) as mock_stream_agent_response,
+            patch("mindroom.bot.send_streaming_response", new_callable=AsyncMock) as mock_send_streaming_response,
+        ):
+            mock_stream_agent_response.return_value = mock_streaming_response()
+            mock_send_streaming_response.return_value = ("$response", "chunk")
+            event_id = await bot._process_and_respond_streaming(
+                room_id="!test:localhost",
+                prompt="Hello",
+                reply_to_event_id="$event456",
+                thread_id=None,
+                thread_history=[],
+                user_id="@user:localhost",
+            )
+
+        assert event_id == "$response"
+        bot._knowledge_for_agent.assert_called_once()
+        args, kwargs = bot._knowledge_for_agent.call_args
+        assert args == ("calculator",)
+        assert kwargs["request_knowledge_managers"] == {}
+        assert "execution_identity" not in kwargs
+
+    @pytest.mark.asyncio
     async def test_process_and_respond_includes_attachment_ids_in_response_metadata(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -1543,11 +1695,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
@@ -1641,11 +1789,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
@@ -1720,11 +1864,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=None),
@@ -1794,11 +1934,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch(
@@ -1869,11 +2005,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.register_file_or_video_attachment", new_callable=AsyncMock, return_value=None),
@@ -2320,11 +2452,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
             patch(
@@ -2547,11 +2675,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
         ):
@@ -2605,11 +2729,7 @@ class TestAgentBot:
         }
 
         with patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide:
-            mock_decide.return_value = TeamFormationDecision(
-                should_form_team=False,
-                agents=[],
-                mode=TeamMode.COLLABORATE,
-            )
+            mock_decide.return_value = TeamFormationDecision.none()
 
             await bot._decide_team_for_sender(
                 agents_in_thread=[],
@@ -2626,8 +2746,272 @@ class TestAgentBot:
         ]
 
     @pytest.mark.asyncio
+    async def test_resolve_response_action_rejects_instead_of_falling_through_to_individual_reply(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Explicitly rejected team requests must not fall through to individual replies."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        context = _MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[bot.matrix_id],
+            has_non_agent_mentions=False,
+        )
+
+        with (
+            patch.object(
+                bot,
+                "_decide_team_for_sender",
+                new=AsyncMock(
+                    return_value=TeamFormationDecision.reject(
+                        agents=[bot.matrix_id],
+                        reason="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+                    ),
+                ),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
+        ):
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "help me",
+                False,
+            )
+
+        assert action.kind == "reject"
+        assert "private agents cannot participate in teams yet" in action.rejection_message
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_rejects_when_explicit_mentions_include_hidden_agent(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit mixed mentions should reject instead of collapsing to one visible agent."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": ["@alice:localhost"],
+                        "general": ["@bob:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+        }
+        context = _MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            has_non_agent_mentions=False,
+        )
+
+        with patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond:
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@alice:localhost",
+                "calculator and general, help",
+                False,
+            )
+
+        assert action.kind == "reject"
+        assert action.rejection_message == (
+            "Team request includes agent 'general' that is not available to you in this room."
+        )
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_skips_when_explicit_mentions_are_all_hidden(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Explicit mixed mentions must not fall through when sender-visible agents are []."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                    "general": AgentConfig(display_name="GeneralAgent", rooms=["!room:localhost"]),
+                },
+                authorization={
+                    "default_room_access": True,
+                    "agent_reply_permissions": {
+                        "calculator": ["@bob:localhost"],
+                        "general": ["@bob:localhost"],
+                    },
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+        }
+        context = _MessageContext(
+            am_i_mentioned=True,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[
+                config.get_ids(runtime_paths_for(config))["calculator"],
+                config.get_ids(runtime_paths_for(config))["general"],
+            ],
+            has_non_agent_mentions=False,
+        )
+
+        with patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond:
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@alice:localhost",
+                "calculator and general, help",
+                False,
+            )
+
+        assert action.kind == "skip"
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_action_honors_single_agent_team_fallback(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Team formation may degrade to one responder without falling back through should_agent_respond."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        context = _MessageContext(
+            am_i_mentioned=False,
+            is_thread=False,
+            thread_id=None,
+            thread_history=[],
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        )
+
+        with (
+            patch.object(
+                bot,
+                "_decide_team_for_sender",
+                new=AsyncMock(return_value=TeamFormationDecision.individual(agent=bot.matrix_id)),
+            ),
+            patch("mindroom.bot.should_agent_respond", return_value=False) as mock_should_respond,
+        ):
+            action = await bot._resolve_response_action(
+                context,
+                room,
+                "@user:localhost",
+                "help me",
+                True,
+            )
+
+        assert action.kind == "individual"
+        mock_should_respond.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_dispatch_action_sends_visible_rejection_for_unsupported_team_request(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Rejected team requests should send one actionable reply instead of silently skipping."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(display_name="CalculatorAgent", rooms=["!room:localhost"]),
+                },
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.response_tracker = MagicMock()
+        room = MagicMock(spec=nio.MatrixRoom)
+        room.room_id = "!room:localhost"
+        event = MagicMock()
+        event.event_id = "$event"
+        dispatch = _PreparedDispatch(
+            requester_user_id="@user:localhost",
+            context=_MessageContext(
+                am_i_mentioned=True,
+                is_thread=False,
+                thread_id=None,
+                thread_history=[],
+                mentioned_agents=[bot.matrix_id],
+                has_non_agent_mentions=False,
+            ),
+        )
+        action = _ResponseAction(
+            kind="reject",
+            rejection_message="Team request includes private agent 'mind'; private agents cannot participate in teams yet",
+        )
+
+        with patch.object(bot, "_send_response", new=AsyncMock(return_value="$reply")) as mock_send_response:
+            await bot._execute_dispatch_action(
+                room,
+                event,
+                dispatch,
+                action,
+                _DispatchPayload(prompt="help me"),
+                processing_log="processing",
+            )
+
+        mock_send_response.assert_awaited_once()
+        assert mock_send_response.await_args.kwargs["response_text"].endswith(
+            "private agents cannot participate in teams yet",
+        )
+        bot.response_tracker.mark_responded.assert_called_once_with("$event", "$reply")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.teams.get_agent_knowledge")
+    @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
@@ -2644,6 +3028,8 @@ class TestAgentBot:
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
         mock_get_model_instance: MagicMock,
+        mock_create_agent: MagicMock,
+        mock_get_agent_knowledge: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
@@ -2657,6 +3043,11 @@ class TestAgentBot:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
+        mock_get_agent_knowledge.return_value = None
+        fake_member = MagicMock()
+        fake_member.name = "MockAgent"
+        fake_member.instructions = []
+        mock_create_agent.return_value = fake_member
 
         # Mock get_latest_thread_event_id_if_needed to return a valid event ID
         mock_get_latest_thread.return_value = "latest_thread_event"
@@ -2688,8 +3079,12 @@ class TestAgentBot:
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
-        # Mock room users to include the agent - use the actual agent's user_id
-        mock_room.users = {mock_agent_user.user_id: MagicMock()}
+        # Thread team resolution now uses room-visible membership, so include the
+        # other participating agent in the room fixture as well.
+        mock_room.users = {
+            mock_agent_user.user_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+        }
 
         # Test 1: Thread with only this agent - should respond without mention
         mock_fetch_history.return_value = [

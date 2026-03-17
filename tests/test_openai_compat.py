@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
 import pytest
 from fastapi import Request
@@ -18,18 +18,21 @@ from mindroom import constants
 from mindroom.api import openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
-    _build_tool_execution_identity,
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
     _extract_content_text,
     _is_error_response,
 )
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_tool_execution_identity,
+    get_tool_execution_identity,
+)
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -192,6 +195,29 @@ class TestListModels:
         assert "general" in model_ids
         assert "code" not in model_ids
         assert "team/dev-team" not in model_ids
+
+    def test_hides_agents_that_delegate_to_private_agents(self, test_config: Config) -> None:
+        """Shared agents should not be advertised on /v1 when delegation reaches private agents."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
+        test_config.agents["general"].delegate_to = ["research"]
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
+            client = TestClient(app)
+            response = client.get("/v1/models")
+
+        assert response.status_code == 200
+        model_ids = {model["id"] for model in response.json()["data"]}
+        assert "general" not in model_ids
+        assert "research" not in model_ids
 
     def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
@@ -362,12 +388,44 @@ class TestChatCompletions:
         assert response.status_code == 200
         assert seen_requester_ids == [None]
 
+    def test_non_stream_completion_keeps_execution_identity_for_ai_response(self, app_client: TestClient) -> None:
+        """Non-stream agent responses must keep execution identity active through ai_response."""
+        observed_agent_names: list[str | None] = []
+        observed_session_ids: list[str | None] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            identity = get_tool_execution_identity()
+            observed_agent_names.append(identity.agent_name if identity is not None else None)
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert observed_agent_names == ["general"]
+        assert len(observed_session_ids) == 1
+        assert observed_session_ids[0] is not None
+
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
-        identity = _build_tool_execution_identity(
+        identity = build_tool_execution_identity(
+            channel="openai_compat",
             agent_name="general",
             session_id="session-123",
             runtime_paths=resolve_runtime_paths(process_env={}),
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
         )
         assert identity.requester_id is None
 
@@ -423,7 +481,7 @@ class TestChatCompletions:
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "unsupported_worker_scope"
-        assert "unscoped agents and worker_scope=shared" in error["message"]
+        assert "unscoped or configured with worker_scope=shared" in error["message"]
         assert "general" in error["message"]
 
     def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
@@ -459,8 +517,38 @@ class TestChatCompletions:
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "unsupported_worker_scope"
-        assert "unscoped agents and worker_scope=shared" in error["message"]
+        assert "unscoped or configured with worker_scope=shared" in error["message"]
         assert "code" in error["message"]
+
+    def test_rejects_agent_that_delegates_to_private_agent(self, test_config: Config) -> None:
+        """Shared agents should fail on /v1 when delegation reaches a private agent."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
+        test_config.agents["general"].delegate_to = ["research"]
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        with patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "unsupported_worker_scope"
+        assert "Requester-private agents configured with private.per are not yet supported on /v1." in error["message"]
+        assert "Delegation reaches unsupported agents: research" in error["message"]
 
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto-routing should fail when all agents require unsupported worker scopes."""
@@ -2293,7 +2381,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("collab_team", collaborate_config, _runtime_paths())
+            _build_team("collab_team", collaborate_config, _runtime_paths(), execution_identity=None)
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -2323,7 +2411,7 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config, _runtime_paths())
+            _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
@@ -2354,20 +2442,17 @@ class TestTeamCompletion:
             knowledge_bases={"docs": KnowledgeBaseConfig(path="./docs")},
         )
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
-
         with (
             patch("mindroom.api.openai_compat.create_agent") as mock_create,
             patch("mindroom.api.openai_compat.get_model_instance"),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat.get_agent_knowledge", return_value=mock_knowledge),
             patch("agno.team.Team.__init__", return_value=None),
         ):
             mock_create.return_value = MagicMock(name="Research")
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config, _runtime_paths())
+            _build_team("team_with_kb", config, _runtime_paths(), execution_identity=None)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs
@@ -2427,13 +2512,11 @@ class TestKnowledgeIntegration:
     def test_knowledge_passed_when_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is passed to ai_response when agent has knowledge_bases."""
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
 
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
         ):
             mock_ai.return_value = "Response with knowledge"
 
@@ -2448,11 +2531,60 @@ class TestKnowledgeIntegration:
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
 
+    def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
+        """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        mock_knowledge = MagicMock()
+        observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
+
+        def fake_get_knowledge_for_base(
+            base_id: str,
+            *,
+            config: Config | None = None,
+            runtime_paths: RuntimePaths | None = None,
+            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
+            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+        ) -> MagicMock | None:
+            observed_calls.append((base_id, config, runtime_paths))
+            if config is None or runtime_paths is None or base_id != "docs":
+                return None
+            return mock_knowledge
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
+        ):
+            mock_ai.return_value = "Response with keyed knowledge"
+
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "What do the docs say?"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+        assert observed_calls == [("docs", knowledge_config, runtime_paths)]
+
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
         ):
             mock_ai.return_value = "Response"
 
@@ -2470,7 +2602,10 @@ class TestKnowledgeIntegration:
         """_ensure_knowledge_initialized is called for configs with knowledge_bases."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock) as mock_init,
+            patch(
+                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
+                new_callable=AsyncMock,
+            ) as mock_init,
         ):
             mock_ai.return_value = "Response"
 
@@ -2489,8 +2624,8 @@ class TestKnowledgeIntegration:
         """When knowledge manager is not found, knowledge is None."""
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=None),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=None),
         ):
             mock_ai.return_value = "Response without knowledge"
 
@@ -2510,16 +2645,14 @@ class TestKnowledgeIntegration:
         from agno.run.agent import RunContentEvent  # noqa: PLC0415
 
         mock_knowledge = MagicMock()
-        mock_manager = MagicMock()
-        mock_manager.get_knowledge.return_value = mock_knowledge
 
         async def mock_stream(**_kw: object) -> AsyncIterator[RunContentEvent]:
             yield RunContentEvent(content="Streamed!")
 
         with (
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream) as mock_stream_fn,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", return_value=mock_manager),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", return_value=mock_knowledge),
         ):
             response = knowledge_app_client.post(
                 "/v1/chat/completions",
@@ -2549,26 +2682,30 @@ class TestKnowledgeIntegration:
         runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
         initialize_api_app(app, runtime_paths)
 
-        mock_manager_docs = MagicMock()
         mock_knowledge_docs = MagicMock()
         mock_knowledge_docs.vector_db = MagicMock()
         mock_knowledge_docs.max_results = 5
-        mock_manager_docs.get_knowledge.return_value = mock_knowledge_docs
 
-        mock_manager_wiki = MagicMock()
         mock_knowledge_wiki = MagicMock()
         mock_knowledge_wiki.vector_db = MagicMock()
         mock_knowledge_wiki.max_results = 10
-        mock_manager_wiki.get_knowledge.return_value = mock_knowledge_wiki
 
-        def fake_get_manager(base_id: str) -> MagicMock | None:
-            return {"docs": mock_manager_docs, "wiki": mock_manager_wiki}.get(base_id)
+        def fake_get_knowledge_for_base(
+            base_id: str,
+            *,
+            config: Config | None = None,  # noqa: ARG001
+            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
+            request_knowledge_managers: Mapping[str, object] | None = None,  # noqa: ARG001
+            shared_manager_lookup: Callable[[str], object | None] | None = None,  # noqa: ARG001
+            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+        ) -> MagicMock | None:
+            return {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
-            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
-            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_manager),
+            patch("mindroom.api.openai_compat.initialize_shared_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.knowledge.utils._get_knowledge_for_base", side_effect=fake_get_knowledge_for_base),
         ):
             mock_ai.return_value = "Merged knowledge response"
 
@@ -2595,7 +2732,7 @@ class TestKnowledgeIntegration:
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
             patch(
-                "mindroom.api.openai_compat.initialize_knowledge_managers",
+                "mindroom.api.openai_compat.initialize_shared_knowledge_managers",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("DB connection failed"),
             ),

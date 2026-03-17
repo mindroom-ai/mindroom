@@ -8,19 +8,23 @@ from unittest.mock import patch
 
 import pytest
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.memory.functions import (
+    add_agent_memory,
     delete_agent_memory,
     get_agent_memory,
+    list_all_agent_memories,
     search_agent_memories,
     store_conversation_memory,
     update_agent_memory,
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_state_root_path,
+    resolve_worker_key,
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -121,6 +125,129 @@ async def test_store_conversation_memory_uses_explicit_execution_identity_for_de
 
 
 @pytest.mark.asyncio
+async def test_private_agent_explicit_mem0_uses_private_instance_storage(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Explicit mem0 CRUD for private agents should stay inside the private-instance root."""
+    config.memory.backend = "mem0"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+
+    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
+
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
+        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=scope_storage_path.name))
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+
+    assert worker_key is not None
+
+    with (
+        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+        tool_execution_identity(execution_identity),
+    ):
+        await add_agent_memory(
+            "Private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        search_results = await search_agent_memories(
+            "Private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+            limit=10,
+        )
+        listed = await list_all_agent_memories(
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+            limit=10,
+        )
+
+        assert len(listed) == 1
+        memory_id = listed[0]["id"]
+        loaded = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        assert loaded is not None
+
+        await update_agent_memory(
+            memory_id,
+            "Updated private note",
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        updated = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        assert updated is not None
+        assert updated["memory"] == "Updated private note"
+
+        await delete_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        deleted = await get_agent_memory(
+            memory_id,
+            "general",
+            storage_path,
+            config,
+            runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+        assert deleted is None
+
+    expected_private_path = _private_instance_state_root_path(
+        storage_path,
+        worker_key=worker_key,
+        agent_name="general",
+    )
+    assert set(memories_by_path) == {expected_private_path}
+    assert agent_state_root_path(storage_path, "general") not in memories_by_path
+    assert any(result.get("memory") == "Private note" for result in search_results)
+
+
+@pytest.mark.asyncio
 async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_user_scoped_workers(
     storage_path: Path,
     config: Config,
@@ -217,6 +344,89 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
     assert (agent_state_root_path(storage_path, "general"), "team_calculator+general") in stored_memories
     assert (agent_state_root_path(storage_path, "calculator"), "team_calculator+general") in stored_memories
     assert (storage_path, "team_calculator+general") not in stored_memories
+
+
+@pytest.mark.asyncio
+async def test_mixed_private_team_mem0_conversation_memory_is_rejected(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mem0 team memory should reject private team members outright."""
+    config.memory.backend = "mem0"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        await store_conversation_memory(
+            "Alice-authored private team memory",
+            ["general", "calculator"],
+            storage_path,
+            "session-alice",
+            config,
+            runtime_paths_for(config),
+        )
+
+
+@pytest.mark.asyncio
+async def test_mixed_private_team_mem0_member_crud_is_rejected(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mem0 team member CRUD should reject private team members."""
+    config.memory.backend = "mem0"
+    config.memory.team_reads_member_memory = True
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    memories_by_path: dict[Path, FakeMem0ScopedMemory] = {}
+
+    async def create_fake_memory_instance(
+        scope_storage_path: Path,
+        _config: Config,
+        *,
+        runtime_paths: object,
+    ) -> FakeMem0ScopedMemory:
+        del runtime_paths
+        id_prefix = scope_storage_path.name.replace("/", "_") or "mem"
+        return memories_by_path.setdefault(scope_storage_path, FakeMem0ScopedMemory(id_prefix=id_prefix))
+
+    with (
+        patch("mindroom.memory.functions.create_memory_instance", side_effect=create_fake_memory_instance),
+    ):
+        await add_agent_memory("Shared calculator note", "calculator", storage_path, config, runtime_paths_for(config))
+        calculator_memory_id = (
+            await list_all_agent_memories("calculator", storage_path, config, runtime_paths_for(config), limit=10)
+        )[0]["id"]
+
+        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+            await get_agent_memory(
+                calculator_memory_id,
+                ["general", "calculator"],
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+            await update_agent_memory(
+                calculator_memory_id,
+                "Updated shared calculator note",
+                ["general", "calculator"],
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+        with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+            await delete_agent_memory(
+                calculator_memory_id,
+                ["general", "calculator"],
+                storage_path,
+                config,
+                runtime_paths_for(config),
+            )
+
+    assert agent_state_root_path(storage_path, "calculator") in memories_by_path
 
 
 @pytest.mark.asyncio

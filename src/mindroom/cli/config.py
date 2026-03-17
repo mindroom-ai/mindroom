@@ -10,7 +10,7 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from pathlib import Path
+from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Literal
 
 import typer
@@ -32,6 +32,7 @@ from mindroom.constants import (
 )
 from mindroom.credentials_sync import get_secret_from_env
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -72,18 +73,6 @@ _REQUIRED_ENV_KEYS: dict[_ProviderPreset, tuple[str, ...]] = {
 _CANONICAL_INIT_PROFILES: tuple[str, ...] = ("full", "minimal", "public", "public-vertexai-anthropic")
 
 
-_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates" / "mind_data"
-_MIND_WORKSPACE_TEMPLATE_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
-_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
-
-
 def _config_init_storage_plan(
     config_dir: Path,
     env_path: Path,
@@ -100,8 +89,8 @@ def _config_init_storage_plan(
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
-    """Return the starter Mind workspace inside the canonical agent workspace."""
-    return agent_workspace_root_path(storage_root, "mind") / "mind_data"
+    """Return the shared single-user starter Mind workspace inside the canonical agent workspace."""
+    return agent_workspace_root_path(storage_root, "mind")
 
 
 def _path_string_for_config(path: Path, config_dir: Path) -> str:
@@ -122,25 +111,13 @@ def _default_mind_knowledge_base_path(
 ) -> str:
     """Return the starter knowledge-base path anchored to the chosen runtime storage root."""
     if use_storage_env_placeholder:
-        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/mind_data/memory"
+        return "${MINDROOM_STORAGE_PATH}/agents/mind/workspace/memory"
     return _path_string_for_config(_default_mind_workspace(storage_root) / "memory", config_dir)
 
 
 def _ensure_mind_workspace(workspace_path: Path, *, force: bool) -> None:
     """Create the default Mind workspace files used by the full/public templates."""
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
-
-    for filename in _MIND_WORKSPACE_TEMPLATE_FILES:
-        source_path = _MIND_TEMPLATE_DIR / filename
-        file_path = workspace_path / filename
-        if file_path.exists() and not force:
-            continue
-        file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    memory_path = workspace_path / "MEMORY.md"
-    if not memory_path.exists() or force:
-        memory_path.write_text(_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+    ensure_workspace_template(workspace_path, template="mind", force=force)
 
 
 def _write_env_file(
@@ -663,7 +640,11 @@ def _full_template(
     use_storage_env_placeholder: bool,
     profile: Literal["full", "public"] = "full",
 ) -> str:
-    """Return a provider-aware starter config."""
+    """Return a provider-aware starter config.
+
+    `config init` intentionally generates the shared single-user starter model.
+    Requester-private agents remain an opt-in advanced config surface.
+    """
     model_block = _model_template_block(provider_preset)
     mind_memory_knowledge_path = _default_mind_knowledge_base_path(
         config_dir,
@@ -709,16 +690,15 @@ agents:
     include_default_tools: false
     learning: false
     memory_backend: file
-    memory_file_path: mind_data
     rooms:
       - personal
     context_files:
-      - mind_data/SOUL.md
-      - mind_data/AGENTS.md
-      - mind_data/USER.md
-      - mind_data/IDENTITY.md
-      - mind_data/TOOLS.md
-      - mind_data/HEARTBEAT.md
+      - SOUL.md
+      - AGENTS.md
+      - USER.md
+      - IDENTITY.md
+      - TOOLS.md
+      - HEARTBEAT.md
     knowledge_bases:
       - mind_memory
     tools:

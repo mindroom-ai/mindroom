@@ -15,7 +15,10 @@ from mindroom import constants
 from mindroom.agents import ensure_default_agent_workspaces, get_rooms_for_entity
 from mindroom.authorization import is_authorized_sender
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.knowledge.manager import initialize_knowledge_managers, shutdown_knowledge_managers
+from mindroom.knowledge.manager import (
+    initialize_shared_knowledge_managers,
+    shutdown_shared_knowledge_managers,
+)
 from mindroom.matrix.client import (
     PermanentMatrixStartupError,
     get_joined_rooms,
@@ -185,7 +188,7 @@ class MultiAgentOrchestrator:
 
     async def _configure_knowledge(self, config: Config, *, start_watcher: bool) -> None:
         """Initialize or reconfigure knowledge managers for the current config."""
-        self.knowledge_managers = await initialize_knowledge_managers(
+        self.knowledge_managers = await initialize_shared_knowledge_managers(
             config=config,
             runtime_paths=self.runtime_paths,
             start_watchers=start_watcher,
@@ -881,7 +884,7 @@ class MultiAgentOrchestrator:
         await self._stop_memory_auto_flush_worker()
         await self._cancel_knowledge_refresh_task()
         await self._cancel_bot_start_tasks()
-        await shutdown_knowledge_managers()
+        await shutdown_shared_knowledge_managers()
         self.knowledge_managers = {}
 
         # Cancel sync tasks first so shutdown does not race with active sync loops.

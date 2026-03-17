@@ -19,6 +19,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from mindroom import constants
+from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     RequestCredentialsTarget,
     consume_pending_oauth_request,
@@ -28,6 +29,7 @@ from mindroom.api.credentials import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
@@ -166,10 +168,12 @@ def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> N
     save_scoped_credentials(
         "google",
         _build_google_token_data(creds),
-        worker_scope=target.worker_scope,
-        routing_agent_name=target.agent_name,
         credentials_manager=target.base_manager,
-        execution_identity=target.execution_identity,
+        worker_target=resolve_worker_target(
+            target.worker_scope,
+            target.agent_name,
+            execution_identity=target.execution_identity,
+        ),
     )
 
 
@@ -356,7 +360,13 @@ async def callback(request: Request) -> RedirectResponse:
         flow.fetch_token(code=code)
 
         # Save credentials
-        target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("google",))
+        target = resolve_request_credentials_target(
+            request,
+            agent_name=agent_name,
+            service_names=("google",),
+            execution_scope_override_provided=pending.execution_scope_override_provided,
+            execution_scope_override=pending.execution_scope_override,
+        )
         _save_credentials(flow.credentials, target)
 
         # Extract the domain from the redirect URI for the final redirect
@@ -416,9 +426,9 @@ async def configure(request: Request, credentials: dict[str, str]) -> dict[str, 
             api_runtime_paths(request),
             project_id,
         )
-        from mindroom.api.main import _load_config_from_file, initialize_api_app, load_runtime_config  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
-        load_runtime_config(runtime_paths)
+        config_lifecycle.load_runtime_config(runtime_paths)
         initialize_api_app(request.app, runtime_paths)
         config_reloaded = _load_config_from_file(runtime_paths, request.app)
     except Exception as e:
@@ -457,9 +467,9 @@ async def reset(request: Request) -> dict[str, Any]:
             with env_path.open("w", encoding="utf-8") as f:
                 f.writelines(filtered_lines)
         refreshed_runtime_paths = _refresh_runtime_paths(runtime_paths)
-        from mindroom.api.main import _load_config_from_file, initialize_api_app, load_runtime_config  # noqa: PLC0415
+        from mindroom.api.main import _load_config_from_file, initialize_api_app  # noqa: PLC0415
 
-        load_runtime_config(refreshed_runtime_paths)
+        config_lifecycle.load_runtime_config(refreshed_runtime_paths)
         initialize_api_app(request.app, refreshed_runtime_paths)
         config_reloaded = _load_config_from_file(refreshed_runtime_paths, request.app)
     except Exception as e:

@@ -1,6 +1,7 @@
 import { FaSpotify } from 'react-icons/fa';
 import { Integration, IntegrationProvider, IntegrationConfig, IntegrationScope } from '../types';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
+import type { WorkerScope } from '@/types/config';
 
 class SpotifyIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -14,31 +15,42 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     connected: false,
   };
 
-  private localStorageKey(agentName?: string | null): string {
-    return agentName ? `spotify_configured:${agentName}` : 'spotify_configured';
+  private localStorageKey(agentName?: string | null, executionScope?: WorkerScope | null): string {
+    const scopeKey = executionScope ?? 'unscoped';
+    return agentName
+      ? `spotify_configured:${agentName}:${scopeKey}`
+      : `spotify_configured:${scopeKey}`;
   }
 
   getConfig(scope?: IntegrationScope): IntegrationConfig {
     const agentName = scope?.agentName ?? null;
+    const executionScope = scope?.executionScope;
     return {
       integration: this.integration,
-      onAction: () => this.connect(agentName),
-      onDisconnect: () => this.disconnect(agentName),
+      onAction: () => this.connect(agentName, executionScope),
+      onDisconnect: () => this.disconnect(agentName, executionScope),
     };
   }
 
   async loadStatus(scope?: IntegrationScope): Promise<Partial<Integration>> {
-    const connected = await this.checkConnection(scope?.agentName ?? null);
+    const connected = await this.checkConnection(scope?.agentName ?? null, scope?.executionScope);
     return {
       status: connected ? 'connected' : 'available',
       connected,
     };
   }
 
-  private async connect(agentName?: string | null): Promise<void> {
+  private async connect(
+    agentName?: string | null,
+    executionScope?: WorkerScope | null
+  ): Promise<void> {
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/integrations/spotify/connect`, agentName),
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/integrations/spotify/connect`,
+          agentName,
+          executionScope
+        ),
         {
           method: 'POST',
         }
@@ -56,7 +68,7 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
       const pollInterval = setInterval(async () => {
         if (authWindow?.closed) {
           clearInterval(pollInterval);
-          localStorage.setItem(this.localStorageKey(agentName), 'true');
+          localStorage.setItem(this.localStorageKey(agentName, executionScope), 'true');
           // The parent component should reload status after this
         }
       }, 2000);
@@ -66,27 +78,44 @@ class SpotifyIntegrationProvider implements IntegrationProvider {
     }
   }
 
-  private async disconnect(agentName?: string | null): Promise<void> {
-    localStorage.removeItem(this.localStorageKey(agentName));
+  private async disconnect(
+    agentName?: string | null,
+    executionScope?: WorkerScope | null
+  ): Promise<void> {
+    localStorage.removeItem(this.localStorageKey(agentName, executionScope));
     // Optionally call backend to revoke tokens
     try {
-      await fetch(withAgentName(`${API_BASE_URL}/api/integrations/spotify/disconnect`, agentName), {
-        method: 'POST',
-      });
+      await fetch(
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/integrations/spotify/disconnect`,
+          agentName,
+          executionScope
+        ),
+        {
+          method: 'POST',
+        }
+      );
     } catch (error) {
       console.error('Failed to disconnect Spotify:', error);
     }
   }
 
-  private async checkConnection(agentName?: string | null): Promise<boolean> {
+  private async checkConnection(
+    agentName?: string | null,
+    executionScope?: WorkerScope | null
+  ): Promise<boolean> {
     // Check localStorage first for quick response
-    const localConfig = localStorage.getItem(this.localStorageKey(agentName));
+    const localConfig = localStorage.getItem(this.localStorageKey(agentName, executionScope));
     if (localConfig) return true;
 
     // Then check backend for authoritative status
     try {
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/integrations/spotify/status`, agentName)
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/integrations/spotify/status`,
+          agentName,
+          executionScope
+        )
       );
       if (response.ok) {
         const data = await response.json();

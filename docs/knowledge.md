@@ -4,7 +4,8 @@ icon: lucide/book-open
 
 # Knowledge Bases
 
-Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation). Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
+Knowledge bases give your agents access to your own documents through RAG (Retrieval-Augmented Generation).
+Drop files into a folder, point a knowledge base at it, and agents can search the indexed content when answering questions.
 
 ## How It Works
 
@@ -50,7 +51,8 @@ agents:
     knowledge_bases: [docs]
 ```
 
-Place files in `./knowledge_docs/` and they'll be indexed automatically on startup. When `watch: true`, new or modified files are re-indexed in real time.
+Place files in `./knowledge_docs/` and they'll be indexed automatically on startup.
+When `watch: true`, new or modified files are re-indexed in real time.
 
 ## Configuration
 
@@ -75,6 +77,57 @@ knowledge_bases:
 
 Use smaller `chunk_size` values when your embedding server has lower token or batch limits.
 If chunking is too large, indexing retries will fail with embedder 500 errors.
+
+### Private Agent Knowledge
+
+Use `agents.<name>.private.knowledge` when one shared agent definition should index requester-local knowledge from that requester's private root.
+
+```yaml
+knowledge_bases:
+  company_docs:
+    path: ./company_docs
+    watch: true
+
+agents:
+  mind:
+    display_name: Mind
+    role: A persistent personal AI companion
+    model: sonnet
+    private:
+      per: user
+      root: mind_data
+      template_dir: ./mind_template
+      knowledge:
+        path: memory
+        watch: true
+    knowledge_bases: [company_docs]
+```
+
+With this configuration, each requester's private knowledge path becomes `<their private root>/memory`.
+The template source is explicit, so you can see and edit the files being copied into each requester's private root.
+`private.template_dir` only copies files.
+Requester-local knowledge is enabled only when you explicitly configure `private.knowledge.path`.
+`private.knowledge.path` must be relative to the private root and cannot be absolute or escape with `..`.
+`private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself.
+MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
+For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
+Git-backed knowledge still keeps the repository fresh when `watch: false`; that flag only disables filesystem watchers.
+Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
+This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
+If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`.
+Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `private.knowledge.enabled` | bool | `true` | Whether requester-local knowledge indexing is active for this agent |
+| `private.knowledge.path` | string | `null` | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true` |
+| `private.knowledge.watch` | bool | `true` | Whether local filesystem changes should be watched. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root. Git sync still runs even when this is `false` |
+| `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
+| `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |
+| `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
+
+Use `private.knowledge` when the data itself should be private to that requester's private instance.
+Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.
 
 ### Multiple Knowledge Bases
 
@@ -233,6 +286,7 @@ memory:
 ## Storage
 
 Knowledge data is stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`. Each knowledge base gets its own ChromaDB collection named `mindroom_knowledge_<base_id>_<hash>`.
+For requester-private agent knowledge, the effective private-root path is part of that storage key, so each requester-local root gets an isolated index.
 
 The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can be set with `MINDROOM_STORAGE_PATH`.
 
@@ -260,4 +314,4 @@ Knowledge base configuration supports hot reload. When you change `config.yaml`:
 - Removed knowledge bases are stopped and cleaned up
 - Changed settings (path, chunking, embedder, git config) trigger a re-initialization
 - Unchanged knowledge bases continue running without interruption
-- File watchers are preserved across reloads
+- Background watchers are preserved across reloads when that knowledge base actually runs a watcher

@@ -2,7 +2,8 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Agent } from '@/types/config';
+import { Agent, normalizeAgentUpdates, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
+import { useTools } from '@/hooks/useTools';
 
 // Mock the store
 vi.mock('@/store/configStore', () => ({
@@ -33,6 +34,7 @@ vi.mock('@/hooks/useTools', () => ({
       },
     ],
     loading: false,
+    statusAuthoritative: true,
   })),
 }));
 
@@ -103,20 +105,136 @@ describe('AgentEditor', () => {
     ],
     selectedAgentId: 'test_agent',
     updateAgent: vi.fn(),
+    setAgentPrivateEnabled: vi.fn(),
     deleteAgent: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue(undefined),
     config: mockConfig,
     isDirty: false,
+    diagnostics: [],
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue(mockStore);
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'calculator',
+          display_name: 'Calculator',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'delegate',
+          display_name: 'Agent Delegation',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'file',
+          display_name: 'File',
+          setup_type: 'none',
+          status: 'available',
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
   });
 
   it('renders without infinite loops', () => {
     const { container } = render(<AgentEditor />);
     expect(container).toBeTruthy();
+  });
+
+  it('requests agent-scoped tools for the selected agent', () => {
+    render(<AgentEditor />);
+
+    expect(useTools).toHaveBeenCalledWith('test_agent', null);
+  });
+
+  it('requests tools using inherited defaults.worker_scope', () => {
+    const inheritedScopeAgent = {
+      ...mockAgent,
+      worker_scope: undefined,
+      private: undefined,
+    };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [inheritedScopeAgent],
+      config: {
+        ...mockConfig,
+        defaults: {
+          ...mockConfig.defaults,
+          worker_scope: 'user',
+        },
+      },
+      rooms: mockStore.rooms,
+    });
+
+    render(<AgentEditor />);
+
+    expect(useTools).toHaveBeenCalledWith('test_agent', 'user');
+  });
+
+  it('shows selectable setup-required tools instead of hiding them', () => {
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'calculator',
+          display_name: 'Calculator',
+          setup_type: 'none',
+          status: 'available',
+        },
+        {
+          name: 'weather',
+          display_name: 'Weather',
+          setup_type: 'api_key',
+          status: 'requires_config',
+          dashboard_configuration_supported: true,
+        },
+      ],
+      loading: false,
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('Setup Required')).toBeInTheDocument();
+    expect(screen.getByLabelText('Weather')).toBeInTheDocument();
+  });
+
+  it('keeps selected unsupported tools visible so they can be removed', async () => {
+    const invalidToolAgent = { ...mockAgent, tools: ['gmail'] };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [invalidToolAgent],
+      config: {
+        ...mockConfig,
+        agents: { test_agent: invalidToolAgent },
+      },
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: 'gmail',
+          display_name: 'Gmail',
+          setup_type: 'oauth',
+          status: 'requires_config',
+          execution_scope_supported: false,
+        },
+      ],
+      loading: false,
+    });
+
+    render(<AgentEditor />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Selected But Unavailable')).toBeInTheDocument();
+      expect(screen.getByLabelText('Gmail')).toBeInTheDocument();
+      expect(
+        screen.getByText('Not supported for this execution scope. Uncheck it to remove it.')
+      ).toBeInTheDocument();
+    });
   });
 
   it('displays selected agent details', () => {
@@ -202,6 +320,86 @@ describe('AgentEditor', () => {
     });
   });
 
+  it('renders backend validation errors for private fields', () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: 'user',
+        root: '../outside',
+        template_dir: '   ',
+        context_files: ['../SOUL.md'],
+        knowledge: {
+          enabled: true,
+          path: '../memory',
+          watch: true,
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: privateAgent,
+        },
+      },
+      diagnostics: [
+        {
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'root'],
+            msg: 'private.root must stay within the private instance root',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'template_dir'],
+            msg: 'template_dir must not be blank',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'context_files'],
+            msg: 'private.context_files must stay under the private root',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'knowledge', 'path'],
+            msg: 'private.knowledge.path must stay under the private root',
+            type: 'value_error',
+          },
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByText('private.root must stay within the private instance root')
+    ).toBeInTheDocument();
+    expect(screen.getByText('template_dir must not be blank')).toBeInTheDocument();
+    expect(
+      screen.getByText('private.context_files must stay under the private root')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('private.knowledge.path must stay under the private root')
+    ).toBeInTheDocument();
+  });
+
   it('disables save button when not dirty', () => {
     render(<AgentEditor />);
 
@@ -278,6 +476,259 @@ describe('AgentEditor', () => {
         rooms: ['other_room'],
       })
     );
+  });
+
+  it('enables requester-private state with the default private scope', async () => {
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+
+    await waitFor(() => {
+      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith('test_agent', true);
+    });
+  });
+
+  it('clears explicit worker_scope when enabling private state', async () => {
+    const scopedAgent: Agent = {
+      ...mockAgent,
+      worker_scope: 'user_agent',
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [scopedAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: scopedAgent,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+
+    await waitFor(() => {
+      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith('test_agent', true);
+    });
+  });
+
+  it('restores prior worker_scope when private mode is disabled after rerender', async () => {
+    const scopedAgent: Agent = {
+      ...mockAgent,
+      worker_scope: 'user_agent',
+    };
+
+    let state = {
+      ...mockStore,
+      agents: [scopedAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: scopedAgent,
+        },
+      },
+    };
+    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const nextAgent = { ...currentAgent, ...normalizedUpdates };
+      state = {
+        ...state,
+        agents: state.agents.map(agent => (agent.id === agentId ? nextAgent : agent)),
+        config: {
+          ...state.config,
+          agents: {
+            ...state.config.agents,
+            [agentId]: nextAgent,
+          },
+        },
+        updateAgent,
+      };
+    });
+    const privateWorkerScopeBackups: Record<string, Agent['worker_scope'] | null> = {};
+    const setAgentPrivateEnabled = vi.fn((agentId: string, enabled: boolean) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      if (enabled) {
+        privateWorkerScopeBackups[agentId] = currentAgent.worker_scope ?? null;
+        updateAgent(agentId, { private: { per: 'user' } });
+        return;
+      }
+      const restoredWorkerScope = privateWorkerScopeBackups[agentId];
+      delete privateWorkerScopeBackups[agentId];
+      updateAgent(
+        agentId,
+        restoredWorkerScope != null
+          ? { private: undefined, worker_scope: restoredWorkerScope }
+          : { private: undefined }
+      );
+    });
+    state = { ...state, updateAgent, setAgentPrivateEnabled };
+    (useConfigStore as any).mockImplementation(() => state);
+
+    const view = render(<AgentEditor />);
+
+    const privateToggle = screen.getByLabelText('Enable requester-private state');
+    fireEvent.click(privateToggle);
+    await waitFor(() => {
+      expect(state.agents[0].private).toEqual({ per: 'user' });
+      expect(state.agents[0].worker_scope).toBeUndefined();
+    });
+
+    view.rerender(<AgentEditor />);
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+
+    await waitFor(() => {
+      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(1, 'test_agent', true);
+      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(2, 'test_agent', false);
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBe('user_agent');
+    });
+  });
+
+  it('renders and updates private agent fields', async () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: 'user_agent',
+        root: 'mind_data',
+        template_dir: './mind_template',
+        context_files: ['SOUL.md'],
+        knowledge: {
+          enabled: true,
+          path: 'memory',
+          watch: true,
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: privateAgent,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByDisplayValue('mind_data')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('./mind_template')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('SOUL.md')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('memory')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Private Root'), {
+      target: { value: 'updated_data' },
+    });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          private: expect.objectContaining({
+            per: 'user_agent',
+            root: 'updated_data',
+          }),
+        })
+      );
+    });
+  });
+
+  it('enables private knowledge with a default path', async () => {
+    let state = {
+      ...mockStore,
+      agents: [{ ...mockAgent }],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: { ...mockAgent },
+        },
+      },
+    };
+    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const nextAgent = { ...currentAgent, ...normalizedUpdates };
+      state = {
+        ...state,
+        agents: state.agents.map(agent => (agent.id === agentId ? nextAgent : agent)),
+        config: {
+          ...state.config,
+          agents: {
+            ...state.config.agents,
+            [agentId]: nextAgent,
+          },
+        },
+        updateAgent,
+      };
+    });
+    const setAgentPrivateEnabled = vi.fn((agentId: string, enabled: boolean) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      if (enabled) {
+        updateAgent(agentId, { private: { per: 'user' } });
+        return;
+      }
+      updateAgent(agentId, { private: undefined });
+    });
+    state = { ...state, updateAgent, setAgentPrivateEnabled };
+    (useConfigStore as any).mockImplementation(() => state);
+
+    const view = render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+    view.rerender(<AgentEditor />);
+    fireEvent.click(screen.getByLabelText('Enable private knowledge'));
+
+    await waitFor(() => {
+      expect(state.agents[0].private).toEqual({
+        per: 'user',
+        knowledge: {
+          enabled: true,
+          path: 'memory',
+          watch: true,
+        },
+      });
+    });
+  });
+
+  it('uses the canonical shared context placeholder', async () => {
+    const agentWithoutContextFiles: Agent = {
+      ...mockAgent,
+      context_files: [],
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [agentWithoutContextFiles],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: agentWithoutContextFiles,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByTestId('add-context-file-button'));
+
+    expect(screen.getByPlaceholderText(SHARED_CONTEXT_FILE_PLACEHOLDER)).toBeInTheDocument();
   });
 
   it('updates knowledge bases when checkboxes are toggled', () => {
@@ -450,52 +901,6 @@ describe('AgentEditor', () => {
       'test_agent',
       expect.objectContaining({
         memory_backend: undefined,
-      })
-    );
-  });
-
-  it('disables memory file path when effective backend is not file', () => {
-    render(<AgentEditor />);
-    expect(screen.getByLabelText('Memory File Path')).toBeDisabled();
-  });
-
-  it('updates memory file path when changed', () => {
-    render(<AgentEditor />);
-
-    const memoryBackendSelect = screen.getByLabelText('Memory Backend');
-    fireEvent.click(memoryBackendSelect);
-    const fileOption = screen.getByRole('option', { name: 'File (markdown memory)' });
-    fireEvent.click(fileOption);
-
-    const memoryPathInput = screen.getByLabelText('Memory File Path');
-    expect(memoryPathInput).not.toBeDisabled();
-    fireEvent.change(memoryPathInput, { target: { value: './openclaw_data' } });
-
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      'test_agent',
-      expect.objectContaining({
-        memory_file_path: './openclaw_data',
-      })
-    );
-  });
-
-  it('clears memory file path when input is emptied', () => {
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [{ ...mockAgent, memory_backend: 'file', memory_file_path: './openclaw_data' }],
-      rooms: mockStore.rooms,
-    });
-
-    render(<AgentEditor />);
-
-    const memoryPathInput = screen.getByLabelText('Memory File Path');
-    expect(memoryPathInput).not.toBeDisabled();
-    fireEvent.change(memoryPathInput, { target: { value: '' } });
-
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
-      'test_agent',
-      expect.objectContaining({
-        memory_file_path: undefined,
       })
     );
   });
