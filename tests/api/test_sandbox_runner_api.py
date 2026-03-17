@@ -45,7 +45,7 @@ from mindroom.tool_system.metadata import (
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
-    private_instance_scope_root_path,
+    private_instance_state_root_path,
     resolve_worker_key,
     worker_dir_name,
 )
@@ -1480,13 +1480,69 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
     prepared = sandbox_worker_prep_module.prepare_worker_request(
         worker_key=worker_key,
         tool_init_overrides={
-            "base_dir": str(private_instance_scope_root_path(runtime_paths.storage_root, worker_key)),
+            "base_dir": str(
+                private_instance_state_root_path(
+                    runtime_paths.storage_root,
+                    worker_key=worker_key,
+                    agent_name="mind",
+                ),
+            ),
         },
         runtime_paths=runtime_paths,
         private_agent_names=frozenset({"mind"}),
     )
 
     assert prepared.handle is worker_handle
+
+
+def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agent_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-agent workers must not accept sibling private agent roots."""
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    worker_handle = SimpleNamespace()
+    worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "mind")
+
+    monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
+    monkeypatch.setattr(
+        sandbox_worker_prep_module,
+        "local_worker_state_paths_from_handle",
+        lambda _handle: worker_paths,
+    )
+
+    with pytest.raises(
+        sandbox_worker_prep_module.WorkerRequestPreparationError,
+        match="base_dir must stay inside the allowed state roots or worker root",
+    ):
+        sandbox_worker_prep_module.prepare_worker_request(
+            worker_key=worker_key,
+            tool_init_overrides={
+                "base_dir": str(
+                    private_instance_state_root_path(
+                        runtime_paths.storage_root,
+                        worker_key=worker_key,
+                        agent_name="other_agent",
+                    ),
+                ),
+            },
+            runtime_paths=runtime_paths,
+            private_agent_names=frozenset({"mind"}),
+        )
 
 
 def test_prepare_worker_request_requires_explicit_private_visibility_for_user_agent_workers(

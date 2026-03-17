@@ -340,7 +340,13 @@ def visible_state_roots_for_worker_key(
     if agent_name is None:
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:
-        return (private_instance_scope_root_path(base_storage_path, worker_key),)
+        return (
+            private_instance_state_root_path(
+                base_storage_path,
+                worker_key=worker_key,
+                agent_name=agent_name,
+            ),
+        )
     return (agent_state_root_path(base_storage_path, agent_name),)
 
 
