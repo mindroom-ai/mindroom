@@ -12,6 +12,7 @@ import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -421,6 +422,59 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
     )
     assert alice_memory_file.exists()
     assert "Alice workspace memory" in alice_memory_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_private_file_memory_only_reads_memory_files(
+    storage_path: Path,
+    config: Config,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    template_dir = build_private_template_dir(
+        files={
+            "SOUL.md": "Template soul secret.\n",
+            "MEMORY.md": "# Memory\n",
+            "docs/runbook.md": "Runbook secret.\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+        context_files=["SOUL.md"],
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with tool_execution_identity(identity):
+        resolve_agent_runtime("general", config, runtime_paths_for(config), execution_identity=identity, create=True)
+        soul_results = await search_agent_memories("Template soul", "general", storage_path, config, limit=5)
+        runbook_results = await search_agent_memories("Runbook secret", "general", storage_path, config, limit=5)
+        note_results = await search_agent_memories("Private note", "general", storage_path, config, limit=5)
+        prompt = await build_memory_enhanced_prompt(
+            "What should I remember about the runbook and private note?",
+            "general",
+            storage_path,
+            config,
+        )
+
+    assert not any(result.get("memory") == "Template soul secret." for result in soul_results)
+    assert not any(result.get("memory") == "Runbook secret." for result in runbook_results)
+    assert any(result.get("memory") == "Private note." for result in note_results)
+    assert "Private note." in prompt
+    assert "Template soul secret." not in prompt
+    assert "Runbook secret." not in prompt
 
 
 @pytest.mark.asyncio
