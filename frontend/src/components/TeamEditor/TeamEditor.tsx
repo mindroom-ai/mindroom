@@ -14,7 +14,7 @@ import {
 import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
-import { Team } from '@/types/config';
+import { Team, getTeamEligibilityReason } from '@/types/config';
 
 export function TeamEditor() {
   const {
@@ -214,12 +214,18 @@ export function TeamEditor() {
               control={control}
               render={({ field }) => {
                 const isChecked = field.value.includes(agent.id);
+                const eligibilityReason = getTeamEligibilityReason(agent.id, agents);
+                const isSelectable = eligibilityReason == null;
                 return (
                   <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-white/5 transition-all duration-200">
                     <Checkbox
                       id={`agent-${agent.id}`}
                       checked={isChecked}
+                      disabled={!isSelectable && !isChecked}
                       onCheckedChange={checked => {
+                        if (!isSelectable && checked === true) {
+                          return;
+                        }
                         const newAgents = checked
                           ? [...field.value, agent.id]
                           : field.value.filter(a => a !== agent.id);
@@ -234,6 +240,11 @@ export function TeamEditor() {
                     >
                       <div className="font-medium">{agent.display_name}</div>
                       <div className="text-sm text-gray-500 dark:text-gray-400">{agent.role}</div>
+                      {eligibilityReason != null && (
+                        <div className="text-xs text-amber-600 dark:text-amber-400">
+                          {eligibilityReason}
+                        </div>
+                      )}
                     </label>
                   </div>
                 );

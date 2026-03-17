@@ -46,6 +46,26 @@ describe('TeamEditor', () => {
       instructions: [],
       rooms: ['research'],
     },
+    {
+      id: 'leader',
+      display_name: 'Leader Agent',
+      role: 'Coordinates work',
+      tools: [],
+      skills: [],
+      instructions: [],
+      rooms: ['dev'],
+      delegate_to: ['mind'],
+    },
+    {
+      id: 'mind',
+      display_name: 'Mind Agent',
+      role: 'Private assistant',
+      tools: [],
+      skills: [],
+      instructions: [],
+      rooms: ['research'],
+      private: { per: 'user' },
+    },
   ];
 
   const mockConfig: Partial<Config> = {
@@ -170,6 +190,24 @@ describe('TeamEditor', () => {
     expect(codeCheckbox).toBeChecked();
     expect(shellCheckbox).toBeChecked();
     expect(researchCheckbox).not.toBeChecked();
+  });
+
+  it('disables private agents as team members', () => {
+    render(<TeamEditor />);
+
+    const mindCheckbox = screen.getByRole('checkbox', { name: /Mind Agent/i });
+    expect(mindCheckbox).toBeDisabled();
+    expect(screen.getByText('Private agents cannot participate in teams yet.')).toBeInTheDocument();
+  });
+
+  it('disables agents that delegate to private agents', () => {
+    render(<TeamEditor />);
+
+    const leaderCheckbox = screen.getByRole('checkbox', { name: /Leader Agent/i });
+    expect(leaderCheckbox).toBeDisabled();
+    expect(
+      screen.getByText("Delegates to private agent 'mind', so it cannot participate in teams yet.")
+    ).toBeInTheDocument();
   });
 
   it('adds agent to team when checkbox is checked', async () => {

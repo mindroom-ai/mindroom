@@ -21,7 +21,14 @@ import {
   CheckboxListItem,
 } from '@/components/shared';
 import { useForm, useWatch, Controller } from 'react-hook-form';
-import { Agent, AgentPrivateConfig, AgentPrivateKnowledgeConfig } from '@/types/config';
+import {
+  Agent,
+  getDefaultPrivateConfig,
+  AgentPrivateConfig,
+  AgentPrivateKnowledgeConfig,
+  normalizeAgentUpdates,
+  SHARED_CONTEXT_FILE_PLACEHOLDER,
+} from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
@@ -193,11 +200,11 @@ export function AgentEditor() {
   // Create a debounced update function
   const handleFieldChange = useCallback(
     (fieldName: keyof Agent, value: any) => {
-      if (selectedAgentId) {
-        updateAgent(selectedAgentId, { [fieldName]: value });
+      if (selectedAgentId && selectedAgent) {
+        updateAgent(selectedAgentId, normalizeAgentUpdates(selectedAgent, { [fieldName]: value }));
       }
     },
-    [selectedAgentId, updateAgent]
+    [selectedAgent, selectedAgentId, updateAgent]
   );
 
   const handleDelete = () => {
@@ -240,10 +247,17 @@ export function AgentEditor() {
 
   const updatePrivate = useCallback(
     (nextPrivate: Agent['private']) => {
-      setValue('private', nextPrivate);
-      handleFieldChange('private', nextPrivate);
+      if (!selectedAgent) {
+        setValue('private', nextPrivate);
+        handleFieldChange('private', nextPrivate);
+        return;
+      }
+
+      const normalizedUpdates = normalizeAgentUpdates(selectedAgent, { private: nextPrivate });
+      setValue('private', normalizedUpdates.private ?? nextPrivate);
+      handleFieldChange('private', normalizedUpdates.private ?? nextPrivate);
     },
-    [handleFieldChange, setValue]
+    [handleFieldChange, selectedAgent, setValue]
   );
 
   const mutatePrivate = useCallback(
@@ -254,10 +268,10 @@ export function AgentEditor() {
   );
 
   const ensurePrivateConfig = (value: Agent['private']): AgentPrivateConfig =>
-    value ?? { per: 'user' };
+    value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined, worker_scope: null });
 
   const handleEnablePrivate = (enabled: boolean) => {
-    updatePrivate(enabled ? ensurePrivateConfig(getValues('private')) : undefined);
+    updatePrivate(enabled ? getDefaultPrivateConfig(selectedAgent ?? getValues()) : undefined);
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
@@ -550,7 +564,13 @@ export function AgentEditor() {
             : 'Workspace-relative files loaded into each freshly built agent instance and prepended to its role context.'
         }
         actions={
-          <Button variant="outline" size="sm" onClick={handleAddContextFile} className="h-9 px-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleAddContextFile}
+            className="h-9 px-3"
+            data-testid="add-context-file-button"
+          >
             <Plus className="h-4 w-4 sm:mr-1" />
             <span className="hidden sm:inline">Add</span>
           </Button>
@@ -571,7 +591,7 @@ export function AgentEditor() {
                       field.onChange(updated);
                       handleFieldChange('context_files', updated);
                     }}
-                    placeholder="mind_data/SOUL.md"
+                    placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
                     className="min-h-[40px]"
                   />
                   <Button

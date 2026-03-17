@@ -7,6 +7,7 @@ import {
   ModelConfig,
   KnowledgeBaseConfig,
   Culture,
+  normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
 
@@ -250,7 +251,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Update an existing agent
   updateAgent: (agentId, updates) => {
     set(state => ({
-      agents: state.agents.map(agent => (agent.id === agentId ? { ...agent, ...updates } : agent)),
+      agents: state.agents.map(agent =>
+        agent.id === agentId ? { ...agent, ...normalizeAgentUpdates(agent, updates) } : agent
+      ),
       isDirty: true,
     }));
   },

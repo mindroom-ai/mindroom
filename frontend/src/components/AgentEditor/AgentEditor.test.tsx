@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Agent } from '@/types/config';
+import { Agent, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
 
 // Mock the store
 vi.mock('@/store/configStore', () => ({
@@ -295,6 +295,38 @@ describe('AgentEditor', () => {
     });
   });
 
+  it('migrates legacy worker_scope into private.per and clears worker_scope', async () => {
+    const scopedAgent: Agent = {
+      ...mockAgent,
+      worker_scope: 'user_agent',
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [scopedAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: scopedAgent,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          worker_scope: undefined,
+          private: { per: 'user_agent' },
+        })
+      );
+    });
+  });
+
   it('renders and updates private agent fields', async () => {
     const privateAgent: Agent = {
       ...mockAgent,
@@ -344,6 +376,52 @@ describe('AgentEditor', () => {
         })
       );
     });
+  });
+
+  it('enables private knowledge with a default path', async () => {
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+    fireEvent.click(screen.getByLabelText('Enable private knowledge'));
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          private: expect.objectContaining({
+            knowledge: expect.objectContaining({
+              enabled: true,
+              path: 'memory',
+              watch: true,
+            }),
+          }),
+        })
+      );
+    });
+  });
+
+  it('uses the canonical shared context placeholder', async () => {
+    const agentWithoutContextFiles: Agent = {
+      ...mockAgent,
+      context_files: [],
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [agentWithoutContextFiles],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: agentWithoutContextFiles,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByTestId('add-context-file-button'));
+
+    expect(screen.getByPlaceholderText(SHARED_CONTEXT_FILE_PLACEHOLDER)).toBeInTheDocument();
   });
 
   it('updates knowledge bases when checkboxes are toggled', () => {

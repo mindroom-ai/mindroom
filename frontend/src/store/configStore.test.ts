@@ -308,6 +308,65 @@ describe('configStore', () => {
     });
   });
 
+  describe('updateAgent', () => {
+    it('clears legacy worker_scope when private state is enabled', () => {
+      useConfigStore.setState({
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            worker_scope: 'user_agent',
+          },
+        ],
+        isDirty: false,
+      });
+
+      useConfigStore.getState().updateAgent('mind', {
+        private: { per: 'user_agent' },
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].worker_scope).toBeUndefined();
+      expect(state.agents[0].private).toEqual({ per: 'user_agent' });
+    });
+
+    it('defaults private knowledge path when enabling it from an empty state', () => {
+      useConfigStore.setState({
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+        isDirty: false,
+      });
+
+      useConfigStore.getState().updateAgent('mind', {
+        private: {
+          per: 'user',
+          knowledge: { enabled: true, watch: true },
+        },
+      });
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].private?.knowledge).toEqual({
+        enabled: true,
+        path: 'memory',
+        watch: true,
+      });
+    });
+  });
+
   describe('agent operations', () => {
     beforeEach(() => {
       // Set up agents
