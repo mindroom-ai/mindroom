@@ -493,3 +493,67 @@ async def test_team_response_reuses_already_bound_request_knowledge() -> None:
         )
 
     assert "Private knowledge response" in response
+
+
+@pytest.mark.asyncio
+async def test_team_response_honors_degraded_request_knowledge_context() -> None:
+    """Direct team helpers should not retry knowledge init after the caller degraded to no knowledge."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="memory"),
+                    ),
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.agent_bots = {"general": MagicMock()}
+    team_agent = MagicMock()
+    team_agent.name = "GeneralAgent"
+    team_agent.instructions = []
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="$thread",
+    )
+
+    mock_team = MagicMock()
+    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Degraded team response"))
+
+    with (
+        patch(
+            "mindroom.teams.ensure_request_knowledge_managers",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("request knowledge should not be retried"),
+        ),
+        patch("mindroom.teams._get_agents_from_orchestrator", return_value=[team_agent]),
+        patch("mindroom.teams._create_team_instance", return_value=mock_team),
+        tool_execution_identity(execution_identity),
+        bound_knowledge_managers({}),
+    ):
+        response = await team_response(
+            agent_names=["general"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+        )
+
+    assert "Degraded team response" in response

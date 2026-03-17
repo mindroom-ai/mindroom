@@ -28,6 +28,7 @@ from mindroom.knowledge.utils import (
     bound_knowledge_managers,
     ensure_request_knowledge_managers,
     get_bound_knowledge_manager,
+    request_knowledge_init_attempted,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
@@ -480,7 +481,10 @@ async def _get_request_scoped_team_agents(
             if orchestrator.config.agents[agent_name].private is not None:
                 msg = f"Private team agent '{agent_name}' requires an active execution identity"
                 raise ValueError(msg)
-    if _request_knowledge_is_already_bound(available_agent_names, orchestrator.config):
+    if (
+        _request_knowledge_is_already_bound(available_agent_names, orchestrator.config)
+        or request_knowledge_init_attempted()
+    ):
         return _get_agents_from_orchestrator(available_agent_names, orchestrator)
     request_knowledge_managers = await ensure_request_knowledge_managers(
         available_agent_names,

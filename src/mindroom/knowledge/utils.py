@@ -29,6 +29,10 @@ _BOUND_KNOWLEDGE_MANAGERS: ContextVar[dict[str, KnowledgeManager] | None] = Cont
     "bound_knowledge_managers",
     default=None,
 )
+_REQUEST_KNOWLEDGE_INIT_ATTEMPTED: ContextVar[bool] = ContextVar(
+    "request_knowledge_init_attempted",
+    default=False,
+)
 
 
 class _KnowledgeVectorDb(Protocol):
@@ -51,21 +55,28 @@ def get_bound_knowledge_manager(base_id: str) -> KnowledgeManager | None:
     return managers.get(base_id)
 
 
+def request_knowledge_init_attempted() -> bool:
+    """Return whether this request already attempted to bind scoped knowledge."""
+    return _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.get()
+
+
 @contextmanager
 def bound_knowledge_managers(managers: Mapping[str, KnowledgeManager] | None) -> Iterator[None]:
     """Bind ensured managers to the current async execution scope."""
-    if not managers:
+    if managers is None:
         yield
         return
 
+    attempt_token = _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.set(True)
     current = _BOUND_KNOWLEDGE_MANAGERS.get()
     merged = dict(current) if current is not None else {}
     merged.update(managers)
-    token = _BOUND_KNOWLEDGE_MANAGERS.set(merged)
+    token = _BOUND_KNOWLEDGE_MANAGERS.set(merged or None)
     try:
         yield
     finally:
         _BOUND_KNOWLEDGE_MANAGERS.reset(token)
+        _REQUEST_KNOWLEDGE_INIT_ATTEMPTED.reset(attempt_token)
 
 
 async def ensure_request_knowledge_managers(
