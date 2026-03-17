@@ -21,6 +21,7 @@ from mindroom.workers.backend import WorkerBackendError
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from mindroom.constants import RuntimePaths
     from mindroom.workers.backends.docker_config import _DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
@@ -86,10 +87,10 @@ def _ordered_unique_nonempty_strings(values: Iterable[object]) -> tuple[str, ...
     return tuple(ordered_values)
 
 
-def _plugin_uses_filesystem_path(plugin_path: str, *, config_path: Path) -> bool:
+def _plugin_uses_filesystem_path(plugin_path: str, *, runtime_paths: RuntimePaths) -> bool:
     if plugin_path.startswith(("python:", "pkg:", "module:")):
         return False
-    candidate = resolve_config_relative_path(plugin_path, config_path=config_path)
+    candidate = resolve_config_relative_path(plugin_path, runtime_paths=runtime_paths)
     if candidate.exists():
         return True
     unresolved = Path(plugin_path).expanduser()
@@ -211,9 +212,16 @@ class _DockerProjectedConfig:
 class DockerProjectionManager:
     """Build projected config snapshots for dedicated Docker workers."""
 
-    def __init__(self, *, config: _DockerWorkerBackendConfig, projected_configs_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        config: _DockerWorkerBackendConfig,
+        projected_configs_root: Path,
+        runtime_paths: RuntimePaths,
+    ) -> None:
         self.config = config
         self._projected_configs_root = projected_configs_root
+        self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
         self._config_data_cache: tuple[Path, str, dict[str, object]] | None = None
 
@@ -260,7 +268,6 @@ class DockerProjectionManager:
         )
         self._rewrite_projected_config_paths(
             config_data,
-            host_config_path,
             worker_key,
             paths,
             projected_agent_names=projected_agent_names,
@@ -399,7 +406,6 @@ class DockerProjectionManager:
     def _rewrite_projected_config_paths(
         self,
         config_data: dict[str, object],
-        host_config_path: Path,
         worker_key: str | None,
         paths: LocalWorkerStatePaths,
         *,
@@ -411,14 +417,12 @@ class DockerProjectionManager:
     ) -> None:
         self._rewrite_projected_plugin_paths(
             config_data,
-            host_config_path,
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
             assets,
         )
         self._rewrite_projected_knowledge_paths(
             config_data,
-            host_config_path,
             projected_knowledge_base_ids,
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
@@ -426,7 +430,6 @@ class DockerProjectionManager:
         )
         self._rewrite_projected_agent_paths(
             config_data,
-            host_config_path,
             paths,
             projected_agent_names,
             asset_paths_by_host,
@@ -576,7 +579,6 @@ class DockerProjectionManager:
     def _rewrite_projected_plugin_paths(
         self,
         config_data: dict[str, object],
-        host_config_path: Path,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
@@ -589,10 +591,10 @@ class DockerProjectionManager:
         for index, raw_plugin in enumerate(plugins):
             if not isinstance(raw_plugin, str) or not _plugin_uses_filesystem_path(
                 raw_plugin,
-                config_path=host_config_path,
+                runtime_paths=self._runtime_paths,
             ):
                 continue
-            host_path = resolve_config_relative_path(raw_plugin, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_plugin, runtime_paths=self._runtime_paths)
             plugins[index] = self._projected_path_value(
                 host_path,
                 PurePosixPath(
@@ -608,7 +610,6 @@ class DockerProjectionManager:
     def _rewrite_projected_knowledge_paths(
         self,
         config_data: dict[str, object],
-        host_config_path: Path,
         projected_knowledge_base_ids: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
@@ -628,7 +629,7 @@ class DockerProjectionManager:
             raw_path = knowledge_base.get("path")
             if not isinstance(raw_path, str) or not raw_path.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_path, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_path, runtime_paths=self._runtime_paths)
             knowledge_base["path"] = self._projected_path_value(
                 host_path,
                 PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
@@ -640,7 +641,6 @@ class DockerProjectionManager:
     def _rewrite_projected_agent_paths(
         self,
         config_data: dict[str, object],
-        host_config_path: Path,
         paths: LocalWorkerStatePaths,
         projected_agent_names: tuple[str, ...] | None,
         asset_paths_by_host: dict[Path, PurePosixPath],
@@ -662,7 +662,6 @@ class DockerProjectionManager:
             agent_dir = PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "agents", safe_agent_name)
             self._rewrite_projected_context_files(
                 agent,
-                host_config_path,
                 agent_dir,
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
@@ -677,7 +676,6 @@ class DockerProjectionManager:
     def _rewrite_projected_context_files(
         self,
         raw_agent: dict[str, object],
-        host_config_path: Path,
         agent_dir: PurePosixPath,
         *,
         asset_paths_by_host: dict[Path, PurePosixPath],
@@ -692,7 +690,7 @@ class DockerProjectionManager:
         for index, raw_context_file in enumerate(context_files):
             if not isinstance(raw_context_file, str) or not raw_context_file.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_context_file, config_path=host_config_path)
+            host_path = resolve_config_relative_path(raw_context_file, runtime_paths=self._runtime_paths)
             context_files[index] = self._projected_path_value(
                 host_path,
                 agent_dir
