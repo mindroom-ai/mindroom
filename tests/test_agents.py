@@ -2296,6 +2296,7 @@ def test_create_agent_shares_culture_manager_for_same_culture(
         )
 
     assert mock_culture_manager_class.call_count == 1
+    assert len(_CULTURE_MANAGER_CACHE) == 1
     first_kwargs = mock_agent_class.call_args_list[0].kwargs
     second_kwargs = mock_agent_class.call_args_list[1].kwargs
 
@@ -2447,6 +2448,7 @@ def test_create_private_agent_scopes_culture_storage_per_requester(
     assert culture_db_calls[0] != culture_db_calls[1]
     assert "/private_instances/" in culture_db_calls[0]
     assert "/private_instances/" in culture_db_calls[1]
+    assert _CULTURE_MANAGER_CACHE == {}
     first_kwargs = mock_agent_class.call_args_list[0].kwargs
     second_kwargs = mock_agent_class.call_args_list[1].kwargs
     assert first_kwargs["culture_manager"] is created_culture_managers[0]

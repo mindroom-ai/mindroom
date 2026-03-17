@@ -665,12 +665,14 @@ def _resolve_agent_culture(
 
     culture_name, culture_config = culture_assignment
     settings = _resolve_culture_settings(culture_config.mode)
+    is_private_agent = config.agents[agent_name].private is not None
     cache_key = (str(storage_path.resolve()), culture_name)
     signature = _culture_signature(culture_config)
-    cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
-    if cached_manager is not None and cached_manager.signature == signature:
-        cached_manager.manager.model = model
-        return cached_manager.manager, settings
+    if not is_private_agent:
+        cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
+        if cached_manager is not None and cached_manager.signature == signature:
+            cached_manager.manager.model = model
+            return cached_manager.manager, settings
 
     culture_scope = culture_config.description.strip() or "Shared best practices and principles."
     culture_manager = CultureManager(
@@ -682,10 +684,11 @@ def _resolve_agent_culture(
         delete_knowledge=False,
         clear_knowledge=False,
     )
-    _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
-        signature=signature,
-        manager=culture_manager,
-    )
+    if not is_private_agent:
+        _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
+            signature=signature,
+            manager=culture_manager,
+        )
     return culture_manager, settings
 
 
