@@ -31,7 +31,11 @@ from mindroom.tool_system.worker_routing import (
     resolve_agent_state_storage_path,
     shared_storage_root,
 )
-from mindroom.workspaces import resolve_agent_private_state_storage_path, resolve_agent_workspace
+from mindroom.workspaces import (
+    ensure_workspace_template,
+    resolve_agent_private_state_storage_path,
+    resolve_agent_workspace,
+)
 
 if TYPE_CHECKING:
     from agno.knowledge.protocol import KnowledgeProtocol
@@ -57,16 +61,6 @@ _DEFAULT_MIND_CONTEXT_FILES = (
     "mind_data/TOOLS.md",
     "mind_data/HEARTBEAT.md",
 )
-_DEFAULT_MIND_TEMPLATE_FILENAMES = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
-_DEFAULT_MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
-_DEFAULT_MIND_MEMORY_TEMPLATE = "# Memory\n\n"
 
 
 @dataclass
@@ -117,19 +111,7 @@ def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentCo
 
 def _ensure_default_mind_workspace(storage_path: Path) -> None:
     workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME) / _DEFAULT_MIND_WORKSPACE_DIRNAME
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
-
-    for filename in _DEFAULT_MIND_TEMPLATE_FILENAMES:
-        source_path = _DEFAULT_MIND_TEMPLATE_DIR / filename
-        target_path = workspace_path / filename
-        if target_path.exists():
-            continue
-        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    memory_path = workspace_path / "MEMORY.md"
-    if not memory_path.exists():
-        memory_path.write_text(_DEFAULT_MIND_MEMORY_TEMPLATE, encoding="utf-8")
+    ensure_workspace_template(workspace_path, template="mind")
 
 
 def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:

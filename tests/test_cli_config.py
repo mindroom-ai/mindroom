@@ -233,6 +233,12 @@ class TestConfigInit:
         assert (runtime_workspace / "TOOLS.md").exists()
         assert (runtime_workspace / "HEARTBEAT.md").exists()
         assert (runtime_workspace / "MEMORY.md").exists()
+        template_memory = (
+            Path(__file__).resolve().parents[1] / "src" / "mindroom" / "cli" / "templates" / "mind_data" / "MEMORY.md"
+        )
+        assert (runtime_workspace / "MEMORY.md").read_text(encoding="utf-8") == template_memory.read_text(
+            encoding="utf-8",
+        )
 
     def test_init_without_path_uses_detected_default_location(
         self,
