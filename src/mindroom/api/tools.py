@@ -131,8 +131,8 @@ def _resolve_tool_availability_context(
         build_worker_target_from_runtime_env(
             execution_scope,
             agent_name,
-            execution_identity,
-            runtime_paths,
+            execution_identity=execution_identity,
+            runtime_paths=runtime_paths,
         )
         if agent_name is not None or execution_scope is not None
         else None

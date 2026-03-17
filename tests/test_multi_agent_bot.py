@@ -42,6 +42,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.matrix.client import PermanentMatrixStartupError
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, AgentMatrixUser
@@ -77,6 +78,22 @@ def _runtime_bound_config(config: Config, runtime_root: Path) -> Config:
         config,
         test_runtime_paths(runtime_root),
     )
+
+
+def _mock_shared_knowledge_manager(
+    *,
+    base_id: str,
+    storage_root: Path,
+    knowledge_path: Path,
+    knowledge: object,
+) -> KnowledgeManager:
+    manager = MagicMock(spec=KnowledgeManager)
+    manager.base_id = base_id
+    manager.storage_path = storage_root
+    manager.knowledge_path = knowledge_path
+    manager.matches.return_value = True
+    manager.get_knowledge.return_value = knowledge
+    return manager
 
 
 @dataclass
@@ -314,8 +331,12 @@ class TestAgentBot:
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_knowledge = object()
-        manager = MagicMock()
-        manager.get_knowledge.return_value = expected_knowledge
+        manager = _mock_shared_knowledge_manager(
+            base_id="research",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb").resolve(),
+            knowledge=expected_knowledge,
+        )
         bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
         assert bot._knowledge_for_agent("calculator") is expected_knowledge
@@ -381,10 +402,18 @@ class TestAgentBot:
         ]
         legal_knowledge = Knowledge(vector_db=legal_vector_db)
 
-        research_manager = MagicMock()
-        research_manager.get_knowledge.return_value = research_knowledge
-        legal_manager = MagicMock()
-        legal_manager.get_knowledge.return_value = legal_knowledge
+        research_manager = _mock_shared_knowledge_manager(
+            base_id="research",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb_research").resolve(),
+            knowledge=research_knowledge,
+        )
+        legal_manager = _mock_shared_knowledge_manager(
+            base_id="legal",
+            storage_root=runtime_paths_for(config).storage_root,
+            knowledge_path=(tmp_path / "kb_legal").resolve(),
+            knowledge=legal_knowledge,
+        )
 
         bot.orchestrator = MagicMock(knowledge_managers={"research": research_manager, "legal": legal_manager})
 
