@@ -103,29 +103,27 @@ Top-level shared knowledge definitions should remain available for truly shared/
 
 The current low-level workspace machinery can remain as internal implementation if it helps.
 
-## Current Rewrite Rules
+## Runtime Resolver Contract
 
-The current rewrite is an internal source-of-truth cleanup, not a public config rename.
+This PR keeps `agents.<name>.private` as the public surface.
 
-Keep `agents.<name>.private` as the public surface for this PR.
+It does not rename that surface to `requester_state`.
 
-Do not rename it to `requester_state` in the same change that rewires the internals.
+`src/mindroom/runtime_resolution.py` is the internal source of truth for private versus shared runtime resolution.
 
-Introduce one internal resolver layer that becomes the source of truth for private versus shared runtime resolution as the remaining call paths migrate onto it.
+It resolves state per `(agent_name, execution_identity)` materialization, not once per request.
 
-That resolver must resolve state per `(agent_name, execution_identity)` materialization, not once per request.
+After ingress, resolved runtime state should be passed explicitly instead of being recomputed from config plus ambient context.
 
-After the outer ingress points, resolved runtime state should be passed explicitly instead of being recomputed from config plus ambient context.
+Worker visibility and knowledge bindings may remain derived helpers, but they must come from the same resolver layer.
 
-Worker visibility and knowledge bindings may be derived helpers, but they must come from the same resolver layer.
+Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision.
 
-Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision once the migration is complete.
+## Runtime Scope
 
-## Current Rewrite Scope
+The resolver-based contract now covers direct agent execution.
 
-The rewrite should first cover direct agent execution.
-
-That means:
+That includes:
 
 - workspace and template materialization
 - private context loading
@@ -133,23 +131,23 @@ That means:
 - private knowledge binding
 - sessions
 - learning
+- worker execution routing for the touched paths
+- credential routing for the touched paths
+- auto-flush scope resolution
 
-`/v1` remains shared-only in this rewrite.
+`/v1` remains shared-only.
 
-Private teams are out of scope for the rewrite.
+Private teams are intentionally rejected.
 
-Any team behavior that depends on private agents should be rejected and removed rather than migrated.
+Mixed private/shared team behavior is out of scope and should stay removed.
 
-This is a deliberate simplification to stop the current mixed private/shared team complexity from shaping the new design.
+## Remaining Non-Goals
 
-## Current Implementation Order
+This PR does not add private-team support.
 
-1. Add the internal runtime resolver and move `create_agent()` onto it.
-2. Move private knowledge binding onto the same resolver layer.
-3. Reject private agents in teams and delete mixed private/shared team behavior.
-4. Move worker prep and worker mounts onto resolver-derived visibility instead of recomputing private visibility locally.
-5. Move remaining direct memory path resolution onto the resolver layer.
-6. Remove obsolete helpers and duplicated scope-to-root logic after the resolver-based flow is in place.
+This PR does not add `/v1` requester isolation.
+
+This PR does not rename the public config surface.
 
 ## Acceptance Check
 

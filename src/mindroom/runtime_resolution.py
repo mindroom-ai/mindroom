@@ -75,18 +75,19 @@ class ResolvedKnowledgeBinding:
 
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
-    runtime_paths: RuntimePaths,
     *,
     agent_name: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
 ) -> ResolvedWorkerExecution:
-    """Resolve worker execution identity and key from explicit scope policy."""
+    """Resolve worker execution identity and key from explicit scope inputs."""
     resolved_execution_identity = resolve_execution_identity_for_worker_scope(
         worker_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
-        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        tenant_id=tenant_id,
+        account_id=account_id,
     )
     worker_key: str | None = None
     if worker_scope is not None and resolved_execution_identity is not None:
@@ -136,9 +137,10 @@ def resolve_agent_execution(
     is_private = agent_config.private is not None
     resolved_worker_execution = resolve_worker_execution_scope(
         worker_scope,
-        runtime_paths=runtime_paths,
         agent_name=agent_name,
         execution_identity=effective_execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
     if is_private:
         if resolved_worker_execution.execution_identity is None:

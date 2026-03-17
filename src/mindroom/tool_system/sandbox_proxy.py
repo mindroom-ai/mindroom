@@ -340,9 +340,10 @@ def _build_worker_routing_payload(
     else:
         worker_key = resolve_worker_execution_scope(
             worker_scope,
-            runtime_paths,
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         ).worker_key
         if worker_key is None:
             msg = (

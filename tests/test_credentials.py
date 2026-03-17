@@ -15,7 +15,6 @@ from mindroom.credentials import (
     _DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
-    _sync_env_credentials_to_worker,
     get_credentials_manager,
     get_runtime_credentials_manager,
     load_scoped_credentials,
@@ -297,7 +296,11 @@ class TestCredentialsManager:
         worker_key = "v1:tenant-123:user:@alice:example.org"
         worker_manager = base_manager.for_worker(worker_key)
         base_manager.save_credentials("openweather", {"api_key": "env-key", "_source": "env", "base": "yes"})
-        _sync_env_credentials_to_worker(worker_key, credentials_manager=base_manager)
+        sync_shared_credentials_to_worker(
+            worker_key,
+            include_ui_credentials=False,
+            credentials_manager=base_manager,
+        )
         worker_manager.save_credentials("openweather", {"api_key": "worker-key", "_source": "ui"})
 
         loaded_credentials = load_scoped_credentials(
@@ -309,6 +312,26 @@ class TestCredentialsManager:
         )
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui", "base": "yes"}
+
+    def test_load_scoped_credentials_shared_scope_synthesizes_worker_key_from_tenant_context(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """Shared worker scope should resolve worker credentials from explicit tenant context."""
+        manager = CredentialsManager(temp_credentials_dir)
+        worker_key = "v1:tenant-123:shared:general"
+        manager.for_worker(worker_key).save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
+
+        loaded_credentials = load_scoped_credentials(
+            "google",
+            worker_scope="shared",
+            routing_agent_name="general",
+            credentials_manager=manager,
+            tenant_id="tenant-123",
+            account_id="account-456",
+        )
+
+        assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
 
     def test_load_scoped_credentials_uses_shared_mirror_for_unscoped_worker_manager(
         self,
@@ -395,7 +418,7 @@ class TestCredentialsManager:
             "_source": "ui",
         }
 
-    def test_sync_env_credentials_to_worker_copies_env_backed_credentials(
+    def test_sync_shared_credentials_to_worker_copies_env_backed_credentials(
         self,
         temp_credentials_dir: Path,
     ) -> None:
@@ -403,12 +426,16 @@ class TestCredentialsManager:
         manager = CredentialsManager(temp_credentials_dir)
         manager.save_credentials("google", {"api_key": "env-key", "_source": "env"})
 
-        _sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=False,
+            credentials_manager=manager,
+        )
 
         worker_credentials = manager.for_worker("worker-a").shared_manager().load_credentials("google")
         assert worker_credentials == {"api_key": "env-key", "_source": "env"}
 
-    def test_sync_env_credentials_to_worker_preserves_worker_local_credentials(
+    def test_sync_shared_credentials_to_worker_preserves_worker_local_credentials(
         self,
         temp_credentials_dir: Path,
     ) -> None:
@@ -418,7 +445,11 @@ class TestCredentialsManager:
         worker_manager = manager.for_worker("worker-a")
         worker_manager.save_credentials("google", {"api_key": "worker-key", "_source": "ui"})
 
-        _sync_env_credentials_to_worker("worker-a", credentials_manager=manager)
+        sync_shared_credentials_to_worker(
+            "worker-a",
+            include_ui_credentials=False,
+            credentials_manager=manager,
+        )
 
         assert worker_manager.load_credentials("google") == {"api_key": "worker-key", "_source": "ui"}
         assert worker_manager.shared_manager().load_credentials("google") == {

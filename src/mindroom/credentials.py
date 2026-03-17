@@ -13,13 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    WorkerScope,
-    resolve_execution_identity_for_worker_scope,
-    resolve_worker_key,
-    worker_root_path,
-)
+from mindroom.runtime_resolution import resolve_worker_execution_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, worker_root_path
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -319,17 +314,14 @@ def _resolve_worker_credentials_manager(
     if worker_scope is None:
         return None
 
-    execution_identity = resolve_execution_identity_for_worker_scope(
+    resolved_worker_execution = resolve_worker_execution_scope(
         worker_scope,
         agent_name=routing_agent_name,
         execution_identity=execution_identity,
         tenant_id=tenant_id,
         account_id=account_id,
     )
-    if execution_identity is None:
-        return None
-
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
+    worker_key = resolved_worker_execution.worker_key
     if worker_key is None:
         return None
 
@@ -423,19 +415,6 @@ def sync_shared_credentials_to_worker(
 
     for service in mirrored_services - allowed_services:
         worker_shared_manager.delete_credentials(service)
-
-
-def _sync_env_credentials_to_worker(
-    worker_key: str,
-    *,
-    credentials_manager: CredentialsManager,
-) -> None:
-    """Backward-compatible wrapper for syncing env-backed shared credentials."""
-    sync_shared_credentials_to_worker(
-        worker_key,
-        include_ui_credentials=False,
-        credentials_manager=credentials_manager,
-    )
 
 
 def load_scoped_credentials(
