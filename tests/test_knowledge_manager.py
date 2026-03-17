@@ -1268,6 +1268,50 @@ async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
 
 
 @pytest.mark.asyncio
+async def test_initialize_knowledge_managers_refreshes_shared_managers_on_reuse_without_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared managers should still sync on reuse when callers intentionally disable watchers."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), watch=True)},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+
+    try:
+        managers = await initialize_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+        sync_mock = AsyncMock(return_value={"added": 0, "updated": 0, "removed": 0})
+        monkeypatch.setattr(managers["docs"], "sync_indexed_files", sync_mock)
+
+        await initialize_knowledge_managers(
+            config,
+            runtime_paths_for(config),
+            start_watchers=False,
+            reindex_on_create=False,
+        )
+
+        sync_mock.assert_awaited_once()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

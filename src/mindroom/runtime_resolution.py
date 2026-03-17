@@ -72,14 +72,13 @@ class ResolvedKnowledgeBinding:
     incremental_sync_on_access: bool
 
 
-def _knowledge_sync_enabled(
+def _knowledge_refresh_enabled(
     *,
-    start_watchers: bool,
     file_watch_enabled: bool,
     has_git_sync: bool,
 ) -> bool:
-    """Return whether a knowledge base should keep itself fresh beyond initial indexing."""
-    return start_watchers and (file_watch_enabled or has_git_sync)
+    """Return whether a knowledge base has any refresh mechanism available."""
+    return file_watch_enabled or has_git_sync
 
 
 def resolve_worker_execution_scope(
@@ -248,8 +247,7 @@ def resolve_knowledge_binding(
 ) -> ResolvedKnowledgeBinding:
     """Resolve one knowledge base to its effective storage and workspace-derived path."""
     base_config = config.get_knowledge_base_config(base_id)
-    sync_enabled = _knowledge_sync_enabled(
-        start_watchers=start_watchers,
+    refresh_enabled = _knowledge_refresh_enabled(
         file_watch_enabled=base_config.watch,
         has_git_sync=base_config.git is not None,
     )
@@ -261,8 +259,8 @@ def resolve_knowledge_binding(
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
             request_scoped=False,
-            start_background_watchers=sync_enabled,
-            incremental_sync_on_access=False,
+            start_background_watchers=start_watchers and refresh_enabled,
+            incremental_sync_on_access=refresh_enabled and not start_watchers,
         )
 
     agent_runtime = resolve_agent_runtime(
@@ -286,6 +284,6 @@ def resolve_knowledge_binding(
             field_name=f"knowledge base '{base_id}' path",
         ),
         request_scoped=uses_isolating_worker_scope,
-        start_background_watchers=sync_enabled and not uses_isolating_worker_scope,
-        incremental_sync_on_access=sync_enabled and uses_isolating_worker_scope,
+        start_background_watchers=start_watchers and refresh_enabled and not uses_isolating_worker_scope,
+        incremental_sync_on_access=refresh_enabled and (uses_isolating_worker_scope or not start_watchers),
     )
