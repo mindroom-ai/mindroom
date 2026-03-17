@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { useConfigStore } from '@/store/configStore';
 import { useSwipeBack } from '@/hooks/useSwipeBack';
 import { Input } from '@/components/ui/input';
@@ -15,7 +15,7 @@ import { Users } from 'lucide-react';
 import { EditorPanel, EditorPanelEmptyState, FieldGroup } from '@/components/shared';
 import { useForm, Controller } from 'react-hook-form';
 import { Team } from '@/types/config';
-import { findConfigValidationIssue } from '@/lib/configValidation';
+import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
 export function TeamEditor() {
   const {
@@ -29,24 +29,15 @@ export function TeamEditor() {
     teamEligibilityByAgent,
     config,
     isDirty,
-    configValidationIssues,
     selectTeam,
   } = useConfigStore();
 
   const selectedTeam = teams.find(t => t.id === selectedTeamId);
-  const validationErrorForPath = useCallback(
-    (path: string[], exact: boolean = false): string | undefined => {
-      if (!selectedTeamId) {
-        return undefined;
-      }
-      return findConfigValidationIssue(
-        configValidationIssues,
-        ['teams', selectedTeamId, ...path],
-        exact
-      );
-    },
-    [configValidationIssues, selectedTeamId]
+  const validationPrefix = useMemo<Array<string | number> | null>(
+    () => (selectedTeamId == null ? null : ['teams', selectedTeamId]),
+    [selectedTeamId]
   );
+  const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const teamRootError = validationErrorForPath([], true);
   const displayNameError = validationErrorForPath(['display_name'], true);
   const roleError = validationErrorForPath(['role'], true);

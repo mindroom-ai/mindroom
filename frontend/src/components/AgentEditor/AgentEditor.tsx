@@ -34,7 +34,7 @@ import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
-import { findConfigValidationIssue } from '@/lib/configValidation';
+import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
 
 export function AgentEditor() {
   const {
@@ -46,7 +46,6 @@ export function AgentEditor() {
     saveConfig,
     config,
     isDirty,
-    configValidationIssues,
     selectAgent,
   } = useConfigStore();
 
@@ -125,19 +124,11 @@ export function AgentEditor() {
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
   const privateKnowledge = privateConfig?.knowledge;
-  const validationErrorForPath = useCallback(
-    (path: string[], exact: boolean = false): string | undefined => {
-      if (!selectedAgentId) {
-        return undefined;
-      }
-      return findConfigValidationIssue(
-        configValidationIssues,
-        ['agents', selectedAgentId, ...path],
-        exact
-      );
-    },
-    [configValidationIssues, selectedAgentId]
+  const validationPrefix = useMemo<Array<string | number> | null>(
+    () => (selectedAgentId == null ? null : ['agents', selectedAgentId]),
+    [selectedAgentId]
   );
+  const validationErrorForPath = useScopedConfigValidation(validationPrefix);
   const agentRootError = validationErrorForPath([], true);
   const privateScopeError = validationErrorForPath(['private', 'per'], true);
   const privateRootError = validationErrorForPath(['private', 'root'], true);
