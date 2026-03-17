@@ -81,6 +81,7 @@ async def add_agent_memory(
         agent_name,
         storage_path,
         config,
+        runtime_paths,
         metadata=metadata,
         create_memory=_create_memory_factory(runtime_paths),
     )
@@ -122,6 +123,7 @@ async def search_agent_memories(
         agent_name,
         storage_path,
         config,
+        runtime_paths,
         limit=limit,
         create_memory=_create_memory_factory(runtime_paths),
     )
@@ -150,6 +152,7 @@ async def list_all_agent_memories(
         agent_name,
         storage_path,
         config,
+        runtime_paths,
         limit=limit,
         create_memory=_create_memory_factory(runtime_paths),
     )
@@ -170,6 +173,7 @@ async def get_agent_memory(
         caller_context,
         storage_path,
         config,
+        runtime_paths,
         create_memory=_create_memory_factory(runtime_paths),
     )
 
@@ -192,6 +196,7 @@ async def update_agent_memory(
         caller_context,
         storage_path,
         config,
+        runtime_paths,
         create_memory=_create_memory_factory(runtime_paths),
     )
 
@@ -212,6 +217,7 @@ async def delete_agent_memory(
         caller_context,
         storage_path,
         config,
+        runtime_paths,
         create_memory=_create_memory_factory(runtime_paths),
     )
 
@@ -278,6 +284,7 @@ async def store_conversation_memory(
             storage_path,
             session_id,
             config,
+            runtime_paths,
             replica_key=new_memory_id() if isinstance(agent_name, list) else None,
             create_memory=_create_memory_factory(runtime_paths),
         )

@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.worker_routing import (
-    get_tool_execution_identity,
-    resolve_agent_owned_path,
-    resolve_agent_state_storage_path,
-)
-from mindroom.workspaces import resolve_agent_private_state_storage_path
+from mindroom.runtime_resolution import resolve_agent_runtime
 
 from ._shared import FileMemoryResolution
 
@@ -44,15 +39,16 @@ def effective_storage_paths_for_context(
     caller_context: str | list[str],
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[Path]:
     """Return the distinct storage roots affected by the caller context."""
     if isinstance(caller_context, str):
-        return [_effective_storage_path_for_agent(caller_context, storage_path, config)]
+        return [_effective_storage_path_for_agent(caller_context, config, runtime_paths)]
 
     config.assert_team_agents_supported(caller_context)
     effective_paths: list[Path] = []
     for agent_name in caller_context:
-        effective_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
+        effective_path = _effective_storage_path_for_agent(agent_name, config, runtime_paths)
         if effective_path not in effective_paths:
             effective_paths.append(effective_path)
     return effective_paths or [storage_path]
@@ -60,25 +56,14 @@ def effective_storage_paths_for_context(
 
 def _effective_storage_path_for_agent(
     agent_name: str,
-    storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> Path:
-    if _agent_has_private_state(agent_name, config):
-        return resolve_agent_private_state_storage_path(
-            agent_name,
-            config,
-            base_storage_path=storage_path,
-            execution_identity=get_tool_execution_identity(),
-        )
-    return resolve_agent_state_storage_path(
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-
-
-def _agent_has_private_state(agent_name: str, config: Config) -> bool:
-    agent_config = config.agents.get(agent_name)
-    return agent_config is not None and agent_config.private is not None
+    return resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+    ).state_root
 
 
 def build_team_user_id(agent_names: list[str]) -> str:
@@ -125,12 +110,13 @@ def storage_paths_for_scope_user_id(
     scope_user_id: str,
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
 ) -> list[Path]:
     """Return the canonical storage roots for one memory scope."""
     if (team_members := _team_members_from_scope_user_id(scope_user_id, config)) is not None:
-        return effective_storage_paths_for_context(team_members, storage_path, config)
+        return effective_storage_paths_for_context(team_members, storage_path, config, runtime_paths)
     if (agent_name := agent_name_from_scope_user_id(scope_user_id)) is not None:
-        return [_effective_storage_path_for_agent(agent_name, storage_path, config)]
+        return [_effective_storage_path_for_agent(agent_name, config, runtime_paths)]
     msg = f"Unsupported memory scope user_id: {scope_user_id}"
     raise ValueError(msg)
 
@@ -143,6 +129,9 @@ def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config)
         if config.memory.team_reads_member_memory:
             allowed_user_ids.update(agent_scope_user_id(agent_name) for agent_name in caller_context)
         return allowed_user_ids
+
+    if caller_context not in config.agents:
+        return set()
 
     allowed_user_ids = {agent_scope_user_id(caller_context)}
     allowed_user_ids.update(get_team_ids_for_agent(caller_context, config))
@@ -191,40 +180,26 @@ def resolve_file_memory_resolution(
     """Resolve file-memory storage settings for one caller context."""
     resolved_storage_path = storage_path
     base_storage_path = original_storage_path or storage_path
-    agent_config = config.agents.get(agent_name) if agent_name is not None else None
+    agent_memory_scope_path: Path | None = None
     if agent_name is not None:
-        if _agent_has_private_state(agent_name, config):
-            resolved_storage_path = resolve_agent_private_state_storage_path(
-                agent_name,
-                config,
-                base_storage_path=base_storage_path,
-                execution_identity=get_tool_execution_identity(),
-            )
-        else:
-            resolved_storage_path = resolve_agent_state_storage_path(
-                agent_name=agent_name,
-                base_storage_path=base_storage_path,
-            )
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+        )
+        resolved_storage_path = agent_runtime.state_root
+        agent_memory_scope_path = agent_runtime.file_memory_root
     resolution = file_memory_resolution_from_paths(
         original_storage_path=base_storage_path,
         resolved_storage_path=resolved_storage_path,
         runtime_paths=runtime_paths,
         preserve_resolved_storage_path=preserve_resolved_storage_path,
     )
-    if agent_name is None:
-        return resolution
-
-    if agent_config is None or agent_config.memory_file_path is None:
-        return resolution
-
-    agent_memory_scope_path = resolve_agent_owned_path(
-        agent_config.memory_file_path,
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-    return FileMemoryResolution(
-        storage_path=resolution.storage_path,
-        runtime_paths=runtime_paths,
-        use_configured_path=resolution.use_configured_path,
-        agent_memory_scope_path=agent_memory_scope_path,
-    )
+    if agent_name is None or agent_memory_scope_path is not None:
+        return FileMemoryResolution(
+            storage_path=resolution.storage_path,
+            runtime_paths=runtime_paths,
+            use_configured_path=resolution.use_configured_path,
+            agent_memory_scope_path=agent_memory_scope_path,
+        )
+    return resolution

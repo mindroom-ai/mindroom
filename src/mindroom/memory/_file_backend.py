@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 from mindroom.constants import resolve_config_relative_path
 from mindroom.logging_config import get_logger
-from mindroom.workspaces import resolve_agent_file_memory_path
 
 from ._policy import (
     agent_name_from_scope_user_id,
@@ -81,19 +80,6 @@ def _scope_dir(
     *,
     create: bool,
 ) -> Path:
-    agent_name = agent_name_from_scope_user_id(scope_user_id)
-    if agent_name is not None:
-        workspace_memory_path = resolve_agent_file_memory_path(
-            agent_name,
-            config,
-            runtime_paths=resolution.runtime_paths,
-            state_storage_path=resolution.storage_path,
-            use_state_storage_path=not resolution.use_configured_path,
-            create=create,
-        )
-        if workspace_memory_path is not None:
-            return workspace_memory_path
-
     if resolution.agent_memory_scope_path is not None:
         scope_path = resolution.agent_memory_scope_path
         if create:
@@ -418,7 +404,7 @@ def _find_file_anchor_memory_result(
     runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
@@ -459,7 +445,7 @@ def _mutate_file_memory_targets(
 ) -> tuple[str, int]:
     updated_targets = 0
     scope_user_id = anchor_result["user_id"]
-    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
+    for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
         resolution = resolve_file_memory_resolution(
             target_storage_path,
             config,
@@ -538,7 +524,7 @@ def search_file_agent_memories(
     )
     existing_memories = {result.get("memory", "") for result in results}
     for team_id in get_team_ids_for_agent(agent_name, config):
-        for target_storage_path in storage_paths_for_scope_user_id(team_id, storage_path, config):
+        for target_storage_path in storage_paths_for_scope_user_id(team_id, storage_path, config, runtime_paths):
             team_resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
@@ -586,7 +572,7 @@ def get_file_agent_memory(
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
     for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
-        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config, runtime_paths):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
@@ -689,7 +675,7 @@ def store_file_conversation_memory(
     if not condensed_prompt:
         return
 
-    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config)
+    target_storage_paths = effective_storage_paths_for_context(agent_name, storage_path, config, runtime_paths)
     scope_user_id = agent_scope_user_id(agent_name) if isinstance(agent_name, str) else build_team_user_id(agent_name)
     team_memory_id = new_memory_id() if isinstance(agent_name, list) else None
 

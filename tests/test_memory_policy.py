@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.memory._policy import (
     agent_scope_user_id,
     effective_storage_paths_for_context,
@@ -20,6 +21,7 @@ from mindroom.tool_system.worker_routing import (
     agent_state_root_path,
     tool_execution_identity,
 )
+from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -27,9 +29,10 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def config() -> Config:
+def config(tmp_path: Path) -> Config:
     """Build the minimal config needed for policy tests."""
-    return Config()
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    return bind_runtime_paths(Config(), runtime_paths)
 
 
 def test_get_team_ids_for_agent(config: Config) -> None:
@@ -104,7 +107,7 @@ def test_effective_storage_paths_for_mixed_private_team_is_rejected(tmp_path: Pa
             match="private agents cannot participate in teams yet",
         ),
     ):
-        effective_storage_paths_for_context(["general", "calculator"], tmp_path, config)
+        effective_storage_paths_for_context(["general", "calculator"], tmp_path, config, runtime_paths_for(config))
 
 
 def test_storage_paths_for_scope_user_id_rejects_mixed_private_team(
@@ -132,9 +135,9 @@ def test_storage_paths_for_scope_user_id_rejects_mixed_private_team(
             match="private agents cannot participate in teams yet",
         ),
     ):
-        storage_paths_for_scope_user_id("team_calculator+general", tmp_path, config)
+        storage_paths_for_scope_user_id("team_calculator+general", tmp_path, config, runtime_paths_for(config))
     with tool_execution_identity(identity):
-        assert storage_paths_for_scope_user_id("agent_calculator", tmp_path, config) == [
+        assert storage_paths_for_scope_user_id("agent_calculator", tmp_path, config, runtime_paths_for(config)) == [
             agent_state_root_path(tmp_path, "calculator"),
         ]
 
