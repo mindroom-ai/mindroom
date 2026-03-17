@@ -513,7 +513,7 @@ class TestRouterTeamFormation:
         )
 
         # Should form a team with both agents
-        assert result.should_form_team is True
+        assert result.kind == "team"
         agent_names = sorted(_agent_names(result.agents, config))
         assert agent_names == ["agent1", "agent2"]
 
@@ -533,7 +533,7 @@ class TestRouterTeamFormation:
         )
 
         # Should not form a team with single agent
-        assert result.should_form_team is False
+        assert result.kind == "none"
 
     @pytest.mark.asyncio
     async def test_dm_room_thread_single_agent_no_team(self) -> None:
@@ -583,8 +583,7 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is False
-        assert result.rejected_request is False
+        assert result.kind == "none"
 
     @pytest.mark.asyncio
     async def test_dm_room_ignores_private_agents_for_team_formation(self) -> None:
@@ -629,8 +628,7 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is False
-        assert result.rejected_request is False
+        assert result.kind == "none"
 
     @pytest.mark.asyncio
     async def test_tagged_private_agents_reject_the_entire_team_request(self) -> None:
@@ -674,7 +672,7 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is False
+        assert result.kind == "reject"
 
     @pytest.mark.asyncio
     async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
@@ -725,4 +723,4 @@ class TestRouterTeamFormation:
             use_ai_decision=False,
         )
 
-        assert result.should_form_team is False
+        assert result.kind == "reject"

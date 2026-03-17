@@ -244,13 +244,28 @@ def _get_response_content(response: TeamRunOutput | RunOutput) -> str:
     return ""
 
 
-class TeamFormationDecision(NamedTuple):
+@dataclass(frozen=True)
+class TeamFormationDecision:
     """Result of decide_team_formation."""
 
-    should_form_team: bool
+    kind: Literal["team", "none", "reject"]
     agents: list[MatrixID]
     mode: TeamMode
-    rejected_request: bool = False
+
+    @classmethod
+    def none(cls) -> TeamFormationDecision:
+        """Return the no-team outcome."""
+        return cls(kind="none", agents=[], mode=TeamMode.COLLABORATE)
+
+    @classmethod
+    def reject(cls) -> TeamFormationDecision:
+        """Return the explicit-rejection outcome."""
+        return cls(kind="reject", agents=[], mode=TeamMode.COLLABORATE)
+
+    @classmethod
+    def team(cls, *, agents: list[MatrixID], mode: TeamMode) -> TeamFormationDecision:
+        """Return the successful team-formation outcome."""
+        return cls(kind="team", agents=agents, mode=mode)
 
 
 class _FilteredTeamMembers(NamedTuple):
@@ -379,11 +394,7 @@ async def decide_team_formation(
     team_agents = candidate_team_members.agents
 
     if not team_agents:
-        return TeamFormationDecision(
-            should_form_team=False,
-            agents=[],
-            mode=TeamMode.COLLABORATE,
-        )
+        return TeamFormationDecision.none()
 
     if config is not None:
         filtered_team_members = _filter_supported_team_agents(
@@ -394,12 +405,9 @@ async def decide_team_formation(
         )
         team_agents = filtered_team_members.agents
         if len(team_agents) < 2:
-            return TeamFormationDecision(
-                should_form_team=False,
-                agents=[],
-                mode=TeamMode.COLLABORATE,
-                rejected_request=filtered_team_members.rejected_request,
-            )
+            if filtered_team_members.rejected_request:
+                return TeamFormationDecision.reject()
+            return TeamFormationDecision.none()
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
     # Only do this AI call for the first agent to avoid duplication
@@ -413,7 +421,7 @@ async def decide_team_formation(
         mode = TeamMode.COORDINATE if len(tagged_agents) > 1 else TeamMode.COLLABORATE
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 
-    return TeamFormationDecision(should_form_team=True, agents=team_agents, mode=mode)
+    return TeamFormationDecision.team(agents=team_agents, mode=mode)
 
 
 def _candidate_team_agents(

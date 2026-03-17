@@ -50,7 +50,7 @@ from mindroom.orchestrator import (
     main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
-from mindroom.teams import TeamFormationDecision, TeamMode
+from mindroom.teams import TeamFormationDecision
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1663,11 +1663,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
@@ -1761,11 +1757,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=image),
@@ -1840,11 +1832,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.image_handler.download_image", new_callable=AsyncMock, return_value=None),
@@ -1914,11 +1902,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch(
@@ -1989,11 +1973,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
             patch("mindroom.bot.register_file_or_video_attachment", new_callable=AsyncMock, return_value=None),
@@ -2440,11 +2420,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.suggest_agent_for_message", new_callable=AsyncMock, return_value="general"),
             patch(
@@ -2667,11 +2643,7 @@ class TestAgentBot:
             patch(
                 "mindroom.bot.decide_team_formation",
                 new_callable=AsyncMock,
-                return_value=TeamFormationDecision(
-                    should_form_team=False,
-                    agents=[],
-                    mode=TeamMode.COLLABORATE,
-                ),
+                return_value=TeamFormationDecision.none(),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True),
         ):
@@ -2725,11 +2697,7 @@ class TestAgentBot:
         }
 
         with patch("mindroom.bot.decide_team_formation", new_callable=AsyncMock) as mock_decide:
-            mock_decide.return_value = TeamFormationDecision(
-                should_form_team=False,
-                agents=[],
-                mode=TeamMode.COLLABORATE,
-            )
+            mock_decide.return_value = TeamFormationDecision.none()
 
             await bot._decide_team_for_sender(
                 agents_in_thread=[],
@@ -2776,14 +2744,7 @@ class TestAgentBot:
             patch.object(
                 bot,
                 "_decide_team_for_sender",
-                new=AsyncMock(
-                    return_value=TeamFormationDecision(
-                        should_form_team=False,
-                        agents=[],
-                        mode=TeamMode.COLLABORATE,
-                        rejected_request=True,
-                    ),
-                ),
+                new=AsyncMock(return_value=TeamFormationDecision.reject()),
             ),
             patch("mindroom.bot.should_agent_respond", return_value=True) as mock_should_respond,
         ):

@@ -1553,13 +1553,13 @@ class AgentBot:
             is_dm,
         )
 
-        if form_team.should_form_team and self.matrix_id in form_team.agents:
+        if form_team.kind == "team" and self.matrix_id in form_team.agents:
             first_agent = min(form_team.agents, key=lambda x: x.full_id)
             if self.matrix_id != first_agent:
                 return _ResponseAction(kind="skip")
             return _ResponseAction(kind="team", form_team=form_team)
 
-        if form_team.rejected_request:
+        if form_team.kind == "reject":
             return _ResponseAction(kind="skip")
 
         if not should_agent_respond(
