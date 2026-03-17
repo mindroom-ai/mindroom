@@ -20,6 +20,7 @@ from mindroom.config.voice import VoiceConfig
 from mindroom.constants import (
     ROUTER_AGENT_NAME,
     RuntimePaths,
+    resolve_config_relative_path,
     resolve_runtime_paths,
     runtime_matrix_homeserver,
     safe_replace,
@@ -120,6 +121,21 @@ def _normalized_config_data(data: object) -> object:
     normalized_data = cast("dict[str, object]", data.copy())
     _normalize_optional_config_sections(normalized_data)
     return normalized_data
+
+
+def _relative_paths_overlap(left: Path, right: Path) -> bool:
+    """Return whether two relative paths overlap by equality, ancestry, or descent."""
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path) -> bool:
+    """Return whether a template already seeds content at or around one target subtree."""
+    if not template_dir.is_dir():
+        return False
+    return any(
+        _relative_paths_overlap(source_path.relative_to(template_dir), target_path)
+        for source_path in template_dir.rglob("*")
+    )
 
 
 def _router_agents_for_room(
@@ -295,9 +311,10 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_private_git_knowledge_paths(self) -> Config:
+    def validate_private_git_knowledge_paths(self, info: ValidationInfo) -> Config:
         """Ensure git-backed private knowledge uses a dedicated subtree."""
         memory_notes_dir = Path("memory")
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
         for agent_name, agent_config in self.agents.items():
             private_config = agent_config.private
             if private_config is None or private_config.knowledge is None:
@@ -306,21 +323,31 @@ class Config(BaseModel):
             if private_knowledge.git is None or private_knowledge.path is None:
                 continue
             knowledge_path = Path(private_knowledge.path)
-            overlaps_private_file_memory = self.get_agent_memory_backend(agent_name) == "file" and (
-                knowledge_path == Path()
-                or knowledge_path.is_relative_to(memory_notes_dir)
-                or memory_notes_dir.is_relative_to(knowledge_path)
+            if knowledge_path == Path():
+                msg = (
+                    f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
+                    "but git-backed private knowledge must use a dedicated subtree outside the private root "
+                    "and outside scaffolded private workspace content"
+                )
+                raise ValueError(msg)
+            overlaps_private_file_memory = self.get_agent_memory_backend(
+                agent_name,
+            ) == "file" and _relative_paths_overlap(
+                knowledge_path,
+                memory_notes_dir,
             )
-            overlaps_template_scaffold = private_config.template_dir is not None and (
-                knowledge_path == Path()
-                or knowledge_path.is_relative_to(memory_notes_dir)
-                or memory_notes_dir.is_relative_to(knowledge_path)
-            )
+            overlaps_template_scaffold = False
+            if private_config.template_dir is not None:
+                if _relative_paths_overlap(knowledge_path, memory_notes_dir):
+                    overlaps_template_scaffold = True
+                elif runtime_paths is not None:
+                    template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+                    overlaps_template_scaffold = _template_contains_overlapping_subtree(template_dir, knowledge_path)
             if overlaps_private_file_memory or overlaps_template_scaffold:
                 msg = (
                     f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
                     "but git-backed private knowledge must use a dedicated subtree outside the private root "
-                    "and outside the conventional memory/ workspace content"
+                    "and outside scaffolded private workspace content"
                 )
                 raise ValueError(msg)
         return self

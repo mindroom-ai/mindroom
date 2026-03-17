@@ -2181,6 +2181,66 @@ def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> No
     assert config.agents["mind"].private.knowledge.path == "kb_repo"
 
 
+def test_config_rejects_git_backed_private_knowledge_at_private_root() -> None:
+    """Git-backed private knowledge must never target the private root itself."""
+    with pytest.raises(
+        ValidationError,
+        match="git-backed private knowledge at '.'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path=".",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="mem0",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
+def test_config_rejects_git_backed_private_knowledge_overlapping_template_content(tmp_path: Path) -> None:
+    """Git-backed private knowledge must not overlap any template-seeded subtree."""
+    from tests.conftest import bind_runtime_paths  # noqa: PLC0415
+
+    template_dir = tmp_path / "mind_template"
+    (template_dir / "docs").mkdir(parents=True)
+    (template_dir / "docs" / "README.md").write_text("seeded\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(
+        ValidationError,
+        match="git-backed private knowledge at 'docs'.*scaffolded private workspace content",
+    ):
+        bind_runtime_paths(
+            Config(
+                agents={
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        private=AgentPrivateConfig(
+                            per="user",
+                            root="mind_data",
+                            template_dir="./mind_template",
+                            knowledge=AgentPrivateKnowledgeConfig(
+                                path="docs",
+                                git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                            ),
+                        ),
+                    ),
+                },
+                models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+            ),
+            runtime_paths,
+        )
+
+
 @patch("mindroom.agents.SqliteDb")
 @patch("mindroom.agents.CultureManager")
 @patch("mindroom.agents.Agent")
