@@ -631,7 +631,7 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
     )
 
     assert runtime.is_private is False
-    assert runtime.worker_scope == "user"
+    assert runtime.execution_scope == "user"
     assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
@@ -652,7 +652,7 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
     runtime = resolve_agent_runtime("general", config, runtime_paths, execution_identity=None, create=True)
 
     assert runtime.is_private is False
-    assert runtime.worker_scope == "shared"
+    assert runtime.execution_scope == "shared"
     assert runtime.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
@@ -2208,7 +2208,7 @@ def test_config_rejects_shared_only_integrations_inherited_from_defaults() -> No
     """Shared-only defaults.tools must still be rejected for isolating agents."""
     with pytest.raises(
         ValidationError,
-        match=r"mind -> homeassistant \(worker_scope=user_agent\)",
+        match=r"mind -> homeassistant \(private\.per=user_agent\)",
     ):
         Config(
             agents={

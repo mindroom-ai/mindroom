@@ -11,7 +11,7 @@ import {
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
-import type { ConfigValidationIssue } from '@/lib/configValidation';
+import type { ConfigDiagnostic } from '@/lib/configValidation';
 
 function unassignAgentsFromOtherCultures(
   cultures: Culture[],
@@ -82,9 +82,7 @@ interface ConfigState {
   selectedRoomId: string | null;
   isDirty: boolean;
   isLoading: boolean;
-  error: string | null;
-  editorError: string | null;
-  configValidationIssues: ConfigValidationIssue[];
+  diagnostics: ConfigDiagnostic[];
   syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
 
   // Actions
@@ -117,7 +115,6 @@ interface ConfigState {
   deleteModel: (modelId: string) => void;
   updateToolConfig: (toolId: string, config: unknown) => void;
   markDirty: () => void;
-  clearError: () => void;
 }
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
@@ -135,14 +132,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   selectedRoomId: null,
   isDirty: false,
   isLoading: false,
-  error: null,
-  editorError: null,
-  configValidationIssues: [],
+  diagnostics: [],
   syncStatus: 'disconnected',
 
   // Load configuration from backend
   loadConfig: async () => {
-    set({ isLoading: true, error: null, editorError: null, configValidationIssues: [] });
+    set({ isLoading: true, diagnostics: [] });
     try {
       const config = await configService.loadConfig();
       const normalizedConfig: Config = {
@@ -196,11 +191,15 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         };
       });
       let teamEligibilityByAgent: TeamEligibilityByAgent = {};
-      let editorError: string | null = null;
+      const diagnostics: ConfigDiagnostic[] = [];
       try {
         teamEligibilityByAgent = await configService.getTeamEligibility(agents);
       } catch (error) {
-        editorError = error instanceof Error ? error.message : 'Failed to derive team eligibility';
+        diagnostics.push({
+          kind: 'global',
+          message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+          blocking: false,
+        });
       }
 
       set({
@@ -213,12 +212,17 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
-        editorError,
-        configValidationIssues: [],
+        diagnostics,
       });
     } catch (error) {
       set({
-        error: error instanceof Error ? error.message : 'Failed to load config',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to load config',
+            blocking: true,
+          },
+        ],
         isLoading: false,
         syncStatus: 'error',
       });
@@ -235,7 +239,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       set({
         teamEligibilityByAgent,
-        editorError: null,
+        diagnostics: get().diagnostics.filter(diagnostic => diagnostic.kind !== 'global'),
       });
     } catch (error) {
       if (get().teamEligibilityRequestId != teamEligibilityRequestId) {
@@ -243,7 +247,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       }
       set({
         teamEligibilityByAgent: {},
-        editorError: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+        diagnostics: [
+          ...get().diagnostics.filter(diagnostic => diagnostic.kind === 'validation'),
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+            blocking: false,
+          },
+        ],
       });
     }
   },
@@ -255,9 +266,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
     set({
       isLoading: true,
-      error: null,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
       syncStatus: 'syncing',
     });
     try {
@@ -308,20 +317,35 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
-        editorError: null,
-        configValidationIssues: [],
+        diagnostics: [],
       });
     } catch (error) {
       if (error instanceof configService.ConfigValidationError) {
         set({
-          configValidationIssues: error.issues,
+          diagnostics: [
+            {
+              kind: 'global',
+              message: 'Configuration validation failed',
+              blocking: false,
+            },
+            ...error.issues.map(issue => ({
+              kind: 'validation' as const,
+              issue,
+            })),
+          ],
           isLoading: false,
           syncStatus: 'error',
         });
         return;
       }
       set({
-        editorError: error instanceof Error ? error.message : 'Failed to save config',
+        diagnostics: [
+          {
+            kind: 'global',
+            message: error instanceof Error ? error.message : 'Failed to save config',
+            blocking: false,
+          },
+        ],
         isLoading: false,
         syncStatus: 'error',
       });
@@ -353,8 +377,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       return {
         agents: nextAgents,
         isDirty: true,
-        editorError: null,
-        configValidationIssues: [],
+        diagnostics: [],
       };
     });
     if (shouldRefreshTeamEligibility && get().config != null) {
@@ -379,8 +402,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agents: [...state.agents, newAgent],
       selectedAgentId: id,
       isDirty: true,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     }));
     if (get().config != null && agentCanAffectTeamEligibility(newAgent)) {
       void get().refreshTeamEligibility([...get().agents]);
@@ -415,8 +437,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teamEligibilityByAgent: nextTeamEligibilityByAgent,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     });
     const shouldRefreshTeamEligibility =
       deletedAgent != null &&
@@ -437,6 +458,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set(state => ({
       teams: state.teams.map(team => (team.id === teamId ? { ...team, ...updates } : team)),
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -451,6 +473,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teams: [...state.teams, newTeam],
       selectedTeamId: id,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -460,6 +483,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teams: state.teams.filter(team => team.id !== teamId),
       selectedTeamId: state.selectedTeamId === teamId ? null : state.selectedTeamId,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -478,7 +502,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (updates.agents) {
         const targetCulture = updatedCultures.find(culture => culture.id === cultureId);
         if (!targetCulture) {
-          return { cultures: updatedCultures, isDirty: true };
+          return { cultures: updatedCultures, isDirty: true, diagnostics: [] };
         }
         return {
           cultures: unassignAgentsFromOtherCultures(
@@ -487,12 +511,14 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             targetCulture.agents
           ),
           isDirty: true,
+          diagnostics: [],
         };
       }
 
       return {
         cultures: updatedCultures,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -524,6 +550,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         cultures: nextCultures,
         selectedCultureId: id,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -534,6 +561,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       cultures: state.cultures.filter(culture => culture.id !== cultureId),
       selectedCultureId: state.selectedCultureId === cultureId ? null : state.selectedCultureId,
       isDirty: true,
+      diagnostics: [],
     }));
   },
 
@@ -596,6 +624,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           rooms: updatedRooms,
           agents: updatedAgents,
           isDirty: true,
+          diagnostics: [],
         };
       }
 
@@ -603,6 +632,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         rooms: updatedRooms,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -629,6 +659,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         agents: updatedAgents,
         selectedRoomId: id,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -665,6 +696,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: updatedConfig,
         selectedRoomId: state.selectedRoomId === roomId ? null : state.selectedRoomId,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -690,6 +722,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms: updatedRooms,
         agents: updatedAgents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -715,6 +748,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         rooms: updatedRooms,
         agents: updatedAgents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -729,6 +763,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           room_models: roomModels,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -753,6 +788,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
             },
           },
           isDirty: true,
+          diagnostics: [],
         };
       }
 
@@ -762,6 +798,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           memory: memoryConfig,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -783,6 +820,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -817,6 +855,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         },
         agents,
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -837,6 +876,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -852,6 +892,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           models: remainingModels,
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
@@ -869,17 +910,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
         isDirty: true,
+        diagnostics: [],
       };
     });
   },
 
   // Mark configuration as dirty
   markDirty: () => {
-    set({ isDirty: true });
-  },
-
-  // Clear error
-  clearError: () => {
-    set({ error: null, editorError: null, configValidationIssues: [] });
+    set({ isDirty: true, diagnostics: [] });
   },
 }));

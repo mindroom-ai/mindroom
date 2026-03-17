@@ -31,7 +31,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { useConfigStore } from '@/store/configStore';
-import { getAgentEffectiveWorkerScope, getAgentScopeLabel } from '@/types/config';
+import { getAgentExecutionScope, getAgentScopeLabel } from '@/types/config';
 import { getIconForTool } from './iconMapping';
 import { API_BASE_URL, withAgentName } from '@/lib/api';
 import {
@@ -58,7 +58,7 @@ export function Integrations() {
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => getAgentEffectiveWorkerScope(agent) != null)
+        .filter(agent => getAgentExecutionScope(agent) != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
     [agents]
   );
@@ -66,12 +66,14 @@ export function Integrations() {
     () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
     [scopedAgents, scopeAgentName]
   );
-  const selectedWorkerScope =
-    selectedScopeAgent != null ? getAgentEffectiveWorkerScope(selectedScopeAgent) : null;
+  const selectedExecutionScope =
+    selectedScopeAgent != null ? getAgentExecutionScope(selectedScopeAgent) : null;
   const selectedScopeLabel =
     selectedScopeAgent != null ? getAgentScopeLabel(selectedScopeAgent) : null;
   const hidesSharedOnlyIntegrations =
-    selectedScopeAgent !== null && selectedWorkerScope !== null && selectedWorkerScope !== 'shared';
+    selectedScopeAgent !== null &&
+    selectedExecutionScope !== null &&
+    selectedExecutionScope !== 'shared';
   const disablesDashboardCredentialManagement = hidesSharedOnlyIntegrations;
 
   // Fetch tools from backend

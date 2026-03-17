@@ -26,7 +26,6 @@ import {
   getDefaultPrivateConfig,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
-  WorkerScope,
   normalizeAgentUpdates,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
@@ -51,9 +50,6 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
-  const [restorableWorkerScopesByAgent, setRestorableWorkerScopesByAgent] = useState<
-    Record<string, WorkerScope>
-  >({});
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -285,38 +281,15 @@ export function AgentEditor() {
   );
 
   const ensurePrivateConfig = (value: Agent['private']): AgentPrivateConfig =>
-    value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined, worker_scope: null });
+    value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined });
 
   const handleEnablePrivate = (enabled: boolean) => {
     if (enabled) {
-      const sourceAgent = selectedAgent ?? getValues();
-      if (
-        selectedAgentId != null &&
-        sourceAgent.private == null &&
-        sourceAgent.worker_scope != null
-      ) {
-        setRestorableWorkerScopesByAgent(current => ({
-          ...current,
-          [selectedAgentId]: sourceAgent.worker_scope as WorkerScope,
-        }));
-      }
-      updatePrivate(getDefaultPrivateConfig(sourceAgent));
+      updatePrivate(getDefaultPrivateConfig(selectedAgent ?? getValues()));
       return;
     }
 
-    if (!selectedAgentId) {
-      updatePrivate(undefined);
-      return;
-    }
-
-    const { [selectedAgentId]: restoredWorkerScope, ...remainingWorkerScopes } =
-      restorableWorkerScopesByAgent;
-    setRestorableWorkerScopesByAgent(remainingWorkerScopes);
-    setValue('private', undefined);
-    updateAgent(selectedAgentId, {
-      private: undefined,
-      worker_scope: restoredWorkerScope,
-    });
+    updatePrivate(undefined);
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
@@ -689,7 +662,7 @@ export function AgentEditor() {
           <>
             <FieldGroup
               label="Private Scope"
-              helperText="Requester boundary that gets its own private instance. This becomes the agent's effective worker scope."
+              helperText="Requester boundary that gets its own private instance. Private agents derive their execution scope from this boundary."
               htmlFor="private_per"
               error={privateScopeError}
             >

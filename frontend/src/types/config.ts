@@ -201,7 +201,7 @@ export interface Config {
   voice?: VoiceConfig; // Voice configuration
 }
 
-export function getAgentEffectiveWorkerScope(
+export function getAgentExecutionScope(
   agent: Pick<Agent, 'private' | 'worker_scope'>
 ): WorkerScope | null {
   return agent.private?.per ?? agent.worker_scope ?? null;
@@ -239,33 +239,25 @@ function normalizePrivateKnowledgeConfig(
 }
 
 function normalizePrivateConfig(
-  privateConfig: AgentPrivateConfig | null | undefined,
-  workerScope: WorkerScope | null | undefined
+  privateConfig: AgentPrivateConfig | null | undefined
 ): AgentPrivateConfig | null | undefined {
   if (privateConfig == null) {
     return privateConfig;
   }
 
-  const inferredPer = workerScope === 'user' || workerScope === 'user_agent' ? workerScope : 'user';
-
   return {
     ...privateConfig,
-    per: privateConfig.per ?? inferredPer,
+    per: privateConfig.per ?? 'user',
     knowledge: normalizePrivateKnowledgeConfig(privateConfig.knowledge),
   };
 }
 
-export function getDefaultPrivateConfig(
-  agent: Pick<Agent, 'private' | 'worker_scope'>
-): AgentPrivateConfig {
+export function getDefaultPrivateConfig(agent: Pick<Agent, 'private'>): AgentPrivateConfig {
   if (agent.private != null) {
     return agent.private;
   }
   return {
-    per:
-      agent.worker_scope === 'user' || agent.worker_scope === 'user_agent'
-        ? agent.worker_scope
-        : 'user',
+    per: 'user',
   };
 }
 
@@ -274,7 +266,7 @@ export function normalizeAgentUpdates(agent: Agent, updates: Partial<Agent>): Pa
   const nextPrivate = 'private' in updates ? updates.private : agent.private;
 
   if (nextPrivate != null) {
-    normalizedUpdates.private = normalizePrivateConfig(nextPrivate, agent.worker_scope);
+    normalizedUpdates.private = normalizePrivateConfig(nextPrivate);
     normalizedUpdates.worker_scope = undefined;
   }
 

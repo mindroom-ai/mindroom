@@ -31,7 +31,7 @@ class ResolvedAgentExecution:
 
     agent_name: str
     is_private: bool
-    worker_scope: WorkerScope | None
+    execution_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
 
@@ -42,7 +42,7 @@ class ResolvedAgentRuntime:
 
     agent_name: str
     is_private: bool
-    worker_scope: WorkerScope | None
+    execution_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
     state_root: Path
@@ -110,10 +110,10 @@ def resolve_agent_execution(
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
     agent_config = config.get_agent(agent_name)
-    worker_scope = config.get_agent_worker_scope(agent_name)
+    execution_scope = config.get_agent_execution_scope(agent_name)
     is_private = agent_config.private is not None
     resolved_worker_execution = resolve_worker_execution_scope(
-        worker_scope,
+        execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
@@ -122,12 +122,12 @@ def resolve_agent_execution(
             msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
             raise ValueError(msg)
         if resolved_worker_execution.worker_key is None:
-            msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{worker_scope}'"
+            msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
             raise ValueError(msg)
     return ResolvedAgentExecution(
         agent_name=agent_name,
         is_private=is_private,
-        worker_scope=worker_scope,
+        execution_scope=execution_scope,
         execution_identity=resolved_worker_execution.execution_identity,
         worker_key=resolved_worker_execution.worker_key,
     )
@@ -176,7 +176,7 @@ def resolve_agent_runtime(
     return ResolvedAgentRuntime(
         agent_name=agent_name,
         is_private=resolved_execution.is_private,
-        worker_scope=resolved_execution.worker_scope,
+        execution_scope=resolved_execution.execution_scope,
         execution_identity=resolved_execution.execution_identity,
         worker_key=resolved_execution.worker_key,
         state_root=state_root,
@@ -224,7 +224,7 @@ def resolve_knowledge_binding(
         msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
         raise ValueError(msg)
 
-    uses_isolating_worker_scope = agent_runtime.worker_scope not in {None, "shared"}
+    uses_isolating_worker_scope = agent_runtime.execution_scope not in {None, "shared"}
     return ResolvedKnowledgeBinding(
         base_id=base_id,
         storage_root=agent_runtime.state_root,

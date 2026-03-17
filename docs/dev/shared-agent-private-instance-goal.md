@@ -132,6 +132,22 @@ This PR keeps `agents.<name>.private` as the public surface.
 
 It does not rename that surface to `requester_state`.
 
+`worker_scope` and `private.per` are different public concepts.
+
+`worker_scope` is the shared-agent knob for worker runtime reuse.
+
+`private.per` is the private-agent knob for requester partitioning of state.
+
+`private.template_dir` is only the scaffold source for that private state.
+
+Private agents must not set `worker_scope`.
+
+The runtime may derive one internal execution scope from either `worker_scope` or `private.per`, but that internal execution scope is not itself a public config field.
+
+Future refactors must not describe `private.per` as if it were literally `worker_scope`.
+
+Future refactors must not infer or restore one of these fields from the other.
+
 `src/mindroom/runtime_resolution.py` is the internal source of truth for private versus shared runtime resolution.
 
 It resolves state per `(agent_name, execution_identity)` materialization, not once per request.

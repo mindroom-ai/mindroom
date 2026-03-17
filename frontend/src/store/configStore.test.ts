@@ -23,9 +23,7 @@ describe('configStore', () => {
       selectedRoomId: null,
       isDirty: false,
       isLoading: false,
-      error: null,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
       syncStatus: 'disconnected',
     });
 
@@ -297,8 +295,13 @@ describe('configStore', () => {
       expect(state.config).toEqual({ ...mockConfig, knowledge_bases: {}, cultures: {} });
       expect(state.teams).toEqual([]);
       expect(state.teamEligibilityByAgent).toEqual({});
-      expect(state.editorError).toBe('Failed to derive team eligibility');
-      expect(state.error).toBeNull();
+      expect(state.diagnostics).toEqual([
+        {
+          kind: 'global',
+          message: 'Failed to derive team eligibility',
+          blocking: false,
+        },
+      ]);
       expect(state.syncStatus).toBe('synced');
     });
   });
@@ -477,13 +480,19 @@ describe('configStore', () => {
       await useConfigStore.getState().saveConfig();
 
       const state = useConfigStore.getState();
-      expect(state.error).toBeNull();
-      expect(state.editorError).toBeNull();
-      expect(state.configValidationIssues).toEqual([
+      expect(state.diagnostics).toEqual([
         {
-          loc: ['agents', 'mind', 'private', 'root'],
-          msg: 'private.root must stay within the private instance root',
-          type: 'value_error',
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'mind', 'private', 'root'],
+            msg: 'private.root must stay within the private instance root',
+            type: 'value_error',
+          },
         },
       ]);
     });

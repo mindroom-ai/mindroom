@@ -123,7 +123,7 @@ def _openai_incompatible_agent_closure(
             closures=delegation_closures,
         )
         if target_name in config.agents
-        and config.get_agent_worker_scope(target_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and config.get_agent_execution_scope(target_name) not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
     )
 
 
@@ -139,15 +139,24 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
             delegation_closures=delegation_closures,
         )
     }
-    invalid_scopes = {
-        config.get_agent_worker_scope(agent_name) for agent_name in invalid_scope_agents if agent_name in config.agents
+    invalid_execution_scopes = {
+        config.get_agent_execution_scope(agent_name)
+        for agent_name in invalid_scope_agents
+        if agent_name in config.agents
     }
-    message = (
-        "OpenAI-compatible chat completions currently support only unscoped agents and worker_scope=shared, "
-        "including all delegation targets."
+    has_private_agents = any(
+        config.get_agent(agent_name).private is not None
+        for agent_name in invalid_scope_agents
+        if agent_name in config.agents
     )
-    if invalid_scopes & {"user", "user_agent"}:
-        message += " worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    message = (
+        "OpenAI-compatible chat completions currently support only shared agents that are "
+        "unscoped or configured with worker_scope=shared, including all delegation targets."
+    )
+    if invalid_execution_scopes & {"user", "user_agent"}:
+        message += " Shared agents with worker_scope=user and worker_scope=user_agent are not yet supported on /v1."
+    if has_private_agents:
+        message += " Requester-private agents configured with private.per are not yet supported on /v1."
     if invalid_scope_agents and set(agent_names) != invalid_scope_agents:
         message += f" Delegation reaches unsupported agents: {', '.join(sorted(invalid_scope_agents))}."
 

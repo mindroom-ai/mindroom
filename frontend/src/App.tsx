@@ -51,6 +51,7 @@ import {
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/contexts/ThemeContext';
 import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle';
+import { getGlobalConfigDiagnostics } from '@/lib/configValidation';
 import { cn } from '@/lib/utils';
 
 const queryClient = new QueryClient();
@@ -90,8 +91,7 @@ function AppContent() {
   const {
     loadConfig,
     syncStatus,
-    error,
-    editorError,
+    diagnostics,
     selectedAgentId,
     selectedTeamId,
     selectedCultureId,
@@ -108,6 +108,9 @@ function AppContent() {
   const currentTab = location.pathname.slice(1) || 'dashboard';
   const currentNavItem = NAV_ITEMS.find(item => item.value === currentTab) || NAV_ITEMS[0];
   const CurrentNavIcon = currentNavItem.icon;
+  const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
+  const blockingDiagnostic = globalDiagnostics.find(diagnostic => diagnostic.blocking) ?? null;
+  const bannerDiagnostics = globalDiagnostics.filter(diagnostic => !diagnostic.blocking);
 
   useEffect(() => {
     // Load configuration on mount
@@ -181,7 +184,8 @@ function AppContent() {
     return 'https://app.mindroom.chat';
   };
 
-  if (error) {
+  if (blockingDiagnostic) {
+    const error = blockingDiagnostic.message;
     const isAuthError =
       error.includes('Authentication required') || error.includes('Access denied');
     const isDifferentInstance = error.includes('Access denied');
@@ -307,11 +311,14 @@ function AppContent() {
           </div>
         </header>
 
-        {editorError && (
-          <div className="border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive sm:px-6">
-            {editorError}
+        {bannerDiagnostics.map((diagnostic, index) => (
+          <div
+            key={`${diagnostic.kind}-${diagnostic.message}-${index}`}
+            className="border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-sm text-destructive sm:px-6"
+          >
+            {diagnostic.message}
           </div>
-        )}
+        ))}
 
         {/* Main Content */}
         <div className="flex-1 overflow-hidden">

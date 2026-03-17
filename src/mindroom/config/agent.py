@@ -180,7 +180,7 @@ class AgentConfig(BaseModel):
     )
     private: AgentPrivateConfig | None = Field(
         default=None,
-        description="Optional requester-private state materialized per worker scope",
+        description="Optional requester-private state materialized per private.per partition",
     )
     knowledge_bases: list[str] = Field(
         default_factory=list,
@@ -246,7 +246,7 @@ class AgentConfig(BaseModel):
             msg = "num_history_runs and num_history_messages are mutually exclusive"
             raise ValueError(msg)
         if self.private is not None and self.worker_scope is not None:
-            msg = "agents.<name>.private.per replaces agents.<name>.worker_scope; configure only one"
+            msg = "Private agents derive their execution scope from private.per; configure private or worker_scope, not both"
             raise ValueError(msg)
         return self
 

@@ -245,7 +245,7 @@ def requires_shared_only_integration_scope(name: str) -> bool:
 
 
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
-    """Return whether one tool/integration name is supported for the effective worker scope."""
+    """Return whether one tool/integration name is supported for the effective execution scope."""
     return not requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
         worker_scope,
     )
@@ -255,7 +255,7 @@ def unsupported_shared_only_integration_names(
     names: list[str],
     worker_scope: WorkerScope | None,
 ) -> list[str]:
-    """Return shared-only integration names that are invalid for the effective worker scope."""
+    """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
     return [name for name in names if requires_shared_only_integration_scope(name)]
@@ -267,13 +267,16 @@ def unsupported_shared_only_integration_message(
     *,
     agent_name: str | None = None,
     subject: str = "Integration",
+    scope_label: str | None = None,
 ) -> str:
     """Return the user-facing error for shared-only integrations on isolating scopes."""
-    scope_label = worker_scope or "unscoped"
+    resolved_scope_label = scope_label or (
+        f"execution_scope={worker_scope}" if worker_scope is not None else "unscoped"
+    )
     agent_detail = f"Agent '{agent_name}' uses " if agent_name else "This request uses "
     return (
         f"{subject} '{name}' is only supported for shared deployment credentials or agents with "
-        f"worker_scope=shared. {agent_detail}worker_scope={scope_label}."
+        f"worker_scope=shared. {agent_detail}{resolved_scope_label}."
     )
 
 

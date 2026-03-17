@@ -430,16 +430,16 @@ class Config(BaseModel):
         """Reject shared-only integrations on isolating worker scopes at config-validation time."""
         invalid_assignments: list[str] = []
         for agent_name in sorted(self.agents):
-            worker_scope = self.get_agent_worker_scope(agent_name)
+            execution_scope = self.get_agent_execution_scope(agent_name)
             unsupported_tools = unsupported_shared_only_integration_names(
                 self.get_agent_tools(agent_name),
-                worker_scope,
+                execution_scope,
             )
             if not unsupported_tools:
                 continue
-            scope_label = worker_scope or "unscoped"
+            scope_label = self.get_agent_scope_label(agent_name)
             invalid_assignments.extend(
-                f"{agent_name} -> {tool_name} (worker_scope={scope_label})" for tool_name in unsupported_tools
+                f"{agent_name} -> {tool_name} ({scope_label})" for tool_name in unsupported_tools
             )
         if invalid_assignments:
             msg = (
@@ -752,14 +752,24 @@ class Config(BaseModel):
             return default_worker_routed_tools(self.get_agent_tools(agent_name))
         return self.expand_tool_names(list(configured))
 
-    def get_agent_worker_scope(self, agent_name: str) -> WorkerScope | None:
-        """Get the effective worker scope for an agent."""
+    def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
+        """Return the effective execution scope derived from worker_scope and private.per."""
         agent_config = self.get_agent(agent_name)
         if agent_config.private is not None:
             return agent_config.private.per
         if agent_config.worker_scope is not None:
             return agent_config.worker_scope
         return self.defaults.worker_scope
+
+    def get_agent_scope_label(self, agent_name: str) -> str:
+        """Return the user-facing authored scope label for one agent."""
+        agent_config = self.get_agent(agent_name)
+        if agent_config.private is not None:
+            return f"private.per={agent_config.private.per}"
+        execution_scope = self.get_agent_execution_scope(agent_name)
+        if execution_scope is None:
+            return "unscoped"
+        return f"worker_scope={execution_scope}"
 
     def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
         """Return the synthetic knowledge base ID for one agent's private knowledge."""

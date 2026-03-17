@@ -133,11 +133,13 @@ async def get_registered_tools(request: Request, agent_name: str | None = None) 
     config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
-    worker_scope = config.get_agent_worker_scope(agent_name) if agent_name in config.agents else None
-    unsupported_tools = set(unsupported_shared_only_integration_names([tool["name"] for tool in tools], worker_scope))
+    execution_scope = config.get_agent_execution_scope(agent_name) if agent_name in config.agents else None
+    unsupported_tools = set(
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], execution_scope),
+    )
     if unsupported_tools:
         tools = [tool for tool in tools if tool["name"] not in unsupported_tools]
     _append_config_only_presets(tools)
-    _update_tools_statuses(tools, request, agent_name, worker_scope=worker_scope)
+    _update_tools_statuses(tools, request, agent_name, worker_scope=execution_scope)
 
     return ToolsResponse(tools=tools)

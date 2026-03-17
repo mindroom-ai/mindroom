@@ -208,8 +208,8 @@ def resolve_request_credentials_target(
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    if worker_scope is None:
+    execution_scope = config.get_agent_execution_scope(agent_name)
+    if execution_scope is None:
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
@@ -218,29 +218,30 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
-    if not dashboard_supports_worker_credentials(worker_scope):
+    if not dashboard_supports_worker_credentials(execution_scope):
         raise HTTPException(
             status_code=400,
             detail=(
                 "Dashboard credential management does not support "
-                f"worker_scope={worker_scope} for agent '{agent_name}'."
+                f"{config.get_agent_scope_label(agent_name)} for agent '{agent_name}'."
             ),
         )
 
-    unsupported_services = unsupported_shared_only_integration_names(list(service_names), worker_scope)
+    unsupported_services = unsupported_shared_only_integration_names(list(service_names), execution_scope)
     if unsupported_services:
         raise HTTPException(
             status_code=400,
             detail=unsupported_shared_only_integration_message(
                 unsupported_services[0],
-                worker_scope,
+                execution_scope,
                 agent_name=agent_name,
+                scope_label=config.get_agent_scope_label(agent_name),
             ),
         )
 
     execution_identity = _build_dashboard_execution_identity(request, agent_name)
     worker_key = require_worker_key_for_scope(
-        worker_scope,
+        execution_scope,
         execution_identity=execution_identity,
         agent_name=agent_name,
         failure_message=f"Could not resolve worker credentials for agent '{agent_name}'.",
@@ -248,7 +249,7 @@ def resolve_request_credentials_target(
     return RequestCredentialsTarget(
         base_manager=base_manager,
         target_manager=base_manager.for_worker(worker_key),
-        worker_scope=worker_scope,
+        worker_scope=execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )

@@ -641,7 +641,7 @@ class TestConsolidatedConfigManager:
 
 
 class TestGetAgentWorkerTools:
-    """Tests for Config.get_agent_worker_tools and get_agent_worker_scope."""
+    """Tests for Config.get_agent_worker_tools and get_agent_execution_scope."""
 
     def test_agent_worker_tools_override_takes_precedence(self) -> None:
         """Agent-level worker_tools should override defaults."""
@@ -739,7 +739,7 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
-        assert config.get_agent_worker_scope("code") == "user_agent"
+        assert config.get_agent_execution_scope("code") == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
@@ -749,4 +749,4 @@ class TestGetAgentWorkerTools:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.get_agent_worker_scope("code") == "user"
+        assert config.get_agent_execution_scope("code") == "user"

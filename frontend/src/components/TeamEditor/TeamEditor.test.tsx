@@ -116,8 +116,7 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: false,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     });
   });
 
@@ -142,8 +141,7 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: {},
       config: mockConfig,
       isDirty: false,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -358,8 +356,7 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -401,8 +398,7 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
-      editorError: null,
-      configValidationIssues: [],
+      diagnostics: [],
     });
 
     render(<TeamEditor />);
@@ -431,11 +427,14 @@ describe('TeamEditor', () => {
       teamEligibilityByAgent: mockTeamEligibilityByAgent,
       config: mockConfig,
       isDirty: true,
-      configValidationIssues: [
+      diagnostics: [
         {
-          loc: ['teams', 'dev_team', 'agents'],
-          msg: 'Team members cannot include private agents.',
-          type: 'value_error',
+          kind: 'validation',
+          issue: {
+            loc: ['teams', 'dev_team', 'agents'],
+            msg: 'Team members cannot include private agents.',
+            type: 'value_error',
+          },
         },
       ],
     });

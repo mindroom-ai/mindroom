@@ -108,8 +108,7 @@ describe('AgentEditor', () => {
     saveConfig: vi.fn().mockResolvedValue(undefined),
     config: mockConfig,
     isDirty: false,
-    editorError: null,
-    configValidationIssues: [],
+    diagnostics: [],
   };
 
   beforeEach(() => {
@@ -259,27 +258,43 @@ describe('AgentEditor', () => {
           test_agent: privateAgent,
         },
       },
-      editorError: 'Configuration validation failed',
-      configValidationIssues: [
+      diagnostics: [
         {
-          loc: ['agents', 'test_agent', 'private', 'root'],
-          msg: 'private.root must stay within the private instance root',
-          type: 'value_error',
+          kind: 'global',
+          message: 'Configuration validation failed',
+          blocking: false,
         },
         {
-          loc: ['agents', 'test_agent', 'private', 'template_dir'],
-          msg: 'template_dir must not be blank',
-          type: 'value_error',
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'root'],
+            msg: 'private.root must stay within the private instance root',
+            type: 'value_error',
+          },
         },
         {
-          loc: ['agents', 'test_agent', 'private', 'context_files'],
-          msg: 'private.context_files must stay under the private root',
-          type: 'value_error',
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'template_dir'],
+            msg: 'template_dir must not be blank',
+            type: 'value_error',
+          },
         },
         {
-          loc: ['agents', 'test_agent', 'private', 'knowledge', 'path'],
-          msg: 'private.knowledge.path must stay under the private root',
-          type: 'value_error',
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'context_files'],
+            msg: 'private.context_files must stay under the private root',
+            type: 'value_error',
+          },
+        },
+        {
+          kind: 'validation',
+          issue: {
+            loc: ['agents', 'test_agent', 'private', 'knowledge', 'path'],
+            msg: 'private.knowledge.path must stay under the private root',
+            type: 'value_error',
+          },
         },
       ],
     });
@@ -391,7 +406,7 @@ describe('AgentEditor', () => {
     });
   });
 
-  it('migrates legacy worker_scope into private.per and clears worker_scope', async () => {
+  it('clears explicit worker_scope when enabling private state', async () => {
     const scopedAgent: Agent = {
       ...mockAgent,
       worker_scope: 'user_agent',
@@ -417,13 +432,13 @@ describe('AgentEditor', () => {
         'test_agent',
         expect.objectContaining({
           worker_scope: undefined,
-          private: { per: 'user_agent' },
+          private: { per: 'user' },
         })
       );
     });
   });
 
-  it('restores a legacy worker_scope when private mode is disabled again', async () => {
+  it('does not restore prior worker_scope when private mode is disabled again', async () => {
     const scopedAgent: Agent = {
       ...mockAgent,
       worker_scope: 'user_agent',
@@ -452,7 +467,7 @@ describe('AgentEditor', () => {
         'test_agent',
         expect.objectContaining({
           worker_scope: undefined,
-          private: { per: 'user_agent' },
+          private: { per: 'user' },
         })
       );
       expect(mockStore.updateAgent).toHaveBeenNthCalledWith(
@@ -460,10 +475,11 @@ describe('AgentEditor', () => {
         'test_agent',
         expect.objectContaining({
           private: undefined,
-          worker_scope: 'user_agent',
         })
       );
     });
+
+    expect(mockStore.updateAgent.mock.calls[1][1]).not.toHaveProperty('worker_scope');
   });
 
   it('renders and updates private agent fields', async () => {

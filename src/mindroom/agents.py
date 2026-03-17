@@ -95,7 +95,7 @@ class AgentToolInitContext:
     """Shared agent tool-init settings used across local and command-dispatch paths."""
 
     workspace_path: Path | None
-    worker_scope: WorkerScope | None
+    execution_scope: WorkerScope | None
     routing_agent_is_private: bool
 
 
@@ -385,7 +385,7 @@ def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> Agen
     workspace_path = agent_runtime.tool_base_dir
     return AgentToolInitContext(
         workspace_path=workspace_path,
-        worker_scope=agent_runtime.worker_scope,
+        execution_scope=agent_runtime.execution_scope,
         routing_agent_is_private=agent_runtime.is_private,
     )
 
@@ -459,7 +459,7 @@ def build_agent_toolkit(
         credentials_manager,
         shared_storage_path,
         worker_tools,
-        tool_init_context.worker_scope,
+        tool_init_context.execution_scope,
         agent_name,
         tool_init_context.workspace_path,
         tool_init_context.routing_agent_is_private,
