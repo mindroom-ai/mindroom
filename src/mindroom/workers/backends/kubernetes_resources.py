@@ -29,6 +29,7 @@ _DEFAULT_NAME_PREFIX = "mindroom-worker"
 _DEFAULT_RESOURCE_REQUESTS = {"memory": "256Mi", "cpu": "100m"}
 _DEFAULT_RESOURCE_LIMITS = {"memory": "1Gi", "cpu": "500m"}
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
 
 ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
@@ -318,7 +319,8 @@ class KubernetesResourceManager:
             desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
-                self.delete_deployment(worker_id)
+                self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
+                return
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -352,6 +354,47 @@ class KubernetesResourceManager:
     def delete_service(self, service_name: str) -> None:
         """Delete one worker Service, ignoring 404s."""
         self._delete_object(self._core.delete_namespaced_service, service_name)
+
+    def _recreate_deployment(
+        self,
+        deployment_name: str,
+        manifest: dict[str, object],
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Replace one Deployment when pod-template drift requires a full recreate."""
+        self.delete_deployment(deployment_name)
+        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+        deadline = time.time() + timeout_seconds
+        while True:
+            try:
+                self._apps.create_namespaced_deployment(self.config.namespace, manifest)
+            except self._api_exception as exc:
+                if exc.status != 409:
+                    raise
+                if time.time() >= deadline:
+                    msg = (
+                        f"Kubernetes worker deployment '{deployment_name}' did not finish deleting "
+                        f"within {timeout_seconds:.0f}s before recreate."
+                    )
+                    raise WorkerBackendError(msg) from exc
+                time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
+            else:
+                return
+
+    def _wait_for_deployment_absent(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Poll until one Deployment is fully gone after delete has been requested."""
+        deadline = time.time() + timeout_seconds
+        while True:
+            if self.read_deployment(deployment_name) is None:
+                return
+            if time.time() >= deadline:
+                msg = (
+                    f"Kubernetes worker deployment '{deployment_name}' did not finish deleting "
+                    f"within {timeout_seconds:.0f}s."
+                )
+                raise WorkerBackendError(msg)
+            time.sleep(_DELETE_POLL_INTERVAL_SECONDS)
 
     def wait_for_ready(
         self,
