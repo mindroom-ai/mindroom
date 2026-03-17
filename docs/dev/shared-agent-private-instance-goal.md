@@ -49,6 +49,7 @@ That private instance has its own scaffolded files such as:
 - `memory/`
 
 Those files are created on first use if they do not already exist.
+Later resolutions may backfill newly added scaffold files, but they must never overwrite requester edits.
 
 The agent loads its private context from that requester's own scaffolded files.
 

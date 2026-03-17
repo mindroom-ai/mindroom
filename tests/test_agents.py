@@ -714,8 +714,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert runtime.file_memory_root == runtime.workspace.root
 
 
-def test_private_workspace_template_preserves_metadata_and_initializes_only_once(tmp_path: Path) -> None:
-    """Private templates should preserve file metadata and avoid repeated rescaffolding."""
+def test_private_workspace_template_preserves_metadata_and_backfills_missing_files(tmp_path: Path) -> None:
+    """Private templates should preserve file metadata and backfill new files without overwriting edits."""
     template_dir = tmp_path / "template"
     template_dir.mkdir(parents=True, exist_ok=True)
     script_path = template_dir / "bootstrap.sh"
@@ -748,6 +748,13 @@ def test_private_workspace_template_preserves_metadata_and_initializes_only_once
             execution_identity=identity,
             create=True,
         ).workspace
+        assert first_workspace is not None
+        copied_script = first_workspace.root / "bootstrap.sh"
+        assert copied_script.exists()
+        assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
+        copied_script.write_text("#!/bin/sh\necho edited\n", encoding="utf-8")
+        later_file = template_dir / "LATER.md"
+        later_file.write_text("later\n", encoding="utf-8")
         second_workspace = resolve_agent_runtime(
             "general",
             bound_config,
@@ -756,13 +763,11 @@ def test_private_workspace_template_preserves_metadata_and_initializes_only_once
             create=True,
         ).workspace
 
-    assert first_workspace is not None
     assert second_workspace is not None
     assert first_workspace.root == second_workspace.root
-    assert copy_template.call_count == 1
-    copied_script = first_workspace.root / "bootstrap.sh"
-    assert copied_script.exists()
-    assert stat.S_IMODE(copied_script.stat().st_mode) == stat.S_IMODE(script_path.stat().st_mode)
+    assert copy_template.call_count == 2
+    assert copied_script.read_text(encoding="utf-8") == "#!/bin/sh\necho edited\n"
+    assert (first_workspace.root / "LATER.md").read_text(encoding="utf-8") == "later\n"
 
 
 def test_private_workspace_template_initializes_missing_files_in_partially_populated_root(tmp_path: Path) -> None:

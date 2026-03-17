@@ -100,7 +100,7 @@ agents:
       template_dir: ./mind_template
 ```
 
-In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded on first use. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. Use `private` for requester-isolated workspaces.
+In this setup, each requester gets their own private `mind_data/` root inside a canonical private-instance state root in shared storage. When `memory_backend: file` is enabled, that private root becomes the agent's effective file-memory root. If `./mind_template/` contains `MEMORY.md` and `memory/`, those files are copied into each private root on first use and then remain editable per requester. Later runs backfill newly added scaffold files without overwriting requester edits. MindRoom does not invent `MEMORY.md` or `memory/` for private agents. Put those files in your template directory if you want them scaffolded into each private root. If `memory_backend` is not `file`, `private` still creates private files and directories, but it does not make file memory active. Use `private` for requester-isolated workspaces.
 
 ### File layout
 
