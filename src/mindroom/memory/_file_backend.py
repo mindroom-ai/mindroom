@@ -417,8 +417,8 @@ def _find_file_anchor_memory_result(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,
@@ -585,8 +585,8 @@ def get_file_agent_memory(
     runtime_paths: RuntimePaths,
 ) -> MemoryResult | None:
     """Return one file-backed memory visible to the caller."""
-    for target_storage_path in effective_storage_paths_for_context(caller_context, storage_path, config):
-        for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+    for scope_user_id in sorted(get_allowed_memory_user_ids(caller_context, config)):
+        for target_storage_path in storage_paths_for_scope_user_id(scope_user_id, storage_path, config):
             resolution = resolve_file_memory_resolution(
                 target_storage_path,
                 config,

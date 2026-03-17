@@ -658,6 +658,61 @@ async def test_file_backend_team_search_ignores_agent_memory_file_path_override(
 
 
 @pytest.mark.asyncio
+async def test_mixed_private_team_can_crud_shared_member_memory_in_custom_memory_file_path(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Mixed private teams should still CRUD shared member file memory in custom workspaces."""
+    workspace = agent_workspace_root_path(storage_path, "calculator") / "calc-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_text("# Memory\n\nCalculator note.\n", encoding="utf-8")
+
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["calculator"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
+    config.agents["calculator"].memory_file_path = "calc-workspace"
+    config.memory.team_reads_member_memory = True
+    config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="!room:example.org:$thread",
+    )
+
+    with tool_execution_identity(execution_identity):
+        await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
+        memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
+
+        loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert loaded is not None
+        assert loaded["memory"] == "Calculator workspace note"
+
+        await update_agent_memory(
+            memory_id,
+            "Updated calculator workspace note",
+            ["general", "calculator"],
+            storage_path,
+            config,
+        )
+        updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert updated is not None
+        assert updated["memory"] == "Updated calculator workspace note"
+
+        await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
+        assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
+
+    memory_content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Calculator note." in memory_content
+    assert "Updated calculator workspace note" not in memory_content
+
+
+@pytest.mark.asyncio
 async def test_file_backend_prompt_includes_entrypoint(storage_path: Path, config: Config) -> None:
     config.memory.backend = "file"
     config.memory.file.path = str(storage_path / "memory-files")
