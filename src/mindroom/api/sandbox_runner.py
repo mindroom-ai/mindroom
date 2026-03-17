@@ -361,12 +361,14 @@ async def _execute_request_inprocess(
     execution_identity: ToolExecutionIdentity | None = None
     if request.execution_identity:
         execution_identity = ToolExecutionIdentity(**request.execution_identity)
-    config = _runtime_config_or_empty(effective_runtime_paths)
+    effective_config = config
+    if effective_runtime_paths is not runtime_paths:
+        effective_config = _runtime_config_or_empty(effective_runtime_paths)
 
     with tool_execution_identity(execution_identity):
         toolkit, entrypoint = _resolve_entrypoint(
             runtime_paths=effective_runtime_paths,
-            config=config,
+            config=effective_config,
             tool_name=request.tool_name,
             function_name=request.function_name,
             credential_overrides=request.credential_overrides or None,

@@ -455,6 +455,57 @@ def test_sandbox_runner_execution_env_excludes_runner_token_and_unrelated_host_e
     assert "CI_JOB_TOKEN" not in execution_env
 
 
+@pytest.mark.asyncio
+async def test_execute_request_inprocess_reuses_passed_config_without_execution_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In-process runner should not reparse config when runtime paths are unchanged."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
+    request = sandbox_runner_module.SandboxRunnerExecuteRequest(
+        tool_name="calculator",
+        function_name="add",
+        args=[1, 2],
+        kwargs={},
+    )
+
+    monkeypatch.setattr(sandbox_runner_module.sandbox_exec, "request_execution_env", lambda *_args: {})
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_runtime_config_or_empty",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("config should not be reloaded")),
+    )
+
+    class _Toolkit:
+        requires_connect = False
+
+    async def _entrypoint(*_args: object, **_kwargs: object) -> int:
+        return 3
+
+    def _fake_resolve_entrypoint(**_kwargs: object) -> tuple[_Toolkit, object]:
+        return _Toolkit(), _entrypoint
+
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        _fake_resolve_entrypoint,
+    )
+
+    response = await sandbox_runner_module._execute_request_inprocess(
+        request,
+        runtime_paths,
+        config,
+    )
+
+    assert response.ok is True
+    assert response.result == 3
+
+
 def test_worker_subprocess_env_preserves_parent_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
