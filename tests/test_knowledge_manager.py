@@ -1145,6 +1145,47 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
 
 
 @pytest.mark.asyncio
+async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime-bound shared lookups must not reuse a stale manager from another path."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_a = tmp_path / "docs-a"
+    docs_b = tmp_path / "docs-b"
+    docs_a.mkdir(parents=True, exist_ok=True)
+    docs_b.mkdir(parents=True, exist_ok=True)
+    (docs_a / "guide.md").write_text("Shared docs A.\n", encoding="utf-8")
+    (docs_b / "guide.md").write_text("Shared docs B.\n", encoding="utf-8")
+
+    config_a = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "config-a.yaml", tmp_path / "storage-a"),
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "config-b.yaml", tmp_path / "storage-b"),
+    )
+
+    try:
+        await initialize_knowledge_managers(config_a, runtime_paths_for(config_a))
+        assert get_knowledge_for_base("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is None
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_knowledge_managers_refreshes_runtime_paths_on_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

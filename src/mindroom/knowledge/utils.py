@@ -122,8 +122,6 @@ def get_knowledge_for_base(
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
         )
-    if manager is None and config.get_private_knowledge_base_agent(base_id) is None:
-        manager = get_knowledge_manager(base_id)
     return manager.get_knowledge() if manager is not None else None
 
 
