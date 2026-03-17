@@ -549,7 +549,6 @@ class DockerProjectionManager:
             "shared",
             "user",
             "user_agent",
-            "room_thread",
         }:
             return raw_worker_scope
         return None
@@ -560,7 +559,7 @@ class DockerProjectionManager:
         default_worker_scope: str | None,
     ) -> str | None:
         raw_worker_scope = raw_agent.get("worker_scope")
-        if raw_worker_scope in {"shared", "user", "user_agent", "room_thread"}:
+        if raw_worker_scope in {"shared", "user", "user_agent"}:
             return cast("str", raw_worker_scope)
         return default_worker_scope
 
