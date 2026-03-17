@@ -13,7 +13,7 @@ import pytest
 from mindroom.constants import deserialize_runtime_paths, resolve_primary_runtime_paths
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    private_instance_state_root_path,
+    _private_instance_state_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
@@ -635,7 +635,7 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
     mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
     expected_private_root = str(
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             Path("/app/worker"),
             worker_key=worker_key,
             agent_name="mind",

@@ -60,7 +60,7 @@ async def ensure_request_knowledge_managers(
     return managers
 
 
-def get_knowledge_for_base(
+def _get_knowledge_for_base(
     base_id: str,
     *,
     config: Config,
@@ -96,7 +96,7 @@ def get_agent_knowledge(
     return resolve_agent_knowledge(
         agent_name,
         config,
-        lambda base_id: get_knowledge_for_base(
+        lambda base_id: _get_knowledge_for_base(
             base_id,
             config=config,
             runtime_paths=runtime_paths,

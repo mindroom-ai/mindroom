@@ -22,8 +22,8 @@ from mindroom.memory.functions import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_state_root_path,
-    private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
@@ -237,7 +237,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
         )
         assert deleted is None
 
-    expected_private_path = private_instance_state_root_path(
+    expected_private_path = _private_instance_state_root_path(
         storage_path,
         worker_key=worker_key,
         agent_name="general",

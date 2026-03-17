@@ -270,7 +270,7 @@ def _matches_root_glob(relative_path: str, pattern: str) -> bool:
 
 
 @dataclass(frozen=True)
-class KnowledgeManagerKey:
+class _KnowledgeManagerKey:
     """Stable cache key for one effective knowledge manager instance."""
 
     base_id: str
@@ -279,31 +279,31 @@ class KnowledgeManagerKey:
 
 
 @dataclass(frozen=True)
-class ResolvedKnowledgeManagerTarget:
+class _ResolvedKnowledgeManagerTarget:
     """Resolved binding plus stable manager key for one effective knowledge manager."""
 
-    key: KnowledgeManagerKey
+    key: _KnowledgeManagerKey
     binding: ResolvedKnowledgeBinding
 
 
 def _knowledge_manager_key_for_binding(
     base_id: str,
     binding: ResolvedKnowledgeBinding,
-) -> KnowledgeManagerKey:
-    return KnowledgeManagerKey(
+) -> _KnowledgeManagerKey:
+    return _KnowledgeManagerKey(
         base_id=base_id,
         storage_path=str(binding.storage_root.resolve()),
         knowledge_path=str(binding.knowledge_path.resolve()),
     )
 
 
-def _current_knowledge_manager_key(manager: KnowledgeManager) -> KnowledgeManagerKey:
+def _current_knowledge_manager_key(manager: KnowledgeManager) -> _KnowledgeManagerKey:
     storage_path = manager.storage_path
     knowledge_path = manager.knowledge_path
     if storage_path is None or knowledge_path is None:
         msg = f"Knowledge manager '{manager.base_id}' requires resolved storage_path and knowledge_path"
         raise ValueError(msg)
-    return KnowledgeManagerKey(
+    return _KnowledgeManagerKey(
         base_id=manager.base_id,
         storage_path=str(storage_path.resolve()),
         knowledge_path=str(knowledge_path.resolve()),
@@ -318,7 +318,7 @@ def _resolve_knowledge_manager_target(
     execution_identity: ToolExecutionIdentity | None = None,
     start_watchers: bool,
     create: bool = False,
-) -> ResolvedKnowledgeManagerTarget:
+) -> _ResolvedKnowledgeManagerTarget:
     binding = resolve_knowledge_binding(
         base_id,
         config,
@@ -329,7 +329,7 @@ def _resolve_knowledge_manager_target(
     )
     if create:
         _ensure_knowledge_directory_ready(binding.knowledge_path)
-    return ResolvedKnowledgeManagerTarget(
+    return _ResolvedKnowledgeManagerTarget(
         key=_knowledge_manager_key_for_binding(base_id, binding),
         binding=binding,
     )
@@ -1101,7 +1101,7 @@ class KnowledgeManager:
 
 _shared_knowledge_managers: dict[str, KnowledgeManager] = {}
 _shared_knowledge_manager_init_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
-_request_knowledge_manager_init_locks: weakref.WeakValueDictionary[KnowledgeManagerKey, asyncio.Lock] = (
+_request_knowledge_manager_init_locks: weakref.WeakValueDictionary[_KnowledgeManagerKey, asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
 
@@ -1127,7 +1127,7 @@ def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
     return lock
 
 
-def _request_knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
+def _request_knowledge_manager_init_lock(key: _KnowledgeManagerKey) -> asyncio.Lock:
     lock = _request_knowledge_manager_init_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
@@ -1138,7 +1138,7 @@ def _request_knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lo
 def _shared_manager_matches_target(
     manager: KnowledgeManager,
     *,
-    target: ResolvedKnowledgeManagerTarget,
+    target: _ResolvedKnowledgeManagerTarget,
     config: Config,
 ) -> bool:
     binding = target.binding
@@ -1151,7 +1151,7 @@ def _shared_manager_matches_target(
 
 def _lookup_shared_manager_for_target(
     *,
-    target: ResolvedKnowledgeManagerTarget,
+    target: _ResolvedKnowledgeManagerTarget,
     config: Config,
 ) -> KnowledgeManager | None:
     manager = _shared_knowledge_managers.get(target.key.base_id)
@@ -1164,7 +1164,7 @@ def _lookup_shared_manager_for_target(
 
 async def _create_knowledge_manager_for_target(
     *,
-    target: ResolvedKnowledgeManagerTarget,
+    target: _ResolvedKnowledgeManagerTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
@@ -1211,7 +1211,7 @@ async def _create_knowledge_manager_for_target(
 
 async def _ensure_shared_knowledge_manager_for_target(
     *,
-    target: ResolvedKnowledgeManagerTarget,
+    target: _ResolvedKnowledgeManagerTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
@@ -1262,7 +1262,7 @@ async def _ensure_shared_knowledge_manager_for_target(
 
 async def _create_request_knowledge_manager_for_target(
     *,
-    target: ResolvedKnowledgeManagerTarget,
+    target: _ResolvedKnowledgeManagerTarget,
     config: Config,
     runtime_paths: RuntimePaths,
     reindex_on_create: bool,
@@ -1357,7 +1357,7 @@ async def initialize_shared_knowledge_managers(
     return managers
 
 
-def get_shared_knowledge_manager(base_id: str) -> KnowledgeManager | None:
+def _get_shared_knowledge_manager(base_id: str) -> KnowledgeManager | None:
     """Return the current shared knowledge manager for a base ID, if one exists."""
     return _shared_knowledge_managers.get(base_id)
 

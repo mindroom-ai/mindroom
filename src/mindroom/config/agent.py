@@ -13,7 +13,7 @@ from mindroom.config.models import AgentLearningMode  # noqa: TC001
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 CultureMode = Literal["automatic", "agentic", "manual"]
-PrivateWorkerScope = Literal["user", "user_agent"]
+_PrivateWorkerScope = Literal["user", "user_agent"]
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset({"sessions", "learning", "knowledge_db", "chroma", "culture"})
 
 
@@ -99,7 +99,7 @@ class AgentPrivateKnowledgeConfig(BaseModel):
 class AgentPrivateConfig(BaseModel):
     """Requester-private materialized state for one shared agent definition."""
 
-    per: PrivateWorkerScope = Field(
+    per: _PrivateWorkerScope = Field(
         description="Worker boundary that gets its own private copy of this agent's state",
     )
     root: str | None = Field(

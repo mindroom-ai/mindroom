@@ -14,10 +14,10 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_state_root_path,
     agent_workspace_root_path,
     get_tool_execution_identity,
-    private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
@@ -411,7 +411,7 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
     alice_memory_file = (
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             storage_path,
             worker_key=alice_worker_key,
             agent_name="general",
@@ -465,7 +465,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
     worker_key = resolve_worker_key("user", identity)
     assert worker_key is not None
     memory_file = (
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             storage_path,
             worker_key=worker_key,
             agent_name="general",
@@ -580,7 +580,7 @@ async def test_private_file_memory_crud_uses_canonical_private_instance_root(
     worker_key = resolve_worker_key("user", identity)
     assert worker_key is not None
     memory_file = (
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             storage_path,
             worker_key=worker_key,
             agent_name="general",

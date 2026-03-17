@@ -43,8 +43,8 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_workspace_root_path,
-    private_instance_state_root_path,
     resolve_worker_key,
     worker_dir_name,
 )
@@ -1518,7 +1518,7 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
         worker_key=worker_key,
         tool_init_overrides={
             "base_dir": str(
-                private_instance_state_root_path(
+                _private_instance_state_root_path(
                     runtime_paths.storage_root,
                     worker_key=worker_key,
                     agent_name="mind",
@@ -1570,7 +1570,7 @@ def test_prepare_worker_request_rejects_sibling_private_agent_root_for_user_agen
             worker_key=worker_key,
             tool_init_overrides={
                 "base_dir": str(
-                    private_instance_state_root_path(
+                    _private_instance_state_root_path(
                         runtime_paths.storage_root,
                         worker_key=worker_key,
                         agent_name="other_agent",

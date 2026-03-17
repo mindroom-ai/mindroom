@@ -32,10 +32,10 @@ from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_state_root_path,
     agent_workspace_root_path,
     private_instance_scope_root_path,
-    private_instance_state_root_path,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     resolve_unscoped_worker_key,
@@ -45,7 +45,7 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
-from mindroom.workspaces import copy_workspace_template
+from mindroom.workspaces import _copy_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -500,7 +500,7 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     )
     worker_key = resolve_worker_key("user", identity, agent_name="general")
     assert worker_key is not None
-    canonical_state_root = private_instance_state_root_path(
+    canonical_state_root = _private_instance_state_root_path(
         runtime_paths.storage_root,
         worker_key=worker_key,
         agent_name="general",
@@ -695,7 +695,7 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert expected_worker_key is not None
     assert runtime.is_private is True
     assert runtime.worker_key == expected_worker_key
-    assert runtime.state_root == private_instance_state_root_path(
+    assert runtime.state_root == _private_instance_state_root_path(
         tmp_path,
         worker_key=expected_worker_key,
         agent_name="general",
@@ -732,7 +732,7 @@ def test_private_workspace_template_preserves_metadata_and_backfills_missing_fil
         session_id="session-1",
     )
 
-    with patch("mindroom.workspaces.copy_workspace_template", wraps=copy_workspace_template) as copy_template:
+    with patch("mindroom.workspaces._copy_workspace_template", wraps=_copy_workspace_template) as copy_template:
         first_workspace = resolve_agent_runtime(
             "general",
             bound_config,
@@ -1348,7 +1348,7 @@ def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_ro
         tmp_path,
         worker_key,
         private_agent_names=frozenset({"mind"}),
-    ) == (private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
+    ) == (_private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
@@ -1723,7 +1723,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
     alice_workspace = (
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             tmp_path,
             worker_key=alice_worker_key,
             agent_name="general",
@@ -1749,7 +1749,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
     bob_workspace = (
-        private_instance_state_root_path(
+        _private_instance_state_root_path(
             tmp_path,
             worker_key=bob_worker_key,
             agent_name="general",

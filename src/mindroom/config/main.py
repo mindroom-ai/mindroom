@@ -223,7 +223,7 @@ def _get_unsupported_team_agents_for_agents(
     return unsupported_agents
 
 
-def team_agent_eligibility_reason(
+def _team_agent_eligibility_reason(
     agent_name: str,
     *,
     private_targets: tuple[str, ...] | None,
@@ -272,7 +272,7 @@ def team_eligibility_reasons_for_agents(
     """Return editor-facing team-eligibility reasons for all configured agents."""
     closure_cache: dict[str, frozenset[str]] = {}
     return {
-        agent_name: team_agent_eligibility_reason(
+        agent_name: _team_agent_eligibility_reason(
             agent_name,
             private_targets=_get_private_team_targets_for_agents(
                 agent_name,

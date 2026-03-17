@@ -21,8 +21,8 @@ from mindroom.memory.auto_flush import (
 from mindroom.memory.functions import add_agent_memory, append_agent_daily_memory
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    _private_instance_state_root_path,
     agent_workspace_root_path,
-    private_instance_state_root_path,
     resolve_worker_key,
     tool_execution_identity,
 )
@@ -944,7 +944,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
     assert worker_key is not None
     private_daily_files = list(
         (
-            private_instance_state_root_path(
+            _private_instance_state_root_path(
                 tmp_path,
                 worker_key=worker_key,
                 agent_name="mind",

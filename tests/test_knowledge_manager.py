@@ -18,17 +18,17 @@ from mindroom.knowledge.manager import (
     _FAILED_SIGNATURE_RETRY_NS,
     KnowledgeManager,
     _create_embedder,
+    _get_shared_knowledge_manager,
     _shared_knowledge_managers,
     ensure_agent_knowledge_managers,
-    get_shared_knowledge_manager,
     get_shared_knowledge_manager_for_config,
     initialize_shared_knowledge_managers,
     shutdown_shared_knowledge_managers,
 )
-from mindroom.knowledge.utils import get_knowledge_for_base
+from mindroom.knowledge.utils import _get_knowledge_for_base
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    private_instance_state_root_path,
+    _private_instance_state_root_path,
     resolve_worker_key,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -680,7 +680,7 @@ async def test_initialize_shared_knowledge_managers_maintains_registry(
 
     managers = await initialize_shared_knowledge_managers(config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research", "legal"}
-    assert get_shared_knowledge_manager("research") is managers["research"]
+    assert _get_shared_knowledge_manager("research") is managers["research"]
 
     updated_config = Config(
         agents={},
@@ -692,7 +692,7 @@ async def test_initialize_shared_knowledge_managers_maintains_registry(
 
     managers = await initialize_shared_knowledge_managers(updated_config, runtime_paths, reindex_on_create=False)
     assert set(managers) == {"research"}
-    assert get_shared_knowledge_manager("legal") is None
+    assert _get_shared_knowledge_manager("legal") is None
 
     await shutdown_shared_knowledge_managers()
 
@@ -845,7 +845,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
             execution_identity=bob_identity,
         )
 
-        assert get_shared_knowledge_manager(private_base_id) is None
+        assert _get_shared_knowledge_manager(private_base_id) is None
 
         alice_manager = alice_managers[private_base_id]
         bob_manager = bob_managers[private_base_id]
@@ -860,7 +860,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
         assert bob_worker_key is not None
 
         alice_workspace = (
-            private_instance_state_root_path(
+            _private_instance_state_root_path(
                 tmp_path,
                 worker_key=alice_worker_key,
                 agent_name="mind",
@@ -868,7 +868,7 @@ async def test_private_knowledge_managers_copy_template_and_isolate_private_inst
             / "mind_data"
         )
         bob_workspace = (
-            private_instance_state_root_path(
+            _private_instance_state_root_path(
                 tmp_path,
                 worker_key=bob_worker_key,
                 agent_name="mind",
@@ -1111,7 +1111,7 @@ async def test_private_request_knowledge_managers_are_not_registered_globally(
         )
         scoped_manager = managers[private_base_id]
 
-        resolved_manager = get_shared_knowledge_manager(private_base_id)
+        resolved_manager = _get_shared_knowledge_manager(private_base_id)
         resolved_for_config = get_shared_knowledge_manager_for_config(
             private_base_id,
             config=config,
@@ -1155,7 +1155,7 @@ async def test_get_knowledge_for_base_reuses_shared_manager_created_by_agent_ens
     try:
         managers = await ensure_agent_knowledge_managers("researcher", config, runtime_paths_for(config))
         manager = managers["docs"]
-        knowledge = get_knowledge_for_base("docs", config=config, runtime_paths=runtime_paths_for(config))
+        knowledge = _get_knowledge_for_base("docs", config=config, runtime_paths=runtime_paths_for(config))
 
         assert knowledge is manager.get_knowledge()
     finally:
@@ -1198,7 +1198,7 @@ async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager
 
     try:
         await initialize_shared_knowledge_managers(config_a, runtime_paths_for(config_a))
-        assert get_knowledge_for_base("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is None
+        assert _get_knowledge_for_base("docs", config=config_b, runtime_paths=runtime_paths_for(config_b)) is None
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -1247,7 +1247,7 @@ async def test_get_knowledge_for_base_treats_stale_lookup_as_cache_miss(
     try:
         managers = await initialize_shared_knowledge_managers(config_b, runtime_paths_for(config_b))
 
-        knowledge = get_knowledge_for_base(
+        knowledge = _get_knowledge_for_base(
             "docs",
             config=config_b,
             runtime_paths=runtime_paths_for(config_b),
@@ -1743,7 +1743,7 @@ async def test_private_request_knowledge_managers_are_created_fresh_per_call(
         )
 
         assert first[private_base_id] is not second[private_base_id]
-        assert get_shared_knowledge_manager(private_base_id) is None
+        assert _get_shared_knowledge_manager(private_base_id) is None
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -1814,7 +1814,7 @@ async def test_request_bound_private_manager_stays_usable_after_later_private_re
             execution_identity=bob_identity,
         )
         assert (
-            get_knowledge_for_base(
+            _get_knowledge_for_base(
                 private_base_id,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -1824,7 +1824,7 @@ async def test_request_bound_private_manager_stays_usable_after_later_private_re
         )
 
         assert (
-            get_knowledge_for_base(
+            _get_knowledge_for_base(
                 private_base_id,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -1880,7 +1880,7 @@ async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_pr
             execution_identity=alice_identity,
         )
         assert (
-            get_knowledge_for_base(
+            _get_knowledge_for_base(
                 private_base_id,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -1911,7 +1911,7 @@ async def test_degraded_request_scoped_knowledge_preserves_shared_manager_fallba
         managers = await initialize_shared_knowledge_managers(config, runtime_paths_for(config))
 
         assert (
-            get_knowledge_for_base(
+            _get_knowledge_for_base(
                 "research",
                 config=config,
                 runtime_paths=runtime_paths_for(config),

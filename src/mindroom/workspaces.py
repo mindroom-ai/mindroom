@@ -80,7 +80,7 @@ def validate_workspace_template_dir(template_dir: Path) -> Path:
     return resolved_template_dir
 
 
-def copy_workspace_template(
+def _copy_workspace_template(
     workspace_path: Path,
     *,
     template_dir: Path,
@@ -112,7 +112,7 @@ def ensure_workspace_template(
     if template != "mind":
         msg = f"Unsupported workspace template: {template}"
         raise ValueError(msg)
-    copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
+    _copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)
     (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
 
 
@@ -191,7 +191,7 @@ def _resolve_workspace(
         root.mkdir(parents=True, exist_ok=True)
         if template_dir is not None:
             assert template_dir is not None
-            copy_workspace_template(root, template_dir=template_dir)
+            _copy_workspace_template(root, template_dir=template_dir)
 
     context_files = tuple(
         resolve_workspace_relative_path(

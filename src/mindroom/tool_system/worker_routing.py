@@ -50,7 +50,7 @@ class ToolExecutionIdentity:
 
 
 @dataclass(frozen=True)
-class ResolvedWorkerExecution:
+class _ResolvedWorkerExecution:
     """Resolved worker execution scope from explicit worker-scope policy."""
 
     worker_scope: WorkerScope | None
@@ -145,7 +145,7 @@ def resolve_worker_execution_scope(
     agent_name: str | None = None,
     tenant_id: str | None = None,
     account_id: str | None = None,
-) -> ResolvedWorkerExecution:
+) -> _ResolvedWorkerExecution:
     """Resolve worker execution identity and key from explicit scope inputs."""
     resolved_execution_identity = resolve_execution_identity_for_worker_scope(
         worker_scope,
@@ -161,7 +161,7 @@ def resolve_worker_execution_scope(
             resolved_execution_identity,
             agent_name=agent_name,
         )
-    return ResolvedWorkerExecution(
+    return _ResolvedWorkerExecution(
         worker_scope=worker_scope,
         execution_identity=resolved_execution_identity,
         worker_key=worker_key,
@@ -471,7 +471,7 @@ def private_instance_scope_root_path(base_storage_path: Path, worker_key: str) -
     return resolved_base_path / _PRIVATE_INSTANCE_ROOT_DIRNAME / worker_dir_name(worker_key)
 
 
-def private_instance_state_root_path(
+def _private_instance_state_root_path(
     base_storage_path: Path,
     *,
     worker_key: str,
@@ -527,7 +527,7 @@ def visible_state_roots_for_worker_key(
         return ()
     if scope == "user_agent" and agent_name in private_agent_names:
         return (
-            private_instance_state_root_path(
+            _private_instance_state_root_path(
                 base_storage_path,
                 worker_key=worker_key,
                 agent_name=agent_name,

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class ResolvedAgentExecution:
+class _ResolvedAgentExecution:
     """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
 
     agent_name: str
@@ -73,7 +73,7 @@ def _knowledge_refresh_enabled(
     return file_watch_enabled or has_git_sync
 
 
-def resolve_private_scope_root(
+def _resolve_private_scope_root(
     *,
     runtime_paths: RuntimePaths,
     worker_key: str,
@@ -103,7 +103,7 @@ def resolve_private_requester_scope_root(
         if requester_worker_key is None:
             msg = "Requester-scoped private root requires a requester identity"
             raise ValueError(msg)
-    return resolve_private_scope_root(
+    return _resolve_private_scope_root(
         runtime_paths=runtime_paths,
         worker_key=requester_worker_key,
     )
@@ -117,7 +117,7 @@ def _resolved_private_state_root(
 ) -> Path:
     """Return one canonical private-instance state root and reject symlink escapes."""
     return resolve_relative_path_within_root(
-        resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key),
+        _resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key),
         agent_name,
         field_name="Private state root",
         root_label="private scope root",
@@ -128,7 +128,7 @@ def resolve_agent_execution(
     agent_name: str,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> ResolvedAgentExecution:
+) -> _ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
     agent_config = config.get_agent(agent_name)
     execution_scope = config.get_agent_execution_scope(agent_name)
@@ -145,7 +145,7 @@ def resolve_agent_execution(
         if resolved_worker_execution.worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
             raise ValueError(msg)
-    return ResolvedAgentExecution(
+    return _ResolvedAgentExecution(
         agent_name=agent_name,
         is_private=is_private,
         execution_scope=execution_scope,
