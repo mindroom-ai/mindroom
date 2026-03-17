@@ -2748,6 +2748,8 @@ class TestAgentBot:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
     @patch("mindroom.config.main.Config.from_yaml")
+    @patch("mindroom.teams.get_agent_knowledge")
+    @patch("mindroom.teams.create_agent")
     @patch("mindroom.teams.get_model_instance")
     @patch("mindroom.teams.Team.arun")
     @patch("mindroom.bot.ai_response")
@@ -2764,6 +2766,8 @@ class TestAgentBot:
         mock_ai_response: AsyncMock,
         mock_team_arun: AsyncMock,
         mock_get_model_instance: MagicMock,
+        mock_create_agent: MagicMock,
+        mock_get_agent_knowledge: MagicMock,
         mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
@@ -2777,6 +2781,11 @@ class TestAgentBot:
         # Mock get_model_instance to return a mock model
         mock_model = Ollama(id="test-model")
         mock_get_model_instance.return_value = mock_model
+        mock_get_agent_knowledge.return_value = None
+        fake_member = MagicMock()
+        fake_member.name = "MockAgent"
+        fake_member.instructions = []
+        mock_create_agent.return_value = fake_member
 
         # Mock get_latest_thread_event_id_if_needed to return a valid event ID
         mock_get_latest_thread.return_value = "latest_thread_event"

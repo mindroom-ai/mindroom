@@ -20,11 +20,12 @@ from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
 from agno.team import Team
 from pydantic import BaseModel, Field
 
-from mindroom import agent_prompts
+from mindroom.agents import create_agent
 from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.knowledge.utils import ensure_request_knowledge_managers, get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -38,15 +39,17 @@ from mindroom.tool_system.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
     import nio
     from agno.models.response import ToolExecution
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.manager import KnowledgeManager
     from mindroom.matrix.identity import MatrixID
     from mindroom.orchestrator import MultiAgentOrchestrator
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 logger = get_logger(__name__)
@@ -347,33 +350,17 @@ async def decide_team_formation(
         TeamFormationDecision with team formation decision
 
     """
-    team_agents: list[MatrixID] = []
-
-    # Case 1: Multiple agents explicitly tagged
-    if len(tagged_agents) > 1:
-        logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
-        team_agents = tagged_agents
-
-    # Case 2: No agents tagged but multiple were mentioned before in thread
-    elif not tagged_agents and len(all_mentioned_in_thread) > 1:
-        logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
-        team_agents = all_mentioned_in_thread
-
-    # Case 3: No agents tagged but multiple in thread
-    elif not tagged_agents and len(agents_in_thread) > 1:
-        logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
-        team_agents = agents_in_thread
-
-    # Case 4: DM room with multiple agents and no mentions (main timeline only)
-    # We avoid forming a team inside an existing thread to preserve
-    # single-agent ownership unless the thread itself involves multiple agents
-    elif is_dm_room and not is_thread and not tagged_agents and room and config:
-        available_agents = available_agents_in_room
-        if available_agents is None:
-            available_agents = get_available_agents_in_room(room, config, runtime_paths)
-        if len(available_agents) > 1:
-            logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
-            team_agents = available_agents
+    team_agents = _candidate_team_agents(
+        tagged_agents,
+        all_mentioned_in_thread,
+        agents_in_thread,
+        room,
+        config,
+        runtime_paths,
+        is_dm_room=is_dm_room,
+        is_thread=is_thread,
+        available_agents_in_room=available_agents_in_room,
+    )
 
     if not team_agents:
         return TeamFormationDecision(
@@ -381,6 +368,15 @@ async def decide_team_formation(
             agents=[],
             mode=TeamMode.COLLABORATE,
         )
+
+    if config is not None:
+        team_agents = _filter_supported_team_agents(team_agents, config, runtime_paths)
+        if len(team_agents) < 2:
+            return TeamFormationDecision(
+                should_form_team=False,
+                agents=[],
+                mode=TeamMode.COLLABORATE,
+            )
 
     is_first_agent = min(team_agents, key=lambda x: x.username) == agent
     # Only do this AI call for the first agent to avoid duplication
@@ -395,6 +391,41 @@ async def decide_team_formation(
         logger.info(f"Using hardcoded mode selection: {mode.value}")
 
     return TeamFormationDecision(should_form_team=True, agents=team_agents, mode=mode)
+
+
+def _candidate_team_agents(
+    tagged_agents: list[MatrixID],
+    all_mentioned_in_thread: list[MatrixID],
+    agents_in_thread: list[MatrixID],
+    room: nio.MatrixRoom,
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+    *,
+    is_dm_room: bool,
+    is_thread: bool,
+    available_agents_in_room: list[MatrixID] | None,
+) -> list[MatrixID]:
+    """Return the candidate team members for one response."""
+    if len(tagged_agents) > 1:
+        logger.info(f"Team formation needed for tagged agents: {tagged_agents}")
+        return tagged_agents
+    if not tagged_agents and len(all_mentioned_in_thread) > 1:
+        logger.info(f"Team formation needed for previously mentioned agents: {all_mentioned_in_thread}")
+        return all_mentioned_in_thread
+    if not tagged_agents and len(agents_in_thread) > 1:
+        logger.info(f"Team formation needed for thread agents: {agents_in_thread}")
+        return agents_in_thread
+    if not (is_dm_room and not is_thread and not tagged_agents and room and config):
+        return []
+
+    available_agents = available_agents_in_room
+    if available_agents is None:
+        available_agents = get_available_agents_in_room(room, config, runtime_paths)
+    if len(available_agents) <= 1:
+        return []
+
+    logger.info(f"Team formation needed for DM room with multiple agents: {available_agents}")
+    return available_agents
 
 
 def _build_prompt_with_context(
@@ -429,29 +460,75 @@ def _build_prompt_with_context(
     return message
 
 
+def _filter_supported_team_agents(
+    agent_ids: list[MatrixID],
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Return only team-eligible agents from one candidate set."""
+    supported_agents: list[MatrixID] = []
+    skipped_agents: list[str] = []
+    for agent_id in agent_ids:
+        agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
+        if agent_name == ROUTER_AGENT_NAME:
+            continue
+        agent_config = config.agents.get(agent_name)
+        if agent_config is None or agent_config.private is not None:
+            skipped_agents.append(agent_name)
+            continue
+        supported_agents.append(agent_id)
+    if skipped_agents:
+        logger.info(
+            "Skipping unsupported team members during ad hoc team formation",
+            skipped_agents=skipped_agents,
+        )
+    return supported_agents
+
+
 def _get_agents_from_orchestrator(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
 ) -> list[Agent]:
     """Get Agent instances from orchestrator for the given agent names."""
+    assert orchestrator.config is not None
     agents: list[Agent] = []
+
+    def _shared_manager(base_id: str) -> KnowledgeManager | None:
+        return orchestrator.knowledge_managers.get(base_id)
+
+    def _on_missing_agent_bases(agent_name: str, missing_base_ids: list[str]) -> None:
+        logger.warning(
+            "Knowledge bases not available for team agent",
+            agent_name=agent_name,
+            knowledge_bases=missing_base_ids,
+        )
+
     for name in agent_names:
-        agent_bot = orchestrator.agent_bots.get(name)
-        if agent_bot is None:
+        if name not in orchestrator.agent_bots:
             logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
             continue
-        agent = agent_bot.agent
-
-        if agent is None:
-            logger.warning(f"Agent bot '{name}' has no agent instance")
-            continue
-        # Remove interactive question prompts to prevent emoji conflicts in team responses
-        if isinstance(agent.instructions, list):
-            agent.instructions = [
-                instr
-                for instr in agent.instructions
-                if isinstance(instr, str) and instr != agent_prompts.INTERACTIVE_QUESTION_PROMPT
-            ]
+        knowledge = get_agent_knowledge(
+            name,
+            orchestrator.config,
+            orchestrator.runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=_shared_manager,
+            execution_identity=execution_identity,
+            on_missing_bases=lambda missing_base_ids, agent_name=name: _on_missing_agent_bases(
+                agent_name,
+                missing_base_ids,
+            ),
+        )
+        agent = create_agent(
+            name,
+            orchestrator.config,
+            orchestrator.runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=knowledge,
+            include_interactive_questions=False,
+        )
         agents.append(agent)
 
     return agents
@@ -481,13 +558,20 @@ def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
 def _resolve_team_members(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
 ) -> _ResolvedTeamMembers:
     """Resolve the materialized team-member set for one request."""
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
     orchestrator.config.assert_team_agents_supported(requested_agent_names)
     available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
-    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
+    agents = _get_agents_from_orchestrator(
+        available_agent_names,
+        orchestrator,
+        execution_identity,
+        request_knowledge_managers=request_knowledge_managers,
+    )
     display_names = [str(agent.name) for agent in agents if agent.name]
     return _ResolvedTeamMembers(
         requested_agent_names=requested_agent_names,
@@ -495,6 +579,30 @@ def _resolve_team_members(
         agents=agents,
         display_names=display_names,
     )
+
+
+async def _ensure_request_team_knowledge_managers(
+    agent_names: list[str],
+    orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
+) -> dict[str, KnowledgeManager]:
+    """Resolve request-scoped knowledge managers needed for one team request."""
+    if execution_identity is None:
+        return {}
+    assert orchestrator.config is not None
+    try:
+        return await ensure_request_knowledge_managers(
+            agent_names,
+            config=orchestrator.config,
+            runtime_paths=orchestrator.runtime_paths,
+            execution_identity=execution_identity,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to initialize request-scoped knowledge managers for team request",
+            agent_names=agent_names,
+        )
+        return {}
 
 
 def _create_team_instance(
@@ -579,6 +687,7 @@ async def team_response(
     mode: TeamMode,
     message: str,
     orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
     media: MediaInputs | None = None,
@@ -587,7 +696,19 @@ async def team_response(
 ) -> str:
     """Create a team and execute response."""
     assert orchestrator.config is not None
-    team_members = _resolve_team_members(agent_names, orchestrator)
+    requested_agent_names = _requested_team_agent_names(agent_names)
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    request_knowledge_managers = await _ensure_request_team_knowledge_managers(
+        requested_agent_names,
+        orchestrator,
+        execution_identity,
+    )
+    team_members = _resolve_team_members(
+        agent_names,
+        orchestrator,
+        execution_identity,
+        request_knowledge_managers=request_knowledge_managers,
+    )
     agents = team_members.agents
     if not agents:
         return _NO_AGENTS_RESPONSE
@@ -710,6 +831,7 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     agent_ids: list[MatrixID],
     message: str,
     orchestrator: MultiAgentOrchestrator,
+    execution_identity: ToolExecutionIdentity | None,
     mode: TeamMode = TeamMode.COORDINATE,
     thread_history: list[dict] | None = None,
     model_name: str | None = None,
@@ -728,7 +850,17 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     requested_agent_names = [
         mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids
     ]
-    team_members = _resolve_team_members(requested_agent_names, orchestrator)
+    request_knowledge_managers = await _ensure_request_team_knowledge_managers(
+        requested_agent_names,
+        orchestrator,
+        execution_identity,
+    )
+    team_members = _resolve_team_members(
+        requested_agent_names,
+        orchestrator,
+        execution_identity,
+        request_knowledge_managers=request_knowledge_managers,
+    )
     agent_names = team_members.display_names
     display_names = team_members.display_names
 

@@ -215,9 +215,13 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
+@patch("mindroom.teams.get_agent_knowledge")
+@patch("mindroom.teams.create_agent")
 @patch("mindroom.teams.Team.arun")
 async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
     mock_team_arun: AsyncMock,
+    mock_create_agent: MagicMock,
+    mock_get_agent_knowledge: MagicMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
 ) -> None:
@@ -225,6 +229,11 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-3-5-haiku-latest")}
+    mock_get_agent_knowledge.return_value = None
+    fake_member = MagicMock()
+    fake_member.name = "MockAgent"
+    fake_member.instructions = []
+    mock_create_agent.return_value = fake_member
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.get_domain(runtime_paths_for(mock_config))
