@@ -1188,7 +1188,7 @@ def test_visible_state_roots_for_user_worker_include_private_instance_namespace(
 def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_root(
     tmp_path: Path,
 ) -> None:
-    """Private requester-scoped workers should only see their private-instance namespace."""
+    """Private requester-scoped workers should only see their addressed private state root."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="mind",
@@ -1206,7 +1206,7 @@ def test_visible_state_roots_for_private_user_agent_workers_hide_shared_agent_ro
         tmp_path,
         worker_key,
         private_agent_names=frozenset({"mind"}),
-    ) == (private_instance_scope_root_path(tmp_path, worker_key),)
+    ) == (private_instance_state_root_path(tmp_path, worker_key=worker_key, agent_name="mind"),)
 
 
 def test_shared_storage_root_does_not_peel_false_positive_agents_parent(tmp_path: Path) -> None:
