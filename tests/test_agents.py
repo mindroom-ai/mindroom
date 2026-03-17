@@ -2250,3 +2250,92 @@ def test_create_agent_culture_uses_agent_model_when_default_missing(
     assert mock_storage.call_count >= 2
     assert mock_culture_manager_class.call_args is not None
     assert mock_culture_manager_class.call_args.kwargs["model"] is model
+
+
+@patch("mindroom.agents.SqliteDb")
+@patch("mindroom.agents.CultureManager")
+@patch("mindroom.agents.Agent")
+def test_create_private_agent_scopes_culture_storage_per_requester(
+    mock_agent_class: MagicMock,
+    mock_culture_manager_class: MagicMock,
+    mock_storage: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """Private agents should not share culture storage across requester instances."""
+    _CULTURE_MANAGER_CACHE.clear()
+    config = Config(
+        agents={
+            "general": AgentConfig(
+                display_name="GeneralAgent",
+                role="General assistant",
+                learning=False,
+                include_default_tools=False,
+                private=AgentPrivateConfig(per="user", root="mind_data"),
+            ),
+        },
+        cultures={
+            "engineering": CultureConfig(
+                description="Engineering best practices",
+                agents=["general"],
+                mode="automatic",
+            ),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
+        },
+    )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    bound_config = _bind_runtime_paths(config, runtime_paths)
+    model = MagicMock()
+    model.id = "gpt-4o-mini"
+    created_culture_managers = [MagicMock(name="alice_culture_manager"), MagicMock(name="bob_culture_manager")]
+    mock_culture_manager_class.side_effect = created_culture_managers
+
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    bob_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@bob:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+    with patch("mindroom.ai.get_model_instance", return_value=model):
+        with tool_execution_identity(alice_identity):
+            _create_agent_for_test(
+                "general",
+                config=bound_config,
+                include_interactive_questions=False,
+            )
+        with tool_execution_identity(bob_identity):
+            _create_agent_for_test(
+                "general",
+                config=bound_config,
+                include_interactive_questions=False,
+            )
+
+    assert mock_culture_manager_class.call_count == 2
+    culture_db_calls = [
+        str(call.kwargs.get("db_file", ""))
+        for call in mock_storage.call_args_list
+        if str(call.kwargs.get("db_file", "")).endswith("/culture/engineering.db")
+    ]
+    assert len(culture_db_calls) == 2
+    assert culture_db_calls[0] != culture_db_calls[1]
+    assert "/private_instances/" in culture_db_calls[0]
+    assert "/private_instances/" in culture_db_calls[1]
+    first_kwargs = mock_agent_class.call_args_list[0].kwargs
+    second_kwargs = mock_agent_class.call_args_list[1].kwargs
+    assert first_kwargs["culture_manager"] is created_culture_managers[0]
+    assert second_kwargs["culture_manager"] is created_culture_managers[1]

@@ -689,6 +689,23 @@ def _resolve_agent_culture(
     return culture_manager, settings
 
 
+def _culture_storage_path(
+    agent_name: str,
+    config: Config,
+    storage_path: Path,
+    execution_identity: ToolExecutionIdentity | None,
+) -> Path:
+    """Resolve the durable culture root for one agent instance."""
+    if config.agents[agent_name].private is None:
+        return storage_path
+    return resolve_agent_private_state_storage_path(
+        agent_name,
+        config,
+        base_storage_path=storage_path,
+        execution_identity=execution_identity,
+    )
+
+
 def create_agent(  # noqa: PLR0915, C901, PLR0912
     agent_name: str,
     config: Config,
@@ -848,7 +865,12 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,
-        resolved_storage_path,
+        _culture_storage_path(
+            agent_name,
+            config,
+            resolved_storage_path,
+            execution_identity,
+        ),
         model,
     )
 
