@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -1395,40 +1394,17 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
 
 
-def test_runtime_private_agent_names_skips_config_load_for_non_user_agent_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Non-user-agent workers should not reload config to compute private visibility."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    runtime_paths.config_path.write_text("not: [valid\n", encoding="utf-8")
-    monkeypatch.setattr(
-        "mindroom.config.main.load_config",
-        lambda _runtime_paths: (_ for _ in ()).throw(AssertionError("load_config should not run")),
+def test_runtime_private_agent_names_skips_config_load_for_non_user_agent_worker() -> None:
+    """Non-user-agent workers should not consult private-agent config visibility."""
+    config = SimpleNamespace(
+        get_private_agent_names=lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
     )
 
-    assert runtime_private_agent_names(runtime_paths, worker_key="v1:tenant-123:shared:general") == frozenset()
+    assert runtime_private_agent_names(config, worker_key="v1:tenant-123:shared:general") == frozenset()
 
 
-def test_runtime_private_agent_names_uses_cached_private_names_after_invalid_reload(tmp_path: Path) -> None:
-    """User-agent visibility should fall back to the last known-good private-agent set."""
-    config_path = tmp_path / "config.yaml"
-    storage_path = tmp_path / "storage"
-    template_dir = tmp_path / "mind_template"
-    template_dir.mkdir()
-    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
-    config_path.write_text(
-        """agents:
-  mind:
-    display_name: Mind
-    private:
-      per: user
-      root: mind_data
-      template_dir: ./mind_template
-models: {}
-""",
-        encoding="utf-8",
-    )
+def test_runtime_private_agent_names_returns_private_names_for_user_agent_worker() -> None:
+    """User-agent workers should read private visibility from the provided config."""
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -1442,35 +1418,9 @@ models: {}
         ),
         agent_name="mind",
     )
+    config = SimpleNamespace(get_private_agent_names=lambda: frozenset({"mind"}))
 
-    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
-
-    time.sleep(0.01)
-    config_path.write_text("agents:\n  mind:\n    private: [\nmodels: {}\n", encoding="utf-8")
-
-    assert runtime_private_agent_names(runtime_paths, worker_key=worker_key) == frozenset({"mind"})
-
-
-def test_runtime_private_agent_names_rejects_missing_config_for_user_agent_worker(tmp_path: Path) -> None:
-    """User-agent workers should fail closed when no runtime config file exists."""
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    worker_key = resolve_worker_key(
-        "user_agent",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-            tenant_id="tenant-123",
-        ),
-        agent_name="mind",
-    )
-
-    with pytest.raises(FileNotFoundError, match="Cannot resolve private agent visibility"):
-        runtime_private_agent_names(runtime_paths, worker_key=worker_key)
+    assert runtime_private_agent_names(config, worker_key=worker_key) == frozenset({"mind"})
 
 
 def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
@@ -1573,36 +1523,6 @@ def test_prepare_worker_request_wraps_private_visibility_config_errors(
         _local_worker_state_paths_from_handle,
     )
     with pytest.raises(sandbox_worker_prep_module.WorkerRequestPreparationError, match="invalid config"):
-        sandbox_worker_prep_module.prepare_worker_request(
-            worker_key=worker_key,
-            tool_init_overrides={"base_dir": "private_instances/example/mind"},
-            runtime_paths=runtime_paths,
-            config=config,
-        )
-
-
-def test_prepare_worker_request_rejects_missing_config_for_user_agent_visibility(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """User-agent visibility should fail closed when no runtime config file exists."""
-    worker_key = "v1:tenant-123:user_agent:mind:@alice:example.org"
-    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    worker_handle = SimpleNamespace()
-    worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "mind")
-    config = SimpleNamespace(get_private_agent_names=lambda: frozenset())
-
-    monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
-    monkeypatch.setattr(
-        sandbox_worker_prep_module,
-        "local_worker_state_paths_from_handle",
-        lambda _handle: worker_paths,
-    )
-
-    with pytest.raises(
-        sandbox_worker_prep_module.WorkerRequestPreparationError,
-        match="Cannot resolve private agent visibility",
-    ):
         sandbox_worker_prep_module.prepare_worker_request(
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},

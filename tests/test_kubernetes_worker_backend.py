@@ -584,71 +584,6 @@ def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
     assert "/app/worker/.shared_credentials" not in mount_paths
 
 
-def test_kubernetes_backend_user_agent_mounts_use_cached_private_visibility_after_invalid_reload(
-    tmp_path: Path,
-) -> None:
-    """User-agent mounts should keep using the cached private visibility during hot-edit parse failures."""
-    config_path = tmp_path / "config.yaml"
-    template_dir = tmp_path / "mind_template"
-    template_dir.mkdir()
-    config_path.write_text(
-        """agents:
-  mind:
-    display_name: Mind
-    private:
-      per: user_agent
-      root: mind_data
-      template_dir: ./mind_template
-models: {}
-""",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    worker_key_a = resolve_worker_key(
-        "user_agent",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-            tenant_id="tenant-123",
-        ),
-        agent_name="mind",
-    )
-    worker_key_b = resolve_worker_key(
-        "user_agent",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id="@bob:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-            tenant_id="tenant-123",
-        ),
-        agent_name="mind",
-    )
-
-    backend.ensure_worker(WorkerSpec(worker_key_a), now=10.0)
-    config_path.write_text("agents:\n  mind:\n    private: [\nmodels: {}\n", encoding="utf-8")
-    backend.ensure_worker(WorkerSpec(worker_key_b), now=20.0)
-
-    deployment = apps_api.created_bodies[-1]
-    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
-    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
-    expected_worker_root = f"/app/worker/workers/{worker_dir_name(worker_key_b)}"
-    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key_b)}"
-
-    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key_b)}"
-    assert mount_paths[expected_worker_root] == f"workers/{worker_dir_name(worker_key_b)}"
-    assert "/app/worker/agents/mind" not in mount_paths
-
-
 def test_kubernetes_backend_user_agent_mounts_require_runtime_config(tmp_path: Path) -> None:
     """User-agent mounts should fail closed when runtime config is unavailable."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -671,7 +606,7 @@ def test_kubernetes_backend_user_agent_mounts_require_runtime_config(tmp_path: P
         agent_name="mind",
     )
 
-    with pytest.raises(WorkerBackendError, match="Cannot resolve private agent visibility"):
+    with pytest.raises(WorkerBackendError, match="Agent configuration file not found"):
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
 
 

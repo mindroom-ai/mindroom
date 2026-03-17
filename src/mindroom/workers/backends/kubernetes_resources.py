@@ -13,10 +13,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.config.main import runtime_private_agent_names
+from mindroom.config.main import load_config, runtime_private_agent_names
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import visible_state_roots_for_worker_key
+from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -724,7 +724,10 @@ class KubernetesResourceManager:
     def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
         try:
-            private_agent_names = runtime_private_agent_names(self.runtime_paths, worker_key=worker_key)
+            private_agent_names = frozenset()
+            if resolved_worker_key_scope(worker_key) == "user_agent":
+                config = load_config(self.runtime_paths)
+                private_agent_names = runtime_private_agent_names(config, worker_key=worker_key)
         except (FileNotFoundError, ValueError) as exc:
             raise WorkerBackendError(str(exc)) from exc
         visible_state_roots = visible_state_roots_for_worker_key(
