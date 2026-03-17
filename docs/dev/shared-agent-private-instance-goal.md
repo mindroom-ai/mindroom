@@ -103,6 +103,54 @@ Top-level shared knowledge definitions should remain available for truly shared/
 
 The current low-level workspace machinery can remain as internal implementation if it helps.
 
+## Current Rewrite Rules
+
+The current rewrite is an internal source-of-truth cleanup, not a public config rename.
+
+Keep `agents.<name>.private` as the public surface for this PR.
+
+Do not rename it to `requester_state` in the same change that rewires the internals.
+
+Introduce one internal resolver layer as the only source of truth for private versus shared runtime resolution.
+
+That resolver must resolve state per `(agent_name, execution_identity)` materialization, not once per request.
+
+After the outer ingress points, resolved runtime state should be passed explicitly instead of being recomputed from config plus ambient context.
+
+Worker visibility and knowledge bindings may be derived helpers, but they must come from the same resolver layer.
+
+Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision.
+
+## Current Rewrite Scope
+
+The rewrite should first cover direct agent execution.
+
+That means:
+
+- workspace and template materialization
+- private context loading
+- file memory placement
+- private knowledge binding
+- sessions
+- learning
+
+`/v1` remains shared-only in this rewrite.
+
+Private teams are out of scope for the rewrite.
+
+Any team behavior that depends on private agents should be rejected and removed rather than migrated.
+
+This is a deliberate simplification to stop the current mixed private/shared team complexity from shaping the new design.
+
+## Current Implementation Order
+
+1. Add the internal runtime resolver and move `create_agent()` onto it.
+2. Move private knowledge binding onto the same resolver layer.
+3. Reject private agents in teams and delete mixed private/shared team behavior.
+4. Move worker prep and worker mounts onto resolver-derived visibility instead of recomputing private visibility locally.
+5. Move remaining direct memory path resolution onto the resolver layer.
+6. Remove obsolete helpers and duplicated scope-to-root logic after the resolver-based flow is in place.
+
 ## Acceptance Check
 
 If a reader finishes the final config and thinks:

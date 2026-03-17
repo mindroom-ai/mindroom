@@ -35,11 +35,7 @@ from mindroom.embeddings import (
     effective_knowledge_embedder_signature,
 )
 from mindroom.logging_config import get_logger
-from mindroom.workspaces import (
-    resolve_agent_private_state_storage_path,
-    resolve_agent_workspace,
-    resolve_workspace_relative_path,
-)
+from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
@@ -335,23 +331,6 @@ def _should_incrementally_sync_on_access(
     return _knowledge_base_uses_isolating_worker_workspace(config, base_id)
 
 
-def _resolve_manager_storage_path(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    base_id: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> Path:
-    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
-    if effective_agent_name is None:
-        return runtime_paths.storage_root.expanduser().resolve()
-    return resolve_agent_private_state_storage_path(
-        effective_agent_name,
-        config,
-        base_storage_path=runtime_paths.storage_root.expanduser().resolve(),
-        execution_identity=execution_identity,
-    ).resolve()
-
-
 def _resolve_effective_knowledge_path(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -359,39 +338,17 @@ def _resolve_effective_knowledge_path(
     execution_identity: ToolExecutionIdentity | None = None,
     create: bool = False,
 ) -> tuple[Path, Path]:
-    base_config = config.get_knowledge_base_config(base_id)
-    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
-    resolved_storage_path = _resolve_manager_storage_path(
+    binding = resolve_knowledge_binding(
+        base_id,
         config,
         runtime_paths,
-        base_id,
         execution_identity=execution_identity,
-    )
-    if effective_agent_name is None:
-        knowledge_path = _resolve_knowledge_path(base_config.path, runtime_paths).resolve()
-        if create:
-            _ensure_knowledge_directory_ready(knowledge_path)
-        return resolved_storage_path, knowledge_path
-
-    workspace = resolve_agent_workspace(
-        effective_agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+        start_watchers=True,
         create=create,
     )
-    if workspace is None:
-        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
-        raise ValueError(msg)
-
-    knowledge_path = resolve_workspace_relative_path(
-        workspace.root,
-        base_config.path,
-        field_name=f"knowledge base '{base_id}' path",
-    )
     if create:
-        _ensure_knowledge_directory_ready(knowledge_path)
-    return resolved_storage_path, knowledge_path
+        _ensure_knowledge_directory_ready(binding.knowledge_path)
+    return binding.storage_root, binding.knowledge_path
 
 
 def _knowledge_manager_key(

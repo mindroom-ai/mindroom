@@ -21,12 +21,12 @@ from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
-    get_tool_execution_identity,
     resolve_agent_owned_path,
     resolve_agent_state_storage_path,
     shared_storage_root,
@@ -34,7 +34,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import (
     ensure_workspace_template,
     resolve_agent_private_state_storage_path,
-    resolve_agent_workspace,
 )
 
 if TYPE_CHECKING:
@@ -346,27 +345,16 @@ def build_agent_tool_init_context(
     runtime_paths: constants.RuntimePaths,
 ) -> AgentToolInitContext:
     """Build the shared context that decides per-tool init overrides for one agent."""
-    agent_config = config.get_agent(agent_name)
-    workspace_path = None
-    execution_identity = get_tool_execution_identity()
-    if agent_config.private is not None:
-        workspace = resolve_agent_workspace(
-            agent_name,
-            config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
-        workspace_path = workspace.root if workspace is not None else None
-    elif agent_config.memory_file_path is not None:
-        workspace_path = _resolve_agent_workspace_path(
-            agent_name,
-            agent_config,
-            storage_path=runtime_paths.storage_root,
-        )
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        create=True,
+    )
+    workspace_path = agent_runtime.tool_base_dir
     return AgentToolInitContext(
         workspace_path=workspace_path,
-        worker_scope=config.get_agent_worker_scope(agent_name),
+        worker_scope=agent_runtime.worker_scope,
     )
 
 
@@ -575,6 +563,19 @@ def _create_agent_state_db(
     return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
 
 
+def _create_agent_state_db_from_state_root(
+    agent_name: str,
+    state_storage_path: Path,
+    *,
+    subdir: str,
+    session_table: str,
+) -> SqliteDb:
+    """Create a persistent SQLite database from an already-resolved agent state root."""
+    db_dir = state_storage_path / subdir
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return SqliteDb(session_table=session_table, db_file=str(db_dir / f"{agent_name}.db"))
+
+
 def _create_culture_storage(culture_name: str, storage_path: Path) -> SqliteDb:
     """Create persistent culture storage shared by all agents in a culture."""
     culture_dir = storage_path / "culture"
@@ -741,7 +742,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     from mindroom.ai import get_model_instance  # noqa: PLC0415
 
     resolved_storage_path = runtime_paths.storage_root
-    execution_identity = get_tool_execution_identity()
+    agent_runtime = resolve_agent_runtime(
+        agent_name,
+        config,
+        runtime_paths,
+        create=True,
+    )
+    execution_identity = agent_runtime.execution_identity
 
     agent_config = config.get_agent(agent_name)
     ensure_default_agent_workspaces(config, resolved_storage_path)
@@ -760,13 +767,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         agent_name,
         runtime_paths=runtime_paths,
     )
-    workspace = resolve_agent_workspace(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        create=True,
-    )
+    workspace = agent_runtime.workspace
     # Create tools
     tools: list[Toolkit] = []
     for tool_name in tool_names:
@@ -784,18 +785,18 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         except (ValueError, ImportError) as e:
             logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
 
-    storage = create_session_storage(
+    storage = _create_agent_state_db_from_state_root(
         agent_name,
-        resolved_storage_path,
-        config,
-        execution_identity=execution_identity,
+        agent_runtime.state_root,
+        subdir="sessions",
+        session_table=f"{agent_name}_sessions",
     )
     learning_storage = (
-        _create_learning_storage(
+        _create_agent_state_db_from_state_root(
             agent_name,
-            resolved_storage_path,
-            config,
-            execution_identity=execution_identity,
+            agent_runtime.state_root,
+            subdir="learning",
+            session_table=f"{agent_name}_learning_sessions",
         )
         if _is_learning_enabled(agent_config, defaults)
         else None

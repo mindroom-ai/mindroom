@@ -23,6 +23,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -553,6 +554,69 @@ def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path
             runtime_paths=runtime_paths,
             execution_identity=identity,
         )
+
+
+def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_path: Path) -> None:
+    """Shared agents should resolve one canonical shared state root with no worker key."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, create=True)
+
+    assert runtime.is_private is False
+    assert runtime.worker_key is None
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+    assert runtime.tool_base_dir is None
+    assert runtime.file_memory_root is None
+
+
+def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
+    tmp_path: Path,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Private agents should resolve requester-local state, workspace, and worker key together."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    template_dir = build_private_template_dir("runtime_template")
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+        context_files=["USER.md"],
+    )
+    config = _bind_runtime_paths(config, runtime_paths)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    expected_worker_key = resolve_worker_key("user", identity, agent_name="general")
+    assert expected_worker_key is not None
+    assert runtime.is_private is True
+    assert runtime.worker_key == expected_worker_key
+    assert runtime.state_root == private_instance_state_root_path(
+        tmp_path,
+        worker_key=expected_worker_key,
+        agent_name="general",
+    )
+    assert runtime.workspace is not None
+    assert runtime.workspace.root == runtime.state_root / "mind_data"
+    assert runtime.tool_base_dir == runtime.workspace.root
+    assert runtime.file_memory_root == runtime.workspace.root
 
 
 def test_private_workspace_template_preserves_metadata_and_initializes_only_once(tmp_path: Path) -> None:
