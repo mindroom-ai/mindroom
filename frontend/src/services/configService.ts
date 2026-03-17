@@ -2,6 +2,45 @@ import { Agent, Config, TeamEligibilityByAgent } from '@/types/config';
 
 const API_BASE = '/api';
 
+export interface ConfigValidationIssue {
+  loc: Array<string | number>;
+  msg: string;
+  type: string;
+}
+
+function isConfigValidationIssue(detail: unknown): detail is ConfigValidationIssue {
+  return (
+    typeof detail === 'object' &&
+    detail !== null &&
+    Array.isArray((detail as ConfigValidationIssue).loc) &&
+    typeof (detail as ConfigValidationIssue).msg === 'string' &&
+    typeof (detail as ConfigValidationIssue).type === 'string'
+  );
+}
+
+function isConfigValidationIssueList(detail: unknown): detail is ConfigValidationIssue[] {
+  return Array.isArray(detail) && detail.every(isConfigValidationIssue);
+}
+
+export class ConfigValidationError extends Error {
+  readonly issues: ConfigValidationIssue[];
+
+  constructor(issues: ConfigValidationIssue[]) {
+    super('Configuration validation failed');
+    this.name = 'ConfigValidationError';
+    this.issues = issues;
+  }
+}
+
+async function responseDetail(response: Response): Promise<unknown> {
+  try {
+    const payload = (await response.json()) as { detail?: unknown };
+    return payload.detail;
+  } catch {
+    return null;
+  }
+}
+
 export async function loadConfig(): Promise<Config> {
   const response = await fetch(`${API_BASE}/config/load`, {
     method: 'POST',
@@ -59,7 +98,14 @@ export async function saveConfig(config: Config): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error('Failed to save configuration');
+    const detail = await responseDetail(response);
+    if (response.status === 422 && isConfigValidationIssueList(detail)) {
+      throw new ConfigValidationError(detail);
+    }
+    if (typeof detail === 'string' && detail.length > 0) {
+      throw new Error(detail);
+    }
+    throw new Error(`Failed to save configuration (Error ${response.status})`);
   }
 }
 

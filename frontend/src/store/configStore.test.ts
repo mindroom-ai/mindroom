@@ -24,6 +24,8 @@ describe('configStore', () => {
       isDirty: false,
       isLoading: false,
       error: null,
+      editorError: null,
+      configValidationIssues: [],
       syncStatus: 'disconnected',
     });
 
@@ -376,6 +378,80 @@ describe('configStore', () => {
       const state = useConfigStore.getState();
       expect(state.isDirty).toBe(false);
       expect(state.syncStatus).toBe('synced');
+    });
+
+    it('stores backend validation issues without poisoning the global load error', async () => {
+      const mockConfig: Config = {
+        models: {
+          default: { provider: 'test', id: 'test-model' },
+        },
+        memory: {
+          embedder: {
+            provider: 'openai',
+            config: {
+              model: 'text-embedding-ada-002',
+            },
+          },
+        },
+        agents: {},
+        defaults: {
+          markdown: true,
+        },
+        router: {
+          model: 'default',
+        },
+      };
+      const mockAgents = [
+        {
+          id: 'mind',
+          display_name: 'Mind',
+          role: 'Assistant',
+          tools: [],
+          skills: [],
+          instructions: [],
+          rooms: [],
+          private: {
+            per: 'user' as const,
+            root: '../outside',
+          },
+        },
+      ];
+      useConfigStore.setState({
+        config: mockConfig,
+        agents: mockAgents,
+        isDirty: true,
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ team_eligibility: { mind: null } }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({
+          detail: [
+            {
+              loc: ['agents', 'mind', 'private', 'root'],
+              msg: 'private.root must stay within the private instance root',
+              type: 'value_error',
+            },
+          ],
+        }),
+      });
+
+      await useConfigStore.getState().saveConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.error).toBeNull();
+      expect(state.editorError).toBeNull();
+      expect(state.configValidationIssues).toEqual([
+        {
+          loc: ['agents', 'mind', 'private', 'root'],
+          msg: 'private.root must stay within the private instance root',
+          type: 'value_error',
+        },
+      ]);
     });
   });
 

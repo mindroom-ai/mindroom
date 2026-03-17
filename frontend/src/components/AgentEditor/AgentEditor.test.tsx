@@ -107,6 +107,8 @@ describe('AgentEditor', () => {
     saveConfig: vi.fn().mockResolvedValue(undefined),
     config: mockConfig,
     isDirty: false,
+    editorError: null,
+    configValidationIssues: [],
   };
 
   beforeEach(() => {
@@ -200,6 +202,71 @@ describe('AgentEditor', () => {
     await waitFor(() => {
       expect(mockStore.saveConfig).toHaveBeenCalled();
     });
+  });
+
+  it('renders backend validation errors for private fields', () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: 'user',
+        root: '../outside',
+        template_dir: '   ',
+        context_files: ['../SOUL.md'],
+        knowledge: {
+          enabled: true,
+          path: '../memory',
+          watch: true,
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: privateAgent,
+        },
+      },
+      editorError: 'Configuration validation failed',
+      configValidationIssues: [
+        {
+          loc: ['agents', 'test_agent', 'private', 'root'],
+          msg: 'private.root must stay within the private instance root',
+          type: 'value_error',
+        },
+        {
+          loc: ['agents', 'test_agent', 'private', 'template_dir'],
+          msg: 'template_dir must not be blank',
+          type: 'value_error',
+        },
+        {
+          loc: ['agents', 'test_agent', 'private', 'context_files'],
+          msg: 'private.context_files must stay under the private root',
+          type: 'value_error',
+        },
+        {
+          loc: ['agents', 'test_agent', 'private', 'knowledge', 'path'],
+          msg: 'private.knowledge.path must stay under the private root',
+          type: 'value_error',
+        },
+      ],
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByText('Configuration validation failed')).toBeInTheDocument();
+    expect(
+      screen.getByText('private.root must stay within the private instance root')
+    ).toBeInTheDocument();
+    expect(screen.getByText('template_dir must not be blank')).toBeInTheDocument();
+    expect(
+      screen.getByText('private.context_files must stay under the private root')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('private.knowledge.path must stay under the private root')
+    ).toBeInTheDocument();
   });
 
   it('disables save button when not dirty', () => {

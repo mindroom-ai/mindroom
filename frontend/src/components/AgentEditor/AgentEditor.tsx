@@ -45,6 +45,8 @@ export function AgentEditor() {
     saveConfig,
     config,
     isDirty,
+    editorError,
+    configValidationIssues,
     selectAgent,
   } = useConfigStore();
 
@@ -123,6 +125,27 @@ export function AgentEditor() {
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
   const privateKnowledge = privateConfig?.knowledge;
+  const validationErrorForPath = useCallback(
+    (path: string[], exact: boolean = false): string | undefined => {
+      if (!selectedAgentId) {
+        return undefined;
+      }
+      const prefix = ['agents', selectedAgentId, ...path];
+      return configValidationIssues.find(issue =>
+        exact
+          ? issue.loc.length === prefix.length &&
+            prefix.every((segment, index) => issue.loc[index] === segment)
+          : prefix.every((segment, index) => issue.loc[index] === segment)
+      )?.msg;
+    },
+    [configValidationIssues, selectedAgentId]
+  );
+  const privateScopeError = validationErrorForPath(['private', 'per'], true);
+  const privateRootError = validationErrorForPath(['private', 'root'], true);
+  const privateTemplateDirError = validationErrorForPath(['private', 'template_dir'], true);
+  const privateContextFilesError = validationErrorForPath(['private', 'context_files']);
+  const privateKnowledgeError = validationErrorForPath(['private', 'knowledge'], true);
+  const privateKnowledgePathError = validationErrorForPath(['private', 'knowledge', 'path'], true);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -381,6 +404,12 @@ export function AgentEditor() {
       onDelete={handleDelete}
       onBack={() => selectAgent(null)}
     >
+      {editorError && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {editorError}
+        </div>
+      )}
+
       {/* Display Name */}
       <FieldGroup
         label="Display Name"
@@ -640,6 +669,7 @@ export function AgentEditor() {
               label="Private Scope"
               helperText="Requester boundary that gets its own private instance. This becomes the agent's effective worker scope."
               htmlFor="private_per"
+              error={privateScopeError}
             >
               <Select
                 value={privateConfig.per}
@@ -661,6 +691,7 @@ export function AgentEditor() {
               label="Private Root"
               helperText="Optional requester-local root name under the canonical private-instance state root."
               htmlFor="private_root"
+              error={privateRootError}
             >
               <Input
                 id="private_root"
@@ -674,6 +705,7 @@ export function AgentEditor() {
               label="Template Directory"
               helperText="Optional local directory copied into each requester root without overwriting existing files."
               htmlFor="private_template_dir"
+              error={privateTemplateDirError}
             >
               <Input
                 id="private_template_dir"
@@ -686,6 +718,7 @@ export function AgentEditor() {
             <FieldGroup
               label="Private Context Files"
               helperText="Private-root-relative files loaded into role context for each requester-private instance."
+              error={privateContextFilesError}
               actions={
                 <Button
                   variant="outline"
@@ -731,6 +764,7 @@ export function AgentEditor() {
               label="Private Knowledge"
               helperText="Requester-local knowledge indexed from inside the private root."
               htmlFor="private_knowledge_enabled"
+              error={privateKnowledgeError}
             >
               <div className="flex items-center gap-2">
                 <Checkbox
@@ -753,6 +787,7 @@ export function AgentEditor() {
                   label="Private Knowledge Path"
                   helperText="Private-root-relative path to index for requester-local knowledge."
                   htmlFor="private_knowledge_path"
+                  error={privateKnowledgePathError}
                 >
                   <Input
                     id="private_knowledge_path"

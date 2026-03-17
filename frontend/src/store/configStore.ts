@@ -11,6 +11,7 @@ import {
   normalizeAgentUpdates,
 } from '@/types/config';
 import * as configService from '@/services/configService';
+import type { ConfigValidationIssue } from '@/services/configService';
 
 function unassignAgentsFromOtherCultures(
   cultures: Culture[],
@@ -69,6 +70,8 @@ interface ConfigState {
   isDirty: boolean;
   isLoading: boolean;
   error: string | null;
+  editorError: string | null;
+  configValidationIssues: ConfigValidationIssue[];
   syncStatus: 'synced' | 'syncing' | 'error' | 'disconnected';
 
   // Actions
@@ -120,11 +123,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   isDirty: false,
   isLoading: false,
   error: null,
+  editorError: null,
+  configValidationIssues: [],
   syncStatus: 'disconnected',
 
   // Load configuration from backend
   loadConfig: async () => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, editorError: null, configValidationIssues: [] });
     try {
       const config = await configService.loadConfig();
       const normalizedConfig: Config = {
@@ -191,6 +196,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        editorError: null,
+        configValidationIssues: [],
       });
     } catch (error) {
       set({
@@ -218,7 +225,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         return;
       }
       set({
-        error: error instanceof Error ? error.message : 'Failed to derive team eligibility',
+        editorError: error instanceof Error ? error.message : 'Failed to derive team eligibility',
       });
     }
   },
@@ -228,7 +235,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     const { config, agents, cultures, rooms } = get();
     if (!config) return;
 
-    set({ isLoading: true, error: null, syncStatus: 'syncing' });
+    set({
+      isLoading: true,
+      error: null,
+      editorError: null,
+      configValidationIssues: [],
+      syncStatus: 'syncing',
+    });
     try {
       await get().refreshTeamEligibility(agents);
       const { teams, teamEligibilityByAgent } = get();
@@ -280,10 +293,20 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         isLoading: false,
         syncStatus: 'synced',
         isDirty: false,
+        editorError: null,
+        configValidationIssues: [],
       });
     } catch (error) {
+      if (error instanceof configService.ConfigValidationError) {
+        set({
+          configValidationIssues: error.issues,
+          isLoading: false,
+          syncStatus: 'error',
+        });
+        return;
+      }
       set({
-        error: error instanceof Error ? error.message : 'Failed to save config',
+        editorError: error instanceof Error ? error.message : 'Failed to save config',
         isLoading: false,
         syncStatus: 'error',
       });
@@ -303,6 +326,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     set({
       agents: nextAgents,
       isDirty: true,
+      editorError: null,
+      configValidationIssues: [],
     });
     if (get().config != null) {
       void get().refreshTeamEligibility(nextAgents);
@@ -326,6 +351,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       agents: [...state.agents, newAgent],
       selectedAgentId: id,
       isDirty: true,
+      editorError: null,
+      configValidationIssues: [],
     }));
     if (get().config != null) {
       void get().refreshTeamEligibility([...get().agents]);
@@ -359,6 +386,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       teamEligibilityByAgent: nextTeamEligibilityByAgent,
       selectedAgentId: state.selectedAgentId === agentId ? null : state.selectedAgentId,
       isDirty: true,
+      editorError: null,
+      configValidationIssues: [],
     });
     if (get().config != null) {
       void get().refreshTeamEligibility(nextAgents);
@@ -818,6 +847,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
 
   // Clear error
   clearError: () => {
-    set({ error: null });
+    set({ error: null, editorError: null, configValidationIssues: [] });
   },
 }));
