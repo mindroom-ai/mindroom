@@ -113,6 +113,8 @@ MindRoom keeps a separate index per effective private root, so one requester's i
 For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
 This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
+If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`.
+Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a Git checkout path that your template or private file memory also writes into.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -121,7 +123,7 @@ This requester-local private knowledge flow applies to the normal agent runtime 
 | `private.knowledge.watch` | bool | `true` | Whether private knowledge should refresh when files change. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root |
 | `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
 | `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |
-| `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local knowledge |
+| `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |
 
 Use `private.knowledge` when the data itself should be private to that requester's private instance.
 Use top-level `knowledge_bases` when the same documents should stay shared across agents or users.

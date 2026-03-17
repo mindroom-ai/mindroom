@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, CultureConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -2127,6 +2127,58 @@ def test_config_accepts_valid_culture_assignment() -> None:
     assert culture_name == "engineering"
     assert culture_config.mode == "automatic"
     assert config.get_agent_culture("unknown") is None
+
+
+def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree() -> None:
+    """Git-backed private knowledge must use a dedicated subtree outside private writable content."""
+    with pytest.raises(
+        ValidationError,
+        match="git-backed private knowledge at 'memory'.*dedicated subtree",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        template_dir="./mind_template",
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path="memory",
+                            git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                        ),
+                    ),
+                    memory_backend="file",
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+        )
+
+
+def test_config_allows_git_backed_private_knowledge_in_dedicated_subtree() -> None:
+    """Dedicated private knowledge subtrees remain valid for git-backed sync."""
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private=AgentPrivateConfig(
+                    per="user",
+                    root="mind_data",
+                    template_dir="./mind_template",
+                    knowledge=AgentPrivateKnowledgeConfig(
+                        path="kb_repo",
+                        git=KnowledgeGitConfig(repo_url="https://github.com/example/repo", branch="main"),
+                    ),
+                ),
+                memory_backend="file",
+            ),
+        },
+        models={"default": ModelConfig(provider="openai", id="gpt-4o-mini")},
+    )
+
+    assert config.agents["mind"].private is not None
+    assert config.agents["mind"].private.knowledge is not None
+    assert config.agents["mind"].private.knowledge.path == "kb_repo"
 
 
 @patch("mindroom.agents.SqliteDb")

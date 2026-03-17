@@ -298,6 +298,37 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_private_git_knowledge_paths(self) -> Config:
+        """Ensure git-backed private knowledge uses a dedicated subtree."""
+        memory_notes_dir = Path("memory")
+        for agent_name, agent_config in self.agents.items():
+            private_config = agent_config.private
+            if private_config is None or private_config.knowledge is None:
+                continue
+            private_knowledge = private_config.knowledge
+            if private_knowledge.git is None or private_knowledge.path is None:
+                continue
+            knowledge_path = Path(private_knowledge.path)
+            overlaps_private_file_memory = self.get_agent_memory_backend(agent_name) == "file" and (
+                knowledge_path == Path()
+                or knowledge_path.is_relative_to(memory_notes_dir)
+                or memory_notes_dir.is_relative_to(knowledge_path)
+            )
+            overlaps_template_scaffold = private_config.template_dir is not None and (
+                knowledge_path == Path()
+                or knowledge_path.is_relative_to(memory_notes_dir)
+                or memory_notes_dir.is_relative_to(knowledge_path)
+            )
+            if overlaps_private_file_memory or overlaps_template_scaffold:
+                msg = (
+                    f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
+                    "but git-backed private knowledge must use a dedicated subtree outside the private root "
+                    "and outside the conventional memory/ workspace content"
+                )
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_memory_file_path_overrides(self) -> Config:
         """Ensure memory_file_path is only configured for effective file-backed agents."""
         invalid_overrides = [
