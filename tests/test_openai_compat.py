@@ -29,7 +29,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -2528,6 +2528,53 @@ class TestKnowledgeIntegration:
         assert response.status_code == 200
         assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
 
+    def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
+        """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
+        from fastapi import FastAPI  # noqa: PLC0415
+
+        from mindroom.api.openai_compat import router  # noqa: PLC0415
+
+        app = FastAPI()
+        app.include_router(router)
+        runtime_paths = _runtime_paths({"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"})
+        initialize_api_app(app, runtime_paths)
+
+        mock_knowledge = MagicMock()
+        observed_calls: list[tuple[str, Config | None, RuntimePaths | None]] = []
+
+        def fake_get_knowledge_manager(
+            base_id: str,
+            *,
+            config: Config | None = None,
+            runtime_paths: RuntimePaths | None = None,
+            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+        ) -> MagicMock | None:
+            observed_calls.append((base_id, config, runtime_paths))
+            if config is None or runtime_paths is None or base_id != "docs":
+                return None
+            return _knowledge_manager(mock_knowledge)
+
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
+            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.initialize_knowledge_managers", new_callable=AsyncMock),
+            patch("mindroom.api.openai_compat.get_knowledge_manager", side_effect=fake_get_knowledge_manager),
+        ):
+            mock_ai.return_value = "Response with keyed knowledge"
+
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "research",
+                    "messages": [{"role": "user", "content": "What do the docs say?"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert mock_ai.call_args.kwargs["knowledge"] is mock_knowledge
+        assert observed_calls == [("docs", knowledge_config, runtime_paths)]
+
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
         with (
@@ -2635,7 +2682,13 @@ class TestKnowledgeIntegration:
         mock_knowledge_wiki.vector_db = MagicMock()
         mock_knowledge_wiki.max_results = 10
 
-        def fake_get_knowledge_manager(base_id: str) -> MagicMock | None:
+        def fake_get_knowledge_manager(
+            base_id: str,
+            *,
+            config: Config | None = None,  # noqa: ARG001
+            runtime_paths: RuntimePaths | None = None,  # noqa: ARG001
+            execution_identity: ToolExecutionIdentity | None = None,  # noqa: ARG001
+        ) -> MagicMock | None:
             knowledge = {"docs": mock_knowledge_docs, "wiki": mock_knowledge_wiki}.get(base_id)
             if knowledge is None:
                 return None

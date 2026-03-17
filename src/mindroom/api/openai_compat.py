@@ -642,7 +642,11 @@ async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePa
     )
 
 
-def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
+def _resolve_knowledge(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Knowledge | None:
     """Resolve knowledge base(s) for an agent from the global knowledge managers.
 
     Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
@@ -650,7 +654,11 @@ def _resolve_knowledge(agent_name: str, config: Config) -> Knowledge | None:
     return resolve_agent_knowledge(
         agent_name,
         config,
-        lambda base_id: (manager.get_knowledge() if (manager := get_knowledge_manager(base_id)) is not None else None),
+        lambda base_id: (
+            manager.get_knowledge()
+            if (manager := get_knowledge_manager(base_id, config=config, runtime_paths=runtime_paths)) is not None
+            else None
+        ),
         on_missing_bases=lambda missing_base_ids: logger.warning(
             "Knowledge bases not available for agent",
             agent=agent_name,
@@ -814,7 +822,7 @@ async def chat_completions(
     else:
         # Resolve knowledge base for this agent
         try:
-            knowledge = _resolve_knowledge(agent_name, config)
+            knowledge = _resolve_knowledge(agent_name, config, runtime_paths)
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
@@ -1132,7 +1140,7 @@ def _build_team(
                     config,
                     runtime_paths,
                     execution_identity=execution_identity,
-                    knowledge=_resolve_knowledge(member_name, config),
+                    knowledge=_resolve_knowledge(member_name, config, runtime_paths),
                     include_interactive_questions=False,
                 ),
             )
