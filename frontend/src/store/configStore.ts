@@ -53,6 +53,10 @@ function teamEligibilityChanged(
   );
 }
 
+function agentCanAffectTeamEligibility(agent: Pick<Agent, 'private' | 'delegate_to'>): boolean {
+  return agent.private != null || normalizeAgentDelegates(agent.delegate_to).length > 0;
+}
+
 type MemoryEmbedderUpdate = {
   provider: string;
   model: string;
@@ -378,7 +382,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       editorError: null,
       configValidationIssues: [],
     }));
-    if (get().config != null) {
+    if (get().config != null && agentCanAffectTeamEligibility(newAgent)) {
       void get().refreshTeamEligibility([...get().agents]);
     }
   },
@@ -386,6 +390,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Delete an agent
   deleteAgent: agentId => {
     const state = get();
+    const deletedAgent = state.agents.find(agent => agent.id === agentId);
     const nextAgents = state.agents
       .filter(agent => agent.id !== agentId)
       .map(agent => {
@@ -413,7 +418,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       editorError: null,
       configValidationIssues: [],
     });
-    if (get().config != null) {
+    const shouldRefreshTeamEligibility =
+      deletedAgent != null &&
+      (agentCanAffectTeamEligibility(deletedAgent) ||
+        state.agents.some(agent => agent.id !== agentId && agent.delegate_to?.includes(agentId)));
+    if (get().config != null && shouldRefreshTeamEligibility) {
       void get().refreshTeamEligibility(nextAgents);
     }
   },

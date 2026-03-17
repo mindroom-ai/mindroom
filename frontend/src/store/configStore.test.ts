@@ -891,6 +891,82 @@ describe('configStore', () => {
       expect(newAgent?.learning_mode).toBe('agentic');
     });
 
+    it('does not refresh team eligibility when creating a standard shared agent', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          models: {},
+          agents: {},
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        },
+      });
+
+      useConfigStore.getState().createAgent({
+        display_name: 'New Agent',
+        role: 'New role',
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: [],
+      });
+
+      await Promise.resolve();
+
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('refreshes team eligibility when creating a private agent draft', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          models: {},
+          agents: {},
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        },
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: {
+            new_agent: 'Private agents cannot participate in teams yet.',
+          },
+        }),
+      });
+
+      useConfigStore.getState().createAgent({
+        display_name: 'New Agent',
+        role: 'New role',
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: [],
+        private: { per: 'user' },
+      });
+
+      await waitFor(() => {
+        expect(useConfigStore.getState().teamEligibilityByAgent).toEqual({
+          new_agent: 'Private agents cannot participate in teams yet.',
+        });
+      });
+    });
+
     it('should delete agent', () => {
       useConfigStore.setState({
         cultures: [
@@ -921,6 +997,113 @@ describe('configStore', () => {
       expect(state.cultures[0].agents).toEqual(['agent2']);
       expect(state.teams[0].agents).toEqual(['agent2']);
       expect(state.isDirty).toBe(true);
+    });
+
+    it('does not refresh team eligibility when deleting an unrelated shared agent', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          models: {},
+          agents: {},
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'agent1',
+            display_name: 'Agent 1',
+            role: 'Role 1',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+          {
+            id: 'agent2',
+            display_name: 'Agent 2',
+            role: 'Role 2',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().deleteAgent('agent1');
+
+      await Promise.resolve();
+
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('refreshes team eligibility when deleting an agent referenced by delegation', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          models: {},
+          agents: {},
+          defaults: {
+            markdown: true,
+          },
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'leader',
+            display_name: 'Leader',
+            role: 'Lead',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            delegate_to: ['mind'],
+          },
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Private',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            private: { per: 'user' },
+          },
+        ],
+        teamEligibilityByAgent: {
+          leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+          mind: 'Private agents cannot participate in teams yet.',
+        },
+      });
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          team_eligibility: {
+            leader: null,
+          },
+        }),
+      });
+
+      useConfigStore.getState().deleteAgent('mind');
+
+      await waitFor(() => {
+        expect(useConfigStore.getState().teamEligibilityByAgent).toEqual({
+          leader: null,
+        });
+      });
     });
   });
 
