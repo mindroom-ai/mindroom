@@ -6,7 +6,7 @@ icon: lucide/folder-input
 
 MindRoom supports a practical OpenClaw-compatible workflow focused on workspace portability:
 
-- Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.)
+- Reuse your OpenClaw markdown files (`SOUL.md`, `AGENTS.md`, `USER.md`, `MEMORY.md`, etc.) after copying them into the agent's canonical MindRoom workspace
 - Use the `openclaw_compat` preset to enable a native MindRoom tool bundle
 - Use MindRoom's unified memory backend (`memory.backend`) for persistence
 - Optionally add semantic recall over workspace files via knowledge bases
@@ -53,7 +53,7 @@ It uses the normal MindRoom memory backend.
 
 ## Drop-in config
 
-Use this as a starting point for importing an OpenClaw workspace:
+Use this as a starting point for importing an OpenClaw workspace into MindRoom's canonical agent workspace:
 
 ```yaml
 agents:
@@ -92,7 +92,7 @@ agents:
 
 knowledge_bases:
   openclaw_memory:
-    path: ./openclaw_data/memory
+    path: ${MINDROOM_STORAGE_PATH}/agents/openclaw/workspace/memory
     watch: true
 
 memory:
@@ -102,24 +102,28 @@ memory:
     enabled: true
 ```
 
-When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root — no need to add it to `context_files`.
+When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
 The `openclaw_compat` preset already expands to native shell, coding, search/fetch, browser, scheduler, sub-agent orchestration, `matrix_message`, and `attachments` tools, so listing those tools individually is not necessary.
+Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `openclaw_memory` all read the same live workspace.
 
 ## Recommended workspace layout
 
 ```text
-openclaw_data/
-├── SOUL.md
-├── AGENTS.md
-├── USER.md
-├── IDENTITY.md
-├── MEMORY.md
-├── TOOLS.md
-├── HEARTBEAT.md
-└── memory/
-    ├── YYYY-MM-DD.md
-    └── topic-notes.md
+mindroom_data/
+└── agents/
+    └── openclaw/
+        └── workspace/
+            ├── SOUL.md
+            ├── AGENTS.md
+            ├── USER.md
+            ├── IDENTITY.md
+            ├── MEMORY.md
+            ├── TOOLS.md
+            ├── HEARTBEAT.md
+            └── memory/
+                ├── YYYY-MM-DD.md
+                └── topic-notes.md
 ```
 
 ## Unified memory behavior
@@ -130,6 +134,7 @@ OpenClaw-compatible agents use the same memory system as every other MindRoom ag
 - `memory.backend: file` for file-first memory (global default)
 - `memory_backend: file` on an individual agent to override the global default
 - agents that use file memory store it under `agents/<name>/workspace/`, not under the shared global `memory.file.path` tree
+- `context_files` and OpenClaw-style knowledge paths should point into that same canonical workspace if you want one consistent file-first workflow
 - optional `knowledge_bases` for semantic recall over arbitrary workspace folders
 
 Recommended for OpenClaw-style setups: `memory_backend: file` with the canonical workspace layout and `memory.auto_flush.enabled: true`.
