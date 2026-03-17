@@ -831,17 +831,18 @@ async def chat_completions(
                 execution_identity=execution_identity,
             )
         else:
-            response = await _non_stream_completion(
-                agent_name,
-                prompt,
-                session_id,
-                config,
-                runtime_paths,
-                thread_history,
-                req.user,
-                knowledge,
-                execution_identity=execution_identity,
-            )
+            with tool_execution_identity(execution_identity):
+                response = await _non_stream_completion(
+                    agent_name,
+                    prompt,
+                    session_id,
+                    config,
+                    runtime_paths,
+                    thread_history,
+                    req.user,
+                    knowledge,
+                    execution_identity=execution_identity,
+                )
 
     return response
 

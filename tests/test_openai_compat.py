@@ -391,6 +391,33 @@ class TestChatCompletions:
         assert response.status_code == 200
         assert seen_requester_ids == [None]
 
+    def test_non_stream_completion_keeps_execution_identity_for_ai_response(self, app_client: TestClient) -> None:
+        """Non-stream agent responses must keep execution identity active through ai_response."""
+        observed_agent_names: list[str | None] = []
+        observed_session_ids: list[str | None] = []
+
+        async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
+            identity = get_tool_execution_identity()
+            observed_agent_names.append(identity.agent_name if identity is not None else None)
+            observed_session_ids.append(identity.session_id if identity is not None else None)
+            return "Response"
+
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+            mock_ai.side_effect = _capture
+
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "general",
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert observed_agent_names == ["general"]
+        assert len(observed_session_ids) == 1
+        assert observed_session_ids[0] is not None
+
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
         identity = _build_tool_execution_identity(
