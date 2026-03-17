@@ -745,6 +745,93 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     assert captured["json"]["private_agent_names"] == ["code"]
 
 
+def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared user-agent workers should still send explicit empty private visibility."""
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "result": "sandbox-result"}
+
+    class _FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return
+
+        def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="off",
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        worker_tools_override=["calculator"],
+        worker_scope="user_agent",
+        routing_agent_name="code",
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
+
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="shared_agent",
+        requester_id="alice",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
+    assert expected_worker_key is not None
+
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="alice",
+        client=object(),
+        config=Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    worker_scope="user_agent",
+                ),
+            },
+            models={},
+        ),
+        runtime_paths=runtime_paths,
+    )
+
+    with tool_execution_identity(execution_identity), tool_runtime_context(runtime_context):
+        result = entrypoint(1, 2)
+
+    assert result == "sandbox-result"
+    assert captured["json"]["worker_key"] == expected_worker_key
+    assert captured["json"]["private_agent_names"] == []
+
+
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     """The current shared sandbox-runner provider should return stable handle identity per worker key."""
     backend = StaticSandboxRunnerBackend(

@@ -56,6 +56,7 @@ def _resolved_execution_identity(
     *,
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ToolExecutionIdentity | None:
     worker_scope = config.get_agent_worker_scope(agent_name)
@@ -63,7 +64,18 @@ def _resolved_execution_identity(
         worker_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
+
+
+def resolved_worker_private_agent_names(agent_runtime: ResolvedAgentRuntime) -> frozenset[str] | None:
+    """Return explicit user-agent visibility derived from one resolved runtime."""
+    if agent_runtime.worker_scope != "user_agent":
+        return None
+    if agent_runtime.is_private:
+        return frozenset({agent_runtime.agent_name})
+    return frozenset()
 
 
 def resolve_agent_runtime(
@@ -82,20 +94,21 @@ def resolve_agent_runtime(
     resolved_execution_identity = _resolved_execution_identity(
         agent_name=agent_name,
         config=config,
+        runtime_paths=runtime_paths,
         execution_identity=effective_execution_identity,
     )
 
     worker_key: str | None = None
-    if is_private:
-        if resolved_execution_identity is None:
-            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-            raise ValueError(msg)
-        assert worker_scope is not None
+    if worker_scope is not None and resolved_execution_identity is not None:
         worker_key = resolve_worker_key(
             worker_scope,
             resolved_execution_identity,
             agent_name=agent_name,
         )
+    if is_private:
+        if resolved_execution_identity is None:
+            msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
+            raise ValueError(msg)
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{worker_scope}'"
             raise ValueError(msg)

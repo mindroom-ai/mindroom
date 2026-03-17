@@ -577,6 +577,57 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     assert runtime.file_memory_root is None
 
 
+def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp_path: Path) -> None:
+    """Shared scoped agents should still resolve their worker key from execution identity."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].worker_scope = "user"
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="s1",
+    )
+
+    runtime = resolve_agent_runtime(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+
+    assert runtime.is_private is False
+    assert runtime.worker_scope == "user"
+    assert runtime.worker_key == resolve_worker_key("user", identity, agent_name="general")
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+    assert runtime.tool_base_dir is None
+    assert runtime.file_memory_root is None
+
+
+def test_resolve_agent_runtime_derives_shared_worker_key_without_live_identity(tmp_path: Path) -> None:
+    """Shared worker scope should synthesize the shared worker key from runtime tenant context."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"CUSTOMER_ID": "tenant-123"},
+    )
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].worker_scope = "shared"
+
+    runtime = resolve_agent_runtime("general", config, runtime_paths, create=True)
+
+    assert runtime.is_private is False
+    assert runtime.worker_scope == "shared"
+    assert runtime.worker_key == "v1:tenant-123:shared:general"
+    assert runtime.state_root == agent_state_root_path(tmp_path, "general")
+    assert runtime.workspace is None
+
+
 def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     tmp_path: Path,
     build_private_template_dir: Callable[..., Path],

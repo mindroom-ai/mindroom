@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
+from mindroom.runtime_resolution import resolve_agent_runtime, resolved_worker_private_agent_names
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
@@ -24,7 +24,6 @@ from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
     resolve_worker_key,
-    resolved_worker_key_scope,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -321,20 +320,38 @@ def _build_worker_routing_payload(
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
 
-    worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=routing_agent_name)
-    if worker_key is None:
-        msg = (
-            f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
-            "could not be resolved from the current execution identity."
-        )
-        raise RuntimeError(msg)
-
+    effective_agent_name = routing_agent_name or execution_identity.agent_name
+    worker_key: str | None
     private_agent_names: frozenset[str] | None = None
-    if resolved_worker_key_scope(worker_key) == "user_agent":
+    if worker_scope == "user_agent":
         if context is None:
-            msg = f"User-agent worker '{worker_key}' requires runtime config context for private visibility."
+            msg = (
+                f"Worker-routed tool '{tool_name}.{function_name}' with scope '{worker_scope}' "
+                "requires runtime config context for private visibility."
+            )
             raise RuntimeError(msg)
-        private_agent_names = runtime_private_agent_names(context.config, worker_key=worker_key)
+        agent_runtime = resolve_agent_runtime(
+            effective_agent_name,
+            context.config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        )
+        if agent_runtime.worker_key is None:
+            msg = (
+                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+                "could not be resolved from the current execution identity."
+            )
+            raise RuntimeError(msg)
+        worker_key = agent_runtime.worker_key
+        private_agent_names = resolved_worker_private_agent_names(agent_runtime)
+    else:
+        worker_key = resolve_worker_key(worker_scope, execution_identity, agent_name=effective_agent_name)
+        if worker_key is None:
+            msg = (
+                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+                "could not be resolved from the current execution identity."
+            )
+            raise RuntimeError(msg)
     worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
         WorkerSpec(worker_key, private_agent_names=private_agent_names),
     )

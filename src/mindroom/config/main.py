@@ -31,7 +31,6 @@ from mindroom.matrix.identity import (
     managed_room_alias_localpart,
     managed_space_alias_localpart,
 )
-from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 
 if TYPE_CHECKING:
     from mindroom.matrix.identity import MatrixID
@@ -917,14 +916,3 @@ def load_config(runtime_paths: RuntimePaths) -> Config:
     logger.info(f"Loaded agent configuration from {path}")
     logger.info(f"Found {len(config.agents)} agent configurations")
     return config
-
-
-def runtime_private_agent_names(
-    config: Config,
-    *,
-    worker_key: str | None = None,
-) -> frozenset[str]:
-    """Return private-agent visibility for worker scopes that need it."""
-    if worker_key is None or resolved_worker_key_scope(worker_key) != "user_agent":
-        return frozenset()
-    return config.get_private_agent_names()

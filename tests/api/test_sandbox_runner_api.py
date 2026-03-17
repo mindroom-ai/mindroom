@@ -24,7 +24,6 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import (
     resolve_primary_runtime_paths,
     resolve_runtime_paths,
@@ -1441,35 +1440,6 @@ def test_sandbox_runner_worker_request_uses_default_storage_root_when_env_is_uns
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert (canonical_base_dir / "note.txt").read_text(encoding="utf-8") == "hello from default storage root fallback"
-
-
-def test_runtime_private_agent_names_skips_config_load_for_non_user_agent_worker() -> None:
-    """Non-user-agent workers should not consult private-agent config visibility."""
-    config = SimpleNamespace(
-        get_private_agent_names=lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
-    )
-
-    assert runtime_private_agent_names(config, worker_key="v1:tenant-123:shared:general") == frozenset()
-
-
-def test_runtime_private_agent_names_returns_private_names_for_user_agent_worker() -> None:
-    """User-agent workers should read private visibility from the provided config."""
-    worker_key = resolve_worker_key(
-        "user_agent",
-        ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="mind",
-            requester_id="@alice:example.org",
-            room_id="!room:example.org",
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id=None,
-        ),
-        agent_name="mind",
-    )
-    config = SimpleNamespace(get_private_agent_names=lambda: frozenset({"mind"}))
-
-    assert runtime_private_agent_names(config, worker_key=worker_key) == frozenset({"mind"})
 
 
 def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
