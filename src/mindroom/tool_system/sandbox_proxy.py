@@ -16,8 +16,8 @@ import httpx
 from mindroom.constants import execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.runtime_resolution import (
+    require_worker_key_for_scope,
     resolve_agent_execution,
-    resolve_worker_execution_scope,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -322,17 +322,18 @@ def _build_worker_routing_payload(
         )
     else:
         resolved_private_agent_names = None
-        worker_key = resolve_worker_execution_scope(
-            worker_scope,
-            agent_name=effective_agent_name,
-            execution_identity=execution_identity,
-        ).worker_key
-        if worker_key is None:
-            msg = (
-                f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
-                "could not be resolved from the current execution identity."
+        try:
+            worker_key = require_worker_key_for_scope(
+                worker_scope,
+                agent_name=effective_agent_name,
+                execution_identity=execution_identity,
+                failure_message=(
+                    f"Worker scope '{worker_scope}' for tool '{tool_name}.{function_name}' "
+                    "could not be resolved from the current execution identity."
+                ),
             )
-            raise RuntimeError(msg)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
     worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
         WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
     )
@@ -375,20 +376,26 @@ def _resolve_user_agent_worker_payload(
         )
         resolved_private_agent_names = frozenset({effective_agent_name}) if agent_execution.is_private else frozenset()
         worker_key = agent_execution.worker_key
+        if worker_key is None:
+            msg = (
+                f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
+                "could not be resolved from the current execution identity."
+            )
+            raise RuntimeError(msg)
     else:
         resolved_private_agent_names = frozenset({effective_agent_name}) if routing_agent_is_private else frozenset()
-        worker_key = resolve_worker_execution_scope(
-            "user_agent",
-            agent_name=effective_agent_name,
-            execution_identity=execution_identity,
-        ).worker_key
-
-    if worker_key is None:
-        msg = (
-            f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
-            "could not be resolved from the current execution identity."
-        )
-        raise RuntimeError(msg)
+        try:
+            worker_key = require_worker_key_for_scope(
+                "user_agent",
+                agent_name=effective_agent_name,
+                execution_identity=execution_identity,
+                failure_message=(
+                    f"Worker scope 'user_agent' for tool '{tool_name}.{function_name}' "
+                    "could not be resolved from the current execution identity."
+                ),
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     return worker_key, resolved_private_agent_names
 

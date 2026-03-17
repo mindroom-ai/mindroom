@@ -18,7 +18,7 @@ from mindroom.credentials import (
     merge_scoped_credentials,
     validate_service_name,
 )
-from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.runtime_resolution import require_worker_key_for_scope
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
@@ -243,17 +243,12 @@ def resolve_request_credentials_target(
             )
 
     execution_identity = _build_dashboard_execution_identity(request, agent_name)
-    worker_key = resolve_agent_execution(
-        agent_name,
-        config,
+    worker_key = require_worker_key_for_scope(
+        worker_scope,
         execution_identity=execution_identity,
-    ).worker_key
-    if worker_key is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not resolve worker credentials for agent '{agent_name}'.",
-        )
-
+        agent_name=agent_name,
+        failure_message=f"Could not resolve worker credentials for agent '{agent_name}'.",
+    )
     return RequestCredentialsTarget(
         base_manager=base_manager,
         target_manager=base_manager.for_worker(worker_key),

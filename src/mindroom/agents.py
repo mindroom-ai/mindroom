@@ -759,7 +759,6 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
     tool_init_context = _tool_init_context_from_runtime(agent_runtime)
     workspace = agent_runtime.workspace
-    # Create tools
     tools: list[Toolkit] = []
     for tool_name in tool_names:
         try:
@@ -774,8 +773,13 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 delegation_depth=delegation_depth,
             ):
                 tools.append(toolkit)
-        except (ValueError, ImportError) as e:
-            logger.warning(f"Could not load tool '{tool_name}' for agent '{agent_name}': {e}")
+        except (ValueError, ImportError) as exc:
+            logger.warning(
+                "Could not load tool for agent construction",
+                tool=tool_name,
+                agent=agent_name,
+                error=str(exc),
+            )
 
     storage = _create_agent_state_db_from_state_root(
         agent_name,
