@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import hmac
 import json
 from collections.abc import Mapping
 from contextlib import suppress
@@ -162,14 +161,6 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> SandboxProxyConfig:
         proxy_tools=_read_proxy_tools(runtime_paths, execution_mode),
         credential_policy=_read_credential_policy(runtime_paths),
     )
-
-
-def sandbox_proxy_token_matches(provided_token: str | None, runtime_paths: RuntimePaths) -> bool:
-    """Validate a provided token against the configured shared token."""
-    proxy_token = sandbox_proxy_config(runtime_paths).proxy_token
-    if proxy_token is None or provided_token is None:
-        return False
-    return hmac.compare_digest(provided_token, proxy_token)
 
 
 def to_json_compatible(value: object) -> object:

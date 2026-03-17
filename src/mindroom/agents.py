@@ -294,27 +294,6 @@ def _build_additional_context(
     return additional_context
 
 
-def _resolve_agent_workspace_path(
-    agent_name: str,
-    agent_config: AgentConfig,
-    *,
-    storage_path: Path,
-) -> Path:
-    """Return the canonical workspace path for one agent."""
-    if agent_config.memory_file_path is None:
-        workspace_path = agent_workspace_root_path(storage_path, agent_name)
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        return workspace_path
-
-    workspace_path = resolve_agent_owned_path(
-        agent_config.memory_file_path,
-        agent_name=agent_name,
-        base_storage_path=storage_path,
-    )
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    return workspace_path
-
-
 def _tool_supports_base_dir(tool_name: str) -> bool:
     """Return whether a registered tool exposes a base_dir config field."""
     metadata = TOOL_METADATA.get(tool_name)
@@ -509,24 +488,6 @@ def create_session_storage(
         runtime_paths,
         subdir="sessions",
         session_table=f"{agent_name}_sessions",
-        execution_identity=execution_identity,
-    )
-
-
-def _create_learning_storage(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> SqliteDb:
-    """Create persistent learning storage for an agent."""
-    return _create_agent_state_db(
-        agent_name,
-        config,
-        runtime_paths,
-        subdir="learning",
-        session_table=f"{agent_name}_learning_sessions",
         execution_identity=execution_identity,
     )
 
