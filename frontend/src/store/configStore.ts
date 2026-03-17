@@ -39,6 +39,21 @@ function removeMissingTeamMembers(teams: Team[], agents: Agent[]): Team[] {
   }));
 }
 
+function normalizeAgentDelegates(delegateTo: string[] | undefined): string {
+  return [...new Set(delegateTo ?? [])].sort().join('\0');
+}
+
+function teamEligibilityChanged(
+  currentAgent: Pick<Agent, 'private' | 'delegate_to'>,
+  nextAgent: Pick<Agent, 'private' | 'delegate_to'>
+): boolean {
+  return (
+    (currentAgent.private != null) !== (nextAgent.private != null) ||
+    normalizeAgentDelegates(currentAgent.delegate_to) !==
+      normalizeAgentDelegates(nextAgent.delegate_to)
+  );
+}
+
 type MemoryEmbedderUpdate = {
   provider: string;
   model: string;
@@ -321,6 +336,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   // Update an existing agent
   updateAgent: (agentId, updates) => {
     let nextAgents: Agent[] = [];
+    let shouldRefreshTeamEligibility = false;
     set(state => {
       const currentAgent = state.agents.find(agent => agent.id === agentId);
       if (!currentAgent) {
@@ -354,6 +370,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       nextAgents = state.agents.map(agent =>
         agent.id === agentId ? { ...agent, ...resolvedUpdates } : agent
       );
+      const nextAgent = nextAgents.find(agent => agent.id === agentId) ?? currentAgent;
+      shouldRefreshTeamEligibility = teamEligibilityChanged(currentAgent, nextAgent);
 
       return {
         agents: nextAgents,
@@ -363,7 +381,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         configValidationIssues: [],
       };
     });
-    if (get().config != null) {
+    if (shouldRefreshTeamEligibility && get().config != null) {
       void get().refreshTeamEligibility(nextAgents);
     }
   },

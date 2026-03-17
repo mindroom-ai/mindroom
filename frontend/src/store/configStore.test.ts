@@ -648,6 +648,88 @@ describe('configStore', () => {
       });
     });
 
+    it('does not refresh team eligibility for non-policy agent edits', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          agents: {},
+          defaults: { markdown: true },
+          models: {},
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'leader',
+            display_name: 'Leader',
+            role: 'Lead',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            delegate_to: [],
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateAgent('leader', {
+        display_name: 'Updated Leader',
+      });
+
+      await Promise.resolve();
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(useConfigStore.getState().agents[0].display_name).toBe('Updated Leader');
+    });
+
+    it('does not refresh team eligibility for private workspace edits that keep private mode enabled', async () => {
+      useConfigStore.setState({
+        config: {
+          memory: {
+            embedder: {
+              provider: 'openai',
+              config: { model: 'text-embedding-3-small' },
+            },
+          },
+          agents: {},
+          defaults: { markdown: true },
+          models: {},
+          router: { model: 'default' },
+        },
+        agents: [
+          {
+            id: 'mind',
+            display_name: 'Mind',
+            role: 'Private',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            private: {
+              per: 'user',
+              root: 'mind_data',
+            },
+          },
+        ],
+      });
+
+      useConfigStore.getState().updateAgent('mind', {
+        private: {
+          per: 'user',
+          root: 'updated_root',
+        },
+      });
+
+      await Promise.resolve();
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(useConfigStore.getState().agents[0].private?.root).toBe('updated_root');
+    });
+
     it('keeps draft team membership when delegation now reaches a private agent', async () => {
       useConfigStore.setState({
         config: {
