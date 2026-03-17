@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Agent, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
+import { Agent, normalizeAgentUpdates, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
 import { useTools } from '@/hooks/useTools';
 
 // Mock the store
@@ -512,23 +512,19 @@ describe('AgentEditor', () => {
     fireEvent.click(screen.getByLabelText('Enable requester-private state'));
 
     await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        'test_agent',
-        expect.objectContaining({
-          worker_scope: undefined,
-          private: { per: 'user' },
-        })
-      );
+      expect(mockStore.updateAgent).toHaveBeenCalledWith('test_agent', {
+        private: { per: 'user' },
+      });
     });
   });
 
-  it('restores prior worker_scope when private mode is disabled before save', async () => {
+  it('restores prior worker_scope when private mode is disabled after rerender', async () => {
     const scopedAgent: Agent = {
       ...mockAgent,
       worker_scope: 'user_agent',
     };
 
-    (useConfigStore as any).mockReturnValue({
+    let state = {
       ...mockStore,
       agents: [scopedAgent],
       config: {
@@ -537,36 +533,56 @@ describe('AgentEditor', () => {
           test_agent: scopedAgent,
         },
       },
+    };
+    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const nextAgent = { ...currentAgent, ...normalizedUpdates };
+      state = {
+        ...state,
+        agents: state.agents.map(agent => (agent.id === agentId ? nextAgent : agent)),
+        config: {
+          ...state.config,
+          agents: {
+            ...state.config.agents,
+            [agentId]: nextAgent,
+          },
+        },
+        updateAgent,
+      };
     });
+    state = { ...state, updateAgent };
+    (useConfigStore as any).mockImplementation(() => state);
 
-    render(<AgentEditor />);
+    const view = render(<AgentEditor />);
 
     const privateToggle = screen.getByLabelText('Enable requester-private state');
     fireEvent.click(privateToggle);
-    fireEvent.click(privateToggle);
+    await waitFor(() => {
+      expect(state.agents[0].private).toEqual({ per: 'user' });
+      expect(state.agents[0].worker_scope).toBeUndefined();
+    });
+
+    view.rerender(<AgentEditor />);
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
 
     await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenNthCalledWith(
+      expect(updateAgent).toHaveBeenNthCalledWith(
         1,
         'test_agent',
         expect.objectContaining({
-          worker_scope: undefined,
           private: { per: 'user' },
         })
       );
-      expect(mockStore.updateAgent).toHaveBeenNthCalledWith(
-        2,
-        'test_agent',
-        expect.objectContaining({
-          private: undefined,
-        })
-      );
-      expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
-        'test_agent',
-        expect.objectContaining({
-          worker_scope: 'user_agent',
-        })
-      );
+      expect(updateAgent).toHaveBeenNthCalledWith(2, 'test_agent', {
+        private: undefined,
+        worker_scope: 'user_agent',
+      });
+      expect(state.agents[0].private).toBeUndefined();
+      expect(state.agents[0].worker_scope).toBe('user_agent');
     });
   });
 
@@ -622,24 +638,54 @@ describe('AgentEditor', () => {
   });
 
   it('enables private knowledge with a default path', async () => {
-    render(<AgentEditor />);
+    let state = {
+      ...mockStore,
+      agents: [{ ...mockAgent }],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: { ...mockAgent },
+        },
+      },
+    };
+    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
+      const currentAgent = state.agents.find(agent => agent.id === agentId);
+      if (!currentAgent) {
+        return;
+      }
+      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
+      const nextAgent = { ...currentAgent, ...normalizedUpdates };
+      state = {
+        ...state,
+        agents: state.agents.map(agent => (agent.id === agentId ? nextAgent : agent)),
+        config: {
+          ...state.config,
+          agents: {
+            ...state.config.agents,
+            [agentId]: nextAgent,
+          },
+        },
+        updateAgent,
+      };
+    });
+    state = { ...state, updateAgent };
+    (useConfigStore as any).mockImplementation(() => state);
+
+    const view = render(<AgentEditor />);
 
     fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+    view.rerender(<AgentEditor />);
     fireEvent.click(screen.getByLabelText('Enable private knowledge'));
 
     await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalledWith(
-        'test_agent',
-        expect.objectContaining({
-          private: expect.objectContaining({
-            knowledge: expect.objectContaining({
-              enabled: true,
-              path: 'memory',
-              watch: true,
-            }),
-          }),
-        })
-      );
+      expect(state.agents[0].private).toEqual({
+        per: 'user',
+        knowledge: {
+          enabled: true,
+          path: 'memory',
+          watch: true,
+        },
+      });
     });
   });
 

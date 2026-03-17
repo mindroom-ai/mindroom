@@ -27,7 +27,6 @@ import {
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
   getAgentExecutionScope,
-  normalizeAgentUpdates,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
@@ -261,14 +260,15 @@ export function AgentEditor() {
     setRestorableWorkerScope(null);
   }, [selectedAgentId]);
 
-  // Create a debounced update function
+  // Let the store normalize against current state so sequential UI updates do not
+  // reuse stale render-time agent data.
   const handleFieldChange = useCallback(
     (fieldName: keyof Agent, value: any) => {
-      if (selectedAgentId && selectedAgent) {
-        updateAgent(selectedAgentId, normalizeAgentUpdates(selectedAgent, { [fieldName]: value }));
+      if (selectedAgentId) {
+        updateAgent(selectedAgentId, { [fieldName]: value });
       }
     },
-    [selectedAgent, selectedAgentId, updateAgent]
+    [selectedAgentId, updateAgent]
   );
 
   const updateSelectedTools = useCallback(
@@ -323,17 +323,10 @@ export function AgentEditor() {
 
   const updatePrivate = useCallback(
     (nextPrivate: Agent['private']) => {
-      if (!selectedAgent) {
-        setValue('private', nextPrivate);
-        handleFieldChange('private', nextPrivate);
-        return;
-      }
-
-      const normalizedUpdates = normalizeAgentUpdates(selectedAgent, { private: nextPrivate });
-      setValue('private', normalizedUpdates.private ?? nextPrivate);
-      handleFieldChange('private', normalizedUpdates.private ?? nextPrivate);
+      setValue('private', nextPrivate);
+      handleFieldChange('private', nextPrivate);
     },
-    [handleFieldChange, selectedAgent, setValue]
+    [handleFieldChange, setValue]
   );
 
   const mutatePrivate = useCallback(
@@ -354,11 +347,16 @@ export function AgentEditor() {
       return;
     }
 
-    updatePrivate(undefined);
+    setValue('private', undefined);
+    const nextUpdates: Partial<Agent> = { private: undefined };
     if (restorableWorkerScope != null) {
-      handleFieldChange('worker_scope', restorableWorkerScope);
-      setRestorableWorkerScope(null);
+      setValue('worker_scope', restorableWorkerScope);
+      nextUpdates.worker_scope = restorableWorkerScope;
     }
+    if (selectedAgentId) {
+      updateAgent(selectedAgentId, nextUpdates);
+    }
+    setRestorableWorkerScope(null);
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
