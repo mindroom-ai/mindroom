@@ -2044,6 +2044,7 @@ def test_config_private_knowledge_requires_path_without_template_default() -> No
         ("learning", "private.root must not use reserved runtime directory 'learning'"),
         ("knowledge_db", "private.root must not use reserved runtime directory 'knowledge_db'"),
         ("chroma", "private.root must not use reserved runtime directory 'chroma'"),
+        ("culture", "private.root must not use reserved runtime directory 'culture'"),
     ],
 )
 def test_config_rejects_invalid_private_root_values(root: str, expected_message: str) -> None:
