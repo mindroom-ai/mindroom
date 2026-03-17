@@ -20,13 +20,13 @@ from mindroom.memory.functions import (
     search_agent_memories,
     update_agent_memory,
 )
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
 
@@ -40,11 +40,13 @@ class MemoryTools(Toolkit):
         storage_path: Path,
         config: Config,
         runtime_paths: RuntimePaths,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._storage_path = storage_path
         self._config = config
         self._runtime_paths = runtime_paths
+        self._execution_identity = execution_identity
 
         super().__init__(
             name="memory",
@@ -79,7 +81,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 metadata={"source": "explicit_tool"},
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
         except Exception as e:
             logger.exception("Failed to add memory via tool", agent=self._agent_name, error=str(e))
@@ -108,7 +110,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 limit=limit,
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
             if not results:
                 return "No relevant memories found."
@@ -141,7 +143,7 @@ class MemoryTools(Toolkit):
                 self._config,
                 self._runtime_paths,
                 limit=limit,
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
             if not results:
                 return "No memories stored yet."
@@ -174,7 +176,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
             if result is None:
                 return f"No memory found with id={memory_id}"
@@ -204,7 +206,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
         except Exception as e:
             logger.exception(
@@ -237,7 +239,7 @@ class MemoryTools(Toolkit):
                 self._storage_path,
                 self._config,
                 self._runtime_paths,
-                execution_identity=get_tool_execution_identity(),
+                execution_identity=self._execution_identity,
             )
         except Exception as e:
             logger.exception(

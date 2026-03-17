@@ -276,6 +276,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_SCOPE,
         ToolManagedInitArg.ROUTING_AGENT_NAME,
+        ToolManagedInitArg.EXECUTION_IDENTITY,
     ),
     config_fields=[
         ConfigField(

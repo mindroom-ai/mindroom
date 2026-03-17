@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_SCOPE,
         ToolManagedInitArg.ROUTING_AGENT_NAME,
+        ToolManagedInitArg.EXECUTION_IDENTITY,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
     docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",

@@ -149,14 +149,12 @@ def _deserialize_execution_identity(raw_identity: object) -> ToolExecutionIdenti
 
 def _resolve_flush_scope(
     config: Config,
-    runtime_paths: RuntimePaths,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[str | None, _SerializedExecutionIdentity | None]:
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
-        runtime_paths,
         execution_identity=execution_identity,
     )
     if not resolved_execution.is_private:
@@ -189,6 +187,7 @@ def _stale_private_session_entry(
     agent_name: str,
     entry: _FlushSessionEntry,
 ) -> bool:
+    _ = runtime_paths
     agent_config = config.agents.get(agent_name)
     worker_key = entry.get("worker_key")
     execution_identity = _deserialize_execution_identity(entry.get("execution_identity"))
@@ -197,12 +196,7 @@ def _stale_private_session_entry(
     if not isinstance(worker_key, str) or execution_identity is None:
         return True
     try:
-        resolved_worker_key, _ = _resolve_flush_scope(
-            config,
-            runtime_paths,
-            agent_name,
-            execution_identity,
-        )
+        resolved_worker_key, _ = _resolve_flush_scope(config, agent_name, execution_identity)
     except ValueError:
         return True
     return resolved_worker_key != worker_key
@@ -269,11 +263,12 @@ def mark_auto_flush_dirty_session(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Mark one agent session as dirty for background auto-flush."""
+    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
     now = _now_ts()
-    worker_key, serialized_identity = _resolve_flush_scope(config, runtime_paths, agent_name, execution_identity)
+    worker_key, serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
     key = _session_key(agent_name, session_id, worker_key)
 
     with _STATE_LOCK:
@@ -316,6 +311,7 @@ def reprioritize_auto_flush_sessions(
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
     """Raise priority of other dirty sessions for the same agent."""
+    _ = runtime_paths
     if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
         return
 
@@ -324,7 +320,7 @@ def reprioritize_auto_flush_sessions(
         return
 
     now = _now_ts()
-    worker_key, _serialized_identity = _resolve_flush_scope(config, runtime_paths, agent_name, execution_identity)
+    worker_key, _serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
         sessions = state["sessions"]

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.worker_routing import WorkerScope
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 _GOOGLE_OAUTH_DEPS = ["google-auth", "google-auth-oauthlib"]
 
@@ -41,6 +41,7 @@ class ScopedGoogleOAuthMixin:
     _creds_manager: CredentialsManager
     _worker_scope: WorkerScope | None
     _routing_agent_name: str | None
+    _execution_identity: ToolExecutionIdentity | None
     _provided_creds: bool
     _original_auth: Callable[[], None]
     creds: Any | None
@@ -50,6 +51,7 @@ class ScopedGoogleOAuthMixin:
         *,
         worker_scope: WorkerScope | None,
         routing_agent_name: str | None,
+        execution_identity: ToolExecutionIdentity | None,
         provided_creds: Any,  # noqa: ANN401
         logger: Logger,
     ) -> Any:  # noqa: ANN401
@@ -65,6 +67,7 @@ class ScopedGoogleOAuthMixin:
 
         self._worker_scope = worker_scope
         self._routing_agent_name = routing_agent_name
+        self._execution_identity = execution_identity
         self._provided_creds = provided_creds is not None
         self._oauth_logger = logger
         return provided_creds or self._load_stored_credentials()
@@ -76,6 +79,7 @@ class ScopedGoogleOAuthMixin:
             worker_scope=self._worker_scope,
             routing_agent_name=self._routing_agent_name,
             credentials_manager=self._creds_manager,
+            execution_identity=self._execution_identity,
         )
 
     def _save_token_data(self, token_data: dict[str, Any]) -> None:
@@ -86,6 +90,7 @@ class ScopedGoogleOAuthMixin:
             worker_scope=self._worker_scope,
             routing_agent_name=self._routing_agent_name,
             credentials_manager=self._creds_manager,
+            execution_identity=self._execution_identity,
         )
 
     def _build_credentials(self, token_data: dict[str, Any]) -> Any:  # noqa: ANN401

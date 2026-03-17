@@ -14,7 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory.functions import search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.worker_routing import agent_state_root_path
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -77,6 +77,31 @@ class TestMemoryTools:
             )
             assert "Memorized" in result
             assert "dark mode" in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_uses_stored_execution_identity(self, storage_path: Path, config: Config) -> None:
+        """MemoryTools should forward the constructor-bound execution identity without ambient context."""
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="test_agent",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        tools = MemoryTools(
+            agent_name="test_agent",
+            storage_path=storage_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            execution_identity=execution_identity,
+        )
+
+        with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
+            await tools.add_memory("Remember this")
+
+        assert mock_add.await_args.kwargs["execution_identity"] == execution_identity
 
     @pytest.mark.asyncio
     async def test_add_memory_error(self, tools: MemoryTools) -> None:

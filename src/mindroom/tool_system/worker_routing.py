@@ -220,6 +220,9 @@ def resolve_execution_identity_for_worker_scope(
     if worker_scope != "shared" or agent_name is None:
         return None
 
+    if tenant_id is None and account_id is None:
+        return None
+
     return ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent_name,

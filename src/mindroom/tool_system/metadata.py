@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 # Registry mapping tool names to their factory functions
 _TOOL_REGISTRY: dict[str, Callable[[], type[Toolkit]]] = {}
@@ -120,6 +121,7 @@ def _build_managed_tool_init_kwargs(
     credentials_manager: CredentialsManager | None,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
     init_kwargs: dict[str, object] = {}
@@ -132,6 +134,8 @@ def _build_managed_tool_init_kwargs(
             init_kwargs[init_arg.value] = worker_scope
         elif init_arg == ToolManagedInitArg.ROUTING_AGENT_NAME:
             init_kwargs[init_arg.value] = routing_agent_name
+        elif init_arg == ToolManagedInitArg.EXECUTION_IDENTITY:
+            init_kwargs[init_arg.value] = execution_identity
     return init_kwargs
 
 
@@ -163,6 +167,7 @@ def _build_tool_instance(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Toolkit:
     """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
     if requires_shared_only_integration_scope(tool_name) and not worker_scope_allows_shared_only_integrations(
@@ -189,8 +194,7 @@ def _build_tool_instance(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=resolved_credentials_manager,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            execution_identity=execution_identity,
         )
         if resolved_credentials_manager is not None
         else {}
@@ -211,6 +215,7 @@ def _build_tool_instance(
             credentials_manager=resolved_credentials_manager,
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
+            execution_identity=execution_identity,
         ),
     )
 
@@ -228,6 +233,7 @@ def _build_tool_instance(
         routing_agent_name=routing_agent_name,
         routing_agent_is_private=routing_agent_is_private,
         shared_storage_root_path=shared_storage_root_path,
+        execution_identity=execution_identity,
     )
 
 
@@ -245,6 +251,7 @@ def get_tool_by_name(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Toolkit:
     """Get a tool instance by its registered name."""
     if tool_name not in _TOOL_REGISTRY:
@@ -266,6 +273,7 @@ def get_tool_by_name(
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         routing_agent_is_private=routing_agent_is_private,
+        execution_identity=execution_identity,
     )
 
     # Pre-check dependencies using find_spec (no side effects) before importing
@@ -346,6 +354,7 @@ class ToolManagedInitArg(str, Enum):
     CREDENTIALS_MANAGER = "credentials_manager"
     WORKER_SCOPE = "worker_scope"
     ROUTING_AGENT_NAME = "routing_agent_name"
+    EXECUTION_IDENTITY = "execution_identity"
 
 
 @dataclass

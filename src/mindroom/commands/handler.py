@@ -232,6 +232,7 @@ def _collect_agent_toolkits(
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
+                execution_identity=execution_identity,
             )
             if toolkit is None:
                 continue
@@ -375,19 +376,18 @@ async def _run_skill_command_tool(
     room_id: str | None = None,
     thread_id: str | None = None,
 ) -> str:
-    execution_identity: ToolExecutionIdentity | None = None
-    if requester_user_id is not None and room_id is not None:
-        execution_identity = ToolExecutionIdentity(
-            channel="matrix",
-            agent_name=agent_name,
-            requester_id=requester_user_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            resolved_thread_id=thread_id,
-            session_id=create_session_id(room_id, thread_id),
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        )
+    session_id = create_session_id(room_id, thread_id) if room_id is not None else None
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=agent_name,
+        requester_id=requester_user_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        resolved_thread_id=thread_id,
+        session_id=session_id,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
     effective_runtime_paths = (
         runtime_paths
         if storage_path is None or storage_path == runtime_paths.storage_root

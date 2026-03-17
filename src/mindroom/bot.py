@@ -487,16 +487,31 @@ class AgentBot:
             )
             return {}
 
+    def _build_shared_execution_identity(self, agent_name: str | None = None) -> ToolExecutionIdentity:
+        """Build a non-request execution identity for shared agent materialization."""
+        return ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=agent_name or self.agent_name,
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id=self.runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=self.runtime_paths.env_value("ACCOUNT_ID"),
+        )
+
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
-        knowledge = self._knowledge_for_agent(self.agent_name, execution_identity=None)
+        execution_identity = self._build_shared_execution_identity()
+        knowledge = self._knowledge_for_agent(self.agent_name, execution_identity=execution_identity)
         return create_agent(
             agent_name=self.agent_name,
             config=self.config,
             runtime_paths=self.runtime_paths,
             knowledge=knowledge,
-            execution_identity=None,
+            execution_identity=execution_identity,
         )
 
     @cached_property

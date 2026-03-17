@@ -246,7 +246,6 @@ def resolve_request_credentials_target(
     worker_key = resolve_agent_execution(
         agent_name,
         config,
-        runtime_paths,
         execution_identity=execution_identity,
     ).worker_key
     if worker_key is None:

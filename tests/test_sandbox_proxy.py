@@ -20,7 +20,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
@@ -632,14 +632,14 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
+        execution_identity=execution_identity,
         worker_tools_override=["calculator"],
         worker_scope="user",
         routing_agent_name="code",
     )
     entrypoint = tool.functions["add"].entrypoint
     assert entrypoint is not None
-    with tool_execution_identity(execution_identity):
-        result = entrypoint(1, 2)
+    result = entrypoint(1, 2)
 
     assert result == "proxied"
     lease_url, lease_payload = captured_calls[0]
@@ -683,16 +683,6 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name(
-        "calculator",
-        runtime_paths,
-        worker_tools_override=["calculator"],
-        worker_scope="user_agent",
-        routing_agent_name="code",
-    )
-    entrypoint = tool.functions["add"].entrypoint
-    assert entrypoint is not None
-
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="shared_agent",
@@ -702,6 +692,17 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        execution_identity=execution_identity,
+        worker_tools_override=["calculator"],
+        worker_scope="user_agent",
+        routing_agent_name="code",
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
@@ -724,7 +725,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         runtime_paths=runtime_paths,
     )
 
-    with tool_execution_identity(execution_identity), tool_runtime_context(runtime_context):
+    with tool_runtime_context(runtime_context):
         result = entrypoint(1, 2)
 
     assert result == "sandbox-result"
@@ -783,16 +784,6 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
-    tool = get_tool_by_name(
-        "calculator",
-        runtime_paths,
-        worker_tools_override=["calculator"],
-        worker_scope="user_agent",
-        routing_agent_name="code",
-    )
-    entrypoint = tool.functions["add"].entrypoint
-    assert entrypoint is not None
-
     execution_identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="shared_agent",
@@ -802,6 +793,17 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+
+    tool = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        execution_identity=execution_identity,
+        worker_tools_override=["calculator"],
+        worker_scope="user_agent",
+        routing_agent_name="code",
+    )
+    entrypoint = tool.functions["add"].entrypoint
+    assert entrypoint is not None
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
@@ -824,7 +826,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         runtime_paths=runtime_paths,
     )
 
-    with tool_execution_identity(execution_identity), tool_runtime_context(runtime_context):
+    with tool_runtime_context(runtime_context):
         result = entrypoint(1, 2)
 
     assert result == "sandbox-result"
@@ -1352,22 +1354,6 @@ class TestWorkerToolsOverride:
             execution_mode="off",
             credential_policy={},
         )
-        monkeypatch.setattr(
-            "mindroom.tool_system.sandbox_proxy.httpx.Client",
-            _recording_client_class(captured=captured),
-        )
-        tool = get_tool_by_name(
-            "coding",
-            runtime_paths,
-            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
-            shared_storage_root_path=Path("/srv/mindroom"),
-            worker_tools_override=["coding"],
-            worker_scope="shared",
-            routing_agent_name="general",
-        )
-        entrypoint = tool.functions["ls"].entrypoint
-        assert entrypoint is not None
-
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
@@ -1377,8 +1363,23 @@ class TestWorkerToolsOverride:
             resolved_thread_id="$thread",
             session_id="session-1",
         )
-        with tool_execution_identity(execution_identity):
-            result = entrypoint(path=".")
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+        tool = get_tool_by_name(
+            "coding",
+            runtime_paths,
+            execution_identity=execution_identity,
+            tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace/mind_data"},
+            shared_storage_root_path=Path("/srv/mindroom"),
+            worker_tools_override=["coding"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+        result = entrypoint(path=".")
 
         assert result == "sandbox-result"
         assert captured["url"].endswith("/api/sandbox-runner/execute")
@@ -1440,22 +1441,6 @@ class TestWorkerToolsOverride:
             execution_mode="off",
             credential_policy={},
         )
-        monkeypatch.setattr(
-            "mindroom.tool_system.sandbox_proxy.httpx.Client",
-            _recording_client_class(captured=captured),
-        )
-
-        tool = get_tool_by_name(
-            "coding",
-            runtime_paths,
-            tool_init_overrides={"base_dir": str(unrelated_base_dir)},
-            worker_tools_override=["coding"],
-            worker_scope="shared",
-            routing_agent_name="general",
-        )
-        entrypoint = tool.functions["ls"].entrypoint
-        assert entrypoint is not None
-
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="general",
@@ -1465,8 +1450,23 @@ class TestWorkerToolsOverride:
             resolved_thread_id="$thread",
             session_id="session-1",
         )
-        with tool_execution_identity(execution_identity):
-            result = entrypoint(path=".")
+        monkeypatch.setattr(
+            "mindroom.tool_system.sandbox_proxy.httpx.Client",
+            _recording_client_class(captured=captured),
+        )
+
+        tool = get_tool_by_name(
+            "coding",
+            runtime_paths,
+            execution_identity=execution_identity,
+            tool_init_overrides={"base_dir": str(unrelated_base_dir)},
+            worker_tools_override=["coding"],
+            worker_scope="shared",
+            routing_agent_name="general",
+        )
+        entrypoint = tool.functions["ls"].entrypoint
+        assert entrypoint is not None
+        result = entrypoint(path=".")
 
         assert result == "sandbox-result"
         assert captured["json"]["tool_init_overrides"] == {

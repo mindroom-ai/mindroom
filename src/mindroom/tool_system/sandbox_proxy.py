@@ -24,7 +24,6 @@ from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
     WorkerScope,
-    get_tool_execution_identity,
     resolve_unscoped_worker_key,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
@@ -201,7 +200,6 @@ def _collect_credential_overrides(
     tool_name: str,
     function_name: str,
     *,
-    runtime_paths: RuntimePaths,
     proxy_config: SandboxProxyConfig,
     credentials_manager: CredentialsManager | None,
     worker_scope: WorkerScope | None,
@@ -222,8 +220,6 @@ def _collect_credential_overrides(
             routing_agent_name=routing_agent_name,
             credentials_manager=credentials_manager,
             execution_identity=execution_identity,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
         if isinstance(credentials, Mapping):
             merged_overrides.update(_filter_internal_credential_keys(credentials))
@@ -233,7 +229,6 @@ def _collect_credential_overrides(
 def _create_credential_lease(
     client: httpx.Client,
     *,
-    runtime_paths: RuntimePaths,
     proxy_config: SandboxProxyConfig,
     lease_url: str,
     headers: Mapping[str, str],
@@ -247,7 +242,6 @@ def _create_credential_lease(
     credential_overrides = _collect_credential_overrides(
         tool_name,
         function_name,
-        runtime_paths=runtime_paths,
         proxy_config=proxy_config,
         credentials_manager=credentials_manager,
         worker_scope=worker_scope,
@@ -280,6 +274,7 @@ def _build_worker_routing_payload(
     function_name: str,
     worker_scope: WorkerScope | None,
     routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
     routing_agent_is_private: bool | None = None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     proxy_config = sandbox_proxy_config(runtime_paths)
@@ -289,7 +284,6 @@ def _build_worker_routing_payload(
             return {}, None
 
         effective_agent_name = routing_agent_name
-        execution_identity = get_tool_execution_identity()
         if effective_agent_name is None and execution_identity is not None:
             effective_agent_name = execution_identity.agent_name
         if effective_agent_name is None:
@@ -302,8 +296,6 @@ def _build_worker_routing_payload(
         worker_key = resolve_unscoped_worker_key(
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         )
         worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(WorkerSpec(worker_key))
         return (
@@ -314,7 +306,6 @@ def _build_worker_routing_payload(
             worker_handle,
         )
 
-    execution_identity = get_tool_execution_identity()
     if execution_identity is None:
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
@@ -322,7 +313,6 @@ def _build_worker_routing_payload(
     effective_agent_name = routing_agent_name or execution_identity.agent_name
     if worker_scope == "user_agent":
         worker_key, resolved_private_agent_names = _resolve_user_agent_worker_payload(
-            runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
             effective_agent_name=effective_agent_name,
@@ -336,8 +326,6 @@ def _build_worker_routing_payload(
             worker_scope,
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         ).worker_key
         if worker_key is None:
             msg = (
@@ -364,7 +352,6 @@ def _build_worker_routing_payload(
 
 def _resolve_user_agent_worker_payload(
     *,
-    runtime_paths: RuntimePaths,
     tool_name: str,
     function_name: str,
     effective_agent_name: str,
@@ -384,7 +371,6 @@ def _resolve_user_agent_worker_payload(
         agent_execution = resolve_agent_execution(
             effective_agent_name,
             context.config,
-            runtime_paths,
             execution_identity=execution_identity,
         )
         resolved_private_agent_names = frozenset({effective_agent_name}) if agent_execution.is_private else frozenset()
@@ -395,8 +381,6 @@ def _resolve_user_agent_worker_payload(
             "user_agent",
             agent_name=effective_agent_name,
             execution_identity=execution_identity,
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
         ).worker_key
 
     if worker_key is None:
@@ -536,9 +520,9 @@ def _call_proxy_sync(  # noqa: C901
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> object:
     proxy_config = sandbox_proxy_config(runtime_paths)
-    execution_identity = get_tool_execution_identity()
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
@@ -551,6 +535,7 @@ def _call_proxy_sync(  # noqa: C901
         function_name=function_name,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
+        execution_identity=execution_identity,
         routing_agent_is_private=routing_agent_is_private,
     )
     payload.update(worker_payload)
@@ -584,7 +569,6 @@ def _call_proxy_sync(  # noqa: C901
         with httpx.Client(timeout=proxy_config.proxy_timeout_seconds) as client:
             lease_id = _create_credential_lease(
                 client,
-                runtime_paths=runtime_paths,
                 proxy_config=proxy_config,
                 lease_url=lease_url,
                 headers=headers,
@@ -631,6 +615,7 @@ def _wrap_sync_function(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -649,6 +634,7 @@ def _wrap_sync_function(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             routing_agent_is_private=routing_agent_is_private,
+            execution_identity=execution_identity,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -667,6 +653,7 @@ def _wrap_async_function(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     assert function.entrypoint is not None
@@ -686,6 +673,7 @@ def _wrap_async_function(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             routing_agent_is_private=routing_agent_is_private,
+            execution_identity=execution_identity,
         )
 
     wrapped.entrypoint = proxy_entrypoint
@@ -704,6 +692,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
     routing_agent_is_private: bool | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
@@ -730,6 +719,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             routing_agent_is_private=routing_agent_is_private,
+            execution_identity=execution_identity,
         )
         for function_name, function in toolkit.functions.items()
     }
@@ -745,6 +735,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             routing_agent_is_private=routing_agent_is_private,
+            execution_identity=execution_identity,
         )
         for function_name, function in toolkit.async_functions.items()
     }

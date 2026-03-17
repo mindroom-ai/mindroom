@@ -294,6 +294,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -304,6 +305,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             worker_tools_override,
             worker_scope,
             routing_agent_name,
+            execution_identity,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -346,6 +348,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -356,6 +359,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             worker_tools_override,
             worker_scope,
             routing_agent_name,
+            execution_identity,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -600,8 +604,8 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
     assert runtime.file_memory_root is None
 
 
-def test_resolve_agent_runtime_derives_shared_worker_key_without_live_identity(tmp_path: Path) -> None:
-    """Shared worker scope should synthesize the shared worker key from runtime tenant context."""
+def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
+    """Shared worker scope should not infer worker keys from ambient runtime context."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -614,7 +618,7 @@ def test_resolve_agent_runtime_derives_shared_worker_key_without_live_identity(t
 
     assert runtime.is_private is False
     assert runtime.worker_scope == "shared"
-    assert runtime.worker_key == "v1:tenant-123:shared:general"
+    assert runtime.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
     assert runtime.workspace is None
 
@@ -1136,12 +1140,12 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
 
 
 @patch("mindroom.agents.SqliteDb")
-def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execution_identity(
+def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
     mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shared worker credentials should be available during agent construction outside request context."""
+    """Shared worker credentials should be available when ingress passes explicit shared identity."""
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -1183,6 +1187,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
         worker_tools_override: list[str] | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> MagicMock:
         del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
         credentials = load_scoped_credentials(
@@ -1190,8 +1195,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
             worker_scope=worker_scope,
             routing_agent_name=routing_agent_name,
             credentials_manager=cast("CredentialsManager", credentials_manager),
-            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+            execution_identity=execution_identity,
         )
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
@@ -1202,7 +1206,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_without_execut
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
-    agent = _create_agent_for_test("general", config=config)
+    agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
 
     assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
 

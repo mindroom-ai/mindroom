@@ -809,6 +809,7 @@ async def chat_completions(
                     runtime_paths,
                     thread_history,
                     req.user,
+                    execution_identity=execution_identity,
                 )
     else:
         # Resolve knowledge base for this agent
@@ -1106,6 +1107,7 @@ def _build_team(
     team_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[list[Agent], Team | None, TeamMode]:
     """Create agents and build an agno.Team for the given team config.
 
@@ -1128,6 +1130,7 @@ def _build_team(
                     member_name,
                     config,
                     runtime_paths,
+                    execution_identity=execution_identity,
                     knowledge=_resolve_knowledge(member_name, config),
                     include_interactive_questions=False,
                 ),
@@ -1164,9 +1167,10 @@ async def _non_stream_team_completion(
     runtime_paths: RuntimePaths,
     thread_history: list[dict[str, Any]] | None,
     user: str | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
 ) -> JSONResponse:
     """Handle non-streaming team completion."""
-    agents, team, mode = _build_team(team_name, config, runtime_paths)
+    agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 
@@ -1214,7 +1218,7 @@ async def _stream_team_completion(
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming team completion via SSE."""
     with tool_execution_identity(execution_identity):
-        agents, team, mode = _build_team(team_name, config, runtime_paths)
+        agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     if not agents or team is None:
         return _error_response(500, "No valid agents found for team", error_type="server_error")
 

@@ -119,6 +119,24 @@ Worker visibility and knowledge bindings may remain derived helpers, but they mu
 
 Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision.
 
+## Execution Identity Boundary
+
+Ingress and adapter boundaries must build `ToolExecutionIdentity` explicitly.
+
+That includes Matrix request entrypoints, `/v1` request entrypoints, dashboard credential entrypoints, and command handlers that dispatch agent work.
+
+After ingress, business logic must receive `execution_identity` explicitly.
+
+Business logic must not call `get_tool_execution_identity()`.
+
+Business logic must not attach tenant or account by reading `runtime_paths.env_value("CUSTOMER_ID")` or `runtime_paths.env_value("ACCOUNT_ID")`.
+
+Those env reads are only allowed in the ingress and adapter boundary files that construct the identity.
+
+Feature-sensitive helper calls must pass `execution_identity=...` explicitly, even when the value is `None`.
+
+CI must enforce these rules with architecture tests.
+
 ## Runtime Scope
 
 The resolver-based contract now covers direct agent execution.

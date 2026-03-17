@@ -284,6 +284,7 @@ def _resolve_entrypoint(
     config: Config,
     tool_name: str,
     function_name: str,
+    execution_identity: ToolExecutionIdentity | None = None,
     credential_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     runtime_overrides: dict[str, object] | None = None,
@@ -295,6 +296,7 @@ def _resolve_entrypoint(
         toolkit = get_tool_by_name(
             tool_name,
             runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             credentials_manager=_runner_credentials_manager(runtime_paths),
@@ -371,6 +373,7 @@ async def _execute_request_inprocess(
             config=effective_config,
             tool_name=request.tool_name,
             function_name=request.function_name,
+            execution_identity=execution_identity,
             credential_overrides=request.credential_overrides or None,
             tool_init_overrides=request.tool_init_overrides or None,
             runtime_overrides=runtime_overrides,

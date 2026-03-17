@@ -15,7 +15,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
 from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -349,8 +349,8 @@ class TestDelegateKnowledge:
             )
 
     @pytest.mark.asyncio
-    async def test_delegation_passes_execution_identity_to_private_target(self, tmp_path: Path) -> None:
-        """Delegation should pass explicit execution identity through to private targets."""
+    async def test_delegation_uses_stored_execution_identity_for_private_target(self, tmp_path: Path) -> None:
+        """Delegation should use the constructor-bound execution identity for private targets."""
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -367,13 +367,6 @@ class TestDelegateKnowledge:
         )
         config = _bind_runtime_paths(config, tmp_path)
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-        tools = DelegateTools(
-            agent_name="leader",
-            delegate_to=["worker"],
-            runtime_paths=runtime_paths,
-            config=config,
-            delegation_depth=0,
-        )
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
             agent_name="leader",
@@ -383,15 +376,20 @@ class TestDelegateKnowledge:
             resolved_thread_id="$thread",
             session_id="session-1",
         )
+        tools = DelegateTools(
+            agent_name="leader",
+            delegate_to=["worker"],
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=execution_identity,
+            delegation_depth=0,
+        )
         mock_response = MagicMock()
         mock_response.content = "done"
         mock_agent = AsyncMock()
         mock_agent.arun = AsyncMock(return_value=mock_response)
 
-        with (
-            tool_execution_identity(execution_identity),
-            patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create,
-        ):
+        with patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create:
             await tools.delegate_task("worker", "do work")
 
         mock_create.assert_called_once_with(

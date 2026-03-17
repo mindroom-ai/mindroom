@@ -125,7 +125,6 @@ def _resolved_private_state_root(
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
-    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
@@ -136,8 +135,6 @@ def resolve_agent_execution(
         worker_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
-        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
     if is_private:
         if resolved_worker_execution.execution_identity is None:
@@ -167,7 +164,6 @@ def resolve_agent_runtime(
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
-        runtime_paths,
         execution_identity=execution_identity,
     )
     if resolved_execution.is_private:

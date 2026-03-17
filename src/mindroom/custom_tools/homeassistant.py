@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 
 from mindroom.credentials import CredentialsManager, load_scoped_credentials
 from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
     WorkerScope,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
@@ -28,6 +29,7 @@ class HomeAssistantTools(Toolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_scope: WorkerScope | None = None,
         routing_agent_name: str | None = None,
+        execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         """Initialize Home Assistant tools."""
         if not worker_scope_allows_shared_only_integrations(worker_scope):
@@ -45,6 +47,7 @@ class HomeAssistantTools(Toolkit):
         self._creds_manager = credentials_manager
         self._worker_scope = worker_scope
         self._routing_agent_name = routing_agent_name
+        self._execution_identity = execution_identity
 
         # Initialize the toolkit with all available methods
         super().__init__(
@@ -71,6 +74,7 @@ class HomeAssistantTools(Toolkit):
             worker_scope=self._worker_scope,
             routing_agent_name=self._routing_agent_name,
             credentials_manager=self._creds_manager,
+            execution_identity=self._execution_identity,
         )
 
     async def _api_request(  # noqa: PLR0911

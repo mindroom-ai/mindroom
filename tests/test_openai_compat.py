@@ -2351,7 +2351,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("collab_team", collaborate_config, _runtime_paths())
+            _build_team("collab_team", collaborate_config, _runtime_paths(), execution_identity=None)
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is True
@@ -2381,7 +2381,7 @@ class TestTeamCompletion:
                     ),
                 },
             )
-            _build_team("coord_team", config, _runtime_paths())
+            _build_team("coord_team", config, _runtime_paths(), execution_identity=None)
 
             mock_team_init.assert_called_once()
             assert mock_team_init.call_args.kwargs["delegate_to_all_members"] is False
@@ -2422,7 +2422,7 @@ class TestTeamCompletion:
 
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 
-            _build_team("team_with_kb", config, _runtime_paths())
+            _build_team("team_with_kb", config, _runtime_paths(), execution_identity=None)
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs

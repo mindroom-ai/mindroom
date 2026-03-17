@@ -325,12 +325,14 @@ def _build_registered_agent_tool(
     agent_name: str,
     workspace_path: Path | None,
     routing_agent_is_private: bool,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
     if worker_scope == "user_agent":
         return get_tool_by_name(
             tool_name,
             runtime_paths,
+            execution_identity=execution_identity,
             credentials_manager=credentials_manager,
             tool_init_overrides=_tool_base_dir_override(
                 tool_name,
@@ -346,6 +348,7 @@ def _build_registered_agent_tool(
     return get_tool_by_name(
         tool_name,
         runtime_paths,
+        execution_identity=execution_identity,
         credentials_manager=credentials_manager,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
@@ -388,6 +391,7 @@ def build_agent_toolkit(
     runtime_paths: constants.RuntimePaths,
     worker_tools: list[str],
     tool_init_context: AgentToolInitContext,
+    execution_identity: ToolExecutionIdentity | None = None,
     delegation_depth: int = 0,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
@@ -410,6 +414,7 @@ def build_agent_toolkit(
             storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
         )
 
     if tool_name == "delegate":
@@ -432,6 +437,7 @@ def build_agent_toolkit(
             delegate_to=agent_config.delegate_to,
             runtime_paths=runtime_paths,
             config=config,
+            execution_identity=execution_identity,
             delegation_depth=delegation_depth,
         )
 
@@ -450,6 +456,7 @@ def build_agent_toolkit(
         agent_name,
         tool_init_context.workspace_path,
         tool_init_context.routing_agent_is_private,
+        execution_identity,
     )
 
 
@@ -763,6 +770,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
                 runtime_paths=runtime_paths,
                 worker_tools=worker_tools,
                 tool_init_context=tool_init_context,
+                execution_identity=execution_identity,
                 delegation_depth=delegation_depth,
             ):
                 tools.append(toolkit)
