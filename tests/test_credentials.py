@@ -6,7 +6,6 @@ from typing import Any
 import pytest
 
 import mindroom.constants as constants_mod
-import mindroom.credentials
 from mindroom.api.credentials import RequestCredentialsTarget
 from mindroom.api.google_integration import _build_google_token_data
 from mindroom.api.integrations import _save_spotify_credentials
@@ -15,6 +14,7 @@ from mindroom.credentials import (
     _DEDICATED_WORKER_ROOT_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
+    _reset_credentials_manager_cache,
     get_credentials_manager,
     get_runtime_credentials_manager,
     load_scoped_credentials,
@@ -601,17 +601,16 @@ class TestGlobalCredentialsManager:
     @pytest.fixture(autouse=True)
     def reset_global_manager(self) -> None:
         """Reset the global credentials manager before each test."""
-        mindroom.credentials._credentials_manager = None
-        mindroom.credentials._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
-    def test_get_credentials_manager_singleton(self, tmp_path: Path) -> None:
-        """Test that get_credentials_manager returns the same instance."""
+    def test_get_credentials_manager_returns_same_cached_instance(self, tmp_path: Path) -> None:
+        """Same storage roots should reuse the same cached manager."""
         manager1 = get_credentials_manager(storage_root=tmp_path)
         manager2 = get_credentials_manager(storage_root=tmp_path)
         assert manager1 is manager2
 
-    def test_global_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
-        """Test that global manager uses the provided storage root."""
+    def test_cached_manager_uses_explicit_storage_root(self, tmp_path: Path) -> None:
+        """The cached manager should use the provided storage root."""
         manager = get_credentials_manager(storage_root=tmp_path)
         assert manager.base_path == tmp_path / "credentials"
 
@@ -638,6 +637,34 @@ class TestGlobalCredentialsManager:
         assert manager.base_path == storage_path / "credentials"
         assert manager.shared_base_path == shared_path
 
+    def test_runtime_manager_rebuilds_when_shared_credentials_path_changes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct runtime credential mirrors should not reuse the same cached manager."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+            encoding="utf-8",
+        )
+        first_runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str((tmp_path / "shared-a").resolve())},
+        )
+        second_runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=tmp_path,
+            process_env={SHARED_CREDENTIALS_PATH_ENV: str((tmp_path / "shared-b").resolve())},
+        )
+
+        first_manager = get_runtime_credentials_manager(first_runtime_paths)
+        second_manager = get_runtime_credentials_manager(second_runtime_paths)
+
+        assert first_manager is not second_manager
+        assert first_manager.shared_base_path == (tmp_path / "shared-a").resolve()
+        assert second_manager.shared_base_path == (tmp_path / "shared-b").resolve()
+
     def test_global_manager_rebuilds_when_storage_root_changes(self, tmp_path: Path) -> None:
         """Changing the explicit storage root should invalidate the cached manager."""
         config_path = tmp_path / "config.yaml"
@@ -660,7 +687,7 @@ class TestGlobalCredentialsManager:
         self,
         tmp_path: Path,
     ) -> None:
-        """Dedicated worker processes should load mirrored shared credentials through the global manager."""
+        """Dedicated worker processes should load mirrored shared credentials through the runtime cache."""
         root = (tmp_path / "shared-storage").resolve()
         base_manager = CredentialsManager(root / "credentials")
         config_path = tmp_path / "config.yaml"
@@ -684,8 +711,7 @@ class TestGlobalCredentialsManager:
         sync_shared_credentials_to_worker(worker_key, credentials_manager=base_manager)
         worker_root = base_manager.for_worker(worker_key).storage_root
 
-        mindroom.credentials._credentials_manager = None
-        mindroom.credentials._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
         runtime_paths = constants_mod.resolve_runtime_paths(
             config_path=config_path,

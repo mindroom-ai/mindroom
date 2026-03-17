@@ -1092,16 +1092,15 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_env(
+        def from_runtime(
             cls,
+            runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             storage_path: Path | None = None,
-            runtime_paths: RuntimePaths | None = None,
         ) -> _FakeDockerBackend:
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
-            assert runtime_paths is not None
             built_storage_paths.append(storage_path)
             built_runtime_paths.append(runtime_paths)
             return cls()
@@ -1110,7 +1109,12 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     monkeypatch.setattr(
         workers_runtime_module,
         "docker_backend_config_signature",
-        lambda *, auth_token, storage_path=None: ("docker", auth_token or "", str(storage_path)),
+        lambda runtime_paths, *, auth_token, storage_path=None: (
+            "docker",
+            auth_token or "",
+            str(storage_path),
+            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
+        ),
     )
 
     first_storage_path = (tmp_path / "runtime-a").resolve()
@@ -1136,6 +1140,77 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
 
     assert built_storage_paths == [first_storage_path, second_storage_path]
     assert built_runtime_paths == [first_runtime_paths, second_runtime_paths]
+    assert first_manager is not second_manager
+    workers_runtime_module._reset_primary_worker_manager()
+
+
+def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing the runtime shared-credentials path should rebuild the Docker worker manager."""
+    workers_runtime_module._reset_primary_worker_manager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
+    monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
+
+    built_shared_paths: list[str | None] = []
+
+    class _FakeDockerBackend:
+        backend_name = "docker"
+        idle_timeout_seconds = 60.0
+
+        @classmethod
+        def from_runtime(
+            cls,
+            runtime_paths: RuntimePaths,
+            *,
+            auth_token: str | None,
+            storage_path: Path | None = None,
+        ) -> _FakeDockerBackend:
+            assert auth_token == _TEST_AUTH_TOKEN
+            assert storage_path == tmp_path.resolve()
+            built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
+            return cls()
+
+    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+
+    config_path = tmp_path / "config.yaml"
+    first_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": str((tmp_path / "shared-a").resolve()),
+        },
+    )
+    second_runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "docker",
+            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_SHARED_CREDENTIALS_PATH": str((tmp_path / "shared-b").resolve()),
+        },
+    )
+
+    first_manager = workers_runtime_module.get_primary_worker_manager(
+        first_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+    second_manager = workers_runtime_module.get_primary_worker_manager(
+        second_runtime_paths,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        storage_root=tmp_path,
+    )
+
+    assert built_shared_paths == [
+        str((tmp_path / "shared-a").resolve()),
+        str((tmp_path / "shared-b").resolve()),
+    ]
     assert first_manager is not second_manager
     workers_runtime_module._reset_primary_worker_manager()
 

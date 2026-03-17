@@ -18,8 +18,7 @@ if TYPE_CHECKING:
 
 _PRIMARY_WORKER_BACKEND_ENV = "MINDROOM_WORKER_BACKEND"
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
-_PRIMARY_WORKER_MANAGER: WorkerManager | None = None
-_PRIMARY_WORKER_MANAGER_CONFIG: tuple[str, ...] | None = None
+_PRIMARY_WORKER_MANAGERS: dict[tuple[str, ...], WorkerManager] = {}
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 
 
@@ -60,6 +59,7 @@ def primary_worker_backend_available(
     try:
         if backend_name == "docker":
             docker_backend_config_signature(
+                runtime_paths,
                 auth_token=proxy_token,
                 storage_path=runtime_paths.storage_root,
             )
@@ -101,6 +101,7 @@ def _primary_worker_backend_config_signature(
         return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
     if backend_name == "docker":
         return docker_backend_config_signature(
+            runtime_paths,
             auth_token=proxy_token,
             storage_path=resolved_storage_root,
         )
@@ -132,10 +133,10 @@ def _build_primary_worker_manager(
         )
     if backend_name == "docker":
         return WorkerManager(
-            DockerWorkerBackend.from_env(
+            DockerWorkerBackend.from_runtime(
+                runtime_paths,
                 auth_token=proxy_token,
                 storage_path=resolved_storage_root,
-                runtime_paths=runtime_paths,
             ),
         )
     if backend_name == "kubernetes":
@@ -158,8 +159,6 @@ def get_primary_worker_manager(
     storage_root: Path | None = None,
 ) -> WorkerManager:
     """Return the primary-runtime worker manager for the current backend config."""
-    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
-
     config_signature = _primary_worker_backend_config_signature(
         runtime_paths,
         proxy_url=proxy_url,
@@ -167,20 +166,19 @@ def get_primary_worker_manager(
         storage_root=storage_root,
     )
     with _PRIMARY_WORKER_MANAGER_LOCK:
-        if _PRIMARY_WORKER_MANAGER is None or config_signature != _PRIMARY_WORKER_MANAGER_CONFIG:
-            _PRIMARY_WORKER_MANAGER = _build_primary_worker_manager(
+        manager = _PRIMARY_WORKER_MANAGERS.get(config_signature)
+        if manager is None:
+            manager = _build_primary_worker_manager(
                 runtime_paths,
                 proxy_url=proxy_url,
                 proxy_token=proxy_token,
                 storage_root=storage_root,
             )
-            _PRIMARY_WORKER_MANAGER_CONFIG = config_signature
-    return _PRIMARY_WORKER_MANAGER
+            _PRIMARY_WORKER_MANAGERS[config_signature] = manager
+        return manager
 
 
 def _reset_primary_worker_manager() -> None:
     """Reset the cached primary worker manager. Intended for tests."""
-    global _PRIMARY_WORKER_MANAGER, _PRIMARY_WORKER_MANAGER_CONFIG
     with _PRIMARY_WORKER_MANAGER_LOCK:
-        _PRIMARY_WORKER_MANAGER = None
-        _PRIMARY_WORKER_MANAGER_CONFIG = None
+        _PRIMARY_WORKER_MANAGERS.clear()

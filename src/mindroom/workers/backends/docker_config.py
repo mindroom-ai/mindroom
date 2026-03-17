@@ -7,10 +7,20 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_primary_runtime_paths,
+    runtime_env_values,
+    runtime_paths_with_storage_root,
+)
+from mindroom.credentials import runtime_credentials_manager_key
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -36,8 +46,12 @@ _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
 
 
-def _read_float_env(name: str, default: float) -> float:
-    raw = os.getenv(name, str(default)).strip()
+def _read_env(env: Mapping[str, str], name: str, default: str = "") -> str:
+    return env.get(name, default).strip()
+
+
+def _read_float_env(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = _read_env(env, name, str(default))
     try:
         value = float(raw)
     except ValueError:
@@ -45,8 +59,8 @@ def _read_float_env(name: str, default: float) -> float:
     return max(1.0, value)
 
 
-def _read_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
+def _read_int_env(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = _read_env(env, name, str(default))
     try:
         value = int(raw)
     except ValueError:
@@ -54,8 +68,8 @@ def _read_int_env(name: str, default: int) -> int:
     return max(1, value)
 
 
-def _read_json_mapping_env(name: str) -> dict[str, str]:
-    raw = os.getenv(name, "").strip()
+def _read_json_mapping_env(env: Mapping[str, str], name: str) -> dict[str, str]:
+    raw = _read_env(env, name)
     if not raw:
         return {}
     try:
@@ -75,17 +89,17 @@ def _read_json_mapping_env(name: str) -> dict[str, str]:
     return cleaned
 
 
-def _read_host_config_path() -> Path | None:
-    configured = os.getenv(_HOST_CONFIG_PATH_ENV, "").strip()
+def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) -> Path | None:
+    configured = _read_env(env, _HOST_CONFIG_PATH_ENV)
     if configured:
         resolved = Path(configured).expanduser().resolve()
         if not resolved.exists():
             msg = f"{_HOST_CONFIG_PATH_ENV} points to a missing file: {resolved}"
             raise WorkerBackendError(msg)
         return resolved
-    runtime_config_path = resolve_primary_runtime_paths(process_env=dict(os.environ)).config_path
+    runtime_config_path = runtime_paths.config_path.expanduser().resolve()
     if runtime_config_path.exists():
-        return runtime_config_path.expanduser().resolve()
+        return runtime_config_path
     return None
 
 
@@ -101,8 +115,8 @@ def _default_docker_user() -> str | None:
     return _default_docker_user_for_os(os.name)
 
 
-def _read_docker_user() -> str | None:
-    raw_value = os.getenv(_USER_ENV)
+def _read_docker_user(env: Mapping[str, str] | None = None) -> str | None:
+    raw_value = os.getenv(_USER_ENV) if env is None else env.get(_USER_ENV)
     if raw_value is None:
         return _default_docker_user()
     normalized = raw_value.strip()
@@ -120,13 +134,14 @@ def docker_workers_root(base_storage_path: Path) -> Path:
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
 
 
-def resolve_docker_storage_path(storage_path: Path | None = None) -> Path:
+def resolve_docker_storage_path(storage_path: Path | None = None, *, runtime_paths: RuntimePaths | None = None) -> Path:
     """Resolve the storage root used by the Docker backend."""
-    base_storage_path = (
-        resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
-        if storage_path is None
-        else storage_path
-    )
+    if storage_path is not None:
+        base_storage_path = storage_path
+    elif runtime_paths is not None:
+        base_storage_path = runtime_paths.storage_root
+    else:
+        base_storage_path = resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
     return base_storage_path.expanduser().resolve()
 
 
@@ -147,40 +162,51 @@ class _DockerWorkerBackendConfig:
     extra_labels: dict[str, str]
 
     @classmethod
-    def from_env(cls) -> _DockerWorkerBackendConfig:
-        image = os.getenv(_IMAGE_ENV, "").strip()
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
+        env = runtime_env_values(runtime_paths)
+        image = _read_env(env, _IMAGE_ENV)
         if not image:
             msg = f"{_IMAGE_ENV} must be set when {_WORKER_BACKEND_ENV}=docker."
             raise WorkerBackendError(msg)
 
-        publish_host = os.getenv(_PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST).strip() or _DEFAULT_PUBLISH_HOST
-        endpoint_host = os.getenv(_ENDPOINT_HOST_ENV, publish_host).strip() or publish_host
+        publish_host = _read_env(env, _PUBLISH_HOST_ENV, _DEFAULT_PUBLISH_HOST) or _DEFAULT_PUBLISH_HOST
+        endpoint_host = _read_env(env, _ENDPOINT_HOST_ENV, publish_host) or publish_host
         return cls(
             image=image,
-            worker_port=_read_int_env(_PORT_ENV, _DEFAULT_WORKER_PORT),
-            storage_mount_path=os.getenv(_STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH).strip()
+            worker_port=_read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
+            storage_mount_path=_read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
-            config_path=os.getenv(_CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH).strip() or _DEFAULT_CONFIG_PATH,
-            host_config_path=_read_host_config_path(),
-            idle_timeout_seconds=_read_float_env(_IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
-            ready_timeout_seconds=_read_float_env(_READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
-            name_prefix=os.getenv(_NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX).strip() or _DEFAULT_NAME_PREFIX,
+            config_path=_read_env(env, _CONFIG_PATH_ENV, _DEFAULT_CONFIG_PATH) or _DEFAULT_CONFIG_PATH,
+            host_config_path=_read_host_config_path(runtime_paths, env),
+            idle_timeout_seconds=_read_float_env(env, _IDLE_TIMEOUT_ENV, _DEFAULT_IDLE_TIMEOUT_SECONDS),
+            ready_timeout_seconds=_read_float_env(env, _READY_TIMEOUT_ENV, _DEFAULT_READY_TIMEOUT_SECONDS),
+            name_prefix=_read_env(env, _NAME_PREFIX_ENV, _DEFAULT_NAME_PREFIX) or _DEFAULT_NAME_PREFIX,
             publish_host=publish_host,
             endpoint_host=endpoint_host,
-            user=_read_docker_user(),
-            extra_env=_read_json_mapping_env(_EXTRA_ENV_JSON_ENV),
-            extra_labels=_read_json_mapping_env(_EXTRA_LABELS_JSON_ENV),
+            user=_read_docker_user(env),
+            extra_env=_read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
+            extra_labels=_read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
         )
+
+    @classmethod
+    def from_env(cls) -> _DockerWorkerBackendConfig:
+        return cls.from_runtime(resolve_primary_runtime_paths(process_env=dict(os.environ)))
 
 
 def docker_backend_config_signature(
+    runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
     storage_path: Path | None = None,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Docker backend config."""
-    config = _DockerWorkerBackendConfig.from_env()
-    workers_root = docker_workers_root(resolve_docker_storage_path(storage_path))
+    effective_runtime_paths = runtime_paths_with_storage_root(
+        runtime_paths,
+        resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths),
+    )
+    config = _DockerWorkerBackendConfig.from_runtime(effective_runtime_paths)
+    workers_root = docker_workers_root(effective_runtime_paths.storage_root)
+    credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
     extra_env_json = json.dumps(config.extra_env, sort_keys=True, separators=(",", ":"))
     extra_labels_json = json.dumps(config.extra_labels, sort_keys=True, separators=(",", ":"))
     return (
@@ -197,6 +223,9 @@ def docker_backend_config_signature(
         config.endpoint_host,
         config.user or "",
         str(workers_root),
+        str(credentials_key.shared_base_path),
+        credentials_key.current_worker_key or "",
+        str(credentials_key.current_worker_root or ""),
         extra_env_json,
         extra_labels_json,
         auth_token or "",

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, runtime_paths_with_storage_root
 from mindroom.credentials import (
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
@@ -250,7 +250,7 @@ class DockerWorkerBackend:
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
-        self._storage_path = resolve_docker_storage_path(storage_path)
+        self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
         self._workers_root = docker_workers_root(self._storage_path)
         self._projection_manager = DockerProjectionManager(
             config=config,
@@ -259,32 +259,23 @@ class DockerWorkerBackend:
         if runtime_paths is None:
             self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         else:
-            effective_runtime_paths = runtime_paths
-            if runtime_paths.storage_root.expanduser().resolve() != self._storage_path:
-                effective_runtime_paths = RuntimePaths(
-                    config_path=runtime_paths.config_path,
-                    config_dir=runtime_paths.config_dir,
-                    env_path=runtime_paths.env_path,
-                    storage_root=self._storage_path,
-                    process_env=runtime_paths.process_env,
-                    env_file_values=runtime_paths.env_file_values,
-                )
+            effective_runtime_paths = runtime_paths_with_storage_root(runtime_paths, self._storage_path)
             self._credentials_manager = get_runtime_credentials_manager(effective_runtime_paths)
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._launch_config_hash = self._compute_launch_config_hash()
         self._workers_root.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def from_env(
+    def from_runtime(
         cls,
+        runtime_paths: RuntimePaths,
         *,
         auth_token: str | None,
         storage_path: Path | None = None,
-        runtime_paths: RuntimePaths | None = None,
     ) -> DockerWorkerBackend:
-        """Construct a backend instance from environment-backed configuration."""
+        """Construct a backend instance from one explicit runtime context."""
         return cls(
-            config=_DockerWorkerBackendConfig.from_env(),
+            config=_DockerWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
             storage_path=storage_path,
             runtime_paths=runtime_paths,

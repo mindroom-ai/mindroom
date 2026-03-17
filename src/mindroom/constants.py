@@ -343,6 +343,21 @@ def runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, str]:
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+def runtime_paths_with_storage_root(runtime_paths: RuntimePaths, storage_root: Path) -> RuntimePaths:
+    """Return a runtime context rebased to one explicit storage root."""
+    resolved_storage_root = Path(storage_root).expanduser().resolve()
+    if resolved_storage_root == runtime_paths.storage_root:
+        return runtime_paths
+    return RuntimePaths(
+        config_path=runtime_paths.config_path,
+        config_dir=runtime_paths.config_dir,
+        env_path=runtime_paths.env_path,
+        storage_root=resolved_storage_root,
+        process_env=runtime_paths.process_env,
+        env_file_values=runtime_paths.env_file_values,
+    )
+
+
 def _is_execution_runtime_process_env_name(name: str) -> bool:
     if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
         return False

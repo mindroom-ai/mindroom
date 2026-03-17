@@ -10,6 +10,7 @@ import json
 import re
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,9 +27,16 @@ _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 logger = get_logger(__name__)
 
-# Global instance for convenience (lazy initialization)
-_credentials_manager: CredentialsManager | None = None
-_credentials_manager_signature: tuple[Path, Path, str | None, Path | None] | None = None
+
+@dataclass(frozen=True, slots=True)
+class _CredentialsManagerKey:
+    base_path: Path
+    shared_base_path: Path
+    current_worker_key: str | None
+    current_worker_root: Path | None
+
+
+_credentials_managers: dict[_CredentialsManagerKey, CredentialsManager] = {}
 _credentials_manager_lock = threading.Lock()
 
 
@@ -241,54 +249,73 @@ def _runtime_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
     return Path(raw_worker_root).expanduser().resolve()
 
 
-def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
-    """Get the global credentials manager instance.
-
-    Returns:
-        The global CredentialsManager instance
-
-    """
-    global _credentials_manager, _credentials_manager_signature
-
-    base_path = credentials_base_path(storage_root)
-    shared_base_path = _default_shared_credentials_base_path(base_path)
-    current_signature = (
-        base_path,
-        shared_base_path,
-        None,
-        None,
+def _credentials_manager_key(
+    *,
+    base_path: Path,
+    shared_base_path: Path,
+    current_worker_key: str | None = None,
+    current_worker_root: Path | None = None,
+) -> _CredentialsManagerKey:
+    return _CredentialsManagerKey(
+        base_path=Path(base_path).expanduser().resolve(),
+        shared_base_path=Path(shared_base_path).expanduser().resolve(),
+        current_worker_key=current_worker_key,
+        current_worker_root=(
+            Path(current_worker_root).expanduser().resolve() if current_worker_root is not None else None
+        ),
     )
 
+
+def credentials_manager_key(*, storage_root: Path) -> _CredentialsManagerKey:
+    """Return the cache key for one shared credentials manager root."""
+    base_path = credentials_base_path(storage_root)
+    return _credentials_manager_key(
+        base_path=base_path,
+        shared_base_path=_default_shared_credentials_base_path(base_path),
+    )
+
+
+def runtime_credentials_manager_key(runtime_paths: RuntimePaths) -> _CredentialsManagerKey:
+    """Return the cache key for one explicit runtime credential context."""
+    base_path = credentials_base_path(runtime_paths.storage_root)
+    return _credentials_manager_key(
+        base_path=base_path,
+        shared_base_path=_runtime_shared_credentials_base_path(runtime_paths, base_path),
+        current_worker_key=_runtime_dedicated_worker_key(runtime_paths),
+        current_worker_root=_runtime_dedicated_worker_root(runtime_paths),
+    )
+
+
+def get_credentials_manager(*, storage_root: Path) -> CredentialsManager:
+    """Return the cached credentials manager for one explicit storage root."""
+    key = credentials_manager_key(storage_root=storage_root)
     with _credentials_manager_lock:
-        if _credentials_manager is None or _credentials_manager_signature != current_signature:
-            _credentials_manager = CredentialsManager(base_path=base_path, shared_base_path=shared_base_path)
-            _credentials_manager_signature = current_signature
-        return _credentials_manager
+        manager = _credentials_managers.get(key)
+        if manager is None:
+            manager = CredentialsManager(
+                base_path=key.base_path,
+                shared_base_path=key.shared_base_path,
+                current_worker_key=key.current_worker_key,
+                current_worker_root=key.current_worker_root,
+            )
+            _credentials_managers[key] = manager
+        return manager
 
 
 def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
-    """Return the global credentials manager for one explicit runtime context."""
-    global _credentials_manager, _credentials_manager_signature
-
-    base_path = credentials_base_path(runtime_paths.storage_root)
-    shared_base_path = _runtime_shared_credentials_base_path(runtime_paths, base_path)
-    current_signature = (
-        base_path,
-        shared_base_path,
-        _runtime_dedicated_worker_key(runtime_paths),
-        _runtime_dedicated_worker_root(runtime_paths),
-    )
-
+    """Return the cached credentials manager for one explicit runtime context."""
+    key = runtime_credentials_manager_key(runtime_paths)
     with _credentials_manager_lock:
-        if _credentials_manager is None or _credentials_manager_signature != current_signature:
-            _credentials_manager = CredentialsManager(
-                base_path=base_path,
-                shared_base_path=shared_base_path,
-                current_worker_key=_runtime_dedicated_worker_key(runtime_paths),
-                current_worker_root=_runtime_dedicated_worker_root(runtime_paths),
+        manager = _credentials_managers.get(key)
+        if manager is None:
+            manager = CredentialsManager(
+                base_path=key.base_path,
+                shared_base_path=key.shared_base_path,
+                current_worker_key=key.current_worker_key,
+                current_worker_root=key.current_worker_root,
             )
-            _credentials_manager_signature = current_signature
-        return _credentials_manager
+            _credentials_managers[key] = manager
+        return manager
 
 
 def shared_credentials_manager(credentials_manager: CredentialsManager) -> CredentialsManager:
@@ -301,6 +328,12 @@ def shared_credentials_manager(credentials_manager: CredentialsManager) -> Crede
 def get_runtime_shared_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
     """Return the shared credential layer for one explicit runtime context."""
     return shared_credentials_manager(get_runtime_credentials_manager(runtime_paths))
+
+
+def _reset_credentials_manager_cache() -> None:
+    """Reset cached credentials managers. Intended for tests."""
+    with _credentials_manager_lock:
+        _credentials_managers.clear()
 
 
 def _resolve_worker_credentials_manager(

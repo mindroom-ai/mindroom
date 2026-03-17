@@ -21,7 +21,6 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
-import mindroom.credentials as credentials_module
 import mindroom.tool_system.metadata as metadata_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import (
@@ -30,7 +29,12 @@ from mindroom.constants import (
     serialize_public_runtime_paths,
     serialize_runtime_paths,
 )
-from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.credentials import (
+    CredentialsManager,
+    _reset_credentials_manager_cache,
+    get_runtime_credentials_manager,
+    save_scoped_credentials,
+)
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     ConfigField,
@@ -600,8 +604,6 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_manager = credentials_module._credentials_manager
-    original_signature = credentials_module._credentials_manager_signature
     shared_storage = tmp_path / "shared-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(shared_storage))
     metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
@@ -620,8 +622,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
             tool_name,
             {"token": stored_value},
         )
-        credentials_module._credentials_manager = None
-        credentials_module._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
         runtime_paths, config = _refresh_runner_app_from_env()
         toolkit, _ = sandbox_runner_module._resolve_entrypoint(
@@ -637,8 +638,7 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
         metadata_module._TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-        credentials_module._credentials_manager = original_manager
-        credentials_module._credentials_manager_signature = original_signature
+        _reset_credentials_manager_cache()
 
 
 def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_manager(
@@ -659,8 +659,6 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
     stored_value = "value123"
     original_registry = metadata_module._TOOL_REGISTRY.copy()
     original_metadata = TOOL_METADATA.copy()
-    original_manager = credentials_module._credentials_manager
-    original_signature = credentials_module._credentials_manager_signature
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     metadata_module._TOOL_REGISTRY[tool_name] = lambda: DummyTool
@@ -679,8 +677,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
             tool_name,
             {"token": stored_value},
         )
-        credentials_module._credentials_manager = None
-        credentials_module._credentials_manager_signature = None
+        _reset_credentials_manager_cache()
 
         toolkit = get_tool_by_name(
             tool_name,
@@ -694,8 +691,7 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
         metadata_module._TOOL_REGISTRY.update(original_registry)
         TOOL_METADATA.clear()
         TOOL_METADATA.update(original_metadata)
-        credentials_module._credentials_manager = original_manager
-        credentials_module._credentials_manager_signature = original_signature
+        _reset_credentials_manager_cache()
 
 
 def test_resolve_worker_base_dir_does_not_create_directories_during_validation(tmp_path: Path) -> None:
