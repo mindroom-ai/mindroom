@@ -8,17 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
-from mindroom.tool_system.worker_routing import (
-    private_instance_state_root_path,
-    resolve_agent_owned_path,
-    resolve_agent_state_storage_path,
-    resolve_execution_identity_for_worker_scope,
-    resolve_worker_key,
-)
+from mindroom.tool_system.worker_routing import resolve_agent_owned_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
 _TEMPLATE_INITIALIZED_MARKER = ".mindroom-template-initialized"
@@ -128,79 +121,6 @@ def _effective_workspace(
     )
 
 
-def _resolve_workspace_execution_identity(
-    agent_name: str,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-) -> ToolExecutionIdentity | None:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None:
-        return execution_identity
-
-    worker_scope = config.get_agent_worker_scope(agent_name)
-    resolved_identity = resolve_execution_identity_for_worker_scope(
-        worker_scope,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-    )
-    if resolved_identity is None:
-        msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-        raise ValueError(msg)
-    return resolved_identity
-
-
-def _resolve_private_state_root(canonical_state_root: Path) -> Path:
-    """Resolve one private-instance state root while rejecting symlink escapes."""
-    canonical_root = canonical_state_root.expanduser()
-    resolved_scope_root = canonical_root.parent.resolve()
-    resolved_state_root = canonical_root.resolve()
-    if not resolved_state_root.is_relative_to(resolved_scope_root):
-        msg = f"Private state root must stay within its canonical private-instance scope: {canonical_root}"
-        raise ValueError(msg)
-    return resolved_state_root
-
-
-def resolve_agent_private_state_storage_path(
-    agent_name: str,
-    config: Config,
-    *,
-    base_storage_path: Path,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Path:
-    """Return the canonical durable state root for one private agent instance."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None:
-        return resolve_agent_state_storage_path(
-            agent_name=agent_name,
-            base_storage_path=base_storage_path,
-        ).resolve()
-
-    resolved_identity = _resolve_workspace_execution_identity(
-        agent_name,
-        config,
-        execution_identity,
-    )
-    if resolved_identity is None:
-        msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
-        raise ValueError(msg)
-
-    worker_key = resolve_worker_key(
-        agent_config.private.per,
-        resolved_identity,
-        agent_name=agent_name,
-    )
-    if worker_key is None:
-        msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{agent_config.private.per}'"
-        raise ValueError(msg)
-    return _resolve_private_state_root(
-        private_instance_state_root_path(
-            base_storage_path,
-            worker_key=worker_key,
-            agent_name=agent_name,
-        ),
-    )
-
-
 def _resolve_workspace(
     agent_name: str,
     config: Config,
@@ -280,32 +200,6 @@ def _resolve_workspace(
     )
 
 
-def resolve_agent_workspace(
-    agent_name: str,
-    config: Config,
-    *,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    create: bool = False,
-) -> ResolvedAgentWorkspace | None:
-    """Resolve one agent's effective workspace for the current execution scope."""
-    state_storage_path = resolve_agent_private_state_storage_path(
-        agent_name,
-        config,
-        base_storage_path=runtime_paths.storage_root,
-        execution_identity=execution_identity,
-    )
-    agent_config = config.agents.get(agent_name)
-    return _resolve_workspace(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=state_storage_path,
-        use_state_storage_path=agent_config is not None and agent_config.private is not None,
-        create=create,
-    )
-
-
 def resolve_agent_workspace_from_state_path(
     agent_name: str,
     config: Config,
@@ -324,27 +218,3 @@ def resolve_agent_workspace_from_state_path(
         use_state_storage_path=use_state_storage_path,
         create=create,
     )
-
-
-def resolve_agent_file_memory_path(
-    agent_name: str,
-    config: Config,
-    *,
-    runtime_paths: RuntimePaths,
-    state_storage_path: Path,
-    use_state_storage_path: bool,
-    create: bool = False,
-) -> Path | None:
-    """Resolve the effective file-memory path for an agent."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None:
-        return None
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=state_storage_path,
-        use_state_storage_path=use_state_storage_path,
-        create=create,
-    )
-    return workspace.file_memory_path if workspace is not None else None

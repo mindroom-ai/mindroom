@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
+    private_instance_state_root_path,
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
     resolve_worker_key,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
-    resolve_agent_private_state_storage_path,
     resolve_agent_workspace_from_state_path,
     resolve_workspace_relative_path,
 )
@@ -69,6 +69,26 @@ def _resolved_execution_identity(
     )
 
 
+def _resolved_private_state_root(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_key: str,
+    agent_name: str,
+) -> Path:
+    """Return one canonical private-instance state root and reject symlink escapes."""
+    canonical_root = private_instance_state_root_path(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        agent_name=agent_name,
+    ).expanduser()
+    resolved_scope_root = canonical_root.parent.resolve()
+    resolved_state_root = canonical_root.resolve()
+    if not resolved_state_root.is_relative_to(resolved_scope_root):
+        msg = f"Private state root must stay within its canonical private-instance scope: {canonical_root}"
+        raise ValueError(msg)
+    return resolved_state_root
+
+
 def resolved_worker_private_agent_names(agent_runtime: ResolvedAgentRuntime) -> frozenset[str] | None:
     """Return explicit user-agent visibility derived from one resolved runtime."""
     if agent_runtime.worker_scope != "user_agent":
@@ -112,11 +132,10 @@ def resolve_agent_runtime(
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{worker_scope}'"
             raise ValueError(msg)
-        state_root = resolve_agent_private_state_storage_path(
-            agent_name,
-            config,
-            base_storage_path=runtime_paths.storage_root,
-            execution_identity=resolved_execution_identity,
+        state_root = _resolved_private_state_root(
+            runtime_paths=runtime_paths,
+            worker_key=worker_key,
+            agent_name=agent_name,
         )
     else:
         state_root = resolve_agent_state_storage_path(

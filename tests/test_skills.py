@@ -15,6 +15,7 @@ from mindroom.commands.handler import _collect_agent_toolkits, _run_skill_comman
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_utils import create_session_id
 from mindroom.tool_system.metadata import (
     _TOOL_REGISTRY,
@@ -33,7 +34,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from mindroom.workspaces import resolve_agent_workspace
 from tests.conftest import FakeCredentialsManager
 
 if TYPE_CHECKING:
@@ -392,13 +392,12 @@ def test_collect_agent_toolkits_applies_workspace_overrides_like_agent_construct
     with tool_execution_identity(identity):
         toolkits = _collect_agent_toolkits(config, "code", _runtime_paths(runtime_storage_path))
 
-    expected_workspace = resolve_agent_workspace(
+    expected_workspace = resolve_agent_runtime(
         "code",
         config,
-        runtime_paths=_runtime_paths(runtime_storage_path),
+        _runtime_paths(runtime_storage_path),
         execution_identity=identity,
-        create=False,
-    )
+    ).workspace
 
     assert expected_workspace is not None
     assert expected_workspace.root.is_dir()
@@ -461,13 +460,12 @@ async def test_skill_command_tool_dispatch_uses_runtime_storage_path_for_workspa
         tenant_id=os.getenv("CUSTOMER_ID"),
         account_id=os.getenv("ACCOUNT_ID"),
     )
-    expected_workspace = resolve_agent_workspace(
+    expected_workspace = resolve_agent_runtime(
         "code",
         config,
-        runtime_paths=_runtime_paths(runtime_storage_path),
+        _runtime_paths(runtime_storage_path),
         execution_identity=identity,
-        create=False,
-    )
+    ).workspace
 
     assert result == "skill:dispatch:hello"
     assert expected_workspace is not None

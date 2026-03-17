@@ -45,11 +45,7 @@ from mindroom.tool_system.worker_routing import (
     visible_state_roots_for_worker_key,
     worker_root_path,
 )
-from mindroom.workspaces import (
-    copy_workspace_template,
-    resolve_agent_private_state_storage_path,
-    resolve_agent_workspace,
-)
+from mindroom.workspaces import copy_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -437,12 +433,7 @@ def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_memory_file_
     runtime_paths = _runtime_paths(tmp_path, config_path=tmp_path / "cfg" / "config.yaml")
     bound_config = _bind_runtime_paths(config, runtime_paths)
 
-    workspace = resolve_agent_workspace(
-        "general",
-        bound_config,
-        runtime_paths=runtime_paths,
-        create=True,
-    )
+    workspace = resolve_agent_runtime("general", bound_config, runtime_paths, create=True).workspace
 
     expected_workspace = agent_workspace_root_path(tmp_path, "general") / "mind_data"
     assert workspace is not None
@@ -465,22 +456,22 @@ def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: P
         resolved_thread_id="$thread",
         session_id="$thread",
     )
-    state_root = resolve_agent_private_state_storage_path(
+    state_root = resolve_agent_runtime(
         "general",
         bound_config,
-        base_storage_path=runtime_paths.storage_root,
+        runtime_paths,
         execution_identity=identity,
-    )
+    ).state_root
     state_root.mkdir(parents=True, exist_ok=True)
     outside_root = tmp_path / "outside"
     outside_root.mkdir(parents=True, exist_ok=True)
     (state_root / "mind_data").symlink_to(outside_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="private.root must stay within the workspace root"):
-        resolve_agent_workspace(
+        resolve_agent_runtime(
             "general",
             bound_config,
-            runtime_paths=runtime_paths,
+            runtime_paths,
             execution_identity=identity,
         )
 
@@ -513,10 +504,10 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     canonical_state_root.symlink_to(outside_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="Private state root must stay within its canonical private-instance scope"):
-        resolve_agent_workspace(
+        resolve_agent_runtime(
             "general",
             bound_config,
-            runtime_paths=runtime_paths,
+            runtime_paths,
             execution_identity=identity,
         )
 
@@ -540,13 +531,13 @@ def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path
         resolved_thread_id="$thread",
         session_id="$thread",
     )
-    workspace = resolve_agent_workspace(
+    workspace = resolve_agent_runtime(
         "general",
         bound_config,
-        runtime_paths=runtime_paths,
+        runtime_paths,
         execution_identity=identity,
         create=True,
-    )
+    ).workspace
     assert workspace is not None
     outside_root = tmp_path / "outside"
     outside_root.mkdir(parents=True, exist_ok=True)
@@ -554,10 +545,10 @@ def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path
     notes_link.symlink_to(outside_root, target_is_directory=True)
 
     with pytest.raises(ValueError, match="private.context_files must stay within the workspace root"):
-        resolve_agent_workspace(
+        resolve_agent_runtime(
             "general",
             bound_config,
-            runtime_paths=runtime_paths,
+            runtime_paths,
             execution_identity=identity,
         )
 
@@ -703,20 +694,20 @@ def test_private_workspace_template_preserves_metadata_and_initializes_only_once
     )
 
     with patch("mindroom.workspaces.copy_workspace_template", wraps=copy_workspace_template) as copy_template:
-        first_workspace = resolve_agent_workspace(
+        first_workspace = resolve_agent_runtime(
             "general",
             bound_config,
-            runtime_paths=runtime_paths,
+            runtime_paths,
             execution_identity=identity,
             create=True,
-        )
-        second_workspace = resolve_agent_workspace(
+        ).workspace
+        second_workspace = resolve_agent_runtime(
             "general",
             bound_config,
-            runtime_paths=runtime_paths,
+            runtime_paths,
             execution_identity=identity,
             create=True,
-        )
+        ).workspace
 
     assert first_workspace is not None
     assert second_workspace is not None
@@ -751,24 +742,24 @@ def test_private_workspace_template_initializes_missing_files_in_partially_popul
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    state_root = resolve_agent_private_state_storage_path(
+    state_root = resolve_agent_runtime(
         "general",
         bound_config,
-        base_storage_path=runtime_paths.storage_root,
+        runtime_paths,
         execution_identity=identity,
-    )
+    ).state_root
     workspace_root = state_root / "mind_data"
     workspace_root.mkdir(parents=True, exist_ok=True)
     existing_file = workspace_root / "existing.txt"
     existing_file.write_text("keep\n", encoding="utf-8")
 
-    workspace = resolve_agent_workspace(
+    workspace = resolve_agent_runtime(
         "general",
         bound_config,
-        runtime_paths=runtime_paths,
+        runtime_paths,
         execution_identity=identity,
         create=True,
-    )
+    ).workspace
 
     assert workspace is not None
     assert existing_file.read_text(encoding="utf-8") == "keep\n"
