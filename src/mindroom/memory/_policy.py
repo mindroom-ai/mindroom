@@ -194,11 +194,13 @@ def resolve_file_memory_resolution(
     base_storage_path = original_storage_path or storage_path
     agent_memory_scope_path: Path | None = None
     if agent_name is not None:
+        private_agent = config.get_agent(agent_name).private is not None
         agent_runtime = resolve_agent_runtime(
             agent_name,
             config,
             runtime_paths,
             execution_identity=execution_identity,
+            create=private_agent,
         )
         resolved_storage_path = agent_runtime.state_root
         agent_memory_scope_path = agent_runtime.file_memory_root

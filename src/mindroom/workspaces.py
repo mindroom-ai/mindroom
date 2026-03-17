@@ -71,6 +71,15 @@ def resolve_workspace_relative_path(
     )
 
 
+def validate_workspace_template_dir(template_dir: Path) -> Path:
+    """Resolve one workspace template directory and ensure it exists."""
+    resolved_template_dir = template_dir.expanduser().resolve()
+    if not resolved_template_dir.is_dir():
+        msg = f"Workspace template directory does not exist: {resolved_template_dir}"
+        raise ValueError(msg)
+    return resolved_template_dir
+
+
 def copy_workspace_template(
     workspace_path: Path,
     *,
@@ -79,10 +88,7 @@ def copy_workspace_template(
 ) -> None:
     """Copy a local template directory into a workspace root."""
     workspace_path.mkdir(parents=True, exist_ok=True)
-    resolved_template_dir = template_dir.expanduser().resolve()
-    if not resolved_template_dir.is_dir():
-        msg = f"Workspace template directory does not exist: {resolved_template_dir}"
-        raise ValueError(msg)
+    resolved_template_dir = validate_workspace_template_dir(template_dir)
 
     for source_path in sorted(resolved_template_dir.rglob("*")):
         relative_path = source_path.relative_to(resolved_template_dir)

@@ -424,6 +424,61 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
 
 
 @pytest.mark.asyncio
+async def test_private_template_file_memory_is_visible_on_first_prompt(
+    storage_path: Path,
+    config: Config,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    template_dir = build_private_template_dir(
+        files={
+            "MEMORY.md": "# Memory\nFirst-turn memory.\n",
+            "memory/notes.md": "Private note.\n",
+        },
+    )
+    config.memory.backend = "file"
+    config.agents["general"].memory_backend = "file"
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir=str(template_dir),
+    )
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-alice",
+    )
+
+    with tool_execution_identity(identity):
+        prompt = await build_memory_enhanced_prompt(
+            "What do you remember?",
+            "general",
+            storage_path,
+            config,
+        )
+        note_results = await search_agent_memories("Private note", "general", storage_path, config, limit=5)
+
+    worker_key = resolve_worker_key("user", identity)
+    assert worker_key is not None
+    memory_file = (
+        private_instance_state_root_path(
+            storage_path,
+            worker_key=worker_key,
+            agent_name="general",
+        )
+        / "mind_data"
+        / "MEMORY.md"
+    )
+    assert memory_file.exists()
+    assert "First-turn memory." in prompt
+    assert any(result.get("memory") == "Private note." for result in note_results)
+
+
+@pytest.mark.asyncio
 async def test_private_file_memory_only_reads_memory_files(
     storage_path: Path,
     config: Config,

@@ -32,6 +32,7 @@ from mindroom.matrix.identity import (
     managed_space_alias_localpart,
 )
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
+from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -547,6 +548,24 @@ class Config(BaseModel):
                     "and outside scaffolded private workspace content"
                 )
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_private_template_dirs(self, info: ValidationInfo) -> Config:
+        """Ensure private template directories exist when runtime path resolution is available."""
+        runtime_paths = info.context.get("runtime_paths") if isinstance(info.context, dict) else None
+        if runtime_paths is None:
+            return self
+        for agent_name, agent_config in self.agents.items():
+            private_config = agent_config.private
+            if private_config is None or private_config.template_dir is None:
+                continue
+            template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+            try:
+                validate_workspace_template_dir(template_dir)
+            except ValueError as exc:
+                msg = f"Agent '{agent_name}' has invalid private.template_dir: {exc}"
+                raise ValueError(msg) from exc
         return self
 
     @model_validator(mode="after")

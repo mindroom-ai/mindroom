@@ -1652,6 +1652,19 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     assert "Relative soul context." in agent.role
 
 
+def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path) -> None:
+    """Runtime-bound config validation should reject missing private template directories."""
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./missing-template",
+    )
+
+    with pytest.raises(ValueError, match="invalid private.template_dir"):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path))
+
+
 @patch("mindroom.agents.SqliteDb")
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
     mock_storage: MagicMock,  # noqa: ARG001
