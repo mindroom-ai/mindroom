@@ -89,7 +89,7 @@ def _config_init_storage_plan(
 
 
 def _default_mind_workspace(storage_root: Path) -> Path:
-    """Return the starter Mind workspace inside the canonical agent workspace."""
+    """Return the shared single-user starter Mind workspace inside the canonical agent workspace."""
     return agent_workspace_root_path(storage_root, "mind")
 
 
@@ -640,7 +640,11 @@ def _full_template(
     use_storage_env_placeholder: bool,
     profile: Literal["full", "public"] = "full",
 ) -> str:
-    """Return a provider-aware starter config."""
+    """Return a provider-aware starter config.
+
+    `config init` intentionally generates the shared single-user starter model.
+    Requester-private agents remain an opt-in advanced config surface.
+    """
     model_block = _model_template_block(provider_preset)
     mind_memory_knowledge_path = _default_mind_knowledge_base_path(
         config_dir,

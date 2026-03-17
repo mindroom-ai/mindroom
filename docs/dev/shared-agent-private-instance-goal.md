@@ -88,6 +88,12 @@ This PR is not about a private deployment workaround.
 
 This PR is not about baking `mind`-specific special cases into unrelated runtime code paths.
 
+`mindroom config init` is not the onboarding surface for private instances.
+
+The starter config remains a shared single-user example that uses top-level `context_files` and shared knowledge under the canonical shared workspace.
+
+Private instances stay opt-in configuration for multi-user or requester-isolated deployments.
+
 ## Design Direction
 
 The public config should expose one explicit agent-local concept for requester-private materialized state.
