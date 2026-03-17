@@ -58,6 +58,7 @@ logger = get_logger(__name__)
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
 _TeamStreamChunk = str | StructuredStreamChunk
+_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 
 
 class TeamMode(str, Enum):
@@ -81,7 +82,6 @@ class _ResolvedTeamMembers:
     """One resolved team-member set shared across team execution and rendering."""
 
     requested_agent_names: list[str]
-    available_agent_names: list[str]
     agents: list[Agent]
     display_names: list[str]
 
@@ -903,9 +903,6 @@ def _get_agents_from_orchestrator(
         )
 
     for name in agent_names:
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
         knowledge = get_agent_knowledge(
             name,
             orchestrator.config,
@@ -930,20 +927,17 @@ def _get_agents_from_orchestrator(
     return agents
 
 
-def _available_team_agent_names(
-    agent_names: list[str],
+def _materializable_orchestrator_agent_names(
     orchestrator: MultiAgentOrchestrator,
-) -> list[str]:
-    """Return team member names that can be materialized from the orchestrator."""
-    available_agent_names: list[str] = []
-    for name in agent_names:
-        if name == ROUTER_AGENT_NAME:
-            continue
-        if name not in orchestrator.agent_bots:
-            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
-            continue
-        available_agent_names.append(name)
-    return available_agent_names
+) -> set[str]:
+    """Return live shared agent names that can currently be materialized."""
+    assert orchestrator.config is not None
+    orchestrator_agent_bots = orchestrator.agent_bots
+    if not isinstance(orchestrator_agent_bots, dict):
+        return set()
+    return {
+        name for name in orchestrator_agent_bots if name != ROUTER_AGENT_NAME and name in orchestrator.config.agents
+    }
 
 
 def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
@@ -951,19 +945,28 @@ def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
     return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
-def _resolve_team_members(
+def _materialize_team_members(
     agent_names: list[str],
     orchestrator: MultiAgentOrchestrator,
     execution_identity: ToolExecutionIdentity | None,
+    *,
     request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    reason_prefix: str = "Team request",
 ) -> _ResolvedTeamMembers:
-    """Resolve the materialized team-member set for one request."""
+    """Materialize the exact requested team-member set without silent fallback."""
     assert orchestrator.config is not None
     requested_agent_names = _requested_team_agent_names(agent_names)
-    orchestrator.config.assert_team_agents_supported(requested_agent_names)
-    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
+    if not requested_agent_names:
+        raise ValueError(_NO_AGENTS_RESPONSE)
+    materializable_agent_names = _materializable_orchestrator_agent_names(orchestrator)
+    missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
+    if missing_agent_names:
+        raise ValueError(
+            _not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix),
+        )
+
     agents = _get_agents_from_orchestrator(
-        available_agent_names,
+        requested_agent_names,
         orchestrator,
         execution_identity,
         request_knowledge_managers=request_knowledge_managers,
@@ -971,7 +974,6 @@ def _resolve_team_members(
     display_names = [str(agent.name) for agent in agents if agent.name]
     return _ResolvedTeamMembers(
         requested_agent_names=requested_agent_names,
-        available_agent_names=available_agent_names,
         agents=agents,
         display_names=display_names,
     )
@@ -1075,9 +1077,6 @@ def select_model_for_team(
     return "default"
 
 
-_NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
-
-
 async def team_response(
     agent_names: list[str],
     mode: TeamMode,
@@ -1099,19 +1098,20 @@ async def team_response(
         orchestrator,
         execution_identity,
     )
-    team_members = _resolve_team_members(
-        agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
-    )
+    try:
+        team_members = _materialize_team_members(
+            agent_names,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+        )
+    except ValueError as exc:
+        return str(exc)
     agents = team_members.agents
-    if not agents:
-        return _NO_AGENTS_RESPONSE
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
 
@@ -1193,7 +1193,7 @@ async def _team_response_stream_raw(
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, team_members.available_agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, team_members.requested_agent_names, mode, orchestrator, model_name)
     logger.info(f"Created team with {len(agents)} agents in {mode.value} mode")
     for agent in agents:
         logger.debug(f"Team member: {agent.name}")
@@ -1246,17 +1246,22 @@ async def team_response_stream(  # noqa: C901, PLR0912, PLR0915
     requested_agent_names = [
         mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids
     ]
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
     request_knowledge_managers = await _ensure_request_team_knowledge_managers(
         requested_agent_names,
         orchestrator,
         execution_identity,
     )
-    team_members = _resolve_team_members(
-        requested_agent_names,
-        orchestrator,
-        execution_identity,
-        request_knowledge_managers=request_knowledge_managers,
-    )
+    try:
+        team_members = _materialize_team_members(
+            requested_agent_names,
+            orchestrator,
+            execution_identity,
+            request_knowledge_managers=request_knowledge_managers,
+        )
+    except ValueError as exc:
+        yield str(exc)
+        return
     agent_names = team_members.display_names
     display_names = team_members.display_names
 

@@ -1096,17 +1096,7 @@ def _build_team(
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
     config_ids = config.get_ids(runtime_paths)
-    requested_members = [config_ids[member_name] for member_name in team_config.agents if member_name in config_ids]
-    preflight_resolution = resolve_configured_team(
-        team_name,
-        requested_members,
-        mode,
-        config,
-        runtime_paths,
-        materializable_agent_names=set(config.agents),
-    )
-    if preflight_resolution.outcome is not TeamOutcome.TEAM:
-        raise ValueError(preflight_resolution.reason or f"Team '{team_name}' cannot be materialized")
+    requested_members = [config_ids[member_name] for member_name in team_config.agents]
     model_name = team_config.model or "default"
     model = get_model_instance(config, runtime_paths, model_name)
 

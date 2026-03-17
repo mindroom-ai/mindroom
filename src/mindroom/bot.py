@@ -3061,6 +3061,9 @@ class TeamBot(AgentBot):
         )
         if team_resolution.outcome is not TeamOutcome.TEAM:
             assert team_resolution.reason is not None
+            if existing_event_id:
+                await self._edit_message(room_id, existing_event_id, team_resolution.reason, thread_id)
+                return existing_event_id
             return await self._send_response(
                 room_id,
                 reply_to_event_id,

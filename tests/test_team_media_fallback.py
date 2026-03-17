@@ -19,7 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import (
     TeamMode,
-    _resolve_team_members,
+    _materialize_team_members,
     _team_response_stream_raw,
     team_response,
     team_response_stream,
@@ -105,7 +105,7 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
         patch("mindroom.teams._get_agents_from_orchestrator", return_value=[MagicMock(name="GeneralAgent")]),
         patch("mindroom.teams._create_team_instance", return_value=mock_team),
     ):
-        team_members = _resolve_team_members(["general"], orchestrator, None)
+        team_members = _materialize_team_members(["general"], orchestrator, None)
         raw_stream = await _team_response_stream_raw(
             team_members=team_members,
             mode=TeamMode.COORDINATE,
@@ -119,6 +119,76 @@ async def test_team_stream_raw_surfaces_setup_error_as_team_run_error_event() ->
     assert len(events) == 1
     assert isinstance(events[0], TeamRunErrorEvent)
     assert events[0].content == media_validation_error
+
+
+@pytest.mark.asyncio
+async def test_team_response_rejects_missing_materialized_members() -> None:
+    """Exact team execution should reject when one requested member cannot be materialized."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    with patch("mindroom.teams._create_team_instance") as mock_create_team:
+        response = await team_response(
+            agent_names=["general", "research"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+            execution_identity=None,
+        )
+
+    assert response == "Team request includes agent 'research' that could not be materialized for this request."
+    mock_create_team.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_stream_rejects_missing_materialized_members() -> None:
+    """Streaming team execution should surface exact-materialization failures without shrinking."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="GeneralAgent", rooms=["#test:example.org"]),
+                "research": AgentConfig(display_name="ResearchAgent", rooms=["#test:example.org"]),
+            },
+        ),
+        runtime_paths,
+    )
+    orchestrator = MagicMock()
+    orchestrator.config = config
+    orchestrator.runtime_paths = runtime_paths_for(config)
+    orchestrator.knowledge_managers = {}
+    orchestrator.agent_bots = {"general": MagicMock()}
+
+    with patch("mindroom.teams._create_team_instance") as mock_create_team:
+        chunks = [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[
+                    config.get_ids(runtime_paths_for(config))["general"],
+                    config.get_ids(runtime_paths_for(config))["research"],
+                ],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+                execution_identity=None,
+            )
+        ]
+
+    assert chunks == ["Team request includes agent 'research' that could not be materialized for this request."]
+    mock_create_team.assert_not_called()
 
 
 @pytest.mark.asyncio

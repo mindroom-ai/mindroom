@@ -301,7 +301,7 @@ class TeamConfig(BaseModel):
 
     display_name: str = Field(description="Human-readable name for the team")
     role: str = Field(description="Description of the team's purpose")
-    agents: list[str] = Field(description="List of agent names that compose this team")
+    agents: list[str] = Field(min_length=1, description="List of agent names that compose this team")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
     model: str | None = Field(default="default", description="Default model for this team (optional)")
     mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
