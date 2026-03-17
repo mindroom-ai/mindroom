@@ -59,7 +59,7 @@ vi.mock('./iconMapping', () => ({
 // Mock API base URL
 vi.mock('@/lib/api', () => ({
   API_BASE_URL: 'http://localhost:8080',
-  withAgentName: (url: string) => url,
+  withAgentExecutionScope: (url: string) => url,
 }));
 
 // Mock EnhancedConfigDialog

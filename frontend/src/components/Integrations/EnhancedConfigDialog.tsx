@@ -25,8 +25,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/components/ui/use-toast';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import type { WorkerScope } from '@/types/config';
 
 interface ConfigField {
   name: string;
@@ -56,6 +57,7 @@ interface EnhancedConfigDialogProps {
   icon?: any;
   iconColor?: string;
   agentName?: string | null;
+  executionScope?: WorkerScope | null;
 }
 
 export function EnhancedConfigDialog({
@@ -72,6 +74,7 @@ export function EnhancedConfigDialog({
   icon: Icon,
   iconColor,
   agentName,
+  executionScope,
 }: EnhancedConfigDialogProps) {
   const [configValues, setConfigValues] = useState<Record<string, string | boolean>>({});
   const [loading, setLoading] = useState(false);
@@ -120,7 +123,11 @@ export function EnhancedConfigDialog({
       try {
         // Try to load existing credentials
         const response = await fetch(
-          withAgentName(`${API_BASE_URL}/api/credentials/${service}`, agentName)
+          withAgentExecutionScope(
+            `${API_BASE_URL}/api/credentials/${service}`,
+            agentName,
+            executionScope
+          )
         );
         if (response.ok) {
           const data = await response.json();
@@ -171,7 +178,7 @@ export function EnhancedConfigDialog({
     };
 
     loadExistingCredentials();
-  }, [service, open, configFields, agentName]); // Use stable dependencies
+  }, [service, open, configFields, agentName, executionScope]); // Use stable dependencies
 
   const validateField = (field: ConfigField, value: string | boolean): string | null => {
     // Boolean fields don't need validation
@@ -236,7 +243,11 @@ export function EnhancedConfigDialog({
     try {
       // Save all config values as environment variables using our credentials API
       const response = await fetch(
-        withAgentName(`${API_BASE_URL}/api/credentials/${service}`, agentName),
+        withAgentExecutionScope(
+          `${API_BASE_URL}/api/credentials/${service}`,
+          agentName,
+          executionScope
+        ),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

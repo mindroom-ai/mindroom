@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -12,6 +12,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     build_dashboard_execution_identity,
     dashboard_supports_worker_credentials,
+    resolve_dashboard_execution_scope_override,
 )
 from mindroom.api.google_tools_helper import check_google_tool_configured
 from mindroom.config.main import Config
@@ -28,8 +29,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
-
-ToolAvailabilityScopeQuery = WorkerScope | Literal["unscoped"]
 
 
 class ToolsResponse(BaseModel):
@@ -191,7 +190,6 @@ def _update_tools_statuses(
 async def get_registered_tools(
     request: Request,
     agent_name: str | None = None,
-    execution_scope: ToolAvailabilityScopeQuery | None = None,
 ) -> ToolsResponse:
     """Get all registered tools from mindroom.
 
@@ -204,8 +202,7 @@ async def get_registered_tools(
     config, _ = config_lifecycle.load_runtime_config(runtime_paths)
     ensure_tool_registry_loaded(runtime_paths, config)
     tools = export_tools_metadata()
-    execution_scope_override_provided = execution_scope is not None
-    execution_scope_override = None if execution_scope == "unscoped" else execution_scope
+    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
         config=config,

@@ -1,3 +1,5 @@
+import type { WorkerScope } from '@/types/config';
+
 // API configuration
 // Default to relative URLs so requests use the current origin (/api/* via proxy/reverse-proxy).
 // Set VITE_API_URL to override (for explicit cross-origin backend setups).
@@ -88,6 +90,19 @@ export function withQueryParams(
 
 export function withAgentName(url: string, agentName?: string | null): string {
   return withQueryParams(url, { agent_name: agentName });
+}
+
+export function withAgentExecutionScope(
+  url: string,
+  agentName?: string | null,
+  executionScope?: WorkerScope | null
+): string {
+  const executionScopeQuery =
+    agentName != null && executionScope === null ? 'unscoped' : executionScope ?? null;
+  return withQueryParams(url, {
+    agent_name: agentName,
+    execution_scope: executionScopeQuery,
+  });
 }
 
 export async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {

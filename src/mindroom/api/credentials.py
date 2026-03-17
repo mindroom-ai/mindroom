@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -169,6 +169,37 @@ def dashboard_supports_worker_credentials(worker_scope: WorkerScope | None) -> b
     return worker_scope in (None, "shared")
 
 
+def _dashboard_scope_label(
+    *,
+    config_labeled_scope: str,
+    execution_scope: WorkerScope | None,
+    execution_scope_override_provided: bool,
+) -> str:
+    """Return the user-facing scope label for one dashboard request."""
+    if execution_scope_override_provided:
+        if execution_scope is None:
+            return "execution_scope=unscoped"
+        return f"execution_scope={execution_scope}"
+    return config_labeled_scope
+
+
+def resolve_dashboard_execution_scope_override(
+    request: Request,
+) -> tuple[bool, WorkerScope | None]:
+    """Return the explicit dashboard execution-scope override, if one was provided."""
+    raw_execution_scope = request.query_params.get("execution_scope")
+    if raw_execution_scope is None or raw_execution_scope == "":
+        return False, None
+    if raw_execution_scope == "unscoped":
+        return True, None
+    if raw_execution_scope in {"shared", "user", "user_agent"}:
+        return True, cast("WorkerScope", raw_execution_scope)
+    raise HTTPException(
+        status_code=400,
+        detail=("Query parameter 'execution_scope' must be one of 'shared', 'user', 'user_agent', or 'unscoped'."),
+    )
+
+
 def _reject_raw_worker_targeting(request: Request) -> None:
     for param_name in ("worker_key", "source_worker_key"):
         if request.query_params.get(param_name):
@@ -195,8 +226,14 @@ def resolve_request_credentials_target(
     runtime_paths = api_runtime_paths(request)
 
     base_manager = credentials_manager or get_runtime_credentials_manager(runtime_paths)
+    execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
 
     if not agent_name:
+        if execution_scope_override_provided:
+            raise HTTPException(
+                status_code=400,
+                detail="Query parameter 'execution_scope' requires agent_name on the dashboard credentials API.",
+            )
         return RequestCredentialsTarget(
             base_manager=base_manager,
             target_manager=base_manager,
@@ -209,7 +246,9 @@ def resolve_request_credentials_target(
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
-    execution_scope = config.get_agent_execution_scope(agent_name)
+    execution_scope = (
+        execution_scope_override if execution_scope_override_provided else config.get_agent_execution_scope(agent_name)
+    )
     if execution_scope is None:
         return RequestCredentialsTarget(
             base_manager=base_manager,
@@ -219,13 +258,15 @@ def resolve_request_credentials_target(
             execution_identity=None,
         )
 
+    scope_label = _dashboard_scope_label(
+        config_labeled_scope=config.get_agent_scope_label(agent_name),
+        execution_scope=execution_scope,
+        execution_scope_override_provided=execution_scope_override_provided,
+    )
     if not dashboard_supports_worker_credentials(execution_scope):
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Dashboard credential management does not support "
-                f"{config.get_agent_scope_label(agent_name)} for agent '{agent_name}'."
-            ),
+            detail=(f"Dashboard credential management does not support {scope_label} for agent '{agent_name}'."),
         )
 
     unsupported_services = unsupported_shared_only_integration_names(list(service_names), execution_scope)
@@ -236,7 +277,7 @@ def resolve_request_credentials_target(
                 unsupported_services[0],
                 execution_scope,
                 agent_name=agent_name,
-                scope_label=config.get_agent_scope_label(agent_name),
+                scope_label=scope_label,
             ),
         )
 

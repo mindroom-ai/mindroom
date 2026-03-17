@@ -247,6 +247,40 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "worker_scope=user" in response.json()["detail"]
 
+    def test_execution_scope_override_rejects_draft_isolating_scope(
+        self,
+        client: TestClient,
+    ) -> None:
+        """An explicit dashboard override must win over persisted shared config."""
+        config = _config_with_worker_scope(None)
+
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get("/api/credentials/google?agent_name=general&execution_scope=user")
+
+        assert response.status_code == 400
+        assert "execution_scope=user" in response.json()["detail"]
+
+    def test_unscoped_execution_scope_override_does_not_fall_back_to_saved_scope(
+        self,
+        client: TestClient,
+        mock_credentials_manager: MagicMock,
+    ) -> None:
+        """Explicit unscoped dashboard overrides must bypass saved worker scope."""
+        config = _config_with_worker_scope("shared")
+        mock_credentials_manager.load_credentials.return_value = {
+            "api_key": "sk-test-long-key-value",
+            "_source": "ui",
+        }
+
+        with patch("mindroom.api.config_lifecycle.load_runtime_config", return_value=(config, Path("config.yaml"))):
+            response = client.get(
+                "/api/credentials/openai/api-key?agent_name=general&execution_scope=unscoped",
+            )
+
+        assert response.status_code == 200
+        assert response.json()["has_key"] is True
+        mock_credentials_manager.for_worker.assert_not_called()
+
     def test_shared_agent_name_does_not_merge_global_ui_credentials(
         self,
         client: TestClient,

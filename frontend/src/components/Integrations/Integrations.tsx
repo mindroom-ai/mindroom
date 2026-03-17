@@ -33,7 +33,7 @@ import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { useConfigStore } from '@/store/configStore';
 import { getAgentExecutionScope, getAgentScopeLabel } from '@/types/config';
 import { getIconForTool } from './iconMapping';
-import { API_BASE_URL, withAgentName } from '@/lib/api';
+import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 import {
   Integration,
   IntegrationConfig,
@@ -116,7 +116,7 @@ export function Integrations() {
   // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
-  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName]);
+  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName, selectedExecutionScope]);
 
   const loadIntegrations = async (forceRefresh = false) => {
     setLoading(true);
@@ -131,7 +131,7 @@ export function Integrations() {
       }
 
       const loadedIntegrations: Integration[] = [];
-      const scope = { agentName: scopeAgentName };
+      const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
@@ -207,7 +207,7 @@ export function Integrations() {
 
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName };
+    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
     if (provider) {
       const config = provider.getConfig(scope);
@@ -286,7 +286,7 @@ export function Integrations() {
     }
 
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName };
+    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
 
     setLoading(true);
     try {
@@ -296,7 +296,11 @@ export function Integrations() {
       } else {
         // For generic tools, delete credentials via API
         const response = await fetch(
-          withAgentName(`${API_BASE_URL}/api/credentials/${integration.id}`, scopeAgentName),
+          withAgentExecutionScope(
+            `${API_BASE_URL}/api/credentials/${integration.id}`,
+            scopeAgentName,
+            selectedExecutionScope
+          ),
           {
             method: 'DELETE',
           }
@@ -339,7 +343,10 @@ export function Integrations() {
 
     // Check if there's a custom action button
     const provider = integrationProviders[integration.id];
-    const config = provider?.getConfig({ agentName: scopeAgentName });
+    const config = provider?.getConfig({
+      agentName: scopeAgentName,
+      executionScope: selectedExecutionScope,
+    });
 
     if (config?.ActionButton) {
       const ActionButton = config.ActionButton;
@@ -794,6 +801,7 @@ export function Integrations() {
               <activeDialog.config.ConfigComponent
                 onClose={() => setActiveDialog(null)}
                 agentName={scopeAgentName}
+                executionScope={selectedExecutionScope}
                 onSuccess={async () => {
                   setActiveDialog(null);
                   // Force refresh to get updated Google tools status
@@ -820,6 +828,7 @@ export function Integrations() {
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
           agentName={scopeAgentName}
+          executionScope={selectedExecutionScope}
           onSuccess={async () => {
             setConfigDialog(null);
             // Refetch tools to get updated status

@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { API_ENDPOINTS, fetchJSON, withQueryParams } from '@/lib/api';
+import { API_ENDPOINTS, fetchJSON, withAgentExecutionScope } from '@/lib/api';
 import type { WorkerScope } from '@/types/config';
 import { useFetchData } from './useFetchData';
 
@@ -29,13 +29,8 @@ const DEFAULT: ToolInfo[] = [];
 export function useTools(agentName?: string | null, executionScope?: WorkerScope | null) {
   const fetcher = useMemo(
     () => async () => {
-      const executionScopeQuery =
-        agentName != null && executionScope === null ? 'unscoped' : executionScope ?? null;
       const response = (await fetchJSON<ToolsResponse>(
-        withQueryParams(API_ENDPOINTS.tools, {
-          agent_name: agentName,
-          execution_scope: executionScopeQuery,
-        })
+        withAgentExecutionScope(API_ENDPOINTS.tools, agentName, executionScope)
       )) as ToolsResponse;
       return response.tools;
     },
