@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
 from agno.agent import Agent
@@ -21,7 +22,11 @@ from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
+from mindroom.runtime_resolution import (
+    ResolvedAgentRuntime,
+    resolve_agent_runtime,
+    resolve_private_scope_root,
+)
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
@@ -94,6 +99,10 @@ class AgentToolInitContext:
 
 
 _CULTURE_MANAGER_CACHE: dict[tuple[str, str], _CachedCultureManager] = {}
+_PRIVATE_CULTURE_MANAGER_CACHE: WeakValueDictionary[
+    tuple[str, str, tuple[str, str]],
+    CultureManager,
+] = WeakValueDictionary()
 
 
 def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
@@ -666,6 +675,8 @@ def _resolve_agent_culture(
     config: Config,
     storage_path: Path,
     model: Model,
+    *,
+    cache_private: bool = False,
 ) -> tuple[CultureManager | None, _CultureAgentSettings | None]:
     """Resolve shared culture manager and feature flags for an agent."""
     culture_assignment = config.get_agent_culture(agent_name)
@@ -674,10 +685,15 @@ def _resolve_agent_culture(
 
     culture_name, culture_config = culture_assignment
     settings = _resolve_culture_settings(culture_config.mode)
-    is_private_agent = config.agents[agent_name].private is not None
     cache_key = (str(storage_path.resolve()), culture_name)
     signature = _culture_signature(culture_config)
-    if not is_private_agent:
+    if cache_private:
+        private_cache_key = (*cache_key, signature)
+        cached_private_manager = _PRIVATE_CULTURE_MANAGER_CACHE.get(private_cache_key)
+        if cached_private_manager is not None:
+            cached_private_manager.model = model
+            return cached_private_manager, settings
+    else:
         cached_manager = _CULTURE_MANAGER_CACHE.get(cache_key)
         if cached_manager is not None and cached_manager.signature == signature:
             cached_manager.manager.model = model
@@ -693,7 +709,9 @@ def _resolve_agent_culture(
         delete_knowledge=False,
         clear_knowledge=False,
     )
-    if not is_private_agent:
+    if cache_private:
+        _PRIVATE_CULTURE_MANAGER_CACHE[private_cache_key] = culture_manager
+    else:
         _CULTURE_MANAGER_CACHE[cache_key] = _CachedCultureManager(
             signature=signature,
             manager=culture_manager,
@@ -861,11 +879,21 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         instructions.append(agent_prompts.INTERACTIVE_QUESTION_PROMPT)
 
     knowledge_enabled = bool(config.get_agent_knowledge_base_ids(agent_name)) and knowledge is not None
+    culture_storage_root = resolved_storage_path
+    cache_private_culture = False
+    if agent_runtime.is_private:
+        worker_key = agent_runtime.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' requires a worker key to resolve culture state"
+            raise ValueError(msg)
+        culture_storage_root = resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key)
+        cache_private_culture = True
     culture_manager, culture_settings = _resolve_agent_culture(
         agent_name,
         config,
-        agent_runtime.state_root if agent_runtime.is_private else resolved_storage_path,
+        culture_storage_root,
         model,
+        cache_private=cache_private_culture,
     )
 
     add_culture_to_context: bool | None = None

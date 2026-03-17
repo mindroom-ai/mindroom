@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
-    private_instance_state_root_path,
+    private_instance_scope_root_path,
     resolve_agent_state_storage_path,
     resolve_execution_identity_for_worker_scope,
     resolve_worker_key,
@@ -134,6 +134,22 @@ def require_worker_key_for_scope(
     return worker_key
 
 
+def resolve_private_scope_root(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_key: str,
+) -> Path:
+    """Return one canonical requester-scoped private root and reject symlink escapes."""
+    return resolve_relative_path_within_root(
+        runtime_paths.storage_root,
+        private_instance_scope_root_path(
+            runtime_paths.storage_root,
+            worker_key=worker_key,
+        ).relative_to(runtime_paths.storage_root.expanduser().resolve()),
+        field_name="Private scope root",
+    )
+
+
 def _resolved_private_state_root(
     *,
     runtime_paths: RuntimePaths,
@@ -142,13 +158,10 @@ def _resolved_private_state_root(
 ) -> Path:
     """Return one canonical private-instance state root and reject symlink escapes."""
     return resolve_relative_path_within_root(
-        runtime_paths.storage_root,
-        private_instance_state_root_path(
-            runtime_paths.storage_root,
-            worker_key=worker_key,
-            agent_name=agent_name,
-        ).relative_to(runtime_paths.storage_root.expanduser().resolve()),
+        resolve_private_scope_root(runtime_paths=runtime_paths, worker_key=worker_key),
+        agent_name,
         field_name="Private state root",
+        root_label="private scope root",
     )
 
 
