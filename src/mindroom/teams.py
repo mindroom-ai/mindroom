@@ -572,21 +572,33 @@ def _team_member_name(
     return agent_id.agent_name(config, runtime_paths) or agent_id.username
 
 
+def _filter_team_request_members(
+    agent_ids: list[MatrixID],
+    config: Config | None,
+    runtime_paths: RuntimePaths,
+) -> list[MatrixID]:
+    """Keep only actual teamable agents while preserving the requested order."""
+    filtered: list[MatrixID] = []
+    for agent_id in agent_ids:
+        if config is not None:
+            agent_name = agent_id.agent_name(config, runtime_paths)
+            if agent_name is None or agent_name == ROUTER_AGENT_NAME or agent_name not in config.agents:
+                continue
+        filtered.append(agent_id)
+    return filtered
+
+
 def _normalize_team_request_members(
     agent_ids: list[MatrixID],
     config: Config | None,
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
-    """Deduplicate candidates and keep only actual teamable agents."""
+    """Deduplicate ad hoc candidates after filtering out non-teamable agents."""
     normalized: list[MatrixID] = []
     seen_ids: set[str] = set()
-    for agent_id in agent_ids:
+    for agent_id in _filter_team_request_members(agent_ids, config, runtime_paths):
         if agent_id.full_id in seen_ids:
             continue
-        if config is not None:
-            agent_name = agent_id.agent_name(config, runtime_paths)
-            if agent_name is None or agent_name == ROUTER_AGENT_NAME or agent_name not in config.agents:
-                continue
         normalized.append(agent_id)
         seen_ids.add(agent_id.full_id)
     return normalized
@@ -851,8 +863,8 @@ def resolve_configured_team(
     *,
     materializable_agent_names: set[str] | None = None,
 ) -> TeamResolution:
-    """Resolve a configured team with the same explicit semantics as tagged members."""
-    requested_members = _normalize_team_request_members(team_members, config, runtime_paths)
+    """Resolve one configured team while preserving the exact configured membership."""
+    requested_members = _filter_team_request_members(team_members, config, runtime_paths)
     member_statuses = _evaluate_team_members(
         requested_members,
         config,

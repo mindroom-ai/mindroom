@@ -1087,11 +1087,10 @@ def _build_team(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> tuple[list[Agent], Team | None, TeamMode]:
-    """Create agents and build an agno.Team for the given team config.
+) -> tuple[list[Agent], Team, TeamMode]:
+    """Create member agents and build one agno.Team for a configured team.
 
-    Returns (agents, team, mode). When no agents can be created,
-    returns ([], None, mode) so callers can handle it gracefully.
+    Raises ValueError when the configured team cannot be materialized.
     """
     team_config = config.teams[team_name]
     mode = TeamMode(team_config.mode)
@@ -1101,7 +1100,7 @@ def _build_team(
     model = get_model_instance(config, runtime_paths, model_name)
 
     agents: list[Agent] = []
-    built_member_names: list[str] = []
+    materialized_member_names: set[str] = set()
     for member_name in team_config.agents:
         if member_name not in config.agents or member_name == ROUTER_AGENT_NAME:
             logger.warning("Team member not found, skipping", team=team_name, agent=member_name)
@@ -1122,7 +1121,7 @@ def _build_team(
                     include_interactive_questions=False,
                 ),
             )
-            built_member_names.append(member_name)
+            materialized_member_names.add(member_name)
         except Exception:
             logger.warning("Failed to create team member, skipping", team=team_name, agent=member_name, exc_info=True)
 
@@ -1132,7 +1131,7 @@ def _build_team(
         mode,
         config,
         runtime_paths,
-        materializable_agent_names=set(built_member_names),
+        materializable_agent_names=materialized_member_names,
     )
     if final_resolution.outcome is not TeamOutcome.TEAM:
         raise ValueError(final_resolution.reason or f"Team '{team_name}' cannot be materialized")
@@ -1170,8 +1169,6 @@ async def _non_stream_team_completion(
         agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     except ValueError as e:
         return _error_response(500, str(e), error_type="server_error")
-    if not agents or team is None:
-        return _error_response(500, "No valid agents found for team", error_type="server_error")
 
     logger.info("Team completion request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 
@@ -1221,8 +1218,6 @@ async def _stream_team_completion(
             agents, team, mode = _build_team(team_name, config, runtime_paths, execution_identity)
     except ValueError as e:
         return _error_response(500, str(e), error_type="server_error")
-    if not agents or team is None:
-        return _error_response(500, "No valid agents found for team", error_type="server_error")
 
     logger.info("Team streaming request", team=team_name, mode=mode.value, members=len(agents), session_id=session_id)
 

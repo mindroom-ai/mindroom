@@ -2225,6 +2225,21 @@ def test_config_rejects_empty_teams() -> None:
         )
 
 
+def test_config_rejects_duplicate_team_members() -> None:
+    """Configured teams must preserve an exact member set with no duplicates."""
+    with pytest.raises(ValidationError, match="Duplicate agents are not allowed in a team: calculator"):
+        Config(
+            agents={"calculator": AgentConfig(display_name="Calculator")},
+            teams={
+                "duplicate_team": TeamConfig(
+                    display_name="Duplicate Team",
+                    role="Repeated member",
+                    agents=["calculator", "calculator"],
+                ),
+            },
+        )
+
+
 def test_config_rejects_teams_with_members_that_delegate_to_private_agents() -> None:
     """Configured teams must reject shared members that reach private agents via delegation."""
     with pytest.raises(
