@@ -1597,6 +1597,16 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating an existing team."""
     test_client.post("/api/config/load")
 
+    new_agent_data = {
+        "display_name": "New Agent",
+        "role": "Another test agent",
+        "tools": ["calculator"],
+        "instructions": ["Test instruction"],
+        "rooms": ["test_room"],
+    }
+    create_agent_response = test_client.post("/api/config/agents", json=new_agent_data)
+    assert create_agent_response.status_code == 200
+
     # Create a team first
     team_data = {
         "display_name": "Test Team",

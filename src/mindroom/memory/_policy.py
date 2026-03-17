@@ -36,6 +36,7 @@ def caller_uses_file_memory_backend(config: Config, caller_context: str | list[s
 
 def team_uses_file_memory_backend(config: Config, agent_names: list[str]) -> bool:
     """Return whether all team members resolve to file-backed memory."""
+    config.assert_team_agents_supported(agent_names)
     return all(use_file_memory_backend(config, agent_name=agent_name) for agent_name in agent_names)
 
 
@@ -48,17 +49,13 @@ def effective_storage_paths_for_context(
     if isinstance(caller_context, str):
         return [_effective_storage_path_for_agent(caller_context, storage_path, config)]
 
-    private_effective_paths: list[Path] = []
-    shared_effective_paths: list[Path] = []
+    config.assert_team_agents_supported(caller_context)
+    effective_paths: list[Path] = []
     for agent_name in caller_context:
         effective_path = _effective_storage_path_for_agent(agent_name, storage_path, config)
-        if _agent_has_private_state(agent_name, config):
-            if effective_path not in private_effective_paths:
-                private_effective_paths.append(effective_path)
-            continue
-        if effective_path not in shared_effective_paths:
-            shared_effective_paths.append(effective_path)
-    return private_effective_paths or shared_effective_paths or [storage_path]
+        if effective_path not in effective_paths:
+            effective_paths.append(effective_path)
+    return effective_paths or [storage_path]
 
 
 def _effective_storage_path_for_agent(
@@ -101,21 +98,16 @@ def agent_name_from_scope_user_id(scope_user_id: str) -> str | None:
     return None
 
 
-def _team_memory_is_visible_to_agent(agent_name: str, team_members: list[str], config: Config) -> bool:
-    if all(not _agent_has_private_state(member_name, config) for member_name in team_members):
-        return True
-    return _agent_has_private_state(agent_name, config)
-
-
 def get_team_ids_for_agent(agent_name: str, config: Config) -> list[str]:
     """Get all team scope IDs that include the specified agent."""
     if not config.teams:
         return []
-    return [
-        build_team_user_id(team_config.agents)
-        for team_config in config.teams.values()
-        if agent_name in team_config.agents and _team_memory_is_visible_to_agent(agent_name, team_config.agents, config)
-    ]
+    team_ids: list[str] = []
+    for team_name, team_config in config.teams.items():
+        config.assert_team_agents_supported(team_config.agents, team_name=team_name)
+        if agent_name in team_config.agents:
+            team_ids.append(build_team_user_id(team_config.agents))
+    return team_ids
 
 
 def _team_members_from_scope_user_id(scope_user_id: str, config: Config) -> list[str] | None:
@@ -146,6 +138,7 @@ def storage_paths_for_scope_user_id(
 def get_allowed_memory_user_ids(caller_context: str | list[str], config: Config) -> set[str]:
     """Get all user_id scopes the caller is allowed to access."""
     if isinstance(caller_context, list):
+        config.assert_team_agents_supported(caller_context)
         allowed_user_ids = {build_team_user_id(caller_context)}
         if config.memory.team_reads_member_memory:
             allowed_user_ids.update(agent_scope_user_id(agent_name) for agent_name in caller_context)

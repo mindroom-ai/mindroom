@@ -542,47 +542,18 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
 
 
 @pytest.mark.asyncio
-async def test_file_backend_mixed_private_team_conversation_memory_stays_out_of_shared_agent_root(
+async def test_file_backend_mixed_private_team_conversation_memory_is_rejected(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """Mixed private/shared teams should keep requester-local team memory out of shared roots."""
+    """File-backed team memory should reject private team members outright."""
     config.memory.backend = "file"
     config.agents["general"].memory_backend = "file"
     config.agents["calculator"].memory_backend = "file"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    alice_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="team",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-alice",
-    )
-    bob_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="team",
-        requester_id="@bob:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session-bob",
-    )
-    alice_worker_key = resolve_worker_key("user", alice_identity, agent_name="general")
-    private_memory_file = (
-        private_instance_state_root_path(storage_path, worker_key=alice_worker_key, agent_name="general")
-        / "memory_files"
-        / "team_calculator+general"
-        / "MEMORY.md"
-    )
-    shared_memory_file = (
-        agent_state_root_path(storage_path, "calculator") / "memory_files" / "team_calculator+general" / "MEMORY.md"
-    )
-
-    with tool_execution_identity(alice_identity):
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
         await store_conversation_memory(
             "Alice-authored private team memory",
             ["general", "calculator"],
@@ -590,35 +561,6 @@ async def test_file_backend_mixed_private_team_conversation_memory_stays_out_of_
             "session-alice",
             config,
         )
-        private_results = await search_agent_memories(
-            "Alice-authored private team",
-            "general",
-            storage_path,
-            config,
-            limit=5,
-        )
-        shared_results_for_alice = await search_agent_memories(
-            "Alice-authored private team",
-            "calculator",
-            storage_path,
-            config,
-            limit=5,
-        )
-
-    with tool_execution_identity(bob_identity):
-        shared_results_for_bob = await search_agent_memories(
-            "Alice-authored private team",
-            "calculator",
-            storage_path,
-            config,
-            limit=5,
-        )
-
-    assert any(result.get("memory") == "Alice-authored private team memory" for result in private_results)
-    assert shared_results_for_alice == []
-    assert shared_results_for_bob == []
-    assert private_memory_file.exists()
-    assert not shared_memory_file.exists()
 
 
 @pytest.mark.asyncio
@@ -658,11 +600,11 @@ async def test_file_backend_team_search_ignores_agent_memory_file_path_override(
 
 
 @pytest.mark.asyncio
-async def test_mixed_private_team_can_crud_shared_member_memory_in_custom_memory_file_path(
+async def test_file_backend_mixed_private_team_member_crud_is_rejected(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """Mixed private teams should still CRUD shared member file memory in custom workspaces."""
+    """File-backed team member CRUD should reject private team members."""
     workspace = agent_workspace_root_path(storage_path, "calculator") / "calc-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCalculator note.\n", encoding="utf-8")
@@ -675,24 +617,13 @@ async def test_mixed_private_team_can_crud_shared_member_memory_in_custom_memory
     config.memory.team_reads_member_memory = True
     config.teams = {"mixed_team": MockTeamConfig(agents=["general", "calculator"])}
 
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="!room:example.org:$thread",
-    )
+    await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
+    memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
 
-    with tool_execution_identity(execution_identity):
-        await add_agent_memory("Calculator workspace note", "calculator", storage_path, config)
-        memory_id = (await list_all_agent_memories("calculator", storage_path, config))[0]["id"]
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
 
-        loaded = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
-        assert loaded is not None
-        assert loaded["memory"] == "Calculator workspace note"
-
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
         await update_agent_memory(
             memory_id,
             "Updated calculator workspace note",
@@ -700,16 +631,13 @@ async def test_mixed_private_team_can_crud_shared_member_memory_in_custom_memory
             storage_path,
             config,
         )
-        updated = await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
-        assert updated is not None
-        assert updated["memory"] == "Updated calculator workspace note"
 
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
         await delete_agent_memory(memory_id, ["general", "calculator"], storage_path, config)
-        assert await get_agent_memory(memory_id, ["general", "calculator"], storage_path, config) is None
 
     memory_content = (workspace / "MEMORY.md").read_text(encoding="utf-8")
     assert "Calculator note." in memory_content
-    assert "Updated calculator workspace note" not in memory_content
+    assert "Calculator workspace note" in memory_content
 
 
 @pytest.mark.asyncio

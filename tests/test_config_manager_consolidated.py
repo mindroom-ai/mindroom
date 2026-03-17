@@ -91,7 +91,13 @@ class TestConsolidatedConfigManager:
         """Test get_info with teams info type."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(teams={})
+            config = Config(
+                agents={
+                    "agent1": AgentConfig(display_name="Agent One"),
+                    "agent2": AgentConfig(display_name="Agent Two"),
+                },
+                teams={},
+            )
             config.teams["test_team"] = TeamConfig(
                 display_name="Test Team",
                 role="Test team role",
