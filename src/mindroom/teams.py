@@ -424,8 +424,11 @@ def _get_agents_from_orchestrator(
 ) -> list[Agent]:
     """Get Agent instances from orchestrator for the given agent names."""
     agents: list[Agent] = []
-    for name in _available_team_agent_names(agent_names, orchestrator):
-        agent_bot = orchestrator.agent_bots[name]
+    for name in agent_names:
+        agent_bot = orchestrator.agent_bots.get(name)
+        if agent_bot is None:
+            logger.warning(f"Agent '{name}' not found in orchestrator - may not be in room")
+            continue
         agent = agent_bot.agent
 
         if agent is None:
@@ -457,6 +460,11 @@ def _available_team_agent_names(
             continue
         available_agent_names.append(name)
     return available_agent_names
+
+
+def _requested_team_agent_names(agent_names: list[str]) -> list[str]:
+    """Return the requested team members, excluding router placeholders."""
+    return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
 def _create_team_instance(
@@ -549,8 +557,9 @@ async def team_response(
 ) -> str:
     """Create a team and execute response."""
     assert orchestrator.config is not None
-    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
-    orchestrator.config.assert_team_agents_supported(available_agent_names)
+    requested_agent_names = _requested_team_agent_names(agent_names)
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
     agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
     if not agents:
         return _NO_AGENTS_RESPONSE
@@ -630,8 +639,9 @@ async def _team_response_stream_raw(
     """
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
-    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
-    orchestrator.config.assert_team_agents_supported(available_agent_names)
+    requested_agent_names = _requested_team_agent_names(agent_names)
+    orchestrator.config.assert_team_agents_supported(requested_agent_names)
+    available_agent_names = _available_team_agent_names(requested_agent_names, orchestrator)
     agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
 
     if not agents:

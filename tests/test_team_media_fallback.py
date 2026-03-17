@@ -211,9 +211,7 @@ class _DirectTeamAgentBot:
         return create_agent(self._agent_name, self._config, runtime_paths_for(self._config))
 
 
-@pytest.mark.asyncio
-async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
-    """Direct team helpers should reject any team that includes a private agent."""
+def _build_private_team_orchestrator(*, include_private_member: bool) -> tuple[Config, MagicMock]:
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     config = bind_runtime_paths(
         Config(
@@ -240,9 +238,17 @@ async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
     orchestrator.agent_bots = {
-        "general": _DirectTeamAgentBot("general", config),
         "calculator": _DirectTeamAgentBot("calculator", config),
     }
+    if include_private_member:
+        orchestrator.agent_bots["general"] = _DirectTeamAgentBot("general", config)
+    return config, orchestrator
+
+
+@pytest.mark.asyncio
+async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
+    """Direct team helpers should reject any team that includes a private agent."""
+    _, orchestrator = _build_private_team_orchestrator(include_private_member=True)
 
     with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
         await team_response(
@@ -251,6 +257,40 @@ async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
             message="Analyze this.",
             orchestrator=orchestrator,
         )
+
+
+@pytest.mark.asyncio
+async def test_team_response_rejects_private_agents_even_when_private_member_is_unavailable() -> None:
+    """Direct team helpers should reject requested private members before availability filtering."""
+    _, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        await team_response(
+            agent_names=["general", "calculator"],
+            mode=TeamMode.COORDINATE,
+            message="Analyze this.",
+            orchestrator=orchestrator,
+        )
+
+
+@pytest.mark.asyncio
+async def test_team_response_stream_rejects_private_agents_even_when_private_member_is_unavailable() -> None:
+    """Streaming team helpers should reject requested private members before availability filtering."""
+    config, orchestrator = _build_private_team_orchestrator(include_private_member=False)
+
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
+        [
+            chunk
+            async for chunk in team_response_stream(
+                agent_ids=[
+                    config.get_ids(runtime_paths_for(config))["general"],
+                    config.get_ids(runtime_paths_for(config))["calculator"],
+                ],
+                mode=TeamMode.COORDINATE,
+                message="Analyze this.",
+                orchestrator=orchestrator,
+            )
+        ]
 
 
 @pytest.mark.asyncio
