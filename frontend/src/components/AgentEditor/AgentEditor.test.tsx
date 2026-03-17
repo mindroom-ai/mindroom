@@ -498,7 +498,7 @@ describe('AgentEditor', () => {
     });
   });
 
-  it('does not restore prior worker_scope when private mode is disabled again', async () => {
+  it('restores prior worker_scope when private mode is disabled before save', async () => {
     const scopedAgent: Agent = {
       ...mockAgent,
       worker_scope: 'user_agent',
@@ -537,9 +537,13 @@ describe('AgentEditor', () => {
           private: undefined,
         })
       );
+      expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          worker_scope: 'user_agent',
+        })
+      );
     });
-
-    expect(mockStore.updateAgent.mock.calls[1][1]).not.toHaveProperty('worker_scope');
   });
 
   it('renders and updates private agent fields', async () => {

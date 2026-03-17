@@ -51,6 +51,9 @@ export function AgentEditor() {
   } = useConfigStore();
 
   const [configDialogTool, setConfigDialogTool] = useState<string | null>(null);
+  const [restorableWorkerScope, setRestorableWorkerScope] = useState<Agent['worker_scope'] | null>(
+    null
+  );
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
   const defaultLearning = config?.defaults.learning ?? true;
   const defaultLearningMode = config?.defaults.learning_mode ?? 'always';
@@ -254,6 +257,10 @@ export function AgentEditor() {
     }
   }, [defaultLearning, defaultLearningMode, selectedAgent, reset]);
 
+  useEffect(() => {
+    setRestorableWorkerScope(null);
+  }, [selectedAgentId]);
+
   // Create a debounced update function
   const handleFieldChange = useCallback(
     (fieldName: keyof Agent, value: any) => {
@@ -283,6 +290,7 @@ export function AgentEditor() {
 
   const handleSave = async () => {
     await saveConfig();
+    setRestorableWorkerScope(null);
   };
 
   const handleAddInstruction = () => {
@@ -340,11 +348,17 @@ export function AgentEditor() {
 
   const handleEnablePrivate = (enabled: boolean) => {
     if (enabled) {
-      updatePrivate(getDefaultPrivateConfig(selectedAgent ?? getValues()));
+      const currentAgent = selectedAgent ?? getValues();
+      setRestorableWorkerScope(currentAgent.worker_scope ?? null);
+      updatePrivate(getDefaultPrivateConfig(currentAgent));
       return;
     }
 
     updatePrivate(undefined);
+    if (restorableWorkerScope != null) {
+      handleFieldChange('worker_scope', restorableWorkerScope);
+      setRestorableWorkerScope(null);
+    }
   };
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
