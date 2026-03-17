@@ -482,11 +482,11 @@ class AgentBot:
             )
             return {}
 
-    def _build_shared_execution_identity(self, agent_name: str | None = None) -> ToolExecutionIdentity:
+    def _build_shared_execution_identity(self) -> ToolExecutionIdentity:
         """Build a non-request execution identity for shared agent materialization."""
         return ToolExecutionIdentity(
             channel="matrix",
-            agent_name=agent_name or self.agent_name,
+            agent_name=self.agent_name,
             requester_id=None,
             room_id=None,
             thread_id=None,
@@ -499,6 +499,12 @@ class AgentBot:
     @property  # Not cached_property because Team mutates it!
     def agent(self) -> Agent:
         """Get the Agno Agent instance for this bot."""
+        if self.agent_name != ROUTER_AGENT_NAME and self.config.agents[self.agent_name].private is not None:
+            msg = (
+                f"AgentBot.agent is only available for shared agents. "
+                f"Private agent '{self.agent_name}' requires an explicit execution identity."
+            )
+            raise ValueError(msg)
         execution_identity = self._build_shared_execution_identity()
         knowledge = self._knowledge_for_agent(self.agent_name, execution_identity=execution_identity)
         return create_agent(

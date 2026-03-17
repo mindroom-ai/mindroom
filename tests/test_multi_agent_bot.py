@@ -23,7 +23,7 @@ from agno.run.team import TeamRunOutput
 from mindroom.attachments import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import is_authorized_sender as is_authorized_sender_for_test
 from mindroom.bot import AgentBot, MultiKnowledgeVectorDb, _MessageContext
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
@@ -312,6 +312,35 @@ class TestAgentBot:
         bot.orchestrator = MagicMock(knowledge_managers={"research": manager})
 
         assert bot._knowledge_for_agent("calculator") is expected_knowledge
+
+    def test_agent_property_rejects_private_agent_without_request_identity(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """AgentBot.agent should fail fast for private agents with no request scope."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        role="Math assistant",
+                        rooms=[],
+                        private=AgentPrivateConfig(per="user", root="mind_data"),
+                    ),
+                },
+                models={"default": ModelConfig(provider="ollama", id="test-model")},
+                router=RouterConfig(model="default"),
+            ),
+            tmp_path,
+        )
+        bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+
+        with pytest.raises(
+            ValueError,
+            match="AgentBot\\.agent is only available for shared agents",
+        ):
+            _ = bot.agent
 
     def test_knowledge_for_agent_merges_multiple_assigned_bases(
         self,

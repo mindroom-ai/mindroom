@@ -1329,50 +1329,55 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     worker_root = tmp_path / "workers"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
 
-    save_response = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "save_file",
-            "args": ["hello from worker A", "note.txt"],
-            "kwargs": {},
-            "worker_key": "worker-a",
-        },
-    )
-    assert save_response.status_code == 200
-    assert save_response.json()["ok"] is True
+    def fake_create(_self: object, venv_dir: Path) -> None:
+        (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+        (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
-    read_same_worker = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "read_file",
-            "args": ["note.txt"],
-            "kwargs": {},
-            "worker_key": "worker-a",
-        },
-    )
-    assert read_same_worker.status_code == 200
-    assert read_same_worker.json()["ok"] is True
-    assert "hello from worker A" in read_same_worker.json()["result"]
+    with patch("mindroom.workers.backends.local.venv.EnvBuilder.create", new=fake_create):
+        save_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "save_file",
+                "args": ["hello from worker A", "note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-a",
+            },
+        )
+        assert save_response.status_code == 200
+        assert save_response.json()["ok"] is True
 
-    read_other_worker = runner_client.post(
-        "/api/sandbox-runner/execute",
-        headers=SANDBOX_HEADERS,
-        json={
-            "tool_name": "file",
-            "function_name": "read_file",
-            "args": ["note.txt"],
-            "kwargs": {},
-            "worker_key": "worker-b",
-        },
-    )
-    assert read_other_worker.status_code == 200
-    assert read_other_worker.json()["ok"] is True
-    assert "hello from worker A" not in read_other_worker.json()["result"]
-    assert "No such file or directory" in read_other_worker.json()["result"]
+        read_same_worker = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "args": ["note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-a",
+            },
+        )
+        assert read_same_worker.status_code == 200
+        assert read_same_worker.json()["ok"] is True
+        assert "hello from worker A" in read_same_worker.json()["result"]
+
+        read_other_worker = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "tool_name": "file",
+                "function_name": "read_file",
+                "args": ["note.txt"],
+                "kwargs": {},
+                "worker_key": "worker-b",
+            },
+        )
+        assert read_other_worker.status_code == 200
+        assert read_other_worker.json()["ok"] is True
+        assert "hello from worker A" not in read_other_worker.json()["result"]
+        assert "No such file or directory" in read_other_worker.json()["result"]
 
     worker_file = worker_root / worker_dir_name("worker-a") / "workspace" / "note.txt"
     assert worker_file.read_text(encoding="utf-8") == "hello from worker A"
