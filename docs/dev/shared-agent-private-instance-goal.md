@@ -111,7 +111,7 @@ Keep `agents.<name>.private` as the public surface for this PR.
 
 Do not rename it to `requester_state` in the same change that rewires the internals.
 
-Introduce one internal resolver layer as the only source of truth for private versus shared runtime resolution.
+Introduce one internal resolver layer that becomes the source of truth for private versus shared runtime resolution as the remaining call paths migrate onto it.
 
 That resolver must resolve state per `(agent_name, execution_identity)` materialization, not once per request.
 
@@ -119,7 +119,7 @@ After the outer ingress points, resolved runtime state should be passed explicit
 
 Worker visibility and knowledge bindings may be derived helpers, but they must come from the same resolver layer.
 
-Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision.
+Outside the resolver layer and low-level path helpers, no module should make its own scope-to-root decision once the migration is complete.
 
 ## Current Rewrite Scope
 
