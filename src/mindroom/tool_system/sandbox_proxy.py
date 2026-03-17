@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from mindroom.config.main import runtime_private_agent_names
 from mindroom.constants import execution_runtime_env_values
 from mindroom.credentials import load_scoped_credentials
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -23,6 +24,7 @@ from mindroom.tool_system.worker_routing import (
     get_tool_execution_identity,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    resolved_worker_key_scope,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_endpoint
 from mindroom.workers.runtime import (
@@ -283,6 +285,7 @@ def _build_worker_routing_payload(
     routing_agent_name: str | None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
     proxy_config = sandbox_proxy_config(runtime_paths)
+    context = get_tool_runtime_context()
     if worker_scope is None:
         if primary_worker_backend_name(runtime_paths) != "kubernetes":
             return {}, None
@@ -326,13 +329,22 @@ def _build_worker_routing_payload(
         )
         raise RuntimeError(msg)
 
-    worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(WorkerSpec(worker_key))
+    private_agent_names: frozenset[str] | None = None
+    if resolved_worker_key_scope(worker_key) == "user_agent":
+        if context is None:
+            msg = f"User-agent worker '{worker_key}' requires runtime config context for private visibility."
+            raise RuntimeError(msg)
+        private_agent_names = runtime_private_agent_names(context.config, worker_key=worker_key)
+    worker_handle = _get_worker_manager(runtime_paths, proxy_config).ensure_worker(
+        WorkerSpec(worker_key, private_agent_names=private_agent_names),
+    )
     return (
         {
             "worker_scope": worker_scope,
             "routing_agent_name": routing_agent_name,
             "worker_key": worker_key,
             "execution_identity": to_json_compatible(asdict(execution_identity)),
+            "private_agent_names": sorted(private_agent_names) if private_agent_names is not None else None,
         },
         worker_handle,
     )

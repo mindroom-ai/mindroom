@@ -14,9 +14,12 @@ import pytest
 
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools  # noqa: F401
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.metadata import ToolInitOverrideError, get_tool_by_name
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, tool_execution_identity
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
@@ -702,7 +705,26 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
-    with tool_execution_identity(execution_identity):
+    runtime_context = ToolRuntimeContext(
+        agent_name="code",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        requester_id="alice",
+        client=object(),
+        config=Config(
+            agents={
+                "code": AgentConfig(
+                    display_name="Code",
+                    private=AgentPrivateConfig(per="user_agent"),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths=runtime_paths,
+    )
+
+    with tool_execution_identity(execution_identity), tool_runtime_context(runtime_context):
         result = entrypoint(1, 2)
 
     assert result == "sandbox-result"
@@ -720,6 +742,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         "tenant_id": None,
         "account_id": None,
     }
+    assert captured["json"]["private_agent_names"] == ["code"]
 
 
 def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:

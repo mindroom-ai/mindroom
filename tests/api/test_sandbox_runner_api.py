@@ -1097,14 +1097,12 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     async def _fake_execute_request_subprocess(
         request: sandbox_runner_module.SandboxRunnerExecuteRequest,
         runtime_paths: object,
-        config: object,
         prepared_worker: object | None = None,
         *,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
-        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -1432,9 +1430,6 @@ def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     worker_handle = SimpleNamespace()
     worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "general")
-    config = SimpleNamespace(
-        get_private_agent_names=lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
-    )
 
     monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
     monkeypatch.setattr(
@@ -1447,17 +1442,16 @@ def test_prepare_worker_request_shared_worker_does_not_read_private_agent_names(
         worker_key=worker_key,
         tool_init_overrides={"base_dir": "agents/general/workspace"},
         runtime_paths=runtime_paths,
-        config=config,
     )
 
     assert prepared.handle is worker_handle
 
 
-def test_prepare_worker_request_user_agent_private_visibility_comes_from_explicit_config(
+def test_prepare_worker_request_user_agent_private_visibility_comes_from_explicit_names(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """User-agent workers should derive private visibility from the provided config object."""
+    """User-agent workers should derive private visibility from the provided names."""
     worker_key = resolve_worker_key(
         "user_agent",
         ToolExecutionIdentity(
@@ -1475,7 +1469,6 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     worker_handle = SimpleNamespace()
     worker_paths = local_workers_module._local_worker_state_paths_for_root(tmp_path / "workers" / "mind")
-    config = SimpleNamespace(get_private_agent_names=lambda: frozenset({"mind"}))
 
     monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", lambda *_args, **_kwargs: worker_handle)
     monkeypatch.setattr(
@@ -1490,17 +1483,17 @@ def test_prepare_worker_request_user_agent_private_visibility_comes_from_explici
             "base_dir": str(private_instance_scope_root_path(runtime_paths.storage_root, worker_key)),
         },
         runtime_paths=runtime_paths,
-        config=config,
+        private_agent_names=frozenset({"mind"}),
     )
 
     assert prepared.handle is worker_handle
 
 
-def test_prepare_worker_request_wraps_private_visibility_config_errors(
+def test_prepare_worker_request_requires_explicit_private_visibility_for_user_agent_workers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Config visibility failures should surface as worker-preparation errors."""
+    """User-agent workers should fail closed without explicit private visibility."""
     worker_key = "v1:tenant-123:user_agent:mind:@alice:example.org"
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     worker_handle = SimpleNamespace()
@@ -1512,22 +1505,20 @@ def test_prepare_worker_request_wraps_private_visibility_config_errors(
     def _local_worker_state_paths_from_handle(_handle: object) -> local_workers_module.LocalWorkerStatePaths:
         return worker_paths
 
-    config = SimpleNamespace(
-        get_private_agent_names=lambda: (_ for _ in ()).throw(ValueError("invalid config")),
-    )
-
     monkeypatch.setattr(sandbox_worker_prep_module, "prepare_worker", _prepare_worker)
     monkeypatch.setattr(
         sandbox_worker_prep_module,
         "local_worker_state_paths_from_handle",
         _local_worker_state_paths_from_handle,
     )
-    with pytest.raises(sandbox_worker_prep_module.WorkerRequestPreparationError, match="invalid config"):
+    with pytest.raises(
+        sandbox_worker_prep_module.WorkerRequestPreparationError,
+        match="user_agent workers require explicit private-agent visibility",
+    ):
         sandbox_worker_prep_module.prepare_worker_request(
             worker_key=worker_key,
             tool_init_overrides={"base_dir": "private_instances/example/mind"},
             runtime_paths=runtime_paths,
-            config=config,
         )
 
 

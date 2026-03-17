@@ -13,7 +13,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.config.main import load_config, runtime_private_agent_names
 from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
@@ -295,6 +294,7 @@ class KubernetesResourceManager:
         state_subpath: str,
         annotations: dict[str, str],
         replicas: int,
+        private_agent_names: frozenset[str] | None = None,
     ) -> None:
         """Create-or-patch one worker Deployment."""
         self._apply_object(
@@ -308,6 +308,7 @@ class KubernetesResourceManager:
                 state_subpath=state_subpath,
                 annotations=annotations,
                 replicas=replicas,
+                private_agent_names=private_agent_names,
             ),
         )
 
@@ -439,6 +440,7 @@ class KubernetesResourceManager:
         state_subpath: str,
         annotations: dict[str, str],
         replicas: int,
+        private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         metadata: dict[str, object] = {
@@ -469,7 +471,7 @@ class KubernetesResourceManager:
                     "command": ["/app/run-sandbox-runner.sh"],
                     "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
                     "env": self._worker_env(worker_key, state_subpath),
-                    "volumeMounts": self._volume_mounts(worker_key, state_subpath),
+                    "volumeMounts": self._volume_mounts(worker_key, state_subpath, private_agent_names),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
                         "periodSeconds": 5,
@@ -640,8 +642,17 @@ class KubernetesResourceManager:
             env_file_values=MappingProxyType(env_file_values),
         )
 
-    def _volume_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
-        mounts = self._scoped_storage_mounts(worker_key, state_subpath)
+    def _volume_mounts(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        private_agent_names: frozenset[str] | None,
+    ) -> list[dict[str, object]]:
+        mounts = self._scoped_storage_mounts(
+            worker_key,
+            state_subpath,
+            private_agent_names=private_agent_names,
+        )
         if self.config.config_map_name is not None:
             mounts.append(
                 {
@@ -721,24 +732,27 @@ class KubernetesResourceManager:
         self._owner_reference_loaded = True
         return self._owner_reference
 
-    def _scoped_storage_mounts(self, worker_key: str, state_subpath: str) -> list[dict[str, object]]:
+    def _scoped_storage_mounts(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        *,
+        private_agent_names: frozenset[str] | None,
+    ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        try:
-            private_agent_names = frozenset()
-            if resolved_worker_key_scope(worker_key) == "user_agent":
-                config = load_config(self.runtime_paths)
-                private_agent_names = runtime_private_agent_names(config, worker_key=worker_key)
-        except (FileNotFoundError, ValueError) as exc:
-            raise WorkerBackendError(str(exc)) from exc
+        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
+            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
+            raise WorkerBackendError(msg)
+        effective_private_agent_names = private_agent_names or frozenset()
         visible_state_roots = visible_state_roots_for_worker_key(
             mounted_storage_root,
             worker_key,
-            private_agent_names=private_agent_names,
+            private_agent_names=effective_private_agent_names,
         )
         local_visible_state_roots = visible_state_roots_for_worker_key(
             self.storage_root,
             worker_key,
-            private_agent_names=private_agent_names,
+            private_agent_names=effective_private_agent_names,
         )
         if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
             msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"

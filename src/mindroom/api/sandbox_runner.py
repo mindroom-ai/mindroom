@@ -132,6 +132,13 @@ def _runner_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsManag
     return get_runtime_credentials_manager(runtime_paths)
 
 
+def _request_private_agent_names(request: SandboxRunnerExecuteRequest) -> frozenset[str] | None:
+    """Return the explicit user-agent visibility snapshot carried by one request."""
+    if request.private_agent_names is None:
+        return None
+    return frozenset(request.private_agent_names)
+
+
 class SandboxRunnerExecuteRequest(BaseModel):
     """Tool call payload forwarded from a primary runtime to the sandbox runtime.
 
@@ -151,6 +158,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     worker_scope: WorkerScope | None = None
     routing_agent_name: str | None = None
     execution_identity: dict[str, Any] = Field(default_factory=dict)
+    private_agent_names: list[str] | None = None
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
@@ -337,7 +345,7 @@ async def _execute_request_inprocess(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
-            config=config,
+            private_agent_names=_request_private_agent_names(request),
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -425,7 +433,6 @@ def _parse_subprocess_response(
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -436,7 +443,7 @@ def _execute_request_subprocess_sync(
             worker_key=request.worker_key,
             tool_init_overrides=request.tool_init_overrides,
             runtime_paths=runtime_paths,
-            config=config,
+            private_agent_names=_request_private_agent_names(request),
             prepared_worker=prepared_worker,
             runner_token=runner_token,
         )
@@ -474,7 +481,6 @@ def _execute_request_subprocess_sync(
 async def _execute_request_subprocess(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
-    config: Config,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
     runner_token: str | None = None,
@@ -483,7 +489,6 @@ async def _execute_request_subprocess(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
-        config,
         prepared_worker,
         runner_token=runner_token,
     )
@@ -620,7 +625,7 @@ async def execute_tool_call(  # noqa: C901
                 worker_key=payload.worker_key,
                 tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
-                config=config,
+                private_agent_names=_request_private_agent_names(payload),
                 runner_token=runner_token,
             )
         except sandbox_worker_prep.WorkerRequestPreparationError as exc:
@@ -629,7 +634,6 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -641,7 +645,6 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )
@@ -652,7 +655,6 @@ async def execute_tool_call(  # noqa: C901
         return await _execute_request_subprocess(
             payload,
             runtime_paths,
-            config,
             prepared_worker,
             runner_token=runner_token,
         )

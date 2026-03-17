@@ -584,8 +584,8 @@ def test_kubernetes_backend_mounts_broad_agents_tree_for_user_scope() -> None:
     assert "/app/worker/.shared_credentials" not in mount_paths
 
 
-def test_kubernetes_backend_user_agent_mounts_require_runtime_config(tmp_path: Path) -> None:
-    """User-agent mounts should fail closed when runtime config is unavailable."""
+def test_kubernetes_backend_user_agent_mounts_require_explicit_private_visibility(tmp_path: Path) -> None:
+    """User-agent mounts should fail closed without explicit private visibility."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -606,8 +606,37 @@ def test_kubernetes_backend_user_agent_mounts_require_runtime_config(tmp_path: P
         agent_name="mind",
     )
 
-    with pytest.raises(WorkerBackendError, match="Agent configuration file not found"):
+    with pytest.raises(WorkerBackendError, match="user_agent workers require explicit private-agent visibility"):
         backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+
+def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() -> None:
+    """User-agent workers should mount their private root from the explicit worker spec visibility."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=10.0)
+
+    deployment = apps_api.created_bodies[0]
+    volume_mounts = deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_private_root = f"/app/worker/private_instances/{worker_dir_name(worker_key)}"
+
+    assert mount_paths[expected_private_root] == f"private_instances/{worker_dir_name(worker_key)}"
+    assert "/app/worker/agents/mind" not in mount_paths
 
 
 def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:
