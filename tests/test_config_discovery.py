@@ -45,6 +45,7 @@ _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
     "src/mindroom/api/openai_compat.py",
     "src/mindroom/bot.py",
     "src/mindroom/commands/handler.py",
+    "src/mindroom/tool_system/worker_routing.py",
 }
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/api/openai_compat.py",

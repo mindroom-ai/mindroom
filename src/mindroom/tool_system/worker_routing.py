@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from mindroom.constants import RuntimePaths
+
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
 _ExecutionChannel = Literal["matrix", "openai_compat"]
@@ -87,6 +89,31 @@ def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
     if identity.requester_id:
         return _normalize_worker_requester_part(identity.requester_id)
     return None
+
+
+def build_tool_execution_identity(
+    *,
+    channel: _ExecutionChannel,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+    resolved_thread_id: str | None,
+    session_id: str | None,
+) -> ToolExecutionIdentity:
+    """Build the ingress execution identity for one request or shared materialization."""
+    return ToolExecutionIdentity(
+        channel=channel,
+        agent_name=agent_name,
+        requester_id=requester_id,
+        room_id=room_id,
+        thread_id=thread_id,
+        resolved_thread_id=resolved_thread_id,
+        session_id=session_id,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
 
 
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:

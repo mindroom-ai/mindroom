@@ -23,7 +23,11 @@ from mindroom.scheduling import (
 )
 from mindroom.thread_utils import check_agent_mentioned, create_session_id, get_configured_agents_for_room
 from mindroom.tool_system.skills import resolve_skill_command_spec
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_tool_execution_identity,
+    tool_execution_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -377,16 +381,15 @@ async def _run_skill_command_tool(
     thread_id: str | None = None,
 ) -> str:
     session_id = create_session_id(room_id, thread_id) if room_id is not None else None
-    execution_identity = ToolExecutionIdentity(
+    execution_identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent_name,
+        runtime_paths=runtime_paths,
         requester_id=requester_user_id,
         room_id=room_id,
         thread_id=thread_id,
         resolved_thread_id=thread_id,
         session_id=session_id,
-        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
     )
     effective_runtime_paths = (
         runtime_paths

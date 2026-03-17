@@ -73,6 +73,7 @@ from mindroom.thread_utils import (
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
+    build_tool_execution_identity,
     tool_execution_identity,
 )
 
@@ -484,16 +485,15 @@ class AgentBot:
 
     def _build_shared_execution_identity(self) -> ToolExecutionIdentity:
         """Build a non-request execution identity for shared agent materialization."""
-        return ToolExecutionIdentity(
+        return build_tool_execution_identity(
             channel="matrix",
             agent_name=self.agent_name,
+            runtime_paths=self.runtime_paths,
             requester_id=None,
             room_id=None,
             thread_id=None,
             resolved_thread_id=None,
             session_id=None,
-            tenant_id=self.runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=self.runtime_paths.env_value("ACCOUNT_ID"),
         )
 
     @property  # Not cached_property because Team mutates it!
@@ -1715,16 +1715,15 @@ class AgentBot:
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
         """Build the serializable execution identity used for worker routing."""
-        return ToolExecutionIdentity(
+        return build_tool_execution_identity(
             channel="matrix",
             agent_name=agent_name or self.agent_name,
+            runtime_paths=self.runtime_paths,
             requester_id=user_id or self.matrix_id.full_id,
             room_id=room_id,
             thread_id=thread_id,
             resolved_thread_id=self._resolve_reply_thread_id(thread_id, reply_to_event_id, room_id=room_id),
             session_id=session_id,
-            tenant_id=self.runtime_paths.env_value("CUSTOMER_ID"),
-            account_id=self.runtime_paths.env_value("ACCOUNT_ID"),
         )
 
     def _agent_has_matrix_messaging_tool(self, agent_name: str) -> bool:

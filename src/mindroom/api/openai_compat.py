@@ -42,7 +42,12 @@ from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
 from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    build_tool_execution_identity,
+    tool_execution_identity,
+)
 
 _AUTO_MODEL_NAME = "auto"
 _TEAM_MODEL_PREFIX = "team/"
@@ -536,26 +541,6 @@ def _validate_chat_request(
     return _validate_agent_model_request(agent_name, config)
 
 
-def _build_tool_execution_identity(
-    *,
-    agent_name: str,
-    session_id: str,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity:
-    """Build the execution identity used for worker-routed tool calls."""
-    return ToolExecutionIdentity(
-        channel="openai_compat",
-        agent_name=agent_name,
-        requester_id=None,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=session_id,
-        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
-        account_id=runtime_paths.env_value("ACCOUNT_ID"),
-    )
-
-
 def _parse_chat_request(
     request: Request,
     body: bytes,
@@ -743,10 +728,15 @@ async def chat_completions(
         stream=req.stream,
         session_id=session_id,
     )
-    execution_identity = _build_tool_execution_identity(
+    execution_identity = build_tool_execution_identity(
+        channel="openai_compat",
         agent_name=agent_name,
         session_id=session_id,
         runtime_paths=runtime_paths,
+        requester_id=None,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
     )
 
     # Initialize shared knowledge managers once per request (idempotent).

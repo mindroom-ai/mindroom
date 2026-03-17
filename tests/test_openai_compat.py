@@ -18,7 +18,6 @@ from mindroom import constants
 from mindroom.api import openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_compat import (
-    _build_tool_execution_identity,
     _ChatMessage,
     _convert_messages,
     _derive_session_id,
@@ -29,7 +28,11 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_tool_execution_identity,
+    get_tool_execution_identity,
+)
 
 
 def _runtime_paths(process_env: dict[str, str] | None = None) -> RuntimePaths:
@@ -414,10 +417,15 @@ class TestChatCompletions:
 
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
-        identity = _build_tool_execution_identity(
+        identity = build_tool_execution_identity(
+            channel="openai_compat",
             agent_name="general",
             session_id="session-123",
             runtime_paths=resolve_runtime_paths(process_env={}),
+            requester_id=None,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
         )
         assert identity.requester_id is None
 
