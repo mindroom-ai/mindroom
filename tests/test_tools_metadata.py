@@ -19,6 +19,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     register_tool_with_metadata,
 )
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 
 
 def test_export_tools_metadata_json() -> None:
@@ -136,8 +137,8 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
             get_tool_by_name(
                 tool_name,
                 runtime_paths,
-                execution_identity=None,
                 runtime_overrides={"runtime_paths": runtime_paths},
+                worker_target=None,
             )
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
@@ -153,12 +154,10 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
             self,
             *,
             runtime_paths: object,
-            worker_scope: object,
-            routing_agent_name: object,
+            worker_target: object,
         ) -> None:
             self.runtime_paths = runtime_paths
-            self.worker_scope = worker_scope
-            self.routing_agent_name = routing_agent_name
+            self.worker_target = worker_target
             super().__init__(name=tool_name, tools=[])
 
     @register_tool_with_metadata(
@@ -168,8 +167,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         category=ToolCategory.DEVELOPMENT,
         managed_init_args=(
             ToolManagedInitArg.RUNTIME_PATHS,
-            ToolManagedInitArg.WORKER_SCOPE,
-            ToolManagedInitArg.ROUTING_AGENT_NAME,
+            ToolManagedInitArg.WORKER_TARGET,
         ),
     )
     def _explicit_runtime_tool_factory() -> type[ExplicitRuntimeToolkit]:
@@ -182,17 +180,28 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
     )
 
     try:
+        worker_target = resolve_worker_target(
+            "shared",
+            "general",
+            execution_identity=None,
+            tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+            account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        )
         tool = get_tool_by_name(
             tool_name,
             runtime_paths,
-            execution_identity=None,
-            worker_scope="shared",
-            routing_agent_name="general",
+            worker_target=worker_target,
         )
         assert isinstance(tool, ExplicitRuntimeToolkit)
         assert tool.runtime_paths == runtime_paths
-        assert tool.worker_scope == "shared"
-        assert tool.routing_agent_name == "general"
+        assert tool.worker_target == ResolvedWorkerTarget(
+            worker_scope="shared",
+            routing_agent_name="general",
+            execution_identity=None,
+            tenant_id=None,
+            account_id=None,
+            worker_key=None,
+        )
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

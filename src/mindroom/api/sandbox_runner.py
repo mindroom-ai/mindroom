@@ -35,6 +35,7 @@ from mindroom.tool_system.sandbox_proxy import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
+    build_worker_target_from_runtime_env,
     tool_execution_identity,
 )
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -290,20 +291,26 @@ def _resolve_entrypoint(
     runtime_overrides: dict[str, object] | None = None,
     worker_scope: WorkerScope | None = None,
     routing_agent_name: str | None = None,
+    private_agent_names: frozenset[str] | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
     ensure_registry_loaded_with_config(runtime_paths, config)
+    worker_target = build_worker_target_from_runtime_env(
+        worker_scope,
+        routing_agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=private_agent_names,
+    )
     try:
         toolkit = get_tool_by_name(
             tool_name,
             runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
             disable_sandbox_proxy=True,
             credential_overrides=credential_overrides,
             credentials_manager=_runner_credentials_manager(runtime_paths),
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
+            worker_target=worker_target,
         )
     except ToolInitOverrideError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -379,6 +386,7 @@ async def _execute_request_inprocess(
             runtime_overrides=runtime_overrides,
             worker_scope=request.worker_scope,
             routing_agent_name=request.routing_agent_name,
+            private_agent_names=_request_private_agent_names(request),
         )
 
         try:

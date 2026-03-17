@@ -54,35 +54,39 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/commands/handler.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-_EXPLICIT_EXECUTION_IDENTITY_CALLS = {
-    "_build_tool_instance",
-    "build_agent_tool_init_context",
-    "build_agent_toolkit",
-    "create_agent",
-    "create_session_storage",
-    "get_tool_by_name",
-    "load_scoped_credentials",
-    "_resolve_worker_credentials_manager",
-    "resolve_knowledge_binding",
-    "resolve_worker_execution_scope",
-    "resolve_agent_execution",
-    "resolve_agent_runtime",
-    "save_scoped_credentials",
+_EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
+    "_build_tool_instance": "worker_target",
+    "build_agent_tool_init_context": "execution_identity",
+    "build_agent_toolkit": "execution_identity",
+    "build_worker_target_from_runtime_env": "execution_identity",
+    "create_agent": "execution_identity",
+    "create_session_storage": "execution_identity",
+    "get_tool_by_name": "worker_target",
+    "load_scoped_credentials": "worker_target",
+    "_resolve_worker_credentials_manager": "worker_target",
+    "resolve_knowledge_binding": "execution_identity",
+    "resolve_worker_execution_scope": "execution_identity",
+    "resolve_worker_target": "execution_identity",
+    "resolve_agent_execution": "execution_identity",
+    "resolve_agent_runtime": "execution_identity",
+    "save_scoped_credentials": "worker_target",
 }
-_EXPLICIT_EXECUTION_IDENTITY_NO_DEFAULTS = {
-    ("src/mindroom/agents.py", "build_agent_tool_init_context"),
-    ("src/mindroom/agents.py", "build_agent_toolkit"),
-    ("src/mindroom/agents.py", "create_session_storage"),
-    ("src/mindroom/agents.py", "create_agent"),
-    ("src/mindroom/credentials.py", "load_scoped_credentials"),
-    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager"),
-    ("src/mindroom/credentials.py", "save_scoped_credentials"),
-    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance"),
-    ("src/mindroom/runtime_resolution.py", "resolve_agent_execution"),
-    ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime"),
-    ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding"),
-    ("src/mindroom/runtime_resolution.py", "resolve_worker_execution_scope"),
-    ("src/mindroom/tool_system/metadata.py", "get_tool_by_name"),
+_EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
+    ("src/mindroom/agents.py", "build_agent_tool_init_context", "execution_identity"),
+    ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
+    ("src/mindroom/agents.py", "create_session_storage", "execution_identity"),
+    ("src/mindroom/agents.py", "create_agent", "execution_identity"),
+    ("src/mindroom/credentials.py", "load_scoped_credentials", "worker_target"),
+    ("src/mindroom/credentials.py", "_resolve_worker_credentials_manager", "worker_target"),
+    ("src/mindroom/credentials.py", "save_scoped_credentials", "worker_target"),
+    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
+    ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
+    ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "build_worker_target_from_runtime_env", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_execution_scope", "execution_identity"),
+    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_target", "execution_identity"),
+    ("src/mindroom/tool_system/metadata.py", "get_tool_by_name", "worker_target"),
 }
 
 
@@ -215,11 +219,13 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            if _call_name(node) not in _EXPLICIT_EXECUTION_IDENTITY_CALLS:
+            call_name = _call_name(node)
+            required_keyword = _EXPLICIT_RUNTIME_SCOPE_KEYWORDS.get(call_name)
+            if required_keyword is None:
                 continue
             keyword_names = {keyword.arg for keyword in node.keywords if keyword.arg is not None}
-            if "execution_identity" not in keyword_names:
-                violations.append(f"{relative_path}:{node.lineno} calls {_call_name(node)} without execution_identity=")
+            if required_keyword not in keyword_names:
+                violations.append(f"{relative_path}:{node.lineno} calls {call_name} without {required_keyword}=")
     return sorted(set(violations))
 
 
@@ -231,20 +237,22 @@ def _collect_execution_identity_default_violations() -> list[str]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
-            if (relative_path, node.name) not in _EXPLICIT_EXECUTION_IDENTITY_NO_DEFAULTS:
-                continue
             positional_args = [*node.args.posonlyargs, *node.args.args]
             positional_defaults = [None] * (len(positional_args) - len(node.args.defaults)) + list(node.args.defaults)
             keyword_defaults = list(node.args.kw_defaults)
             for argument, default in zip(positional_args, positional_defaults, strict=False):
-                if argument.arg == "execution_identity" and default is not None:
+                if (relative_path, node.name, argument.arg) not in _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS:
+                    continue
+                if default is not None:
                     violations.append(
-                        f"{relative_path}:{node.lineno} defines {node.name} with a default for execution_identity",
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for {argument.arg}",
                     )
             for argument, default in zip(node.args.kwonlyargs, keyword_defaults, strict=False):
-                if argument.arg == "execution_identity" and default is not None:
+                if (relative_path, node.name, argument.arg) not in _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS:
+                    continue
+                if default is not None:
                     violations.append(
-                        f"{relative_path}:{node.lineno} defines {node.name} with a default for execution_identity",
+                        f"{relative_path}:{node.lineno} defines {node.name} with a default for {argument.arg}",
                     )
     return sorted(set(violations))
 

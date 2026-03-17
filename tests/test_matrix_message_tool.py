@@ -67,7 +67,7 @@ def test_matrix_message_tool_registered_and_instantiates() -> None:
     )
     assert "matrix_message" in TOOL_METADATA
     assert isinstance(
-        get_tool_by_name("matrix_message", runtime_paths_for(config), execution_identity=None),
+        get_tool_by_name("matrix_message", runtime_paths_for(config), worker_target=None),
         MatrixMessageTools,
     )
 

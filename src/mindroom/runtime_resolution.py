@@ -9,8 +9,7 @@ from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
-    resolve_execution_identity_for_worker_scope,
-    resolve_worker_key,
+    resolve_worker_execution_scope,
 )
 from mindroom.workspaces import (
     ResolvedAgentWorkspace,
@@ -24,15 +23,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
-
-
-@dataclass(frozen=True)
-class ResolvedWorkerExecution:
-    """Resolved worker execution scope from explicit worker-scope policy."""
-
-    worker_scope: WorkerScope | None
-    execution_identity: ToolExecutionIdentity | None
-    worker_key: str | None
 
 
 @dataclass(frozen=True)
@@ -80,58 +70,6 @@ def _knowledge_refresh_enabled(
 ) -> bool:
     """Return whether a knowledge base has any refresh mechanism available."""
     return file_watch_enabled or has_git_sync
-
-
-def resolve_worker_execution_scope(
-    worker_scope: WorkerScope | None,
-    execution_identity: ToolExecutionIdentity | None,
-    *,
-    agent_name: str | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
-) -> ResolvedWorkerExecution:
-    """Resolve worker execution identity and key from explicit scope inputs."""
-    resolved_execution_identity = resolve_execution_identity_for_worker_scope(
-        worker_scope,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    )
-    worker_key: str | None = None
-    if worker_scope is not None and resolved_execution_identity is not None:
-        worker_key = resolve_worker_key(
-            worker_scope,
-            resolved_execution_identity,
-            agent_name=agent_name,
-        )
-    return ResolvedWorkerExecution(
-        worker_scope=worker_scope,
-        execution_identity=resolved_execution_identity,
-        worker_key=worker_key,
-    )
-
-
-def require_worker_key_for_scope(
-    worker_scope: WorkerScope,
-    execution_identity: ToolExecutionIdentity | None,
-    *,
-    agent_name: str | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
-    failure_message: str,
-) -> str:
-    """Resolve one worker key from explicit inputs or raise with a caller-owned message."""
-    worker_key = resolve_worker_execution_scope(
-        worker_scope,
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    ).worker_key
-    if worker_key is None:
-        raise ValueError(failure_message)
-    return worker_key
 
 
 def resolve_private_scope_root(

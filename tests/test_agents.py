@@ -299,9 +299,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
-        execution_identity: ToolExecutionIdentity | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -310,9 +308,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
-            worker_scope,
-            routing_agent_name,
-            execution_identity,
+            worker_target,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -353,9 +349,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
-        execution_identity: ToolExecutionIdentity | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del (
             _runtime_paths,
@@ -364,9 +358,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             runtime_overrides,
             shared_storage_root_path,
             worker_tools_override,
-            worker_scope,
-            routing_agent_name,
-            execution_identity,
+            worker_target,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -1227,17 +1219,13 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
         worker_tools_override: list[str] | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
-        execution_identity: ToolExecutionIdentity | None = None,
+        worker_target: object | None = None,
     ) -> MagicMock:
         del _runtime_paths, tool_init_overrides, runtime_overrides, shared_storage_root_path, worker_tools_override
         credentials = load_scoped_credentials(
             tool_name,
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
             credentials_manager=cast("CredentialsManager", credentials_manager),
-            execution_identity=execution_identity,
+            worker_target=worker_target,
         )
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"

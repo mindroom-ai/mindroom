@@ -32,6 +32,7 @@ from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
+    build_worker_target_from_runtime_env,
     resolve_agent_owned_path,
     shared_storage_root,
 )
@@ -336,27 +337,21 @@ def _build_registered_agent_tool(
     execution_identity: ToolExecutionIdentity | None,
 ) -> Toolkit:
     """Build one registered toolkit using the resolved routing inputs for this agent."""
-    if worker_scope == "user_agent":
-        return get_tool_by_name(
-            tool_name,
-            runtime_paths,
-            execution_identity=execution_identity,
-            credentials_manager=credentials_manager,
-            tool_init_overrides=_tool_base_dir_override(
-                tool_name,
-                workspace_path=workspace_path,
-            ),
-            shared_storage_root_path=shared_storage_path,
-            worker_tools_override=worker_tools,
-            worker_scope=worker_scope,
-            routing_agent_name=agent_name,
-            routing_agent_is_private=routing_agent_is_private,
-        )
+    worker_target = build_worker_target_from_runtime_env(
+        worker_scope,
+        agent_name,
+        execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
+        private_agent_names=(
+            frozenset({agent_name})
+            if worker_scope == "user_agent" and routing_agent_is_private
+            else (frozenset() if worker_scope == "user_agent" else None)
+        ),
+    )
 
     return get_tool_by_name(
         tool_name,
         runtime_paths,
-        execution_identity=execution_identity,
         credentials_manager=credentials_manager,
         tool_init_overrides=_tool_base_dir_override(
             tool_name,
@@ -364,8 +359,7 @@ def _build_registered_agent_tool(
         ),
         shared_storage_root_path=shared_storage_path,
         worker_tools_override=worker_tools,
-        worker_scope=worker_scope,
-        routing_agent_name=agent_name,
+        worker_target=worker_target,
     )
 
 

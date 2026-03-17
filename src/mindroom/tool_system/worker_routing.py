@@ -49,6 +49,28 @@ class ToolExecutionIdentity:
     account_id: str | None = None
 
 
+@dataclass(frozen=True)
+class ResolvedWorkerExecution:
+    """Resolved worker execution scope from explicit worker-scope policy."""
+
+    worker_scope: WorkerScope | None
+    execution_identity: ToolExecutionIdentity | None
+    worker_key: str | None
+
+
+@dataclass(frozen=True)
+class ResolvedWorkerTarget:
+    """Resolved worker target carried through tool construction and sandbox routing."""
+
+    worker_scope: WorkerScope | None
+    routing_agent_name: str | None
+    execution_identity: ToolExecutionIdentity | None
+    tenant_id: str | None
+    account_id: str | None
+    worker_key: str | None
+    private_agent_names: frozenset[str] | None = None
+
+
 _TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
     "tool_execution_identity",
     default=None,
@@ -113,6 +135,102 @@ def build_tool_execution_identity(
         session_id=session_id,
         tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
+    )
+
+
+def resolve_worker_execution_scope(
+    worker_scope: WorkerScope | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    agent_name: str | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+) -> ResolvedWorkerExecution:
+    """Resolve worker execution identity and key from explicit scope inputs."""
+    resolved_execution_identity = resolve_execution_identity_for_worker_scope(
+        worker_scope,
+        agent_name=agent_name,
+        execution_identity=execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
+    worker_key: str | None = None
+    if worker_scope is not None and resolved_execution_identity is not None:
+        worker_key = resolve_worker_key(
+            worker_scope,
+            resolved_execution_identity,
+            agent_name=agent_name,
+        )
+    return ResolvedWorkerExecution(
+        worker_scope=worker_scope,
+        execution_identity=resolved_execution_identity,
+        worker_key=worker_key,
+    )
+
+
+def resolve_worker_target(
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+    private_agent_names: frozenset[str] | None = None,
+) -> ResolvedWorkerTarget:
+    """Resolve one explicit worker target for tool construction and sandbox routing."""
+    effective_agent_name = routing_agent_name
+    if effective_agent_name is None and execution_identity is not None:
+        effective_agent_name = execution_identity.agent_name
+
+    resolved_worker_execution = resolve_worker_execution_scope(
+        worker_scope,
+        execution_identity=execution_identity,
+        agent_name=effective_agent_name,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
+    resolved_execution_identity = resolved_worker_execution.execution_identity
+    return ResolvedWorkerTarget(
+        worker_scope=worker_scope,
+        routing_agent_name=effective_agent_name,
+        execution_identity=resolved_execution_identity,
+        tenant_id=(
+            tenant_id
+            or (
+                resolved_execution_identity.tenant_id
+                if resolved_execution_identity is not None and resolved_execution_identity.tenant_id is not None
+                else None
+            )
+        ),
+        account_id=(
+            account_id
+            or (
+                resolved_execution_identity.account_id
+                if resolved_execution_identity is not None and resolved_execution_identity.account_id is not None
+                else None
+            )
+        ),
+        worker_key=resolved_worker_execution.worker_key,
+        private_agent_names=private_agent_names,
+    )
+
+
+def build_worker_target_from_runtime_env(
+    worker_scope: WorkerScope | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_paths: RuntimePaths,
+    *,
+    private_agent_names: frozenset[str] | None = None,
+) -> ResolvedWorkerTarget:
+    """Build one worker target at the ingress boundary from runtime tenant/account env."""
+    return resolve_worker_target(
+        worker_scope,
+        routing_agent_name,
+        execution_identity=execution_identity,
+        tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        private_agent_names=private_agent_names,
     )
 
 
@@ -190,6 +308,28 @@ def resolve_unscoped_worker_key(
     )
     effective_agent_name = _normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
+
+
+def require_worker_key_for_scope(
+    worker_scope: WorkerScope,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    agent_name: str | None = None,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+    failure_message: str,
+) -> str:
+    """Resolve one worker key from explicit inputs or raise with a caller-owned message."""
+    worker_key = resolve_worker_execution_scope(
+        worker_scope,
+        execution_identity=execution_identity,
+        agent_name=agent_name,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    ).worker_key
+    if worker_key is None:
+        raise ValueError(failure_message)
+    return worker_key
 
 
 def is_unscoped_worker_key(worker_key: str) -> bool:

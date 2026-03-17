@@ -16,7 +16,7 @@ from mindroom.custom_tools._google_oauth import ScopedGoogleOAuthMixin
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials import CredentialsManager
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
 class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
@@ -30,9 +30,7 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
         *,
         runtime_paths: RuntimePaths,
         credentials_manager: CredentialsManager | None = None,
-        worker_scope: WorkerScope | None = None,
-        routing_agent_name: str | None = None,
-        execution_identity: ToolExecutionIdentity | None = None,
+        worker_target: ResolvedWorkerTarget | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize Gmail tools with MindRoom credentials.
@@ -47,9 +45,7 @@ class GmailTools(ScopedGoogleOAuthMixin, AgnoGmailTools):
         self._runtime_paths = runtime_paths
         self._creds_manager = credentials_manager
         creds = self._initialize_google_oauth(
-            worker_scope=worker_scope,
-            routing_agent_name=routing_agent_name,
-            execution_identity=execution_identity,
+            worker_target=worker_target,
             provided_creds=provided_creds,
             logger=logger,
         )

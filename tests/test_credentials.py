@@ -22,7 +22,7 @@ from mindroom.credentials import (
     save_scoped_credentials,
     sync_shared_credentials_to_worker,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 
 
 @pytest.fixture
@@ -37,6 +37,23 @@ def temp_credentials_dir(tmp_path: Path) -> Path:
 def credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
     """Create a CredentialsManager instance with a temporary directory."""
     return CredentialsManager(base_path=temp_credentials_dir)
+
+
+def _worker_target(
+    worker_scope: str | None,
+    routing_agent_name: str | None,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    tenant_id: str | None = None,
+    account_id: str | None = None,
+) -> ResolvedWorkerTarget:
+    return resolve_worker_target(
+        worker_scope,
+        routing_agent_name,
+        execution_identity,
+        tenant_id=tenant_id,
+        account_id=account_id,
+    )
 
 
 class TestCredentialsManager:
@@ -204,10 +221,8 @@ class TestCredentialsManager:
         save_scoped_credentials(
             "google",
             {"token": "worker-token", "_source": "ui"},
-            worker_scope="user",
-            routing_agent_name="general",
             credentials_manager=manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("user", "general", execution_identity),
         )
 
         shared_credentials = manager.load_credentials("google")
@@ -239,10 +254,8 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("shared", "general", execution_identity),
         )
 
         assert loaded_credentials is None
@@ -268,10 +281,8 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("shared", "general", execution_identity),
         )
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
@@ -305,10 +316,8 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "openweather",
-            worker_scope="user",
-            routing_agent_name="general",
             credentials_manager=worker_manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("user", "general", execution_identity),
         )
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui", "base": "yes"}
@@ -324,12 +333,14 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=manager,
-            execution_identity=None,
-            tenant_id="tenant-123",
-            account_id="account-456",
+            worker_target=_worker_target(
+                "shared",
+                "general",
+                None,
+                tenant_id="tenant-123",
+                account_id="account-456",
+            ),
         )
 
         assert loaded_credentials == {"api_key": "worker-key", "_source": "ui"}
@@ -351,9 +362,8 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "openai",
-            worker_scope=None,
             credentials_manager=worker_manager,
-            execution_identity=None,
+            worker_target=None,
         )
 
         assert loaded_credentials == {"api_key": "shared-ui-key", "_source": "ui"}
@@ -370,9 +380,8 @@ class TestCredentialsManager:
         save_scoped_credentials(
             "google",
             {"refresh_token": "worker-refresh", "_source": "ui"},
-            worker_scope=None,
             credentials_manager=worker_manager,
-            execution_identity=None,
+            worker_target=None,
         )
 
         assert worker_manager.load_credentials("google") == {
@@ -399,9 +408,8 @@ class TestCredentialsManager:
         save_scoped_credentials(
             "google",
             {"refresh_token": "worker-refresh", "_source": "ui"},
-            worker_scope=None,
             credentials_manager=worker_manager,
-            execution_identity=None,
+            worker_target=None,
         )
 
         sync_shared_credentials_to_worker(
@@ -412,9 +420,8 @@ class TestCredentialsManager:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope=None,
             credentials_manager=worker_manager,
-            execution_identity=None,
+            worker_target=None,
         )
 
         assert loaded_credentials == {
@@ -691,10 +698,8 @@ class TestGlobalCredentialsManager:
         manager = get_runtime_credentials_manager(runtime_paths)
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("shared", "general", execution_identity),
         )
 
         assert loaded_credentials == {"api_key": "env-key", "_source": "env"}
@@ -777,10 +782,8 @@ class TestSharedIntegrationCredentialTagging:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=worker_manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("shared", "general", execution_identity),
         )
 
         assert loaded_credentials == {"token": "ui-token", "_source": "ui"}
@@ -788,10 +791,8 @@ class TestSharedIntegrationCredentialTagging:
         save_scoped_credentials(
             "google",
             {"token": "refreshed-token", "_source": "ui"},
-            worker_scope="shared",
-            routing_agent_name="general",
             credentials_manager=worker_manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("shared", "general", execution_identity),
         )
 
         assert worker_manager.load_credentials("google") == {"token": "refreshed-token", "_source": "ui"}
@@ -825,10 +826,8 @@ class TestSharedIntegrationCredentialTagging:
 
         loaded_credentials = load_scoped_credentials(
             "google",
-            worker_scope="user",
-            routing_agent_name="persistent_worker_lab",
             credentials_manager=worker_manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("user", "persistent_worker_lab", execution_identity),
         )
 
         assert loaded_credentials == {"api_key": "env-key", "token": "ui-token", "_source": "ui"}
@@ -836,10 +835,8 @@ class TestSharedIntegrationCredentialTagging:
         save_scoped_credentials(
             "google",
             {"token": "refreshed-token", "_source": "ui"},
-            worker_scope="user",
-            routing_agent_name="persistent_worker_lab",
             credentials_manager=worker_manager,
-            execution_identity=execution_identity,
+            worker_target=_worker_target("user", "persistent_worker_lab", execution_identity),
         )
 
         assert worker_manager.load_credentials("google") == {"token": "refreshed-token", "_source": "ui"}

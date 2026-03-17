@@ -29,6 +29,7 @@ from mindroom.api.credentials import (
 )
 from mindroom.credentials import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.tool_system.dependencies import ensure_tool_deps
+from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
     from google.auth.transport.requests import Request as GoogleRequest
@@ -167,10 +168,12 @@ def _save_credentials(creds: Credentials, target: RequestCredentialsTarget) -> N
     save_scoped_credentials(
         "google",
         _build_google_token_data(creds),
-        worker_scope=target.worker_scope,
-        routing_agent_name=target.agent_name,
         credentials_manager=target.base_manager,
-        execution_identity=target.execution_identity,
+        worker_target=resolve_worker_target(
+            target.worker_scope,
+            target.agent_name,
+            execution_identity=target.execution_identity,
+        ),
     )
 
 

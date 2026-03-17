@@ -48,7 +48,7 @@ def test_all_tools_can_be_imported() -> None:
         requires_config = metadata and metadata.status == ToolStatus.REQUIRES_CONFIG
 
         try:
-            tool_instance = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, execution_identity=None)
+            tool_instance = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
             assert tool_instance is not None
             assert hasattr(tool_instance, "name")
         except Exception as e:
@@ -162,7 +162,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
         lambda name, runtime_paths: name == tool_name and runtime_paths == TEST_RUNTIME_PATHS,
     )
     try:
-        tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, execution_identity=None)
+        tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
         assert isinstance(tool, DummyToolkit)
         assert calls["count"] == 2
     finally:
@@ -207,7 +207,7 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
     )
     try:
         with pytest.raises(ImportError, match="dependency missing forever"):
-            get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, execution_identity=None)
+            get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
     finally:
         _TOOL_REGISTRY.pop(tool_name, None)
         TOOL_METADATA.pop(tool_name, None)

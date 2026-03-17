@@ -18,11 +18,11 @@ from mindroom.credentials import (
     merge_scoped_credentials,
     validate_service_name,
 )
-from mindroom.runtime_resolution import require_worker_key_for_scope
 from mindroom.tool_system.worker_routing import (
     SHARED_ONLY_INTEGRATION_NAMES,
     ToolExecutionIdentity,
     WorkerScope,
+    require_worker_key_for_scope,
     requires_shared_only_integration_scope,
     unsupported_shared_only_integration_message,
     worker_scope_allows_shared_only_integrations,
