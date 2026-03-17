@@ -36,8 +36,8 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
-from mindroom.knowledge.manager import get_knowledge_manager, initialize_knowledge_managers
-from mindroom.knowledge.utils import resolve_agent_knowledge
+from mindroom.knowledge.manager import initialize_knowledge_managers
+from mindroom.knowledge.utils import get_agent_knowledge
 from mindroom.logging_config import get_logger
 from mindroom.routing import suggest_agent
 from mindroom.teams import TeamMode, format_team_response
@@ -49,7 +49,7 @@ _TEAM_MODEL_PREFIX = "team/"
 _RESERVED_MODEL_NAMES = {_AUTO_MODEL_NAME}
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from agno.agent import Agent
     from agno.knowledge.knowledge import Knowledge
@@ -642,28 +642,12 @@ async def _ensure_knowledge_initialized(config: Config, runtime_paths: RuntimePa
     )
 
 
-def _resolve_knowledge(
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> Knowledge | None:
-    """Resolve knowledge base(s) for an agent from the global knowledge managers.
-
-    Mirrors the logic in bot.py's AgentBot._knowledge_for_agent().
-    """
-    return resolve_agent_knowledge(
-        agent_name,
-        config,
-        lambda base_id: (
-            manager.get_knowledge()
-            if (manager := get_knowledge_manager(base_id, config=config, runtime_paths=runtime_paths)) is not None
-            else None
-        ),
-        on_missing_bases=lambda missing_base_ids: logger.warning(
-            "Knowledge bases not available for agent",
-            agent=agent_name,
-            knowledge_bases=missing_base_ids,
-        ),
+def _log_missing_knowledge_bases(agent_name: str) -> Callable[[list[str]], None]:
+    """Build a missing-knowledge callback for one agent name."""
+    return lambda missing_base_ids: logger.warning(
+        "Knowledge bases not available for agent",
+        agent=agent_name,
+        knowledge_bases=missing_base_ids,
     )
 
 
@@ -822,7 +806,12 @@ async def chat_completions(
     else:
         # Resolve knowledge base for this agent
         try:
-            knowledge = _resolve_knowledge(agent_name, config, runtime_paths)
+            knowledge = get_agent_knowledge(
+                agent_name,
+                config,
+                runtime_paths,
+                on_missing_bases=_log_missing_knowledge_bases(agent_name),
+            )
         except Exception:
             logger.warning("Knowledge resolution failed, proceeding without knowledge", exc_info=True)
             knowledge = None
@@ -1140,7 +1129,12 @@ def _build_team(
                     config,
                     runtime_paths,
                     execution_identity=execution_identity,
-                    knowledge=_resolve_knowledge(member_name, config, runtime_paths),
+                    knowledge=get_agent_knowledge(
+                        member_name,
+                        config,
+                        runtime_paths,
+                        on_missing_bases=_log_missing_knowledge_bases(member_name),
+                    ),
                     include_interactive_questions=False,
                 ),
             )

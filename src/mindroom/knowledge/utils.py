@@ -83,6 +83,31 @@ def get_knowledge_for_base(
     return manager.get_knowledge() if manager is not None else None
 
 
+def get_agent_knowledge(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    request_knowledge_managers: Mapping[str, KnowledgeManager] | None = None,
+    shared_manager_lookup: Callable[[str], KnowledgeManager | None] | None = None,
+    execution_identity: ToolExecutionIdentity | None = None,
+    on_missing_bases: Callable[[list[str]], None] | None = None,
+) -> Knowledge | None:
+    """Resolve configured knowledge base(s) for one agent into one Knowledge instance."""
+    return resolve_agent_knowledge(
+        agent_name,
+        config,
+        lambda base_id: get_knowledge_for_base(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=shared_manager_lookup,
+            execution_identity=execution_identity,
+        ),
+        on_missing_bases=on_missing_bases,
+    )
+
+
 @dataclass
 class MultiKnowledgeVectorDb:
     """Thin vector DB wrapper that queries multiple vector DBs and merges results.

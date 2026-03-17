@@ -285,16 +285,14 @@ class TestDelegateKnowledge:
         mock_agent.arun = AsyncMock(return_value=mock_response)
 
         with (
-            patch("mindroom.custom_tools.delegate.get_knowledge_for_base", return_value=mock_knowledge) as mock_get,
+            patch("mindroom.custom_tools.delegate.get_agent_knowledge", return_value=mock_knowledge) as mock_get,
             patch("mindroom.custom_tools.delegate.create_agent", return_value=mock_agent) as mock_create,
         ):
             result = await tools.delegate_task("researcher", "Find info about X")
 
             mock_get.assert_called_once()
             args, kwargs = mock_get.call_args
-            assert args == ("docs",)
-            assert kwargs["config"] == config
-            assert kwargs["runtime_paths"] == runtime_paths
+            assert args == ("researcher", config, runtime_paths)
             assert kwargs["execution_identity"] is None
             assert set(kwargs["request_knowledge_managers"]) == {"docs"}
             mock_create.assert_called_once_with(

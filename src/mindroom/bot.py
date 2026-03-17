@@ -111,8 +111,7 @@ from .constants import (
 from .knowledge.utils import (
     MultiKnowledgeVectorDb,
     ensure_request_knowledge_managers,
-    get_knowledge_for_base,
-    resolve_agent_knowledge,
+    get_agent_knowledge,
 )
 from .logging_config import emoji, get_logger
 from .matrix.avatar import check_and_set_avatar
@@ -449,17 +448,13 @@ class AgentBot:
                 return None
             return self.orchestrator.knowledge_managers.get(base_id)
 
-        return resolve_agent_knowledge(
+        return get_agent_knowledge(
             agent_name,
             self.config,
-            lambda base_id: get_knowledge_for_base(
-                base_id,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                request_knowledge_managers=request_knowledge_managers,
-                shared_manager_lookup=_shared_manager,
-                execution_identity=execution_identity,
-            ),
+            self.runtime_paths,
+            request_knowledge_managers=request_knowledge_managers,
+            shared_manager_lookup=_shared_manager,
+            execution_identity=execution_identity,
             on_missing_bases=lambda missing_base_ids: self.logger.warning(
                 "Knowledge bases not available for agent",
                 agent_name=agent_name,

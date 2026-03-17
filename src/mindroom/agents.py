@@ -21,7 +21,7 @@ from mindroom import agent_prompts, constants
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import ResolvedAgentRuntime, resolve_agent_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.skills import build_agent_skills
@@ -375,6 +375,11 @@ def build_agent_tool_init_context(
         execution_identity=execution_identity,
         create=True,
     )
+    return _tool_init_context_from_runtime(agent_runtime)
+
+
+def _tool_init_context_from_runtime(agent_runtime: ResolvedAgentRuntime) -> AgentToolInitContext:
+    """Build tool-init settings from an already-resolved agent runtime."""
     workspace_path = agent_runtime.tool_base_dir
     return AgentToolInitContext(
         workspace_path=workspace_path,
@@ -752,12 +757,7 @@ def create_agent(  # noqa: PLR0915, C901, PLR0912
         delegation_depth=delegation_depth,
     )
     worker_tools = config.get_agent_worker_tools(agent_name, runtime_paths)
-    tool_init_context = build_agent_tool_init_context(
-        config,
-        agent_name,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
+    tool_init_context = _tool_init_context_from_runtime(agent_runtime)
     workspace = agent_runtime.workspace
     # Create tools
     tools: list[Toolkit] = []
