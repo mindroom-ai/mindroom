@@ -21,7 +21,7 @@ import {
   CheckboxListItem,
 } from '@/components/shared';
 import { useForm, useWatch, Controller } from 'react-hook-form';
-import { Agent } from '@/types/config';
+import { Agent, AgentPrivateConfig, AgentPrivateKnowledgeConfig } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
 import { TOOL_SCHEMAS } from '@/types/toolConfig';
 import { Badge } from '@/components/ui/badge';
@@ -102,6 +102,7 @@ export function AgentEditor() {
       knowledge_bases: [],
       delegate_to: [],
       context_files: [],
+      private: undefined,
       learning: defaultLearning,
       learning_mode: defaultLearningMode,
       memory_backend: undefined,
@@ -113,6 +114,8 @@ export function AgentEditor() {
   const numHistoryMessages = useWatch({ name: 'num_history_messages', control });
   const agentTools = useWatch({ name: 'tools', control });
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
+  const privateConfig = useWatch({ name: 'private', control });
+  const privateKnowledge = privateConfig?.knowledge;
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -180,6 +183,7 @@ export function AgentEditor() {
         knowledge_bases: selectedAgent.knowledge_bases ?? [],
         delegate_to: selectedAgent.delegate_to ?? [],
         context_files: selectedAgent.context_files ?? [],
+        private: selectedAgent.private ?? undefined,
         learning: selectedAgent.learning ?? defaultLearning,
         learning_mode: selectedAgent.learning_mode ?? defaultLearningMode,
       });
@@ -232,6 +236,115 @@ export function AgentEditor() {
     const updated = current.filter((_, i) => i !== index);
     setValue('context_files', updated);
     handleFieldChange('context_files', updated);
+  };
+
+  const updatePrivate = useCallback(
+    (nextPrivate: Agent['private']) => {
+      setValue('private', nextPrivate);
+      handleFieldChange('private', nextPrivate);
+    },
+    [handleFieldChange, setValue]
+  );
+
+  const mutatePrivate = useCallback(
+    (mutator: (current: Agent['private']) => Agent['private']) => {
+      updatePrivate(mutator(getValues('private')));
+    },
+    [getValues, updatePrivate]
+  );
+
+  const ensurePrivateConfig = (value: Agent['private']): AgentPrivateConfig =>
+    value ?? { per: 'user' };
+
+  const handleEnablePrivate = (enabled: boolean) => {
+    updatePrivate(enabled ? ensurePrivateConfig(getValues('private')) : undefined);
+  };
+
+  const handlePrivateScopeChange = (per: AgentPrivateConfig['per']) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      per,
+    }));
+  };
+
+  const handlePrivateRootChange = (root: string) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      root: root.trim() === '' ? undefined : root,
+    }));
+  };
+
+  const handlePrivateTemplateDirChange = (templateDir: string) => {
+    mutatePrivate(current => ({
+      ...ensurePrivateConfig(current),
+      template_dir: templateDir.trim() === '' ? undefined : templateDir,
+    }));
+  };
+
+  const handleAddPrivateContextFile = () => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        context_files: [...(privateState.context_files ?? []), ''],
+      };
+    });
+  };
+
+  const handleRemovePrivateContextFile = (index: number) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        context_files: (privateState.context_files ?? []).filter((_, i) => i !== index),
+      };
+    });
+  };
+
+  const handleEnablePrivateKnowledge = (enabled: boolean) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      const currentKnowledge = privateState.knowledge;
+      const nextKnowledge: AgentPrivateKnowledgeConfig | undefined = enabled
+        ? {
+            ...(currentKnowledge ?? {}),
+            enabled: true,
+            watch: currentKnowledge?.watch ?? true,
+          }
+        : currentKnowledge == null
+          ? { enabled: false }
+          : { ...currentKnowledge, enabled: false };
+      return {
+        ...privateState,
+        knowledge: nextKnowledge,
+      };
+    });
+  };
+
+  const mutatePrivateKnowledge = (
+    mutator: (current: AgentPrivateKnowledgeConfig | undefined) => AgentPrivateKnowledgeConfig
+  ) => {
+    mutatePrivate(current => {
+      const privateState = ensurePrivateConfig(current);
+      return {
+        ...privateState,
+        knowledge: mutator(privateState.knowledge ?? undefined),
+      };
+    });
+  };
+
+  const handlePrivateKnowledgePathChange = (path: string) => {
+    mutatePrivateKnowledge(current => ({
+      ...(current ?? { enabled: true, watch: true }),
+      path: path.trim() === '' ? undefined : path,
+    }));
+  };
+
+  const handlePrivateKnowledgeWatchChange = (watch: boolean) => {
+    mutatePrivateKnowledge(current => ({
+      ...(current ?? { enabled: true }),
+      watch,
+    }));
   };
 
   /** Parse a string to a non-negative integer or return null for empty/invalid input. */
@@ -431,7 +544,11 @@ export function AgentEditor() {
       {/* Context Files */}
       <FieldGroup
         label="Context Files"
-        helperText="Workspace-relative files loaded into each freshly built agent instance and prepended to its role context."
+        helperText={
+          privateConfig != null
+            ? 'Shared workspace-relative files loaded into each agent instance. Use Private Context Files below for requester-local files.'
+            : 'Workspace-relative files loaded into each freshly built agent instance and prepended to its role context.'
+        }
         actions={
           <Button variant="outline" size="sm" onClick={handleAddContextFile} className="h-9 px-3">
             <Plus className="h-4 w-4 sm:mr-1" />
@@ -471,6 +588,186 @@ export function AgentEditor() {
           )}
         />
       </FieldGroup>
+
+      <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
+        <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-4">
+          Private Instance
+        </h3>
+
+        <FieldGroup
+          label="Requester-Private State"
+          helperText="Enable requester-local state for one shared agent definition. Private agents cannot participate in teams yet, including through delegation from shared team members."
+          htmlFor="private_enabled"
+        >
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="private_enabled"
+              checked={privateConfig != null}
+              onCheckedChange={checked => handleEnablePrivate(checked === true)}
+            />
+            <label
+              htmlFor="private_enabled"
+              className="text-sm font-medium cursor-pointer select-none"
+            >
+              Enable requester-private state
+            </label>
+          </div>
+        </FieldGroup>
+
+        {privateConfig != null && (
+          <>
+            <FieldGroup
+              label="Private Scope"
+              helperText="Requester boundary that gets its own private instance. This becomes the agent's effective worker scope."
+              htmlFor="private_per"
+            >
+              <Select
+                value={privateConfig.per}
+                onValueChange={value =>
+                  handlePrivateScopeChange(value as AgentPrivateConfig['per'])
+                }
+              >
+                <SelectTrigger id="private_per">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="user">user</SelectItem>
+                  <SelectItem value="user_agent">user_agent</SelectItem>
+                </SelectContent>
+              </Select>
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Root"
+              helperText="Optional requester-local root name under the canonical private-instance state root."
+              htmlFor="private_root"
+            >
+              <Input
+                id="private_root"
+                value={privateConfig.root ?? ''}
+                placeholder="mind_data"
+                onChange={e => handlePrivateRootChange(e.target.value)}
+              />
+            </FieldGroup>
+
+            <FieldGroup
+              label="Template Directory"
+              helperText="Optional local directory copied into each requester root without overwriting existing files."
+              htmlFor="private_template_dir"
+            >
+              <Input
+                id="private_template_dir"
+                value={privateConfig.template_dir ?? ''}
+                placeholder="./mind_template"
+                onChange={e => handlePrivateTemplateDirChange(e.target.value)}
+              />
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Context Files"
+              helperText="Private-root-relative files loaded into role context for each requester-private instance."
+              actions={
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAddPrivateContextFile}
+                  className="h-9 px-3"
+                >
+                  <Plus className="h-4 w-4 sm:mr-1" />
+                  <span className="hidden sm:inline">Add</span>
+                </Button>
+              }
+            >
+              <div className="space-y-2">
+                {(privateConfig.context_files ?? []).map((filePath, index) => (
+                  <div key={index} className="flex gap-2">
+                    <Input
+                      value={filePath}
+                      onChange={e => {
+                        const updated = [...(privateConfig.context_files ?? [])];
+                        updated[index] = e.target.value;
+                        mutatePrivate(current => ({
+                          ...ensurePrivateConfig(current),
+                          context_files: updated,
+                        }));
+                      }}
+                      placeholder="SOUL.md"
+                      className="min-h-[40px]"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleRemovePrivateContextFile(index)}
+                      className="h-10 w-10 flex-shrink-0"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </FieldGroup>
+
+            <FieldGroup
+              label="Private Knowledge"
+              helperText="Requester-local knowledge indexed from inside the private root."
+              htmlFor="private_knowledge_enabled"
+            >
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="private_knowledge_enabled"
+                  checked={privateKnowledge?.enabled ?? false}
+                  onCheckedChange={checked => handleEnablePrivateKnowledge(checked === true)}
+                />
+                <label
+                  htmlFor="private_knowledge_enabled"
+                  className="text-sm font-medium cursor-pointer select-none"
+                >
+                  Enable private knowledge
+                </label>
+              </div>
+            </FieldGroup>
+
+            {privateKnowledge?.enabled === true && (
+              <>
+                <FieldGroup
+                  label="Private Knowledge Path"
+                  helperText="Private-root-relative path to index for requester-local knowledge."
+                  htmlFor="private_knowledge_path"
+                >
+                  <Input
+                    id="private_knowledge_path"
+                    value={privateKnowledge.path ?? ''}
+                    placeholder="memory"
+                    onChange={e => handlePrivateKnowledgePathChange(e.target.value)}
+                  />
+                </FieldGroup>
+
+                <FieldGroup
+                  label="Watch Private Knowledge"
+                  helperText="Watch the private knowledge path for changes."
+                  htmlFor="private_knowledge_watch"
+                >
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="private_knowledge_watch"
+                      checked={privateKnowledge.watch ?? true}
+                      onCheckedChange={checked =>
+                        handlePrivateKnowledgeWatchChange(checked === true)
+                      }
+                    />
+                    <label
+                      htmlFor="private_knowledge_watch"
+                      className="text-sm font-medium cursor-pointer select-none"
+                    >
+                      Watch for changes
+                    </label>
+                  </div>
+                </FieldGroup>
+              </>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Include Default Tools */}
       <FieldGroup

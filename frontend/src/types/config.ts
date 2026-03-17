@@ -3,6 +3,7 @@ import type { PROVIDERS } from '@/lib/providers';
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
 export type WorkerScope = 'shared' | 'user' | 'user_agent';
+export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -70,6 +71,23 @@ export interface KnowledgeBaseConfig {
   git?: KnowledgeGitConfig;
 }
 
+export interface AgentPrivateKnowledgeConfig {
+  enabled?: boolean;
+  path?: string | null;
+  watch?: boolean;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  git?: KnowledgeGitConfig | null;
+}
+
+export interface AgentPrivateConfig {
+  per: PrivateWorkerScope;
+  root?: string | null;
+  template_dir?: string | null;
+  context_files?: string[] | null;
+  knowledge?: AgentPrivateKnowledgeConfig | null;
+}
+
 export type LearningMode = 'always' | 'agentic';
 export type CultureMode = 'automatic' | 'agentic' | 'manual';
 
@@ -94,6 +112,7 @@ export interface Agent {
   show_tool_calls?: boolean; // Show tool call details inline in responses (defaults to true)
   worker_tools?: string[]; // Tool names to route through scoped workers (overrides defaults)
   worker_scope?: WorkerScope | null;
+  private?: AgentPrivateConfig | null;
   delegate_to?: string[]; // Agent names this agent can delegate tasks to
   thread_mode?: ThreadMode; // Conversation threading mode
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
@@ -177,4 +196,20 @@ export interface Config {
   teams?: Record<string, Omit<Team, 'id'>>; // Teams configuration
   tools?: Record<string, unknown>; // Tool configurations
   voice?: VoiceConfig; // Voice configuration
+}
+
+export function getAgentEffectiveWorkerScope(
+  agent: Pick<Agent, 'private' | 'worker_scope'>
+): WorkerScope | null {
+  return agent.private?.per ?? agent.worker_scope ?? null;
+}
+
+export function getAgentScopeLabel(agent: Pick<Agent, 'private' | 'worker_scope'>): string | null {
+  if (agent.private != null) {
+    return `private.per=${agent.private.per}`;
+  }
+  if (agent.worker_scope != null) {
+    return `worker_scope=${agent.worker_scope}`;
+  }
+  return null;
 }

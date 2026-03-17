@@ -280,6 +280,72 @@ describe('AgentEditor', () => {
     );
   });
 
+  it('enables requester-private state with the default private scope', async () => {
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText('Enable requester-private state'));
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          private: { per: 'user' },
+        })
+      );
+    });
+  });
+
+  it('renders and updates private agent fields', async () => {
+    const privateAgent: Agent = {
+      ...mockAgent,
+      private: {
+        per: 'user_agent',
+        root: 'mind_data',
+        template_dir: './mind_template',
+        context_files: ['SOUL.md'],
+        knowledge: {
+          enabled: true,
+          path: 'memory',
+          watch: true,
+        },
+      },
+    };
+
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [privateAgent],
+      config: {
+        ...mockConfig,
+        agents: {
+          test_agent: privateAgent,
+        },
+      },
+    });
+
+    render(<AgentEditor />);
+
+    expect(screen.getByDisplayValue('mind_data')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('./mind_template')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('SOUL.md')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('memory')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Private Root'), {
+      target: { value: 'updated_data' },
+    });
+
+    await waitFor(() => {
+      expect(mockStore.updateAgent).toHaveBeenCalledWith(
+        'test_agent',
+        expect.objectContaining({
+          private: expect.objectContaining({
+            per: 'user_agent',
+            root: 'updated_data',
+          }),
+        })
+      );
+    });
+  });
+
   it('updates knowledge bases when checkboxes are toggled', () => {
     render(<AgentEditor />);
 

@@ -403,7 +403,7 @@ describe('Integrations', () => {
     }
   });
 
-  it('lists only explicitly worker-scoped agents in the scope selector', async () => {
+  it('lists worker-scoped and private agents in the scope selector', async () => {
     useConfigStore.setState({
       agents: [
         {
@@ -426,6 +426,18 @@ describe('Integrations', () => {
           rooms: ['lobby'],
           worker_scope: 'shared',
         },
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user_agent',
+          },
+        },
       ],
     });
 
@@ -436,6 +448,7 @@ describe('Integrations', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Scoped Agent')).toBeInTheDocument();
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
     });
 
     expect(screen.queryByText('Unscoped Agent')).not.toBeInTheDocument();
@@ -488,5 +501,48 @@ describe('Integrations', () => {
     for (const button of screen.getAllByRole('button', { name: /shared-only config/i })) {
       expect(button).toBeDisabled();
     }
+  });
+
+  it('treats private agents as isolating scopes in integrations', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Configuring tools for Private Agent (private.per=user).')
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/dashboard credential setup, editing, and disconnect are only supported/i)
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
+    expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
+    expect(screen.getByText('Weather')).toBeInTheDocument();
   });
 });

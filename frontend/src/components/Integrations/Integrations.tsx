@@ -31,6 +31,7 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { useConfigStore } from '@/store/configStore';
+import { getAgentEffectiveWorkerScope, getAgentScopeLabel } from '@/types/config';
 import { getIconForTool } from './iconMapping';
 import { API_BASE_URL, withAgentName } from '@/lib/api';
 import {
@@ -57,7 +58,7 @@ export function Integrations() {
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => agent.worker_scope != null)
+        .filter(agent => getAgentEffectiveWorkerScope(agent) != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
     [agents]
   );
@@ -65,7 +66,10 @@ export function Integrations() {
     () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
     [scopedAgents, scopeAgentName]
   );
-  const selectedWorkerScope = selectedScopeAgent?.worker_scope ?? null;
+  const selectedWorkerScope =
+    selectedScopeAgent != null ? getAgentEffectiveWorkerScope(selectedScopeAgent) : null;
+  const selectedScopeLabel =
+    selectedScopeAgent != null ? getAgentScopeLabel(selectedScopeAgent) : null;
   const hidesSharedOnlyIntegrations =
     selectedScopeAgent !== null && selectedWorkerScope !== null && selectedWorkerScope !== 'shared';
   const disablesDashboardCredentialManagement = hidesSharedOnlyIntegrations;
@@ -722,8 +726,8 @@ export function Integrations() {
           <p className="text-gray-600 dark:text-gray-400">
             {selectedScopeAgent
               ? `Configuring tools for ${selectedScopeAgent.display_name} (${
-                  selectedWorkerScope ?? 'shared'
-                } worker scope).`
+                  selectedScopeLabel ?? 'unscoped'
+                }).`
               : 'Connect external services to enable agent capabilities'}
           </p>
           {hidesSharedOnlyIntegrations && (
@@ -734,8 +738,8 @@ export function Integrations() {
               </AlertDescription>
               <AlertDescription className="mt-2">
                 Google Services, Home Assistant, Spotify, Gmail, Google Calendar, and Google Sheets
-                are only supported for shared deployment credentials or agents with
-                <code>worker_scope=shared</code>.
+                are only supported for shared deployment credentials or agents with an effective
+                shared runtime scope (<code>worker_scope=shared</code>).
               </AlertDescription>
             </Alert>
           )}

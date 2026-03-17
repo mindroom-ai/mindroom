@@ -172,6 +172,57 @@ describe('configStore', () => {
       expect(state.agents[0].learning_mode).toBe('agentic');
     });
 
+    it('should preserve private agent configuration from the backend', async () => {
+      const mockConfig = {
+        agents: {
+          mind: {
+            display_name: 'Mind',
+            role: 'Private assistant',
+            tools: [],
+            skills: [],
+            instructions: [],
+            rooms: [],
+            private: {
+              per: 'user',
+              root: 'mind_data',
+              context_files: ['SOUL.md'],
+              knowledge: {
+                enabled: true,
+                path: 'memory',
+                watch: true,
+              },
+            },
+          },
+        },
+        models: {
+          default: {
+            provider: 'ollama',
+            id: 'test-model',
+          },
+        },
+      };
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockConfig,
+      });
+
+      const { loadConfig } = useConfigStore.getState();
+      await loadConfig();
+
+      const state = useConfigStore.getState();
+      expect(state.agents[0].private).toEqual({
+        per: 'user',
+        root: 'mind_data',
+        context_files: ['SOUL.md'],
+        knowledge: {
+          enabled: true,
+          path: 'memory',
+          watch: true,
+        },
+      });
+    });
+
     it('should handle load errors', async () => {
       (global.fetch as any).mockRejectedValueOnce(new Error('Network error'));
 
