@@ -60,7 +60,12 @@ class _ResolvedWorkerExecution:
 
 @dataclass(frozen=True)
 class ResolvedWorkerTarget:
-    """Resolved worker target carried through tool construction and sandbox routing."""
+    """Resolved worker target carried through tool construction and sandbox routing.
+
+    This layer still uses `worker_scope` because it is about worker reuse/routing.
+    Private agents reach this seam through the already-derived execution scope from
+    `private.per`; do not read this field as the raw authored agent config.
+    """
 
     worker_scope: WorkerScope | None
     routing_agent_name: str | None

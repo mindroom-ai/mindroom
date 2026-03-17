@@ -772,7 +772,12 @@ class Config(BaseModel):
         return self.expand_tool_names(list(configured))
 
     def get_agent_execution_scope(self, agent_name: str) -> WorkerScope | None:
-        """Return the effective execution scope derived from worker_scope and private.per."""
+        """Return the internal derived execution scope for one agent.
+
+        This is not the authored config field.
+        Shared agents derive it from `worker_scope` (or defaults), while private agents
+        derive the same runtime concept from `private.per`.
+        """
         agent_config = self.get_agent(agent_name)
         if agent_config.private is not None:
             return agent_config.private.per
@@ -781,7 +786,12 @@ class Config(BaseModel):
         return self.defaults.worker_scope
 
     def get_agent_scope_label(self, agent_name: str) -> str:
-        """Return the user-facing authored scope label for one agent."""
+        """Return the user-facing authored scope label for one agent.
+
+        Keep this separate from `get_agent_execution_scope()`: the internal runtime uses
+        one derived execution scope, but user-facing messages should still distinguish
+        authored `worker_scope=...` from private `private.per=...`.
+        """
         agent_config = self.get_agent(agent_name)
         if agent_config.private is not None:
             return f"private.per={agent_config.private.per}"

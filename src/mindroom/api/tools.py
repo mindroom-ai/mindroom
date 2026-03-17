@@ -12,6 +12,7 @@ from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     build_dashboard_execution_identity,
     dashboard_supports_worker_credentials,
+    resolve_dashboard_agent_execution_scope,
     resolve_dashboard_execution_scope_override,
 )
 from mindroom.api.google_tools_helper import check_google_tool_configured
@@ -132,12 +133,17 @@ def _resolve_tool_availability_context(
     """Resolve one tool-availability context from persisted config plus optional draft override."""
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
-    execution_scope = execution_scope_override
-    if not execution_scope_override_provided and agent_name in config.agents:
-        execution_scope = config.get_agent_execution_scope(agent_name)
+    execution_scope = resolve_dashboard_agent_execution_scope(
+        config=config,
+        agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
+    )
 
     runtime_paths = api_runtime_paths(request)
     execution_identity = (
+        # Dashboard previews use the authenticated dashboard user as requester identity so
+        # draft scope checks exercise the same scoped-runtime path as saved requests.
         build_dashboard_execution_identity(request, agent_name)
         if agent_name is not None and execution_scope is not None
         else None

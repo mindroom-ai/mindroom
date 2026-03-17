@@ -206,6 +206,9 @@ export function getAgentExecutionScope(
   config: Pick<Config, 'defaults'> | null | undefined,
   agent: Pick<Agent, 'private' | 'worker_scope'>
 ): WorkerScope | null {
+  // Mirror Config.get_agent_execution_scope() on the backend. This is the derived
+  // runtime concept, not the authored config field, so private agents come from
+  // private.per while shared agents come from worker_scope/defaults.worker_scope.
   return agent.private?.per ?? agent.worker_scope ?? config?.defaults.worker_scope ?? null;
 }
 
@@ -213,6 +216,8 @@ export function getAgentScopeLabel(
   config: Pick<Config, 'defaults'> | null | undefined,
   agent: Pick<Agent, 'private' | 'worker_scope'>
 ): string | null {
+  // Keep the authored label separate from the derived execution scope so the UI does
+  // not blur private.per together with worker_scope again.
   if (agent.private != null) {
     return `private.per=${agent.private.per}`;
   }

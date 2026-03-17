@@ -6,7 +6,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -25,6 +25,9 @@ from mindroom.tool_system.worker_routing import (
     unsupported_shared_only_integration_message,
     unsupported_shared_only_integration_names,
 )
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 router = APIRouter(prefix="/api/credentials", tags=["credentials"])
 _PENDING_OAUTH_STATE_TTL_SECONDS = 600
@@ -147,7 +150,13 @@ def consume_pending_oauth_request(
 
 
 def build_dashboard_execution_identity(request: Request, agent_name: str) -> ToolExecutionIdentity:
-    """Build one dashboard-scoped execution identity for API credential and tool lookups."""
+    """Build one dashboard-scoped execution identity for API credential and tool lookups.
+
+    This is a boundary helper for dashboard/API requests only.
+    It uses the authenticated dashboard user as the requester, not any Matrix sender,
+    and it exists solely so dashboard previews hit the same scoped-runtime seams as
+    live requests once an execution scope is chosen.
+    """
     from mindroom.api.main import api_runtime_paths  # noqa: PLC0415
 
     auth_user = _request_auth_user(request) or {}
@@ -205,6 +214,26 @@ def resolve_dashboard_execution_scope_override(
     )
 
 
+def resolve_dashboard_agent_execution_scope(
+    *,
+    config: Config,
+    agent_name: str | None,
+    execution_scope_override_provided: bool,
+    execution_scope_override: WorkerScope | None,
+) -> WorkerScope | None:
+    """Return the dashboard's effective execution scope for one agent selection.
+
+    This resolves the internal derived execution scope, not the authored config field.
+    `worker_scope` remains a shared-agent config knob, while private agents derive the
+    same runtime concept from `private.per`.
+    """
+    if execution_scope_override_provided:
+        return execution_scope_override
+    if agent_name is None or agent_name not in config.agents:
+        return None
+    return config.get_agent_execution_scope(agent_name)
+
+
 def _reject_raw_worker_targeting(request: Request) -> None:
     for param_name in ("worker_key", "source_worker_key"):
         if request.query_params.get(param_name):
@@ -256,8 +285,11 @@ def resolve_request_credentials_target(
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
-    execution_scope = (
-        execution_scope_override if execution_scope_override_provided else config.get_agent_execution_scope(agent_name)
+    execution_scope = resolve_dashboard_agent_execution_scope(
+        config=config,
+        agent_name=agent_name,
+        execution_scope_override_provided=execution_scope_override_provided,
+        execution_scope_override=execution_scope_override,
     )
     if execution_scope is None:
         return RequestCredentialsTarget(
