@@ -57,6 +57,7 @@ class _FakeAppsApi:
         self.deployments: dict[str, object] = {}
         self.created_bodies: list[dict[str, object]] = []
         self.patched_bodies: list[tuple[str, dict[str, object]]] = []
+        self.deleted_names: list[str] = []
         self.list_label_selectors: list[str] = []
 
     def read_namespaced_deployment(self, name: str, namespace: str) -> object:
@@ -95,6 +96,7 @@ class _FakeAppsApi:
 
     def delete_namespaced_deployment(self, name: str, namespace: str) -> None:
         _ = namespace
+        self.deleted_names.append(name)
         self.deployments.pop(name, None)
 
     def list_namespaced_deployment(self, namespace: str, label_selector: str) -> object:
@@ -646,6 +648,46 @@ def test_kubernetes_backend_user_agent_mounts_private_root_from_worker_spec() ->
     assert mount_paths[expected_private_root] == expected_private_subpath
     assert "/app/worker/agents/mind" not in mount_paths
     assert f"/app/worker/private_instances/{worker_dir_name(worker_key)}" not in mount_paths
+
+
+def test_kubernetes_backend_recreates_user_agent_deployment_when_private_visibility_changes() -> None:
+    """Changing private visibility should recreate the Deployment instead of relying on patch semantics."""
+    backend, apps_api, _core_api = _backend()
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="mind",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="mind",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"mind"})), now=20.0)
+
+    assert len(apps_api.created_bodies) == 2
+    recreated_worker_id = apps_api.created_bodies[-1]["metadata"]["name"]
+    assert apps_api.deleted_names == [recreated_worker_id]
+    recreated = apps_api.created_bodies[-1]
+    volume_mounts = recreated["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = {mount["mountPath"]: mount.get("subPath") for mount in volume_mounts}
+    expected_private_root = str(
+        _private_instance_state_root_path(
+            Path("/app/worker"),
+            worker_key=worker_key,
+            agent_name="mind",
+        ),
+    )
+    expected_private_subpath = f"private_instances/{worker_dir_name(worker_key)}/mind"
+
+    assert mount_paths[expected_private_root] == expected_private_subpath
+    assert "/app/worker/agents/mind" not in mount_paths
 
 
 def test_kubernetes_backend_mounts_only_scoped_agent_root_for_unscoped_workers() -> None:

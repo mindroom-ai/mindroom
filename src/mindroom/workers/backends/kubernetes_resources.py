@@ -40,6 +40,7 @@ ANNOTATION_FAILURE_REASON = "mindroom.ai/failure-reason"
 ANNOTATION_WORKER_KEY = "mindroom.ai/worker-key"
 ANNOTATION_WORKER_STATUS = "mindroom.ai/worker-status"
 ANNOTATION_STATE_SUBPATH = "mindroom.ai/state-subpath"
+ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -196,6 +197,12 @@ def metadata_annotations(
     return annotations
 
 
+def _template_hash(template: dict[str, object]) -> str:
+    """Return a stable hash for one Deployment pod template."""
+    payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -297,19 +304,27 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
     ) -> None:
         """Create-or-patch one worker Deployment."""
+        manifest = self._deployment_manifest(
+            worker_key=worker_key,
+            worker_id=worker_id,
+            state_subpath=state_subpath,
+            annotations=annotations,
+            replicas=replicas,
+            private_agent_names=private_agent_names,
+        )
+        existing = self.read_deployment(worker_id)
+        if existing is not None:
+            existing_annotations = existing.metadata.annotations or {}
+            desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
+            desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
+            if existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]:
+                self.delete_deployment(worker_id)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
             patch_fn=self._apps.patch_namespaced_deployment,
             resource_name=worker_id,
-            manifest=self._deployment_manifest(
-                worker_key=worker_key,
-                worker_id=worker_id,
-                state_subpath=state_subpath,
-                annotations=annotations,
-                replicas=replicas,
-                private_agent_names=private_agent_names,
-            ),
+            manifest=manifest,
         )
 
     def patch_deployment(
@@ -322,7 +337,10 @@ class KubernetesResourceManager:
         """Patch Deployment metadata and/or scale."""
         body: dict[str, object] = {}
         if annotations is not None:
-            body["metadata"] = {"annotations": annotations}
+            existing = self.read_deployment(deployment_name)
+            merged_annotations = dict(existing.metadata.annotations or {}) if existing is not None else {}
+            merged_annotations.update(annotations)
+            body["metadata"] = {"annotations": merged_annotations}
         if replicas is not None:
             body["spec"] = {"replicas": replicas}
         self._apps.patch_namespaced_deployment(deployment_name, self.config.namespace, body)
@@ -443,17 +461,8 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
-        metadata: dict[str, object] = {
-            "name": worker_id,
-            "namespace": self.config.namespace,
-            "labels": worker_labels,
-            "annotations": annotations,
-        }
-        owner_reference = self._owner_reference_or_none()
-        if owner_reference is not None:
-            metadata["ownerReferences"] = [owner_reference]
-
-        pod_spec: dict[str, object] = {
+        template_metadata = {"labels": worker_labels}
+        template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "securityContext": {
                 "runAsUser": 1000,
@@ -499,9 +508,24 @@ class KubernetesResourceManager:
             ],
             "volumes": self._volumes(),
         }
+        template: dict[str, object] = {
+            "metadata": template_metadata,
+            "spec": template_spec,
+        }
+        metadata: dict[str, object] = {
+            "name": worker_id,
+            "namespace": self.config.namespace,
+            "labels": worker_labels,
+        }
+        owner_reference = self._owner_reference_or_none()
+        if owner_reference is not None:
+            metadata["ownerReferences"] = [owner_reference]
         node_name = self._worker_node_name_or_none()
         if node_name is not None:
-            pod_spec["nodeName"] = node_name
+            template_spec["nodeName"] = node_name
+        desired_annotations = dict(annotations)
+        desired_annotations[ANNOTATION_TEMPLATE_HASH] = _template_hash(template)
+        metadata["annotations"] = desired_annotations
 
         return {
             "apiVersion": "apps/v1",
@@ -510,10 +534,7 @@ class KubernetesResourceManager:
             "spec": {
                 "replicas": replicas,
                 "selector": {"matchLabels": worker_labels},
-                "template": {
-                    "metadata": {"labels": worker_labels},
-                    "spec": pod_spec,
-                },
+                "template": template,
             },
         }
 
