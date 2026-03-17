@@ -474,7 +474,7 @@ def test_resolve_agent_workspace_rejects_private_root_symlink_escape(tmp_path: P
     outside_root.mkdir(parents=True, exist_ok=True)
     (state_root / "mind_data").symlink_to(outside_root, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="private.root must stay within the workspace root"):
+    with pytest.raises(ValueError, match=re.escape("private.root must stay within the workspace root")):
         resolve_agent_runtime(
             "general",
             bound_config,
@@ -583,7 +583,10 @@ def test_resolve_agent_workspace_rejects_private_context_symlink_escape(tmp_path
     notes_link = workspace.root / "notes"
     notes_link.symlink_to(outside_root, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="private.context_files must stay within the workspace root"):
+    with pytest.raises(
+        ValueError,
+        match=re.escape("private.context_files must stay within the workspace root"),
+    ):
         resolve_agent_runtime(
             "general",
             bound_config,
@@ -1661,7 +1664,7 @@ def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path)
         template_dir="./missing-template",
     )
 
-    with pytest.raises(ValueError, match="invalid private.template_dir"):
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
         _bind_runtime_paths(config, _runtime_paths(tmp_path))
 
 
@@ -1680,7 +1683,7 @@ def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(
         template_dir="./mind_template",
     )
 
-    with pytest.raises(ValueError, match="invalid private.template_dir"):
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
         _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
@@ -2407,7 +2410,7 @@ def test_config_rejects_git_backed_private_knowledge_inside_private_memory_tree(
     """Git-backed private knowledge must use a dedicated subtree outside private writable content."""
     with pytest.raises(
         ValidationError,
-        match="git-backed private knowledge at 'memory'.*dedicated subtree",
+        match=r"git-backed private knowledge at 'memory'.*dedicated subtree",
     ):
         Config(
             agents={
@@ -2433,7 +2436,7 @@ def test_config_rejects_git_backed_private_knowledge_at_memory_entrypoint() -> N
     """Git-backed private knowledge must not target the file-memory entrypoint file."""
     with pytest.raises(
         ValidationError,
-        match="git-backed private knowledge at 'MEMORY.md'.*dedicated subtree",
+        match=r"git-backed private knowledge at 'MEMORY.md'.*dedicated subtree",
     ):
         Config(
             agents={
@@ -2485,7 +2488,7 @@ def test_config_rejects_git_backed_private_knowledge_at_private_root() -> None:
     """Git-backed private knowledge must never target the private root itself."""
     with pytest.raises(
         ValidationError,
-        match="git-backed private knowledge at '.'.*dedicated subtree",
+        match=r"git-backed private knowledge at '\.'.*dedicated subtree",
     ):
         Config(
             agents={
@@ -2517,7 +2520,7 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
 
     with pytest.raises(
         ValidationError,
-        match="git-backed private knowledge at 'docs'.*scaffolded private workspace content",
+        match=r"git-backed private knowledge at 'docs'.*scaffolded private workspace content",
     ):
         bind_runtime_paths(
             Config(
