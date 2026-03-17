@@ -13,13 +13,11 @@ from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import TeamRunOutput
 
 from mindroom.agents import create_agent
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.knowledge.utils import bound_knowledge_managers, get_bound_knowledge_manager
 from mindroom.media_inputs import MediaInputs
 from mindroom.teams import TeamMode, _team_response_stream_raw, team_response, team_response_stream
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -214,8 +212,8 @@ class _DirectTeamAgentBot:
 
 
 @pytest.mark.asyncio
-async def test_team_response_requires_active_execution_identity_for_private_agents() -> None:
-    """Direct team helpers should reject private agents without an ambient execution identity."""
+async def test_team_response_rejects_private_agents_in_ad_hoc_teams() -> None:
+    """Direct team helpers should reject any team that includes a private agent."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     config = bind_runtime_paths(
         Config(
@@ -225,6 +223,11 @@ async def test_team_response_requires_active_execution_identity_for_private_agen
                     role="General assistant",
                     rooms=["#test:example.org"],
                     private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+                "calculator": AgentConfig(
+                    display_name="CalculatorAgent",
+                    role="Calculator assistant",
+                    rooms=["#test:example.org"],
                 ),
             },
             models={
@@ -236,65 +239,18 @@ async def test_team_response_requires_active_execution_identity_for_private_agen
     orchestrator = MagicMock()
     orchestrator.config = config
     orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.agent_bots = {"general": _DirectTeamAgentBot("general", config)}
+    orchestrator.agent_bots = {
+        "general": _DirectTeamAgentBot("general", config),
+        "calculator": _DirectTeamAgentBot("calculator", config),
+    }
 
-    with pytest.raises(ValueError, match="requires an active execution identity"):
+    with pytest.raises(ValueError, match="private agents cannot participate in teams yet"):
         await team_response(
-            agent_names=["general"],
+            agent_names=["general", "calculator"],
             mode=TeamMode.COORDINATE,
             message="Analyze this.",
             orchestrator=orchestrator,
         )
-
-
-@pytest.mark.asyncio
-async def test_team_response_uses_ambient_execution_identity_for_private_agents() -> None:
-    """Direct team helpers should honor the ambient execution identity context."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    role="General assistant",
-                    rooms=["#test:example.org"],
-                    private=AgentPrivateConfig(per="user", root="mind_data"),
-                ),
-            },
-            models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
-            },
-        ),
-        runtime_paths,
-    )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.agent_bots = {"general": _DirectTeamAgentBot("general", config)}
-    mock_team = MagicMock()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Private response"))
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="$thread",
-    )
-
-    with (
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        tool_execution_identity(execution_identity),
-    ):
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            orchestrator=orchestrator,
-        )
-
-    assert "Private response" in response
 
 
 @pytest.mark.asyncio
@@ -351,209 +307,3 @@ async def test_team_response_forwards_session_and_user_id_to_team_run() -> None:
     assert "General response" in response
     assert mock_team.arun.await_args.kwargs["session_id"] == "session-123"
     assert mock_team.arun.await_args.kwargs["user_id"] == "@alice:example.org"
-
-
-@pytest.mark.asyncio
-async def test_team_response_binds_private_knowledge_for_direct_team_helpers() -> None:
-    """Direct team helpers should bind request-scoped private knowledge during agent materialization."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    role="General assistant",
-                    private=AgentPrivateConfig(
-                        per="user",
-                        root="mind_data",
-                        knowledge=AgentPrivateKnowledgeConfig(path="memory"),
-                    ),
-                ),
-            },
-            models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
-            },
-        ),
-        runtime_paths,
-    )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.agent_bots = {"general": MagicMock()}
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
-    assert private_base_id is not None
-    bound_manager = MagicMock()
-    team_agent = MagicMock()
-    team_agent.name = "GeneralAgent"
-    team_agent.instructions = []
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="$thread",
-    )
-
-    def _assert_bound_manager(agent_names: list[str], _orchestrator: MagicMock) -> list[MagicMock]:
-        assert agent_names == ["general"]
-        assert get_bound_knowledge_manager(private_base_id) is bound_manager
-        return [team_agent]
-
-    mock_team = MagicMock()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Private knowledge response"))
-
-    with (
-        patch(
-            "mindroom.teams.ensure_request_knowledge_managers",
-            new=AsyncMock(return_value={private_base_id: bound_manager}),
-        ),
-        patch("mindroom.teams._get_agents_from_orchestrator", side_effect=_assert_bound_manager),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        tool_execution_identity(execution_identity),
-    ):
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            orchestrator=orchestrator,
-        )
-
-    assert "Private knowledge response" in response
-
-
-@pytest.mark.asyncio
-async def test_team_response_reuses_already_bound_request_knowledge() -> None:
-    """Direct team helpers should not re-ensure knowledge managers already bound by the caller."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    role="General assistant",
-                    private=AgentPrivateConfig(
-                        per="user",
-                        root="mind_data",
-                        knowledge=AgentPrivateKnowledgeConfig(path="memory"),
-                    ),
-                ),
-            },
-            models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
-            },
-        ),
-        runtime_paths,
-    )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.agent_bots = {"general": MagicMock()}
-    private_base_id = config.get_agent_private_knowledge_base_id("general")
-    assert private_base_id is not None
-    bound_manager = MagicMock()
-    team_agent = MagicMock()
-    team_agent.name = "GeneralAgent"
-    team_agent.instructions = []
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="$thread",
-    )
-
-    def _assert_bound_manager(agent_names: list[str], _orchestrator: MagicMock) -> list[MagicMock]:
-        assert agent_names == ["general"]
-        assert get_bound_knowledge_manager(private_base_id) is bound_manager
-        return [team_agent]
-
-    mock_team = MagicMock()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Private knowledge response"))
-
-    with (
-        patch(
-            "mindroom.teams.ensure_request_knowledge_managers",
-            new_callable=AsyncMock,
-            side_effect=AssertionError("request knowledge should already be bound"),
-        ),
-        patch("mindroom.teams._get_agents_from_orchestrator", side_effect=_assert_bound_manager),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        tool_execution_identity(execution_identity),
-        bound_knowledge_managers({private_base_id: bound_manager}),
-    ):
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            orchestrator=orchestrator,
-        )
-
-    assert "Private knowledge response" in response
-
-
-@pytest.mark.asyncio
-async def test_team_response_honors_degraded_request_knowledge_context() -> None:
-    """Direct team helpers should not retry knowledge init after the caller degraded to no knowledge."""
-    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    config = bind_runtime_paths(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="GeneralAgent",
-                    role="General assistant",
-                    private=AgentPrivateConfig(
-                        per="user",
-                        root="mind_data",
-                        knowledge=AgentPrivateKnowledgeConfig(path="memory"),
-                    ),
-                ),
-            },
-            models={
-                "default": ModelConfig(provider="openai", id="gpt-4o-mini"),
-            },
-        ),
-        runtime_paths,
-    )
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.agent_bots = {"general": MagicMock()}
-    team_agent = MagicMock()
-    team_agent.name = "GeneralAgent"
-    team_agent.instructions = []
-    execution_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="$thread",
-    )
-
-    mock_team = MagicMock()
-    mock_team.arun = AsyncMock(return_value=TeamRunOutput(content="Degraded team response"))
-
-    with (
-        patch(
-            "mindroom.teams.ensure_request_knowledge_managers",
-            new_callable=AsyncMock,
-            side_effect=AssertionError("request knowledge should not be retried"),
-        ),
-        patch("mindroom.teams._get_agents_from_orchestrator", return_value=[team_agent]),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-        tool_execution_identity(execution_identity),
-        bound_knowledge_managers({}),
-    ):
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Analyze this.",
-            orchestrator=orchestrator,
-        )
-
-    assert "Degraded team response" in response

@@ -24,12 +24,6 @@ from mindroom.ai import get_model_instance
 from mindroom.authorization import get_available_agents_in_room
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.knowledge.utils import (
-    bound_knowledge_managers,
-    ensure_request_knowledge_managers,
-    get_bound_knowledge_manager,
-    request_knowledge_init_attempted,
-)
 from mindroom.logging_config import get_logger
 from mindroom.matrix.rooms import get_room_alias_from_id
 from mindroom.media_fallback import append_inline_media_fallback_prompt, should_retry_without_inline_media
@@ -41,7 +35,6 @@ from mindroom.tool_system.events import (
     extract_tool_completed_info,
     format_tool_started_event,
 )
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -466,48 +459,6 @@ def _available_team_agent_names(
     return available_agent_names
 
 
-async def _get_request_scoped_team_agents(
-    agent_names: list[str],
-    orchestrator: MultiAgentOrchestrator,
-) -> list[Agent]:
-    """Materialize team members with the current request's knowledge bindings."""
-    assert orchestrator.config is not None
-    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
-    if not available_agent_names:
-        return []
-    execution_identity = get_tool_execution_identity()
-    if execution_identity is None:
-        for agent_name in available_agent_names:
-            if orchestrator.config.agents[agent_name].private is not None:
-                msg = f"Private team agent '{agent_name}' requires an active execution identity"
-                raise ValueError(msg)
-    if (
-        _request_knowledge_is_already_bound(available_agent_names, orchestrator.config)
-        or request_knowledge_init_attempted()
-    ):
-        return _get_agents_from_orchestrator(available_agent_names, orchestrator)
-    request_knowledge_managers = await ensure_request_knowledge_managers(
-        available_agent_names,
-        config=orchestrator.config,
-        runtime_paths=orchestrator.runtime_paths,
-        execution_identity=execution_identity,
-    )
-    with bound_knowledge_managers(request_knowledge_managers):
-        return _get_agents_from_orchestrator(available_agent_names, orchestrator)
-
-
-def _request_knowledge_is_already_bound(
-    agent_names: list[str],
-    config: Config,
-) -> bool:
-    """Return whether the current request scope already has all needed knowledge bound."""
-    for agent_name in agent_names:
-        for base_id in config.get_agent_knowledge_base_ids(agent_name):
-            if get_bound_knowledge_manager(base_id) is None:
-                return False
-    return True
-
-
 def _create_team_instance(
     agents: list[Agent],
     agent_names: list[str],
@@ -597,13 +548,16 @@ async def team_response(
     user_id: str | None = None,
 ) -> str:
     """Create a team and execute response."""
-    agents = await _get_request_scoped_team_agents(agent_names, orchestrator)
+    assert orchestrator.config is not None
+    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
+    orchestrator.config.assert_team_agents_supported(available_agent_names)
+    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
     if not agents:
         return _NO_AGENTS_RESPONSE
 
     media_inputs = media or MediaInputs()
     prompt = _build_prompt_with_context(message, thread_history)
-    team = _create_team_instance(agents, agent_names, mode, orchestrator, model_name)
+    team = _create_team_instance(agents, available_agent_names, mode, orchestrator, model_name)
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
     team_name = f"Team ({agent_list})"
 
@@ -676,7 +630,9 @@ async def _team_response_stream_raw(
     """
     assert orchestrator.config is not None
     agent_names = [mid.agent_name(orchestrator.config, orchestrator.runtime_paths) or mid.username for mid in agent_ids]
-    agents = await _get_request_scoped_team_agents(agent_names, orchestrator)
+    available_agent_names = _available_team_agent_names(agent_names, orchestrator)
+    orchestrator.config.assert_team_agents_supported(available_agent_names)
+    agents = _get_agents_from_orchestrator(available_agent_names, orchestrator)
 
     if not agents:
 

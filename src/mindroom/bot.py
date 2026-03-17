@@ -1779,6 +1779,9 @@ class AgentBot:
 
         # Convert MatrixID list to agent names for non-streaming APIs
         agent_names = [mid.agent_name(self.config, self.runtime_paths) or mid.username for mid in team_agents]
+        self.config.assert_team_agents_supported(
+            [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
+        )
         include_matrix_prompt_context = any(self._agent_has_matrix_messaging_tool(name) for name in agent_names)
         model_message = self._append_matrix_prompt_context(
             payload.prompt,

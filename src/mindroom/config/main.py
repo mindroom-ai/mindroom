@@ -259,6 +259,13 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_team_agents(self) -> Config:
+        """Ensure team members exist and do not use private requester-local state."""
+        for team_name, team_config in self.teams.items():
+            self.assert_team_agents_supported(team_config.agents, team_name=team_name)
+        return self
+
+    @model_validator(mode="after")
     def validate_knowledge_base_assignments(self) -> Config:
         """Ensure agents only reference configured knowledge base IDs."""
         invalid_assignments = [
@@ -667,6 +674,22 @@ class Config(BaseModel):
         return frozenset(
             agent_name for agent_name, agent_config in self.agents.items() if agent_config.private is not None
         )
+
+    def assert_team_agents_supported(
+        self,
+        agent_names: list[str],
+        *,
+        team_name: str | None = None,
+    ) -> None:
+        """Reject unknown or currently unsupported team members."""
+        prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
+        for agent_name in agent_names:
+            if agent_name not in self.agents:
+                msg = f"{prefix} references unknown agent '{agent_name}'"
+                raise ValueError(msg)
+            if self.agents[agent_name].private is not None:
+                msg = f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
+                raise ValueError(msg)
 
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:

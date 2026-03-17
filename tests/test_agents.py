@@ -17,7 +17,13 @@ from pydantic import ValidationError
 
 from mindroom import agent_prompts
 from mindroom.agents import _CULTURE_MANAGER_CACHE, create_agent
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig, CultureConfig
+from mindroom.config.agent import (
+    AgentConfig,
+    AgentPrivateConfig,
+    AgentPrivateKnowledgeConfig,
+    CultureConfig,
+    TeamConfig,
+)
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -2057,6 +2063,30 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
     private_base_id = config.get_agent_private_knowledge_base_id("mind")
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
+
+
+def test_config_rejects_private_agents_in_teams() -> None:
+    """Configured teams must not include private agents."""
+    with pytest.raises(
+        ValidationError,
+        match="Team 'mixed_team' includes private agent 'mind'; private agents cannot participate in teams yet",
+    ):
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    private=AgentPrivateConfig(per="user", root="mind_data"),
+                ),
+                "calculator": AgentConfig(display_name="Calculator"),
+            },
+            teams={
+                "mixed_team": TeamConfig(
+                    display_name="Mixed Team",
+                    role="Mixed team",
+                    agents=["mind", "calculator"],
+                ),
+            },
+        )
 
 
 def test_config_private_and_shared_knowledge_coexist() -> None:
