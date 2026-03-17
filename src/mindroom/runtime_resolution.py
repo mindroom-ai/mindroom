@@ -27,6 +27,17 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
+class ResolvedAgentExecution:
+    """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
+
+    agent_name: str
+    is_private: bool
+    worker_scope: WorkerScope | None
+    execution_identity: ToolExecutionIdentity | None
+    worker_key: str | None
+
+
+@dataclass(frozen=True)
 class ResolvedAgentRuntime:
     """Resolved runtime state for one `(agent_name, execution_identity)` materialization."""
 
@@ -98,15 +109,14 @@ def resolved_worker_private_agent_names(agent_runtime: ResolvedAgentRuntime) -> 
     return frozenset()
 
 
-def resolve_agent_runtime(
+def resolve_agent_execution(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     execution_identity: ToolExecutionIdentity | None = None,
-    create: bool = False,
-) -> ResolvedAgentRuntime:
-    """Resolve one agent's canonical runtime roots for the current execution scope."""
+) -> ResolvedAgentExecution:
+    """Resolve one agent's execution scope for the current runtime context."""
     agent_config = config.get_agent(agent_name)
     effective_execution_identity = execution_identity or get_tool_execution_identity()
     worker_scope = config.get_agent_worker_scope(agent_name)
@@ -132,6 +142,35 @@ def resolve_agent_runtime(
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key for scope '{worker_scope}'"
             raise ValueError(msg)
+    return ResolvedAgentExecution(
+        agent_name=agent_name,
+        is_private=is_private,
+        worker_scope=worker_scope,
+        execution_identity=resolved_execution_identity,
+        worker_key=worker_key,
+    )
+
+
+def resolve_agent_runtime(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+    create: bool = False,
+) -> ResolvedAgentRuntime:
+    """Resolve one agent's canonical runtime roots for the current execution scope."""
+    resolved_execution = resolve_agent_execution(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
+    if resolved_execution.is_private:
+        worker_key = resolved_execution.worker_key
+        if worker_key is None:
+            msg = f"Private agent '{agent_name}' could not resolve a worker key"
+            raise ValueError(msg)
         state_root = _resolved_private_state_root(
             runtime_paths=runtime_paths,
             worker_key=worker_key,
@@ -148,17 +187,17 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
-        use_state_storage_path=is_private,
+        use_state_storage_path=resolved_execution.is_private,
         create=create,
     )
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
         agent_name=agent_name,
-        is_private=is_private,
-        worker_scope=worker_scope,
-        execution_identity=resolved_execution_identity,
-        worker_key=worker_key,
+        is_private=resolved_execution.is_private,
+        worker_scope=resolved_execution.worker_scope,
+        execution_identity=resolved_execution.execution_identity,
+        worker_key=resolved_execution.worker_key,
         state_root=state_root,
         workspace=workspace,
         tool_base_dir=tool_base_dir,

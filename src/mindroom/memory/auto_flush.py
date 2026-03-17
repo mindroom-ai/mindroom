@@ -18,12 +18,8 @@ from mindroom.agents import create_session_storage
 from mindroom.ai import get_model_instance
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
-from mindroom.tool_system.worker_routing import (
-    ToolExecutionIdentity,
-    resolve_execution_identity_for_worker_scope,
-    resolve_worker_key,
-    tool_execution_identity,
-)
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -153,32 +149,23 @@ def _deserialize_execution_identity(raw_identity: object) -> ToolExecutionIdenti
 
 def _resolve_flush_scope(
     config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[str | None, _SerializedExecutionIdentity | None]:
-    agent_config = config.agents.get(agent_name)
-    if agent_config is None or agent_config.private is None:
-        return None, None
-    if execution_identity is None:
-        msg = f"Private agent '{agent_name}' requires an execution identity for memory auto-flush"
-        raise ValueError(msg)
-    resolved_identity = resolve_execution_identity_for_worker_scope(
-        agent_config.private.per,
-        agent_name=agent_name,
+    resolved_execution = resolve_agent_execution(
+        agent_name,
+        config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
+    if not resolved_execution.is_private:
+        return None, None
+    resolved_identity = resolved_execution.execution_identity
     if resolved_identity is None:
-        msg = f"Private agent '{agent_name}' requires a requester-scoped execution identity for memory auto-flush"
+        msg = f"Private agent '{agent_name}' requires an execution identity for memory auto-flush"
         raise ValueError(msg)
-    worker_key = resolve_worker_key(
-        agent_config.private.per,
-        resolved_identity,
-        agent_name=agent_name,
-    )
-    if worker_key is None:
-        msg = f"Private agent '{agent_name}' could not resolve a private-instance worker key for memory auto-flush"
-        raise ValueError(msg)
-    return worker_key, _serialize_execution_identity(resolved_identity)
+    return resolved_execution.worker_key, _serialize_execution_identity(resolved_identity)
 
 
 def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
@@ -198,6 +185,7 @@ def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
 
 def _stale_private_session_entry(
     config: Config,
+    runtime_paths: RuntimePaths,
     agent_name: str,
     entry: _FlushSessionEntry,
 ) -> bool:
@@ -211,6 +199,7 @@ def _stale_private_session_entry(
     try:
         resolved_worker_key, _ = _resolve_flush_scope(
             config,
+            runtime_paths,
             agent_name,
             execution_identity,
         )
@@ -273,6 +262,7 @@ def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
 def mark_auto_flush_dirty_session(
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     session_id: str,
@@ -283,7 +273,7 @@ def mark_auto_flush_dirty_session(
         return
 
     now = _now_ts()
-    worker_key, serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
+    worker_key, serialized_identity = _resolve_flush_scope(config, runtime_paths, agent_name, execution_identity)
     key = _session_key(agent_name, session_id, worker_key)
 
     with _STATE_LOCK:
@@ -319,6 +309,7 @@ def mark_auto_flush_dirty_session(
 def reprioritize_auto_flush_sessions(
     storage_path: Path,
     config: Config,
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str,
     active_session_id: str,
@@ -333,7 +324,7 @@ def reprioritize_auto_flush_sessions(
         return
 
     now = _now_ts()
-    worker_key, _serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
+    worker_key, _serialized_identity = _resolve_flush_scope(config, runtime_paths, agent_name, execution_identity)
     with _STATE_LOCK:
         state = _read_state_unlocked(storage_path)
         sessions = state["sessions"]
@@ -625,7 +616,7 @@ class MemoryAutoFlushWorker:
                 key
                 for key, entry in sessions.items()
                 if isinstance(entry.get("agent_name"), str)
-                and _stale_private_session_entry(config, entry["agent_name"], entry)
+                and _stale_private_session_entry(config, self.runtime_paths, entry["agent_name"], entry)
             ]
             for key in stale_private_entry_keys:
                 del sessions[key]

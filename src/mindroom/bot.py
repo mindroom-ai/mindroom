@@ -2189,6 +2189,7 @@ class AgentBot:
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
+            self.runtime_paths,
             agent_name=agent_name,
             active_session_id=session_id,
             execution_identity=execution_identity,
@@ -2254,6 +2255,7 @@ class AgentBot:
             mark_auto_flush_dirty_session(
                 self.storage_path,
                 self.config,
+                self.runtime_paths,
                 agent_name=agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,
@@ -2477,6 +2479,7 @@ class AgentBot:
         reprioritize_auto_flush_sessions(
             self.storage_path,
             self.config,
+            self.runtime_paths,
             agent_name=self.agent_name,
             active_session_id=session_id,
             execution_identity=execution_identity,
@@ -2538,6 +2541,7 @@ class AgentBot:
             mark_auto_flush_dirty_session(
                 self.storage_path,
                 self.config,
+                self.runtime_paths,
                 agent_name=self.agent_name,
                 session_id=session_id,
                 execution_identity=execution_identity,

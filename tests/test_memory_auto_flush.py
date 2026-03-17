@@ -124,12 +124,14 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s2",
     )
@@ -137,6 +139,7 @@ def test_mark_dirty_and_reprioritize(tmp_path: Path, config: Config) -> None:
     reprioritize_auto_flush_sessions(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         active_session_id="s1",
     )
@@ -159,6 +162,7 @@ def test_mark_dirty_uses_per_agent_file_override(tmp_path: Path, config: Config)
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
@@ -176,6 +180,7 @@ def test_mark_dirty_skips_per_agent_mem0_override(tmp_path: Path, config: Config
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
@@ -194,12 +199,14 @@ async def test_worker_respects_batch_limits(
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s2",
     )
@@ -264,6 +271,7 @@ async def test_worker_flush_writes_daily_file_memory_into_canonical_agent_root(
         mark_auto_flush_dirty_session(
             tmp_path,
             config,
+            runtime_paths_for(config),
             agent_name="general",
             session_id="session-alice",
         )
@@ -395,6 +403,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
@@ -438,6 +447,7 @@ async def test_worker_keeps_session_dirty_when_new_activity_arrives_mid_flush(
         mark_auto_flush_dirty_session(
             storage_path,
             config,
+            runtime_paths_for(config),
             agent_name=agent_name,
             session_id=session_id,
         )
@@ -466,6 +476,7 @@ async def test_worker_no_reply_does_not_requeue_without_new_dirty_mark(
     mark_auto_flush_dirty_session(
         storage_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="s1",
     )
@@ -534,6 +545,7 @@ def test_mark_dirty_coalesces_shared_agent_sessions(tmp_path: Path, config: Conf
         mark_auto_flush_dirty_session(
             tmp_path,
             config,
+            runtime_paths_for(config),
             agent_name="general",
             session_id="shared-session-id",
         )
@@ -541,6 +553,7 @@ def test_mark_dirty_coalesces_shared_agent_sessions(tmp_path: Path, config: Conf
         mark_auto_flush_dirty_session(
             tmp_path,
             config,
+            runtime_paths_for(config),
             agent_name="general",
             session_id="shared-session-id",
         )
@@ -574,6 +587,7 @@ def test_mark_dirty_separates_private_agent_sessions_by_requester_scope(tmp_path
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="!room:example.org:$thread",
         execution_identity=alice_identity,
@@ -581,6 +595,7 @@ def test_mark_dirty_separates_private_agent_sessions_by_requester_scope(tmp_path
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="!room:example.org:$thread",
         execution_identity=bob_identity,
@@ -666,6 +681,7 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="session-alice",
         execution_identity=alice_identity,
@@ -673,6 +689,7 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="session-bob",
         execution_identity=bob_identity,
@@ -680,6 +697,7 @@ async def test_worker_batch_limits_are_scoped_per_private_requester(
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="general",
         session_id="session-general",
     )
@@ -795,6 +813,7 @@ def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="alice-active",
         execution_identity=alice_identity,
@@ -802,6 +821,7 @@ def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="alice-other",
         execution_identity=alice_identity,
@@ -809,6 +829,7 @@ def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="bob-other",
         execution_identity=bob_identity,
@@ -817,6 +838,7 @@ def test_reprioritize_private_sessions_stays_within_private_scope(tmp_path: Path
     reprioritize_auto_flush_sessions(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         active_session_id="alice-active",
         execution_identity=alice_identity,
@@ -848,6 +870,7 @@ async def test_worker_removes_stale_private_entries_when_agent_becomes_shared(tm
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="!room:example.org:$thread",
         execution_identity=alice_identity,
@@ -884,6 +907,7 @@ async def test_worker_flush_private_agent_uses_persisted_private_scope(
     mark_auto_flush_dirty_session(
         tmp_path,
         config,
+        runtime_paths_for(config),
         agent_name="mind",
         session_id="!room:example.org:$thread",
         execution_identity=alice_identity,
