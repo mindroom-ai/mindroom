@@ -518,7 +518,7 @@ def test_resolve_agent_workspace_rejects_private_state_root_symlink_escape(tmp_p
     outside_root.mkdir(parents=True, exist_ok=True)
     canonical_state_root.symlink_to(outside_root, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="Private state root must stay within the canonical root"):
+    with pytest.raises(ValueError, match="Private state root must stay within the private scope root"):
         resolve_agent_runtime(
             "general",
             bound_config,
@@ -550,7 +550,7 @@ def test_resolve_agent_runtime_rejects_private_scope_root_symlink_escape(tmp_pat
     outside_root.mkdir(parents=True, exist_ok=True)
     scope_root.symlink_to(outside_root, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="Private state root must stay within the canonical root"):
+    with pytest.raises(ValueError, match="Private scope root must stay within the canonical root"):
         resolve_agent_runtime(
             "general",
             bound_config,
