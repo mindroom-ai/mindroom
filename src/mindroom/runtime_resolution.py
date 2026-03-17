@@ -72,6 +72,16 @@ class ResolvedKnowledgeBinding:
     incremental_sync_on_access: bool
 
 
+def _knowledge_sync_enabled(
+    *,
+    start_watchers: bool,
+    file_watch_enabled: bool,
+    has_git_sync: bool,
+) -> bool:
+    """Return whether a knowledge base should keep itself fresh beyond initial indexing."""
+    return start_watchers and (file_watch_enabled or has_git_sync)
+
+
 def resolve_worker_execution_scope(
     worker_scope: WorkerScope | None,
     execution_identity: ToolExecutionIdentity | None,
@@ -216,16 +226,20 @@ def resolve_knowledge_binding(
 ) -> ResolvedKnowledgeBinding:
     """Resolve one knowledge base to its effective storage and workspace-derived path."""
     base_config = config.get_knowledge_base_config(base_id)
+    sync_enabled = _knowledge_sync_enabled(
+        start_watchers=start_watchers,
+        file_watch_enabled=base_config.watch,
+        has_git_sync=base_config.git is not None,
+    )
     effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     if effective_agent_name is None:
         knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
-        start_background_watchers = start_watchers and base_config.watch
         return ResolvedKnowledgeBinding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
             request_scoped=False,
-            start_background_watchers=start_background_watchers,
+            start_background_watchers=sync_enabled,
             incremental_sync_on_access=False,
         )
 
@@ -241,7 +255,6 @@ def resolve_knowledge_binding(
         raise ValueError(msg)
 
     uses_isolating_worker_scope = agent_runtime.worker_scope not in {None, "shared"}
-    start_background_watchers = start_watchers and base_config.watch and not uses_isolating_worker_scope
     return ResolvedKnowledgeBinding(
         base_id=base_id,
         storage_root=agent_runtime.state_root,
@@ -251,6 +264,6 @@ def resolve_knowledge_binding(
             field_name=f"knowledge base '{base_id}' path",
         ),
         request_scoped=uses_isolating_worker_scope,
-        start_background_watchers=start_background_watchers,
-        incremental_sync_on_access=start_watchers and base_config.watch and uses_isolating_worker_scope,
+        start_background_watchers=sync_enabled and not uses_isolating_worker_scope,
+        incremental_sync_on_access=sync_enabled and uses_isolating_worker_scope,
     )

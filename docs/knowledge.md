@@ -111,6 +111,7 @@ Requester-local knowledge is enabled only when you explicitly configure `private
 `private.knowledge.path` can point to any folder inside the private root, including `.` for the private root itself.
 MindRoom keeps a separate index per effective private root, so one requester's indexed data is not shared with another requester's runtime.
 For isolating scopes such as `user` and `user_agent`, MindRoom refreshes the private index on access instead of keeping a background watcher alive for every requester root.
+Git-backed knowledge still keeps the repository fresh when `watch: false`; that flag only disables filesystem watchers.
 Top-level `knowledge_bases` remain the shared/global mechanism, so the same agent can combine private local knowledge with shared company knowledge.
 This requester-local private knowledge flow applies to the normal agent runtime path, not the OpenAI-compatible `/v1` API.
 If you enable `private.knowledge.git`, use a dedicated subtree such as `kb_repo`.
@@ -120,7 +121,7 @@ Do not point Git-backed private knowledge at `.` or `memory/`, and do not use a 
 |-------|------|---------|-------------|
 | `private.knowledge.enabled` | bool | `true` | Whether requester-local knowledge indexing is active for this agent |
 | `private.knowledge.path` | string | `null` | Private-root-relative folder to index. Required when `private.knowledge.enabled` is `true` |
-| `private.knowledge.watch` | bool | `true` | Whether private knowledge should refresh when files change. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root |
+| `private.knowledge.watch` | bool | `true` | Whether local filesystem changes should be watched. For isolating scopes, MindRoom refreshes on access instead of keeping a background watcher per requester root. Git sync still runs even when this is `false` |
 | `private.knowledge.chunk_size` | int | `5000` | Maximum characters per indexed chunk |
 | `private.knowledge.chunk_overlap` | int | `0` | Overlap characters between adjacent chunks. Must be smaller than `chunk_size` |
 | `private.knowledge.git` | object | `null` | Optional Git sync configuration for requester-local knowledge. Git-backed private knowledge must use a dedicated subtree outside requester-writable memory/template content |

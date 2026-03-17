@@ -992,10 +992,12 @@ async def test_worker_scoped_private_knowledge_refreshes_on_access_without_backg
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("watch", [True, False])
 async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_background_watchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     build_private_template_dir: Callable[..., Path],
+    watch: bool,
 ) -> None:
     """Worker-scoped Git knowledge should refresh on access instead of starting git polling tasks."""
     _DummyChromaDb.metadatas = []
@@ -1006,7 +1008,7 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
     config = Config(
         agents={
             "mind": _mind_private_agent(
-                watch=True,
+                watch=watch,
                 template_dir=str(template_dir),
                 knowledge_path="kb_repo",
                 git=KnowledgeGitConfig(
@@ -1044,6 +1046,37 @@ async def test_worker_scoped_git_private_knowledge_refreshes_on_access_without_b
         assert sync_git_repository.await_count == 2
         sync_indexed_files.assert_not_awaited()
         start_watcher.assert_not_awaited()
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_git_knowledge_starts_background_sync_when_watch_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared Git knowledge should still start background sync when file watch is disabled."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    config = _make_git_config(tmp_path / "knowledge")
+    runtime_paths = runtime_paths_for(config)
+    start_watcher = AsyncMock()
+    sync_git_repository = AsyncMock(return_value={"updated": False, "changed_count": 0, "removed_count": 0})
+    monkeypatch.setattr(KnowledgeManager, "start_watcher", start_watcher)
+    monkeypatch.setattr(KnowledgeManager, "sync_git_repository", sync_git_repository)
+
+    try:
+        await initialize_knowledge_managers(
+            config,
+            runtime_paths,
+            start_watchers=True,
+            reindex_on_create=False,
+        )
+
+        start_watcher.assert_awaited_once()
+        sync_git_repository.assert_awaited_once()
     finally:
         await shutdown_knowledge_managers()
 
