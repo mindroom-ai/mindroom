@@ -1745,6 +1745,63 @@ async def test_request_bound_private_manager_survives_cache_eviction(
 
 
 @pytest.mark.asyncio
+async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_private_manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Degraded requests should not silently pick cached private knowledge back up."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "mind": _mind_private_agent(
+                    watch=False,
+                    template_dir=str(template_dir),
+                ),
+            },
+            models={},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path),
+    )
+    private_base_id = config.get_agent_private_knowledge_base_id("mind")
+    assert private_base_id is not None
+    alice_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=alice_identity,
+        )
+        with bound_knowledge_managers({}):
+            assert (
+                get_knowledge_for_base(
+                    private_base_id,
+                    config=config,
+                    runtime_paths=runtime_paths_for(config),
+                    execution_identity=alice_identity,
+                )
+                is None
+            )
+    finally:
+        await shutdown_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_sync_git_repository_indexes_files_after_initial_clone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

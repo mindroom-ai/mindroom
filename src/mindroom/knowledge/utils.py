@@ -111,6 +111,8 @@ def get_knowledge_for_base(
     """Resolve one configured base ID to its current Knowledge instance."""
     manager: KnowledgeManager | None
     manager = get_bound_knowledge_manager(base_id)
+    if manager is None and request_knowledge_init_attempted():
+        return None
     if manager is None:
         manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
     if manager is None:
