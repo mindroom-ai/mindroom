@@ -487,9 +487,9 @@ def _candidate_team_decision(
     candidate_team_members: _CandidateTeamMembers,
 ) -> TeamFormationDecision | None:
     """Return an immediate outcome for one candidate set, if any."""
-    if not candidate_team_members.agents:
-        return TeamFormationDecision.none()
     if candidate_team_members.rejection_message is None:
+        if not candidate_team_members.agents:
+            return TeamFormationDecision.none()
         return None
     return TeamFormationDecision.reject(
         agents=candidate_team_members.agents,
@@ -589,6 +589,23 @@ def _mixed_unavailable_team_agents_message(agent_names: list[str]) -> str:
     )
 
 
+def _explicit_request_sender_available_agents(
+    *,
+    available_agents_in_room: list[MatrixID] | None,
+    room_available_agents: list[MatrixID] | None,
+) -> list[MatrixID] | None:
+    """Return sender-visible agents for one explicit request.
+
+    `None` means the caller did not supply sender-specific visibility and room
+    visibility may be used as a fallback.
+    `[]` means sender-specific visibility was supplied and the sender may talk
+    to zero agents, which must not be collapsed into room visibility.
+    """
+    if available_agents_in_room is not None:
+        return available_agents_in_room
+    return room_available_agents
+
+
 def _candidate_explicit_team_agents(
     tagged_agents: list[MatrixID],
     room: nio.MatrixRoom | None,
@@ -604,7 +621,10 @@ def _candidate_explicit_team_agents(
     room_available_agents: list[MatrixID] | None = None
     if room is not None:
         room_available_agents = get_available_agents_in_room(room, config, runtime_paths)
-    sender_available_agents = available_agents_in_room or room_available_agents
+    sender_available_agents = _explicit_request_sender_available_agents(
+        available_agents_in_room=available_agents_in_room,
+        room_available_agents=room_available_agents,
+    )
     if sender_available_agents is None:
         return _CandidateTeamMembers(tagged_agents, _TeamCandidateSource.EXPLICIT_REQUEST)
 
