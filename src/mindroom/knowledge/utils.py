@@ -13,7 +13,6 @@ from mindroom.knowledge.manager import (
     get_shared_knowledge_manager_for_config,
 )
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_knowledge_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -76,26 +75,12 @@ def get_knowledge_for_base(
     if config.get_private_knowledge_base_agent(base_id):
         return None
 
-    manager = shared_manager_lookup(base_id) if shared_manager_lookup is not None else None
-    if manager is not None:
-        try:
-            binding = resolve_knowledge_binding(
-                base_id,
-                config,
-                runtime_paths,
-                execution_identity=None,
-                start_watchers=False,
-            )
-        except ValueError:
-            return None
-        if not manager.matches(config, binding.storage_root, binding.knowledge_path):
-            return None
-    if manager is None:
-        manager = get_shared_knowledge_manager_for_config(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
+    manager = get_shared_knowledge_manager_for_config(
+        base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        candidate_manager=shared_manager_lookup(base_id) if shared_manager_lookup is not None else None,
+    )
     return manager.get_knowledge() if manager is not None else None
 
 

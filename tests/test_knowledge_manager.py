@@ -1204,6 +1204,62 @@ async def test_get_knowledge_for_base_does_not_fall_back_to_stale_shared_manager
 
 
 @pytest.mark.asyncio
+async def test_get_knowledge_for_base_treats_stale_lookup_as_cache_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale shared-manager candidate should fall through to the current shared manager."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_a = tmp_path / "docs-a"
+    docs_b = tmp_path / "docs-b"
+    docs_a.mkdir(parents=True, exist_ok=True)
+    docs_b.mkdir(parents=True, exist_ok=True)
+    (docs_a / "guide.md").write_text("Shared docs A.\n", encoding="utf-8")
+    (docs_b / "guide.md").write_text("Shared docs B.\n", encoding="utf-8")
+
+    config_a = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_a), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "config-a.yaml", tmp_path / "storage-a"),
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={},
+            models={},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_b), watch=False)},
+        ),
+        _runtime_paths(tmp_path / "config-b.yaml", tmp_path / "storage-b"),
+    )
+    stale_manager = KnowledgeManager(
+        base_id="docs",
+        config=config_a,
+        runtime_paths=runtime_paths_for(config_a),
+        storage_path=runtime_paths_for(config_a).storage_root,
+        knowledge_path=docs_a.resolve(),
+    )
+
+    try:
+        managers = await initialize_shared_knowledge_managers(config_b, runtime_paths_for(config_b))
+
+        knowledge = get_knowledge_for_base(
+            "docs",
+            config=config_b,
+            runtime_paths=runtime_paths_for(config_b),
+            shared_manager_lookup=lambda base_id: stale_manager if base_id == "docs" else None,
+        )
+
+        assert knowledge is managers["docs"].get_knowledge()
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
 async def test_initialize_shared_knowledge_managers_refreshes_runtime_paths_on_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1248,6 +1304,54 @@ async def test_initialize_shared_knowledge_managers_refreshes_runtime_paths_on_r
         assert managers_a["docs"] is managers_b["docs"]
         assert managers_b["docs"].runtime_paths.env_path == runtime_paths_for(config_b).env_path
         assert managers_b["docs"].runtime_paths.config_path == runtime_paths_for(config_b).config_path
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_initialize_shared_knowledge_managers_full_reindex_on_cold_settings_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold shared manager recreation should still full-reindex after index-affecting drift."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    docs_path = tmp_path / "research"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config_a = Config(
+        agents={},
+        models={},
+        knowledge_bases={"research": KnowledgeBaseConfig(path=str(docs_path), watch=False)},
+    )
+    config_b = Config(
+        agents={},
+        models={},
+        knowledge_bases={
+            "research": KnowledgeBaseConfig(
+                path=str(docs_path),
+                watch=False,
+                chunk_size=1234,
+            ),
+        },
+    )
+
+    try:
+        await initialize_shared_knowledge_managers(config_a, runtime_paths, reindex_on_create=False)
+        await shutdown_shared_knowledge_managers()
+
+        initialize = AsyncMock()
+        sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+        monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+        monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+        await initialize_shared_knowledge_managers(config_b, runtime_paths, reindex_on_create=False)
+
+        initialize.assert_awaited_once()
+        sync_indexed_files.assert_not_awaited()
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -1356,6 +1460,64 @@ async def test_ensure_agent_knowledge_managers_removes_stale_shared_manager_keys
 
 
 @pytest.mark.asyncio
+async def test_request_scoped_knowledge_manager_initialization_serializes_per_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Concurrent request-scoped ensures should serialize creation for the same binding."""
+    template_dir = build_private_template_dir()
+    config = bind_runtime_paths(
+        Config(
+            agents={"mind": _mind_private_agent(watch=False, template_dir=str(template_dir))},
+            models={},
+        ),
+        _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage"),
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+    active = 0
+    max_active = 0
+    calls = 0
+
+    async def fake_create(**_: object) -> KnowledgeManager:
+        nonlocal active, max_active, calls
+        calls += 1
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return MagicMock(spec=KnowledgeManager)
+
+    monkeypatch.setattr("mindroom.knowledge.manager._create_knowledge_manager_for_target", fake_create)
+
+    await asyncio.gather(
+        ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+        ),
+        ensure_agent_knowledge_managers(
+            "mind",
+            config,
+            runtime_paths_for(config),
+            execution_identity=identity,
+        ),
+    )
+
+    assert calls == 2
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
 async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_concurrency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1438,6 +1600,87 @@ async def test_ensure_agent_knowledge_managers_replaces_stale_shared_key_under_c
             )
             is new_manager
         )
+    finally:
+        await shutdown_shared_knowledge_managers()
+
+
+@pytest.mark.asyncio
+async def test_recreated_request_knowledge_managers_full_reindex_on_settings_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    build_private_template_dir: Callable[..., Path],
+) -> None:
+    """Fresh request-scoped managers should still full-reindex after index-affecting drift."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
+    template_dir = build_private_template_dir()
+    runtime_paths = _runtime_paths(tmp_path / "config.yaml", tmp_path / "storage")
+    config_a = bind_runtime_paths(
+        Config(
+            agents={"mind": _mind_private_agent(watch=False, template_dir=str(template_dir))},
+            models={},
+        ),
+        runtime_paths,
+    )
+    config_b = bind_runtime_paths(
+        Config(
+            agents={
+                "mind": AgentConfig(
+                    display_name="Mind",
+                    memory_backend="file",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        template_dir=str(template_dir),
+                        context_files=["SOUL.md"],
+                        knowledge=AgentPrivateKnowledgeConfig(
+                            path="memory",
+                            watch=False,
+                            chunk_size=1234,
+                        ),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-alice",
+    )
+
+    try:
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config_a,
+            runtime_paths_for(config_a),
+            execution_identity=identity,
+            reindex_on_create=False,
+        )
+
+        initialize = AsyncMock()
+        sync_indexed_files = AsyncMock(return_value={"loaded_count": 0, "indexed_count": 0, "removed_count": 0})
+        monkeypatch.setattr(KnowledgeManager, "initialize", initialize)
+        monkeypatch.setattr(KnowledgeManager, "sync_indexed_files", sync_indexed_files)
+
+        await ensure_agent_knowledge_managers(
+            "mind",
+            config_b,
+            runtime_paths_for(config_b),
+            execution_identity=identity,
+            reindex_on_create=False,
+        )
+
+        initialize.assert_awaited_once()
+        sync_indexed_files.assert_not_awaited()
     finally:
         await shutdown_shared_knowledge_managers()
 
@@ -1652,25 +1895,33 @@ async def test_degraded_request_scoped_knowledge_does_not_fall_back_to_cached_pr
 @pytest.mark.asyncio
 async def test_degraded_request_scoped_knowledge_preserves_shared_manager_fallback(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An empty request-scoped binding should not suppress shared knowledge."""
+    _DummyChromaDb.metadatas = []
+    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _DummyChromaDb)
+    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _DummyKnowledge)
+
     shared_root = tmp_path / "shared-docs"
     shared_root.mkdir()
+    (shared_root / "guide.md").write_text("Shared docs.\n", encoding="utf-8")
     config = _make_config(shared_root)
-    shared_knowledge = object()
-    shared_manager = MagicMock()
-    shared_manager.get_knowledge.return_value = shared_knowledge
 
-    assert (
-        get_knowledge_for_base(
-            "research",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            request_knowledge_managers={},
-            shared_manager_lookup=lambda base_id: shared_manager if base_id == "research" else None,
+    try:
+        managers = await initialize_shared_knowledge_managers(config, runtime_paths_for(config))
+
+        assert (
+            get_knowledge_for_base(
+                "research",
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                request_knowledge_managers={},
+                shared_manager_lookup=lambda base_id: managers.get(base_id),
+            )
+            is managers["research"].get_knowledge()
         )
-        is shared_knowledge
-    )
+    finally:
+        await shutdown_shared_knowledge_managers()
 
 
 @pytest.mark.asyncio

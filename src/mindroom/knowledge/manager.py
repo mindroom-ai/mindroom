@@ -348,6 +348,7 @@ class KnowledgeManager:
     _indexing_settings: tuple[str, ...] = field(init=False)
     _base_storage_path: Path = field(init=False)
     _index_failures_path: Path = field(init=False)
+    _indexing_settings_path: Path = field(init=False)
     _knowledge: Knowledge = field(init=False)
     _indexed_files: set[str] = field(default_factory=set, init=False)
     _indexed_signatures: dict[str, tuple[int, int] | None] = field(default_factory=dict, init=False)
@@ -377,6 +378,7 @@ class KnowledgeManager:
         ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._index_failures_path = self._base_storage_path / "index_failures.json"
+        self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
 
         vector_db = ChromaDb(
             collection=_collection_name(self.base_id, self.knowledge_path),
@@ -422,6 +424,36 @@ class KnowledgeManager:
             msg = f"Knowledge path for base '{self.base_id}' is not initialized"
             raise RuntimeError(msg)
         return knowledge_path
+
+    def _load_persisted_indexing_settings(self) -> tuple[str, ...] | None:
+        if not self._indexing_settings_path.exists():
+            return None
+        try:
+            payload = json.loads(self._indexing_settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+            return None
+        return tuple(payload)
+
+    def _save_persisted_indexing_settings(self) -> None:
+        self._indexing_settings_path.write_text(
+            json.dumps(list(self._indexing_settings)),
+            encoding="utf-8",
+        )
+
+    def _has_existing_index(self) -> bool:
+        vector_db = self._knowledge.vector_db
+        if not isinstance(vector_db, ChromaDb) or not vector_db.exists():
+            return False
+        collection = vector_db.client.get_collection(name=vector_db.collection_name)
+        return collection.count() > 0
+
+    def _needs_full_reindex_on_create(self) -> bool:
+        persisted_settings = self._load_persisted_indexing_settings()
+        if persisted_settings is None:
+            return self._has_existing_index()
+        return persisted_settings != self._indexing_settings
 
     def matches(
         self,
@@ -1000,6 +1032,7 @@ class KnowledgeManager:
             self._indexed_signatures.clear()
             for file_path in files:
                 await self._index_file_locked(file_path, upsert=True)
+            await asyncio.to_thread(self._save_persisted_indexing_settings)
             return len(self._indexed_files)
 
     async def index_file(self, file_path: Path | str, *, upsert: bool = True) -> bool:
@@ -1068,6 +1101,9 @@ class KnowledgeManager:
 
 _shared_knowledge_managers: dict[str, KnowledgeManager] = {}
 _shared_knowledge_manager_init_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+_request_knowledge_manager_init_locks: weakref.WeakValueDictionary[KnowledgeManagerKey, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 async def _stop_and_remove_shared_manager(base_id: str) -> None:
@@ -1088,6 +1124,14 @@ def _shared_knowledge_manager_init_lock(base_id: str) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _shared_knowledge_manager_init_locks[base_id] = lock
+    return lock
+
+
+def _request_knowledge_manager_init_lock(key: KnowledgeManagerKey) -> asyncio.Lock:
+    lock = _request_knowledge_manager_init_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _request_knowledge_manager_init_locks[key] = lock
     return lock
 
 
@@ -1133,10 +1177,11 @@ async def _create_knowledge_manager_for_target(
         storage_path=binding.storage_root,
         knowledge_path=binding.knowledge_path,
     )
-    if reindex_on_create:
+    if reindex_on_create or manager._needs_full_reindex_on_create():
         await manager.initialize()
     else:
         sync_result = await _sync_manager_without_full_reindex(manager)
+        await asyncio.to_thread(manager._save_persisted_indexing_settings)
         sync_log_context: dict[str, object] = {
             "base_id": target.key.base_id,
             "path": str(manager.knowledge_path),
@@ -1223,12 +1268,16 @@ async def _create_request_knowledge_manager_for_target(
     reindex_on_create: bool,
 ) -> KnowledgeManager:
     """Create one request-owned knowledge manager without registering it globally."""
-    return await _create_knowledge_manager_for_target(
-        target=target,
-        config=config,
-        runtime_paths=runtime_paths,
-        reindex_on_create=reindex_on_create,
-    )
+    if not target.binding.request_scoped:
+        msg = f"Request knowledge manager target '{target.key.base_id}' must be request-scoped"
+        raise ValueError(msg)
+    async with _request_knowledge_manager_init_lock(target.key):
+        return await _create_knowledge_manager_for_target(
+            target=target,
+            config=config,
+            runtime_paths=runtime_paths,
+            reindex_on_create=reindex_on_create,
+        )
 
 
 async def ensure_agent_knowledge_managers(
@@ -1318,8 +1367,9 @@ def get_shared_knowledge_manager_for_config(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    candidate_manager: KnowledgeManager | None = None,
 ) -> KnowledgeManager | None:
-    """Return the shared manager only when it still matches the current shared binding."""
+    """Return the current shared manager for one config, treating stale candidates as cache misses."""
     try:
         target = _resolve_knowledge_manager_target(
             config,
@@ -1329,7 +1379,11 @@ def get_shared_knowledge_manager_for_config(
         )
     except ValueError:
         return None
-    manager = _lookup_shared_manager_for_target(target=target, config=config)
+    manager = candidate_manager
+    if manager is not None and not _shared_manager_matches_target(manager, target=target, config=config):
+        manager = None
+    if manager is None:
+        manager = _lookup_shared_manager_for_target(target=target, config=config)
     if manager is None:
         return None
     return manager
@@ -1341,4 +1395,5 @@ async def shutdown_shared_knowledge_managers() -> None:
         await _stop_and_remove_shared_manager(base_id)
 
     _shared_knowledge_manager_init_locks.clear()
+    _request_knowledge_manager_init_locks.clear()
     _shared_knowledge_managers.clear()
