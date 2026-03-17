@@ -135,6 +135,7 @@ def _build_primary_worker_manager(
             DockerWorkerBackend.from_env(
                 auth_token=proxy_token,
                 storage_path=resolved_storage_root,
+                runtime_paths=runtime_paths,
             ),
         )
     if backend_name == "kubernetes":

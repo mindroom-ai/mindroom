@@ -10,11 +10,19 @@ import textwrap
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 
+import pytest
 import yaml
 
-from mindroom.tool_system.worker_routing import worker_dir_name, worker_root_path
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    resolve_worker_key,
+    worker_dir_name,
+    worker_root_path,
+)
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.docker import DockerWorkerBackend, _load_docker_client_and_errors
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
@@ -23,9 +31,6 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import _PROJECTED_CONFIGS_DIRNAME, _WORKER_CONFIG_STATE_DIRNAME
 from mindroom.workers.models import WorkerSpec
-
-if TYPE_CHECKING:
-    import pytest
 
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ROTATED_AUTH_TOKEN = "rotated-token"  # noqa: S105
@@ -418,6 +423,7 @@ def _backend(
     *,
     idle_timeout_seconds: float = 60.0,
     config_text: str = "agents: {}\n",
+    runtime_paths: RuntimePaths | None = None,
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, bool]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
@@ -461,7 +467,12 @@ def _backend(
         "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
         _record_sync_call,
     )
-    backend = DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
+    backend = DockerWorkerBackend(
+        config=config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        runtime_paths=runtime_paths,
+    )
     monkeypatch.setattr(
         backend,
         "_wait_for_ready",
@@ -556,6 +567,7 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     assert env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _TEST_AUTH_TOKEN
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"] == "worker-a"
     assert env["MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"] == "/app/worker"
+    assert env["MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"] == "/app/shared-storage"
     assert env["MINDROOM_SHARED_CREDENTIALS_PATH"] == "/app/worker/.shared_credentials"
     assert env["MINDROOM_CONFIG_PATH"] == "/app/config-host/config.yaml"
     assert env["EXTRA_ENV"] == "present"
@@ -605,6 +617,41 @@ def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
     assert synced_storage_roots == [tmp_path.resolve()]
+
+
+def test_docker_backend_syncs_shared_credentials_from_runtime_shared_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared-credential mirroring should honor explicit runtime mirror paths."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    shared_credentials_path = (tmp_path / "shared-credentials").resolve()
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path,
+        process_env={SHARED_CREDENTIALS_PATH_ENV: str(shared_credentials_path)},
+    )
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    synced_shared_paths: list[Path | None] = []
+
+    def _capture_runtime_shared_path(
+        _worker_key: str,
+        **kwargs: object,
+    ) -> None:
+        credentials_manager = kwargs.get("credentials_manager")
+        synced_shared_paths.append(
+            None if credentials_manager is None else credentials_manager.shared_base_path,
+        )
+
+    monkeypatch.setattr(
+        "mindroom.workers.backends.docker.sync_shared_credentials_to_worker",
+        _capture_runtime_shared_path,
+    )
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    assert synced_shared_paths == [shared_credentials_path]
 
 
 def test_docker_backend_redacts_projected_config_secrets_and_support_state(
@@ -1066,6 +1113,139 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_context"].resolve() not in projection_root.parents
     assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
+def test_docker_backend_shared_worker_mounts_canonical_agent_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shared workers should mount the canonical shared agent root into the container."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "shared",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    expected_agent_root = (tmp_path / "agents" / "alpha").resolve()
+    assert volumes[str(expected_agent_root)] == {
+        "bind": "/app/shared-storage/agents/alpha",
+        "mode": "rw",
+    }
+
+
+def test_docker_backend_user_agent_requires_explicit_private_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-agent workers should fail closed without an explicit private-agent visibility set."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    with pytest.raises(WorkerBackendError, match="user_agent workers require explicit private-agent visibility"):
+        backend.ensure_worker(WorkerSpec(worker_key), now=10.0)
+
+
+def test_docker_backend_user_agent_mounts_private_root_from_worker_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """User-agent workers should mount their private instance root when explicitly visible."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
+    assert volumes[str(expected_private_root)] == {
+        "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "mode": "rw",
+    }
+    assert all(spec["bind"] != "/app/shared-storage/agents/alpha" for spec in volumes.values())
+
+
+def test_docker_backend_recreates_user_agent_container_when_private_visibility_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Changing user-agent private visibility should recreate the container."""
+    config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    first_handle = backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset()), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=20.0)
+
+    replacement_container = fake_client.containers.by_name[first_handle.worker_id]
+    assert replacement_container is not first_container
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+    second_volumes = fake_client.containers.run_calls[-1]["volumes"]
+    assert isinstance(second_volumes, dict)
+    expected_private_root = (tmp_path / "private_instances" / worker_dir_name(worker_key) / "alpha").resolve()
+    assert second_volumes[str(expected_private_root)] == {
+        "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
+        "mode": "rw",
+    }
 
 
 def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:

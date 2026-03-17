@@ -1085,16 +1085,25 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
 
     built_storage_paths: list[Path] = []
+    built_runtime_paths: list[RuntimePaths] = []
 
     class _FakeDockerBackend:
         backend_name = "docker"
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_env(cls, *, auth_token: str | None, storage_path: Path | None = None) -> _FakeDockerBackend:
+        def from_env(
+            cls,
+            *,
+            auth_token: str | None,
+            storage_path: Path | None = None,
+            runtime_paths: RuntimePaths | None = None,
+        ) -> _FakeDockerBackend:
             assert auth_token == _TEST_AUTH_TOKEN
             assert storage_path is not None
+            assert runtime_paths is not None
             built_storage_paths.append(storage_path)
+            built_runtime_paths.append(runtime_paths)
             return cls()
 
     monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
@@ -1126,6 +1135,7 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     )
 
     assert built_storage_paths == [first_storage_path, second_storage_path]
+    assert built_runtime_paths == [first_runtime_paths, second_runtime_paths]
     assert first_manager is not second_manager
     workers_runtime_module._reset_primary_worker_manager()
 
