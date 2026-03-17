@@ -468,12 +468,13 @@ def _filter_supported_team_agents(
     """Return only team-eligible agents from one candidate set."""
     supported_agents: list[MatrixID] = []
     skipped_agents: list[str] = []
+    closure_cache: dict[str, frozenset[str]] = {}
     for agent_id in agent_ids:
         agent_name = agent_id.agent_name(config, runtime_paths) or agent_id.username
         if agent_name == ROUTER_AGENT_NAME:
             continue
         agent_config = config.agents.get(agent_name)
-        if agent_config is None or agent_config.private is not None:
+        if agent_config is None or config.get_private_team_targets(agent_name, closures=closure_cache):
             skipped_agents.append(agent_name)
             continue
         supported_agents.append(agent_id)

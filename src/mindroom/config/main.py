@@ -702,6 +702,22 @@ class Config(BaseModel):
         closures[agent_name] = result
         return result
 
+    def get_private_team_targets(
+        self,
+        agent_name: str,
+        *,
+        closures: dict[str, frozenset[str]] | None = None,
+    ) -> tuple[str, ...]:
+        """Return private agents reachable from one team member, including itself."""
+        closure_cache = closures if closures is not None else {}
+        return tuple(
+            sorted(
+                target_name
+                for target_name in self.get_agent_delegation_closure(agent_name, closures=closure_cache)
+                if target_name in self.agents and self.agents[target_name].private is not None
+            ),
+        )
+
     def assert_team_agents_supported(
         self,
         agent_names: list[str],
@@ -717,11 +733,7 @@ class Config(BaseModel):
                 raise ValueError(msg)
 
         for agent_name in agent_names:
-            private_targets = sorted(
-                target_name
-                for target_name in self.get_agent_delegation_closure(agent_name, closures=closure_cache)
-                if target_name in self.agents and self.agents[target_name].private is not None
-            )
+            private_targets = self.get_private_team_targets(agent_name, closures=closure_cache)
             if not private_targets:
                 continue
             if agent_name in private_targets:
