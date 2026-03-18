@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { Integrations } from './Integrations';
 import { useConfigStore } from '@/store/configStore';
+import type { AgentPoliciesByAgent } from '@/types/config';
 
 // Mock hooks
 const mockTools = [
@@ -29,15 +30,83 @@ const mockTools = [
     dependencies: null,
   },
 ];
+const scopedMockTools = [
+  {
+    name: 'private_mail',
+    display_name: 'Private Mail',
+    description: 'Private scoped mail integration',
+    icon: '📫',
+    icon_color: null,
+    category: 'communication',
+    status: 'available',
+    setup_type: 'api_key',
+    config_fields: [
+      {
+        name: 'PRIVATE_MAIL_API_KEY',
+        label: 'API Key',
+        type: 'password',
+        required: true,
+        placeholder: 'Enter your private mail API key',
+        description: 'Scoped API key',
+      },
+    ],
+    helper_text: null,
+    docs_url: null,
+    dependencies: null,
+  },
+];
 let mockStatusAuthoritative = true;
+const {
+  mockUseTools,
+  mockGoogleOnAction,
+  mockSpotifyOnAction,
+  mockSpotifyOnDisconnect,
+  mockPlexOnAction,
+  mockPlexOnDisconnect,
+  mockGoogleLoadStatus,
+  mockSpotifyLoadStatus,
+  mockPlexLoadStatus,
+} = vi.hoisted(() => ({
+  mockUseTools: vi.fn(),
+  mockGoogleOnAction: vi.fn(),
+  mockSpotifyOnAction: vi.fn(),
+  mockSpotifyOnDisconnect: vi.fn(),
+  mockPlexOnAction: vi.fn(),
+  mockPlexOnDisconnect: vi.fn(),
+  mockGoogleLoadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
+  mockSpotifyLoadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
+  mockPlexLoadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
+}));
+
+function createDeferred() {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>(promiseResolve => {
+    resolve = () => promiseResolve();
+  });
+  return { promise, resolve };
+}
+
+function makeAgentPolicy(
+  agentName: string,
+  overrides: Partial<AgentPoliciesByAgent[string]> = {}
+): AgentPoliciesByAgent[string] {
+  return {
+    agent_name: agentName,
+    is_private: false,
+    effective_execution_scope: null,
+    scope_label: 'unscoped',
+    scope_source: 'unscoped',
+    dashboard_credentials_supported: true,
+    team_eligibility_reason: null,
+    private_knowledge_base_id: null,
+    request_scoped_workspace_enabled: false,
+    request_scoped_knowledge_enabled: false,
+    ...overrides,
+  };
+}
 
 vi.mock('@/hooks/useTools', () => ({
-  useTools: () => ({
-    tools: mockTools,
-    loading: false,
-    refetch: vi.fn(),
-    statusAuthoritative: mockStatusAuthoritative,
-  }),
+  useTools: mockUseTools,
   mapToolToIntegration: (tool: any) => ({
     id: tool.name,
     name: tool.display_name,
@@ -92,10 +161,10 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'special',
           connected: false,
         },
-        onAction: vi.fn(),
+        onAction: mockGoogleOnAction,
         ConfigComponent: () => <div>Google Config Component</div>,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
+      loadStatus: mockGoogleLoadStatus,
     },
     spotify: {
       getConfig: () => ({
@@ -109,10 +178,10 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'oauth',
           connected: false,
         },
-        onAction: vi.fn(),
-        onDisconnect: vi.fn(),
+        onAction: mockSpotifyOnAction,
+        onDisconnect: mockSpotifyOnDisconnect,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
+      loadStatus: mockSpotifyLoadStatus,
     },
     plex: {
       getConfig: () => ({
@@ -126,15 +195,15 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'api_key',
           connected: true,
         },
-        onAction: vi.fn(),
-        onDisconnect: vi.fn(),
+        onAction: mockPlexOnAction,
+        onDisconnect: mockPlexOnDisconnect,
         ConfigComponent: () => <div>Plex Config Component</div>,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
+      loadStatus: mockPlexLoadStatus,
     },
   },
   getAllIntegrations: () => [
-    vi.mocked({
+    {
       getConfig: () => ({
         integration: {
           id: 'google',
@@ -146,12 +215,12 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'special',
           connected: false,
         },
-        onAction: vi.fn(),
+        onAction: mockGoogleOnAction,
         ConfigComponent: () => <div>Google Config Component</div>,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
-    }),
-    vi.mocked({
+      loadStatus: mockGoogleLoadStatus,
+    },
+    {
       getConfig: () => ({
         integration: {
           id: 'spotify',
@@ -163,12 +232,12 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'oauth',
           connected: false,
         },
-        onAction: vi.fn(),
-        onDisconnect: vi.fn(),
+        onAction: mockSpotifyOnAction,
+        onDisconnect: mockSpotifyOnDisconnect,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'available', connected: false }),
-    }),
-    vi.mocked({
+      loadStatus: mockSpotifyLoadStatus,
+    },
+    {
       getConfig: () => ({
         integration: {
           id: 'plex',
@@ -180,12 +249,12 @@ vi.mock('./integrations/index', () => ({
           setup_type: 'api_key',
           connected: true,
         },
-        onAction: vi.fn(),
-        onDisconnect: vi.fn(),
+        onAction: mockPlexOnAction,
+        onDisconnect: mockPlexOnDisconnect,
         ConfigComponent: () => <div>Plex Config Component</div>,
       }),
-      loadStatus: vi.fn().mockResolvedValue({ status: 'connected', connected: true }),
-    }),
+      loadStatus: mockPlexLoadStatus,
+    },
   ],
 }));
 
@@ -194,7 +263,23 @@ describe('Integrations', () => {
     vi.clearAllMocks();
     mockToast.mockReset();
     mockStatusAuthoritative = true;
-    useConfigStore.setState({ agents: [] });
+    mockGoogleOnAction.mockResolvedValue(undefined);
+    mockSpotifyOnAction.mockResolvedValue(undefined);
+    mockSpotifyOnDisconnect.mockResolvedValue(undefined);
+    mockPlexOnAction.mockResolvedValue(undefined);
+    mockPlexOnDisconnect.mockResolvedValue(undefined);
+    mockGoogleLoadStatus.mockResolvedValue({ status: 'available', connected: false });
+    mockSpotifyLoadStatus.mockResolvedValue({ status: 'available', connected: false });
+    mockPlexLoadStatus.mockResolvedValue({ status: 'connected', connected: true });
+    mockUseTools.mockImplementation(
+      (agentName?: string | null, executionScope?: string | null) => ({
+        tools: agentName === 'mind' && executionScope === 'user' ? scopedMockTools : mockTools,
+        loading: false,
+        refetch: vi.fn(),
+        statusAuthoritative: mockStatusAuthoritative,
+      })
+    );
+    useConfigStore.setState({ agents: [], agentPoliciesByAgent: {} });
     Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
       configurable: true,
       value: () => false,
@@ -446,6 +531,22 @@ describe('Integrations', () => {
           },
         },
       ],
+      agentPoliciesByAgent: {
+        general: makeAgentPolicy('general'),
+        code: makeAgentPolicy('code', {
+          effective_execution_scope: 'shared',
+          scope_label: 'worker_scope=shared',
+          scope_source: 'agent.worker_scope',
+        }),
+        mind: makeAgentPolicy('mind', {
+          is_private: true,
+          effective_execution_scope: 'user_agent',
+          scope_label: 'private.per=user_agent',
+          scope_source: 'private.per',
+          dashboard_credentials_supported: false,
+          request_scoped_workspace_enabled: true,
+        }),
+      },
     });
 
     render(<Integrations />);
@@ -475,6 +576,14 @@ describe('Integrations', () => {
           worker_scope: null,
         },
       ],
+      agentPoliciesByAgent: {
+        general: makeAgentPolicy('general', {
+          effective_execution_scope: 'user',
+          scope_label: 'worker_scope=user',
+          scope_source: 'defaults.worker_scope',
+          dashboard_credentials_supported: false,
+        }),
+      },
       config: {
         memory: {
           backend: 'mem0',
@@ -541,6 +650,16 @@ describe('Integrations', () => {
           },
         },
       ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy('mind', {
+          is_private: true,
+          effective_execution_scope: 'user',
+          scope_label: 'private.per=user',
+          scope_source: 'private.per',
+          dashboard_credentials_supported: false,
+          request_scoped_workspace_enabled: true,
+        }),
+      },
     });
 
     render(<Integrations />);
@@ -573,6 +692,14 @@ describe('Integrations', () => {
           worker_scope: 'user',
         },
       ],
+      agentPoliciesByAgent: {
+        code: makeAgentPolicy('code', {
+          effective_execution_scope: 'user',
+          scope_label: 'worker_scope=user',
+          scope_source: 'agent.worker_scope',
+          dashboard_credentials_supported: false,
+        }),
+      },
     });
 
     render(<Integrations />);
@@ -624,6 +751,16 @@ describe('Integrations', () => {
           },
         },
       ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy('mind', {
+          is_private: true,
+          effective_execution_scope: 'user',
+          scope_label: 'private.per=user',
+          scope_source: 'private.per',
+          dashboard_credentials_supported: false,
+          request_scoped_workspace_enabled: true,
+        }),
+      },
     });
 
     render(<Integrations />);
@@ -648,6 +785,150 @@ describe('Integrations', () => {
 
     expect(screen.queryByText('Google Services')).not.toBeInTheDocument();
     expect(screen.queryByText('Spotify')).not.toBeInTheDocument();
-    expect(screen.getByText('Weather')).toBeInTheDocument();
+    expect(screen.queryByText('Weather')).not.toBeInTheDocument();
+    expect(screen.getByText('Private Mail')).toBeInTheDocument();
+  });
+
+  it('ignores stale shared-scope reloads after switching scope mid-action', async () => {
+    const spotifyAction = createDeferred();
+    mockSpotifyOnAction.mockImplementation(() => spotifyAction.promise);
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy('mind', {
+          is_private: true,
+          effective_execution_scope: 'user',
+          scope_label: 'private.per=user',
+          scope_source: 'private.per',
+          dashboard_credentials_supported: false,
+          request_scoped_workspace_enabled: true,
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Spotify')).toBeInTheDocument();
+      expect(screen.getByText('Weather')).toBeInTheDocument();
+    });
+
+    const spotifyCard = screen.getByText('Spotify').closest('.h-full');
+    expect(spotifyCard).toBeInstanceOf(HTMLElement);
+    fireEvent.click(within(spotifyCard as HTMLElement).getByRole('button', { name: 'Connect' }));
+
+    await waitFor(() => {
+      expect(mockSpotifyOnAction).toHaveBeenCalledTimes(1);
+    });
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Configuring tools for Private Agent (private.per=user).')
+      ).toBeInTheDocument();
+      expect(screen.getByText('Private Mail')).toBeInTheDocument();
+      expect(screen.queryByText('Weather')).not.toBeInTheDocument();
+    });
+
+    await act(async () => {
+      spotifyAction.resolve();
+      await spotifyAction.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Mail')).toBeInTheDocument();
+      expect(screen.queryByText('Weather')).not.toBeInTheDocument();
+    });
+  });
+
+  it('clears the selected scope when policy preview disappears', async () => {
+    useConfigStore.setState({
+      agents: [
+        {
+          id: 'mind',
+          display_name: 'Private Agent',
+          role: 'test',
+          tools: ['gmail'],
+          skills: [],
+          instructions: [],
+          rooms: ['personal'],
+          private: {
+            per: 'user',
+          },
+        },
+      ],
+      agentPoliciesByAgent: {
+        mind: makeAgentPolicy('mind', {
+          is_private: true,
+          effective_execution_scope: 'user',
+          scope_label: 'private.per=user',
+          scope_source: 'private.per',
+          dashboard_credentials_supported: false,
+          request_scoped_workspace_enabled: true,
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole('combobox');
+    fireEvent.keyDown(combobox, { key: 'ArrowDown', code: 'ArrowDown' });
+
+    await waitFor(() => {
+      expect(screen.getByText('Private Agent')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Private Agent'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Configuring tools for Private Agent (private.per=user).')
+      ).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Private Mail')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      useConfigStore.setState({
+        agentPoliciesByAgent: {},
+      });
+    });
+
+    expect(screen.queryByText('Private Mail')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Configuring tools for Private Agent (private.per=user).')
+      ).not.toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(mockUseTools).toHaveBeenLastCalledWith(null, null);
+    });
+    await waitFor(() => {
+      expect(screen.getByText('Weather')).toBeInTheDocument();
+    });
   });
 });

@@ -4,7 +4,12 @@ export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = 'mem0' | 'file';
 export type WorkerScope = 'shared' | 'user' | 'user_agent';
 export type PrivateWorkerScope = Exclude<WorkerScope, 'shared'>;
-export type TeamEligibilityByAgent = Record<string, string | null>;
+export type AgentPolicySource =
+  | 'private.per'
+  | 'agent.worker_scope'
+  | 'defaults.worker_scope'
+  | 'unscoped';
+export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
 export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = 'memory';
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = 'SOUL.md';
 
@@ -202,30 +207,17 @@ export interface Config {
   voice?: VoiceConfig; // Voice configuration
 }
 
-export function getAgentExecutionScope(
-  config: Pick<Config, 'defaults'> | null | undefined,
-  agent: Pick<Agent, 'private' | 'worker_scope'>
-): WorkerScope | null {
-  // Mirror Config.get_agent_execution_scope() on the backend. This is the derived
-  // runtime concept, not the authored config field, so private agents come from
-  // private.per while shared agents come from worker_scope/defaults.worker_scope.
-  return agent.private?.per ?? agent.worker_scope ?? config?.defaults.worker_scope ?? null;
-}
-
-export function getAgentScopeLabel(
-  config: Pick<Config, 'defaults'> | null | undefined,
-  agent: Pick<Agent, 'private' | 'worker_scope'>
-): string | null {
-  // Keep the authored label separate from the derived execution scope so the UI does
-  // not blur private.per together with worker_scope again.
-  if (agent.private != null) {
-    return `private.per=${agent.private.per}`;
-  }
-  const executionScope = getAgentExecutionScope(config, agent);
-  if (executionScope != null) {
-    return `worker_scope=${executionScope}`;
-  }
-  return null;
+export interface AgentPolicy {
+  agent_name: string;
+  is_private: boolean;
+  effective_execution_scope: WorkerScope | null;
+  scope_label: string;
+  scope_source: AgentPolicySource;
+  dashboard_credentials_supported: boolean;
+  team_eligibility_reason: string | null;
+  private_knowledge_base_id: string | null;
+  request_scoped_workspace_enabled: boolean;
+  request_scoped_knowledge_enabled: boolean;
 }
 
 function normalizePrivateKnowledgeConfig(

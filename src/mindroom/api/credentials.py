@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING, Any, cast
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.agent_policy import (
+    ResolvedAgentPolicy,
+    dashboard_credentials_supported_for_scope,
+    resolve_agent_policy_from_data,
+)
 from mindroom.api import config_lifecycle
 from mindroom.credentials import (
     CredentialsManager,
@@ -78,6 +83,7 @@ class DashboardAgentExecutionScopeResolution:
     """Resolved dashboard scope request for one agent selection."""
 
     agent_name: str | None
+    persisted_policy: ResolvedAgentPolicy | None
     persisted_execution_scope: WorkerScope | None
     requested_execution_scope: WorkerScope | None
     execution_scope_override_provided: bool
@@ -189,11 +195,6 @@ def build_dashboard_execution_identity(request: Request, agent_name: str) -> Too
     )
 
 
-def dashboard_supports_worker_credentials(worker_scope: WorkerScope | None) -> bool:
-    """Return whether the dashboard can resolve this worker scope to a concrete worker."""
-    return worker_scope in (None, "shared")
-
-
 def _dashboard_scope_label(
     *,
     config_labeled_scope: str,
@@ -246,6 +247,7 @@ def resolve_dashboard_agent_execution_scope_request(
             )
         return DashboardAgentExecutionScopeResolution(
             agent_name=None,
+            persisted_policy=None,
             persisted_execution_scope=None,
             requested_execution_scope=None,
             execution_scope_override_provided=False,
@@ -255,18 +257,24 @@ def resolve_dashboard_agent_execution_scope_request(
     if agent_name not in config.agents:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
 
-    persisted_execution_scope = config.get_agent_execution_scope(agent_name)
+    persisted_policy = resolve_agent_policy_from_data(
+        agent_name,
+        config.agents[agent_name],
+        default_worker_scope=config.defaults.worker_scope,
+        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    )
+    persisted_execution_scope = persisted_policy.effective_execution_scope
     requested_execution_scope = (
         execution_scope_override if execution_scope_override_provided else persisted_execution_scope
     )
     draft_scope_preview = execution_scope_override_provided and requested_execution_scope != persisted_execution_scope
     if draft_scope_preview and not allow_draft_override:
         requested_scope_label = _dashboard_scope_label(
-            config_labeled_scope=config.get_agent_scope_label(agent_name),
+            config_labeled_scope=persisted_policy.scope_label,
             execution_scope=requested_execution_scope,
             execution_scope_override_provided=True,
         )
-        persisted_scope_label = config.get_agent_scope_label(agent_name) or "execution_scope=unscoped"
+        persisted_scope_label = persisted_policy.scope_label
         raise HTTPException(
             status_code=409,
             detail=(
@@ -276,6 +284,7 @@ def resolve_dashboard_agent_execution_scope_request(
         )
     return DashboardAgentExecutionScopeResolution(
         agent_name=agent_name,
+        persisted_policy=persisted_policy,
         persisted_execution_scope=persisted_execution_scope,
         requested_execution_scope=requested_execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
@@ -354,11 +363,13 @@ def resolve_request_credentials_target(
         )
 
     scope_label = _dashboard_scope_label(
-        config_labeled_scope=config.get_agent_scope_label(scope_request.agent_name),
+        config_labeled_scope=(
+            scope_request.persisted_policy.scope_label if scope_request.persisted_policy is not None else "unscoped"
+        ),
         execution_scope=execution_scope,
         execution_scope_override_provided=execution_scope_override_provided,
     )
-    if not dashboard_supports_worker_credentials(execution_scope):
+    if not dashboard_credentials_supported_for_scope(execution_scope):
         raise HTTPException(
             status_code=400,
             detail=(

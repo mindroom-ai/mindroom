@@ -23,10 +23,9 @@ import {
 import { useForm, useWatch, Controller } from 'react-hook-form';
 import {
   Agent,
-  getDefaultPrivateConfig,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
-  getAgentExecutionScope,
+  getDefaultPrivateConfig,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
 } from '@/types/config';
 import { ToolConfigDialog } from '@/components/ToolConfig/ToolConfigDialog';
@@ -36,6 +35,9 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { useTools } from '@/hooks/useTools';
 import { useSkills } from '@/hooks/useSkills';
 import { useScopedConfigValidation } from '@/hooks/useScopedConfigValidation';
+
+const TOOL_VALIDATION_UNAVAILABLE_MESSAGE =
+  'Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.';
 
 export function AgentEditor() {
   const {
@@ -47,6 +49,7 @@ export function AgentEditor() {
     deleteAgent,
     saveConfig,
     config,
+    agentPoliciesByAgent,
     isDirty,
     selectAgent,
   } = useConfigStore();
@@ -66,15 +69,20 @@ export function AgentEditor() {
   );
 
   // Fetch tools and skills from backend
+  const selectedAgentPolicy = selectedAgent ? agentPoliciesByAgent[selectedAgent.id] ?? null : null;
   const selectedExecutionScope = useMemo(
-    () => (selectedAgent ? getAgentExecutionScope(config, selectedAgent) : null),
-    [config, selectedAgent]
+    () => selectedAgentPolicy?.effective_execution_scope ?? null,
+    [selectedAgentPolicy]
   );
+  const policyPreviewAvailable = selectedAgent == null || selectedAgentPolicy != null;
   const {
     tools: backendTools,
     loading: toolsLoading,
     statusAuthoritative,
-  } = useTools(selectedAgentId, selectedExecutionScope);
+  } = useTools(
+    policyPreviewAvailable ? selectedAgentId : null,
+    policyPreviewAvailable ? selectedExecutionScope : undefined
+  );
   const { skills: availableSkills, loading: skillsLoading } = useSkills();
 
   // Enable swipe back on mobile
@@ -109,6 +117,7 @@ export function AgentEditor() {
   const includeDefaultTools = useWatch({ name: 'include_default_tools', control });
   const privateConfig = useWatch({ name: 'private', control });
   const privateKnowledge = privateConfig?.knowledge;
+  const policyAwareBackendTools = policyPreviewAvailable ? backendTools : [];
   const validationPrefix = useMemo<Array<string | number> | null>(
     () => (selectedAgentId == null ? null : ['agents', selectedAgentId]),
     [selectedAgentId]
@@ -124,9 +133,9 @@ export function AgentEditor() {
   // Split tools into configured, default, and setup-required categories.
   const { configuredTools, defaultTools, setupRequiredTools, selectedUnavailableTools } =
     useMemo(() => {
-      const configured: typeof backendTools = [];
-      const defaults: typeof backendTools = [];
-      const setupRequired: typeof backendTools = [];
+      const configured: typeof policyAwareBackendTools = [];
+      const defaults: typeof policyAwareBackendTools = [];
+      const setupRequired: typeof policyAwareBackendTools = [];
       const selectedUnavailable: Array<{
         name: string;
         display_name: string;
@@ -135,7 +144,7 @@ export function AgentEditor() {
       const selectedToolNames = agentTools ?? [];
       const backendToolNames = new Set<string>();
 
-      backendTools.forEach(tool => {
+      policyAwareBackendTools.forEach(tool => {
         backendToolNames.add(tool.name);
         // delegate is managed via delegate_to, not the tools picker
         if (tool.name === 'delegate') return;
@@ -159,16 +168,18 @@ export function AgentEditor() {
         }
       });
 
-      for (const toolName of selectedToolNames) {
-        if (toolName === 'delegate' || backendToolNames.has(toolName)) {
-          continue;
+      if (policyPreviewAvailable) {
+        for (const toolName of selectedToolNames) {
+          if (toolName === 'delegate' || backendToolNames.has(toolName)) {
+            continue;
+          }
+          selectedUnavailable.push({
+            name: toolName,
+            display_name: toolName,
+            reason:
+              'This tool is no longer available in the current registry. Uncheck it to remove it.',
+          });
         }
-        selectedUnavailable.push({
-          name: toolName,
-          display_name: toolName,
-          reason:
-            'This tool is no longer available in the current registry. Uncheck it to remove it.',
-        });
       }
 
       return {
@@ -181,7 +192,7 @@ export function AgentEditor() {
           a.display_name.localeCompare(b.display_name)
         ),
       };
-    }, [agentTools, backendTools]);
+    }, [agentTools, policyAwareBackendTools, policyPreviewAvailable]);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
     const tools = new Set(agentTools);
@@ -900,6 +911,14 @@ export function AgentEditor() {
       {/* Tools */}
       <FieldGroup label="Tools" helperText="Select tools this agent can use">
         <div className="space-y-4">
+          {selectedAgent != null && selectedAgentPolicy == null && (
+            <Alert>
+              <AlertDescription>
+                Agent policy preview is unavailable. Save or refresh to re-validate tool scope
+                support for this draft.
+              </AlertDescription>
+            </Alert>
+          )}
           {selectedExecutionScope != null && statusAuthoritative === false && (
             <Alert>
               <AlertDescription>
@@ -909,7 +928,11 @@ export function AgentEditor() {
               </AlertDescription>
             </Alert>
           )}
-          {toolsLoading ? (
+          {!policyPreviewAvailable ? (
+            <div className="text-sm text-muted-foreground text-center py-4">
+              {TOOL_VALIDATION_UNAVAILABLE_MESSAGE}
+            </div>
+          ) : toolsLoading ? (
             <div className="text-sm text-muted-foreground text-center py-4">
               Loading available tools...
             </div>

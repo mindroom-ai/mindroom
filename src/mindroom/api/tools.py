@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from mindroom.agent_policy import dashboard_credentials_supported_for_scope
 from mindroom.api import config_lifecycle
 from mindroom.api.credentials import (
     build_dashboard_execution_identity,
-    dashboard_supports_worker_credentials,
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
@@ -165,7 +165,7 @@ def _resolve_tool_availability_context(
     execution_scope = scope_request.requested_execution_scope
 
     runtime_paths = api_runtime_paths(request)
-    status_authoritative = not scope_request.draft_scope_preview and dashboard_supports_worker_credentials(
+    status_authoritative = not scope_request.draft_scope_preview and dashboard_credentials_supported_for_scope(
         execution_scope,
     )
     execution_identity = (

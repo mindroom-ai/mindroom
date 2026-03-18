@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ArrowRight,
   Settings,
@@ -31,7 +31,6 @@ import { useToast } from '@/components/ui/use-toast';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useTools, mapToolToIntegration } from '@/hooks/useTools';
 import { useConfigStore } from '@/store/configStore';
-import { getAgentExecutionScope, getAgentScopeLabel } from '@/types/config';
 import { getIconForTool } from './iconMapping';
 import { API_BASE_URL, withAgentExecutionScope } from '@/lib/api';
 import {
@@ -46,28 +45,30 @@ import { FilterSelector } from '@/components/shared/FilterSelector';
 const SHARED_ONLY_PROVIDER_IDS = new Set(['google', 'spotify', 'homeassistant']);
 
 export function Integrations() {
-  const { agents, config } = useConfigStore();
+  const { agents, agentPoliciesByAgent } = useConfigStore();
   const [scopeAgentName, setScopeAgentName] = useState<string | null>(null);
   const scopedAgents = useMemo(
     () =>
       agents
-        .filter(agent => getAgentExecutionScope(config, agent) != null)
+        .filter(agent => agentPoliciesByAgent[agent.id]?.effective_execution_scope != null)
         .sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [agents, config]
+    [agentPoliciesByAgent, agents]
   );
   const selectedScopeAgent = useMemo(
     () => scopedAgents.find(agent => agent.id === scopeAgentName) ?? null,
     [scopedAgents, scopeAgentName]
   );
-  const selectedExecutionScope =
-    selectedScopeAgent != null ? getAgentExecutionScope(config, selectedScopeAgent) : null;
-  const selectedScopeLabel =
-    selectedScopeAgent != null ? getAgentScopeLabel(config, selectedScopeAgent) : null;
+  const effectiveScopeAgentName = selectedScopeAgent?.id ?? null;
+  const selectedScopePolicy =
+    selectedScopeAgent != null ? agentPoliciesByAgent[selectedScopeAgent.id] ?? null : null;
+  const selectedExecutionScope = selectedScopePolicy?.effective_execution_scope ?? null;
+  const selectedScopeLabel = selectedScopePolicy?.scope_label ?? null;
   const hidesSharedOnlyIntegrations =
     selectedScopeAgent !== null &&
     selectedExecutionScope !== null &&
     selectedExecutionScope !== 'shared';
-  const disablesDashboardCredentialManagement = hidesSharedOnlyIntegrations;
+  const disablesDashboardCredentialManagement =
+    selectedScopeAgent !== null && selectedScopePolicy?.dashboard_credentials_supported === false;
 
   // Fetch tools from backend
   const {
@@ -75,11 +76,32 @@ export function Integrations() {
     loading: toolsLoading,
     refetch: refetchTools,
     statusAuthoritative,
-  } = useTools(scopeAgentName, selectedExecutionScope);
+  } = useTools(effectiveScopeAgentName, selectedExecutionScope);
+  const currentScopeKey = useMemo(
+    () =>
+      [
+        effectiveScopeAgentName ?? 'shared',
+        selectedExecutionScope ?? 'unscoped',
+        hidesSharedOnlyIntegrations ? 'isolated' : 'shared',
+      ].join(':'),
+    [effectiveScopeAgentName, hidesSharedOnlyIntegrations, selectedExecutionScope]
+  );
 
   // State
-  const [integrations, setIntegrations] = useState<Integration[]>([]);
+  const [integrationsState, setIntegrationsState] = useState<{
+    scopeKey: string;
+    integrations: Integration[];
+  }>({
+    scopeKey: '',
+    integrations: [],
+  });
   const [loading, setLoading] = useState(false);
+  const loadRequestIdRef = useRef(0);
+  const currentScopeKeyRef = useRef(currentScopeKey);
+  currentScopeKeyRef.current = currentScopeKey;
+  const isCurrentScope = (scopeKey: string) => currentScopeKeyRef.current === scopeKey;
+  const isCurrentLoadRequest = (requestId: number, scopeKey: string) =>
+    requestId === loadRequestIdRef.current && isCurrentScope(scopeKey);
   const [activeDialog, setActiveDialog] = useState<{
     integrationId: string;
     config: IntegrationConfig;
@@ -110,9 +132,15 @@ export function Integrations() {
   // Load integrations from providers and backend tools
   useEffect(() => {
     loadIntegrations();
-  }, [backendTools, hidesSharedOnlyIntegrations, scopeAgentName, selectedExecutionScope]);
+  }, [backendTools, currentScopeKey]);
 
   const loadIntegrations = async (forceRefresh = false) => {
+    const scopeKey = currentScopeKey;
+    if (!isCurrentScope(scopeKey)) {
+      return;
+    }
+
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     try {
       // Optionally refetch tools from backend to get updated statuses
@@ -120,12 +148,11 @@ export function Integrations() {
       if (forceRefresh) {
         await refetchTools();
         // Return early since refetchTools will trigger this useEffect again via backendTools update
-        setLoading(false);
         return;
       }
 
       const loadedIntegrations: Integration[] = [];
-      const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
+      const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
 
       // Load special integrations from providers
       for (const provider of getAllIntegrations()) {
@@ -159,8 +186,18 @@ export function Integrations() {
           } as Integration & { auth_provider?: string };
         });
 
-      setIntegrations([...loadedIntegrations, ...backendIntegrations]);
+      if (!isCurrentLoadRequest(requestId, scopeKey)) {
+        return;
+      }
+
+      setIntegrationsState({
+        scopeKey,
+        integrations: [...loadedIntegrations, ...backendIntegrations],
+      });
     } catch (error) {
+      if (!isCurrentLoadRequest(requestId, scopeKey)) {
+        return;
+      }
       console.error('Failed to load integrations:', error);
       toast({
         title: 'Error',
@@ -168,7 +205,9 @@ export function Integrations() {
         variant: 'destructive',
       });
     } finally {
-      setLoading(false);
+      if (isCurrentLoadRequest(requestId, scopeKey)) {
+        setLoading(false);
+      }
     }
   };
 
@@ -199,7 +238,7 @@ export function Integrations() {
 
     // Check if we have a provider for this integration
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
+    const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
 
     if (provider) {
       const config = provider.getConfig(scope);
@@ -278,7 +317,7 @@ export function Integrations() {
     }
 
     const provider = integrationProviders[integration.id];
-    const scope = { agentName: scopeAgentName, executionScope: selectedExecutionScope };
+    const scope = { agentName: effectiveScopeAgentName, executionScope: selectedExecutionScope };
 
     setLoading(true);
     try {
@@ -290,7 +329,7 @@ export function Integrations() {
         const response = await fetch(
           withAgentExecutionScope(
             `${API_BASE_URL}/api/credentials/${integration.id}`,
-            scopeAgentName,
+            effectiveScopeAgentName,
             selectedExecutionScope
           ),
           {
@@ -336,7 +375,7 @@ export function Integrations() {
     // Check if there's a custom action button
     const provider = integrationProviders[integration.id];
     const config = provider?.getConfig({
-      agentName: scopeAgentName,
+      agentName: effectiveScopeAgentName,
       executionScope: selectedExecutionScope,
     });
 
@@ -580,6 +619,9 @@ export function Integrations() {
   );
 
   // Filter integrations
+  const integrations =
+    integrationsState.scopeKey === currentScopeKey ? integrationsState.integrations : [];
+
   const filteredIntegrations = useMemo(() => {
     let filtered = integrations;
 
@@ -801,7 +843,7 @@ export function Integrations() {
             {activeDialog.config.ConfigComponent && (
               <activeDialog.config.ConfigComponent
                 onClose={() => setActiveDialog(null)}
-                agentName={scopeAgentName}
+                agentName={effectiveScopeAgentName}
                 executionScope={selectedExecutionScope}
                 onSuccess={async () => {
                   setActiveDialog(null);
@@ -828,7 +870,7 @@ export function Integrations() {
           helperText={configDialog.helperText}
           icon={configDialog.icon}
           iconColor={configDialog.iconColor}
-          agentName={scopeAgentName}
+          agentName={effectiveScopeAgentName}
           executionScope={selectedExecutionScope}
           onSuccess={async () => {
             setConfigDialog(null);

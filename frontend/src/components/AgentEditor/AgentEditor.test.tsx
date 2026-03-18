@@ -2,7 +2,12 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentEditor } from './AgentEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Agent, normalizeAgentUpdates, SHARED_CONTEXT_FILE_PLACEHOLDER } from '@/types/config';
+import {
+  Agent,
+  AgentPoliciesByAgent,
+  normalizeAgentUpdates,
+  SHARED_CONTEXT_FILE_PLACEHOLDER,
+} from '@/types/config';
 import { useTools } from '@/hooks/useTools';
 
 // Mock the store
@@ -59,6 +64,24 @@ vi.mock('@/hooks/useSkills', () => ({
 }));
 
 describe('AgentEditor', () => {
+  const makeAgentPolicies = (
+    overrides: Partial<AgentPoliciesByAgent[string]> = {}
+  ): AgentPoliciesByAgent => ({
+    test_agent: {
+      agent_name: 'test_agent',
+      is_private: false,
+      effective_execution_scope: null,
+      scope_label: 'unscoped',
+      scope_source: 'unscoped',
+      dashboard_credentials_supported: true,
+      team_eligibility_reason: null,
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: false,
+      request_scoped_knowledge_enabled: false,
+      ...overrides,
+    },
+  });
+
   const mockAgent: Agent = {
     id: 'test_agent',
     display_name: 'Test Agent',
@@ -109,6 +132,7 @@ describe('AgentEditor', () => {
     deleteAgent: vi.fn(),
     saveConfig: vi.fn().mockResolvedValue(undefined),
     config: mockConfig,
+    agentPoliciesByAgent: makeAgentPolicies(),
     isDirty: false,
     diagnostics: [],
   };
@@ -169,12 +193,66 @@ describe('AgentEditor', () => {
           worker_scope: 'user',
         },
       },
+      agentPoliciesByAgent: makeAgentPolicies({
+        effective_execution_scope: 'user',
+        scope_label: 'worker_scope=user',
+        scope_source: 'defaults.worker_scope',
+        dashboard_credentials_supported: false,
+      }),
       rooms: mockStore.rooms,
     });
 
     render(<AgentEditor />);
 
     expect(useTools).toHaveBeenCalledWith('test_agent', 'user');
+  });
+
+  it('fails closed when agent policy preview is unavailable', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agentPoliciesByAgent: {},
+    });
+
+    render(<AgentEditor />);
+
+    expect(useTools).toHaveBeenCalledWith(null, undefined);
+    expect(
+      screen.getByText(
+        'Agent policy preview is unavailable. Save or refresh to re-validate tool scope support for this draft.'
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Selected But Unavailable')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'This tool is no longer available in the current registry. Uncheck it to remove it.'
+      )
+    ).not.toBeInTheDocument();
+  });
+
+  it('prefers the unavailable preview message over generic tool loading', () => {
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agentPoliciesByAgent: {},
+    });
+    (useTools as any).mockReturnValue({
+      tools: [],
+      loading: true,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    expect(
+      screen.getByText(
+        'Tool availability preview is unavailable while agent policy preview is unavailable. Save or refresh to validate tool assignments.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Loading available tools...')).not.toBeInTheDocument();
   });
 
   it('shows selectable setup-required tools instead of hiding them', () => {
