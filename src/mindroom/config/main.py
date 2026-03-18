@@ -58,6 +58,7 @@ from mindroom.constants import (
     RuntimePaths,
     matrix_state_file,
     resolve_config_relative_path,
+    config_relative_path,
     runtime_matrix_homeserver,
 )
 from mindroom.git_urls import credential_free_repo_url
@@ -889,7 +890,7 @@ class Config(BaseModel):
                 if _relative_paths_overlap(knowledge_path, memory_notes_dir):
                     overlaps_template_scaffold = True
                 elif runtime_paths is not None:
-                    template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+                    template_dir = config_relative_path(private_config.template_dir, runtime_paths)
                     overlaps_template_scaffold = _template_contains_overlapping_subtree(template_dir, knowledge_path)
             if overlaps_private_file_memory or overlaps_template_scaffold:
                 msg = (
@@ -910,7 +911,7 @@ class Config(BaseModel):
             private_config = agent_config.private
             if private_config is None or private_config.template_dir is None:
                 continue
-            template_dir = resolve_config_relative_path(private_config.template_dir, runtime_paths)
+            template_dir = config_relative_path(private_config.template_dir, runtime_paths)
             try:
                 validate_workspace_template_dir(template_dir)
             except ValueError as exc:
