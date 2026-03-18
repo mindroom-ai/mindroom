@@ -2712,6 +2712,8 @@ class TestAgentBot:
         )
 
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.orchestrator = MagicMock()
+        bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         context = _MessageContext(
             am_i_mentioned=False,
             is_thread=False,
@@ -2744,6 +2746,7 @@ class TestAgentBot:
         assert mock_decide.call_args.kwargs["available_agents_in_room"] == [
             config.get_ids(runtime_paths_for(config))["calculator"],
         ]
+        assert mock_decide.call_args.kwargs["materializable_agent_names"] == {"calculator"}
 
     @pytest.mark.asyncio
     async def test_resolve_response_action_rejects_instead_of_falling_through_to_individual_reply(
@@ -2763,6 +2766,9 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+        }
         context = _MessageContext(
             am_i_mentioned=True,
             is_thread=False,
@@ -2871,7 +2877,7 @@ class TestAgentBot:
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """Explicit rejects should not go silent when only another live bot can speak."""
+        """Explicit rejects should not go silent when stale room members sort before the live fallback bot."""
         config = _runtime_bound_config(
             Config(
                 agents={
@@ -2884,9 +2890,13 @@ class TestAgentBot:
             tmp_path,
         )
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.orchestrator = MagicMock()
+        bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {
+            config.get_ids(runtime_paths_for(config))["general"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["research"].full_id: MagicMock(),
             config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
         }
         context = _MessageContext(
@@ -2912,7 +2922,7 @@ class TestAgentBot:
 
         assert action.kind == "reject"
         assert action.rejection_message == (
-            "Team request includes agents 'general', 'research' that are not available in this room."
+            "Team request includes agents 'general', 'research' that could not be materialized for this request."
         )
         mock_should_respond.assert_not_called()
 
@@ -2989,6 +2999,10 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+        }
         context = _MessageContext(
             am_i_mentioned=True,
             is_thread=False,
@@ -3065,6 +3079,10 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {
+            config.get_ids(runtime_paths_for(config))["alpha"].full_id: MagicMock(),
+            config.get_ids(runtime_paths_for(config))["calculator"].full_id: MagicMock(),
+        }
         context = _MessageContext(
             am_i_mentioned=True,
             is_thread=False,
@@ -3140,6 +3158,9 @@ class TestAgentBot:
         bot = AgentBot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
+        room.users = {
+            bot.matrix_id.full_id: MagicMock(),
+        }
         context = _MessageContext(
             am_i_mentioned=False,
             is_thread=False,

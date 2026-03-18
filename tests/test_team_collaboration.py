@@ -822,8 +822,8 @@ class TestRouterTeamFormation:
         )
 
     @pytest.mark.asyncio
-    async def test_tagged_off_room_agents_use_visible_fallback_owner_for_reject(self) -> None:
-        """Explicit rejects should still be surfaced by one visible live bot."""
+    async def test_tagged_off_room_agents_reject_without_collapsing_requested_members(self) -> None:
+        """Explicit rejects should preserve the full requested-member failure state."""
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         import nio  # noqa: PLC0415
@@ -865,8 +865,10 @@ class TestRouterTeamFormation:
         )
 
         assert result.outcome is TeamOutcome.REJECT
-        assert result.response_owner_candidates() == [config.get_ids(runtime_paths_for(config))["calculator"]]
-        assert result.response_owner() == config.get_ids(runtime_paths_for(config))["calculator"]
+        assert {member.name: member.status for member in result.member_statuses} == {
+            "general": TeamMemberStatus.NOT_IN_ROOM,
+            "research": TeamMemberStatus.NOT_IN_ROOM,
+        }
         assert result.reason == (
             "Team request includes agents 'general', 'research' that are not available in this room."
         )
@@ -921,8 +923,8 @@ class TestRouterTeamFormation:
         assert result.outcome is TeamOutcome.REJECT
 
     @pytest.mark.asyncio
-    async def test_tagged_unsupported_non_materializable_member_does_not_own_reject_response(self) -> None:
-        """Explicit rejects should stay owned by a live visible bot."""
+    async def test_tagged_unsupported_non_materializable_member_keeps_requested_member_statuses(self) -> None:
+        """Explicit rejects should keep requested-member eligibility separate from delivery ownership."""
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         import nio  # noqa: PLC0415
@@ -975,8 +977,6 @@ class TestRouterTeamFormation:
             "alpha": TeamMemberStatus.UNSUPPORTED_FOR_TEAM,
             "calculator": TeamMemberStatus.ELIGIBLE,
         }
-        assert result.response_owner_candidates() == [config.get_ids(runtime_paths_for(config))["calculator"]]
-        assert result.response_owner() == config.get_ids(runtime_paths_for(config))["calculator"]
 
     @pytest.mark.asyncio
     async def test_tagged_agents_that_delegate_to_private_reject_the_entire_team_request(
