@@ -329,6 +329,56 @@ models:
     )
 
 
+def _private_user_agent_projected_config_fixture(tmp_path: Path) -> tuple[str, dict[str, Path]]:
+    alpha_knowledge_root = tmp_path / "knowledge_alpha"
+    alpha_knowledge_root.mkdir()
+    (alpha_knowledge_root / "a.txt").write_text("alpha knowledge\n", encoding="utf-8")
+    beta_knowledge_root = tmp_path / "knowledge_beta"
+    beta_knowledge_root.mkdir()
+    (beta_knowledge_root / "b.txt").write_text("beta knowledge\n", encoding="utf-8")
+    alpha_context = tmp_path / "alpha.md"
+    alpha_context.write_text("# Alpha\n", encoding="utf-8")
+    beta_context = tmp_path / "beta.md"
+    beta_context.write_text("# Beta\n", encoding="utf-8")
+    return (
+        """
+knowledge_bases:
+  a:
+    path: ./knowledge_alpha
+  b:
+    path: ./knowledge_beta
+agents:
+  alpha:
+    display_name: Alpha
+    role: Alpha test
+    model: default
+    private:
+      per: user_agent
+    knowledge_bases: [a]
+    context_files:
+      - ./alpha.md
+  beta:
+    display_name: Beta
+    role: Beta test
+    model: default
+    worker_scope: shared
+    knowledge_bases: [b]
+    context_files:
+      - ./beta.md
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+        {
+            "alpha_context": alpha_context,
+            "beta_context": beta_context,
+            "alpha_knowledge_root": alpha_knowledge_root,
+            "beta_knowledge_root": beta_knowledge_root,
+        },
+    )
+
+
 def _knowledge_base_collision_fixture(tmp_path: Path) -> str:
     first_root = tmp_path / "knowledge_collision_a"
     first_root.mkdir()
@@ -1215,6 +1265,54 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
 
 
+def test_docker_backend_projects_only_private_user_agent_assets_for_private_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Private user-agent workers should not snapshot unrelated agents or knowledge bases."""
+    config_text, projected_paths = _private_user_agent_projected_config_fixture(tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    worker_key = resolve_worker_key(
+        "user_agent",
+        ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="alpha",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+            tenant_id="tenant-123",
+        ),
+        agent_name="alpha",
+    )
+
+    backend.ensure_worker(WorkerSpec(worker_key, private_agent_names=frozenset({"alpha"})), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert set(projected_config_data["agents"]) == {"alpha"}
+    assert set(projected_config_data["knowledge_bases"]) == {"a"}
+    assert (
+        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
+    ).read_text(encoding="utf-8") == "# Alpha\n"
+    assert not (
+        projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
+    ).exists()
+    assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "a" / "a.txt").read_text(
+        encoding="utf-8",
+    ) == "alpha knowledge\n"
+    assert not (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "b" / "b.txt").exists()
+
+    assert projected_paths["alpha_context"].resolve() not in projection_root.parents
+    assert projected_paths["beta_context"].resolve() not in projection_root.parents
+    assert projected_paths["alpha_knowledge_root"].resolve() not in projection_root.parents
+    assert projected_paths["beta_knowledge_root"].resolve() not in projection_root.parents
+
+
 def test_docker_backend_shared_worker_mounts_canonical_agent_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1346,6 +1444,43 @@ def test_docker_backend_recreates_user_agent_container_when_private_visibility_c
         "bind": f"/app/shared-storage/private_instances/{worker_dir_name(worker_key)}/alpha",
         "mode": "rw",
     }
+
+
+def test_docker_backend_redacts_authorization_headers_in_projected_model_extra_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected config should redact auth headers nested under model extra_kwargs."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    worker_scope: shared
+models:
+  default:
+    provider: openai
+    id: test-model
+    extra_kwargs:
+      headers:
+        Authorization: Bearer super-secret-token
+        X-Trace-Id: keep-me
+""".lstrip(),
+    )
+
+    backend.ensure_worker(WorkerSpec("v1:default:shared:code"), now=10.0)
+
+    volumes = fake_client.containers.run_calls[0]["volumes"]
+    assert isinstance(volumes, dict)
+    projection_root = _projection_root(volumes)
+    projected_config = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
+
+    assert projected_config["models"]["default"]["extra_kwargs"]["headers"]["Authorization"] == "__REDACTED__"
+    assert projected_config["models"]["default"]["extra_kwargs"]["headers"]["X-Trace-Id"] == "keep-me"
 
 
 def test_docker_projection_hash_is_stable_across_hash_seeds(tmp_path: Path) -> None:
