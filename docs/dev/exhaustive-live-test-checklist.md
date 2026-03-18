@@ -79,7 +79,7 @@ Expected outcome: The command prepares the expected local stack artifacts and pr
 
 ## 2. Config Loading, Hot Reload, And Reconciliation
 
-Source anchors: `src/mindroom/config/main.py`, `src/mindroom/file_watcher.py`, `src/mindroom/orchestration/config_updates.py`, `src/mindroom/orchestration/rooms.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/skills.py`.
+Source anchors: `src/mindroom/config/main.py`, `src/mindroom/file_watcher.py`, `src/mindroom/orchestrator.py`, `src/mindroom/orchestration/config_updates.py`, `src/mindroom/orchestration/rooms.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/skills.py`.
 
 - [ ] `CONF-001` Edit a configured agent field such as role, tools, or instructions in `config.yaml` while the runtime is active.
 Expected outcome: Only the affected entity is rebuilt or restarted and unaffected bots keep running.
@@ -98,6 +98,9 @@ Expected outcome: Runtime caches invalidate correctly and the change is visible 
 
 - [ ] `CONF-006` Enable `matrix_room_access.reconcile_existing_rooms` for one restart and then disable it again.
 Expected outcome: Existing managed rooms are reconciled once to the configured access policy and steady-state behavior returns after the flag is turned back off.
+
+- [ ] `CONF-007` Edit only shared defaults such as `defaults.enable_streaming` during a live run without changing any entities.
+Expected outcome: Unchanged bots pick up the new defaults in place without restart and subsequent responses reflect the updated default behavior immediately.
 
 ## 3. Room Provisioning, Router Management, And Onboarding
 
@@ -245,6 +248,12 @@ Expected outcome: The runtime refuses ambiguous execution and asks for disambigu
 - [ ] `CMD-009` Exercise reaction-based interactive prompts that are scoped to one conversation.
 Expected outcome: Reactions outside the intended room, message, or thread do not mutate the interactive workflow.
 
+- [ ] `CMD-010` Use `!config show`, `!config get <path>`, and `!config set <path> <value>` in chat.
+Expected outcome: The router uses the active runtime config path, returns current values correctly, and `set` produces a preview plus confirmation flow before applying the change.
+
+- [ ] `CMD-011` Attempt malformed or invalid `!config set` inputs, including quote-parse failures and runtime-invalid changes.
+Expected outcome: Parse or validation errors are explained clearly and no partial configuration change is applied.
+
 ## 8. Authorization And Room Access Policy
 
 Source anchors: `src/mindroom/authorization.py`, `src/mindroom/config/auth.py`, `src/mindroom/config/matrix.py`, `src/mindroom/bot.py`, `src/mindroom/voice_handler.py`.
@@ -301,9 +310,15 @@ Expected outcome: The runtime returns the documented or implemented fallback beh
 - [ ] `MEDIA-009` Repeat the voice flow with `voice.visible_router_echo` enabled and disabled.
 Expected outcome: Visible router echo behavior matches the configuration without changing the underlying responder selection logic.
 
+- [ ] `MEDIA-010` Exercise voice command intelligence with an explicit spoken help or skill request and with a similar non-command question.
+Expected outcome: Explicit command intent can normalize to `!help` or `!skill`, but speculative command rewrites are rejected and natural-language queries stay natural language.
+
+- [ ] `MEDIA-011` Speak or inject unavailable agent mentions while voice normalization runs in a room with limited available entities.
+Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
+
 ## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
 
-Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
+Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
 
 - [ ] `MEM-001` Use a runtime configured with `memory.backend: mem0`.
 Expected outcome: Agent memory persists across turns and later retrieval reflects the stored semantic memory state.
@@ -344,9 +359,18 @@ Expected outcome: The agents share one persisted culture state so later runs obs
 - [ ] `MEM-013` Exercise a private agent that belongs to a culture across two requester scopes.
 Expected outcome: Culture state for private agents is isolated by requester scope and does not leak across different private-instance roots.
 
+- [ ] `MEM-014` Configure `defaults.learning`, override one agent with `learning: false`, and compare runtime behavior plus persisted `learning/` state.
+Expected outcome: Agents inherit learning from defaults unless explicitly disabled, disabled agents do not create or update learning state, and enabled agents persist learning data in their state roots.
+
+- [ ] `MEM-015` Compare `learning_mode: agentic` with the default always-on learning mode for an otherwise identical agent.
+Expected outcome: Both modes keep learning enabled, but agentic mode follows the agentic learning profile instead of the always-on mode.
+
+- [ ] `MEM-016` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
+Expected outcome: The runtime auto-installs required local embedder dependencies when allowed and otherwise fails clearly instead of silently degrading memory setup.
+
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
 
-Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`.
+Source anchors: `src/mindroom/tool_system/skills.py`, `src/mindroom/tool_system/plugins.py`, `src/mindroom/tool_system/runtime_context.py`, `src/mindroom/tool_system/sandbox_proxy.py`, `src/mindroom/tool_system/dependencies.py`, `src/mindroom/tool_system/metadata.py`, `src/mindroom/api/tools.py`, `src/mindroom/api/skills.py`, `src/mindroom/api/workers.py`.
 
 - [ ] `TOOL-001` Load a skill from a bundled skill location, a plugin skill directory, and a user skill directory.
 Expected outcome: Skill precedence, allowlisting, and eligibility gating all match the implemented load order and rules.
@@ -374,6 +398,9 @@ Expected outcome: Worker inspection and cleanup work when a backend exists and r
 
 - [ ] `TOOL-009` Use a long-lived session tool such as `claude_agent` when configured.
 Expected outcome: Repeated calls with the same session identity continue the existing backend session and different session labels create separate sub-sessions.
+
+- [ ] `TOOL-010` Trigger a tool whose optional extra is missing once with auto-install enabled and once with auto-install disabled.
+Expected outcome: The enabled runtime installs the extra and retries successfully, while the disabled runtime raises a clear missing-dependencies error without partial tool registration.
 
 ## 12. Scheduling And Background Task Execution
 
@@ -427,6 +454,12 @@ Expected outcome: Matrix-only features fail clearly when the required Matrix con
 
 - [ ] `OAI-009` Configure dashboard auth and `/v1` auth separately and exercise both surfaces.
 Expected outcome: Dashboard authentication and OpenAI-compatible API authentication remain independent and do not accidentally unlock or block each other.
+
+- [ ] `OAI-010` Send repeated `/v1/chat/completions` requests using `X-LibreChat-Conversation-Id`, then repeat with both `X-LibreChat-Conversation-Id` and `X-Session-Id`.
+Expected outcome: The LibreChat header preserves continuity when `X-Session-Id` is absent and explicit `X-Session-Id` takes precedence when both headers are present.
+
+- [ ] `OAI-011` Send `/v1/chat/completions` requests that include multimodal `messages[].content` and accepted OpenAI fields such as `response_format`, `tools`, and `tool_choice`.
+Expected outcome: Text parts of multimodal content are used as the prompt, non-text parts are ignored by the current implementation, and accepted-but-unsupported OpenAI fields do not change runtime behavior or crash the request.
 
 ## 14. Bundled Dashboard And Runtime API
 
@@ -514,7 +547,7 @@ Expected outcome: The UI shows provisioning guidance or wait messaging that is d
 - [ ] `SAAS-008` Load the single-instance customer dashboard state.
 Expected outcome: Instance card details, URLs, copy actions, status labels, and launch gating all reflect the actual backend instance state.
 
-- [ ] `SAAS-009` Exercise customer instance lifecycle actions for running, stopped, restarting, provisioning, error, and deprovisioned states.
+- [ ] `SAAS-009` Exercise customer instance lifecycle actions for running, stopped, restarting, provisioning, failed, error, and deprovisioned states.
 Expected outcome: Start, stop, restart, provision, and reprovision actions expose only the allowed actions for the current state and poll until the state settles.
 
 - [ ] `SAAS-010` Attempt instance actions on an instance not owned by the authenticated user.
@@ -552,7 +585,7 @@ Expected outcome: Placeholder features remain explicitly placeholder and do not 
 
 ## 16. Representative Integration Buckets
 
-Source anchors: `src/mindroom/api/tools.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/google_integration.py`, `src/mindroom/api/homeassistant_integration.py`, `docs/tools/builtin.md`.
+Source anchors: `src/mindroom/api/tools.py`, `src/mindroom/api/integrations.py`, `src/mindroom/api/google_integration.py`, `src/mindroom/api/homeassistant_integration.py`, `frontend/src/components/GoogleIntegration/GoogleIntegration.tsx`, `frontend/src/components/HomeAssistantIntegration/HomeAssistantIntegration.tsx`, `docs/tools/builtin.md`.
 
 - [ ] `INT-001` Test a no-auth research tool bucket such as `duckduckgo`, `wikipedia`, or `website`.
 Expected outcome: The tool is callable without credential setup and its results appear correctly in normal agent responses.
@@ -577,6 +610,12 @@ Expected outcome: Attachment metadata survives the tool boundary and context sco
 
 - [ ] `INT-008` Compare runtime integration behavior with the dashboard catalog and metadata presentation.
 Expected outcome: UI availability, required credentials, and runtime capability do not contradict each other for the same integration.
+
+- [ ] `INT-009` Exercise Google integration admin bootstrap and reset through the bundled API or dashboard using `/api/google/configure` and `/api/google/reset`.
+Expected outcome: OAuth client credentials are written to the active runtime environment, config reload succeeds, and the dashboard state transitions between admin-setup-required and ready-to-connect without stale status.
+
+- [ ] `INT-010` Exercise Home Assistant via both OAuth and long-lived-token setup, then call `/api/homeassistant/entities` and `/api/homeassistant/service`.
+Expected outcome: Both connection modes persist usable credentials, entity listing reflects the live instance, and service calls succeed or fail clearly against the actual Home Assistant runtime.
 
 ## 17. Suggested Parallel Execution Split
 
