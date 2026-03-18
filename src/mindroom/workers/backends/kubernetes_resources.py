@@ -9,21 +9,23 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
-from mindroom.tool_system.worker_routing import (
-    resolved_worker_key_scope,
-    visible_state_roots_for_worker_key,
-)
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends._dedicated_worker_common import (
+    DedicatedWorkerLifecycleState,
+    build_dedicated_worker_runtime_paths,
+    plan_scoped_visible_state_roots,
+    resolved_agent_policies_from_runtime_config,
+    validate_unique_worker_visible_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.constants import RuntimePaths
     from mindroom.workers.models import WorkerStatus
 
     from .kubernetes_config import _KubernetesWorkerBackendConfig
@@ -54,6 +56,7 @@ _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
 _LABEL_WORKER_ID = "mindroom.ai/worker-id"
+_LABEL_RUNTIME_NAMESPACE = "mindroom.ai/runtime-namespace"
 
 _CONTAINER_NAME = "sandbox-runner"
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
@@ -179,32 +182,62 @@ def parse_annotation_int(annotations: dict[str, str], key: str, default: int = 0
         return default
 
 
+def lifecycle_state_from_annotations(
+    annotations: dict[str, str],
+    *,
+    now: float,
+) -> DedicatedWorkerLifecycleState:
+    """Parse dedicated-worker lifecycle fields from Deployment annotations."""
+    last_used_at = parse_annotation_float(annotations, ANNOTATION_LAST_USED_AT, now)
+    created_at = parse_annotation_float(annotations, ANNOTATION_CREATED_AT, last_used_at)
+    raw_status = annotations.get(ANNOTATION_WORKER_STATUS, "starting")
+    status: WorkerStatus = "starting"
+    if raw_status == "ready":
+        status = "ready"
+    elif raw_status == "idle":
+        status = "idle"
+    elif raw_status == "failed":
+        status = "failed"
+
+    raw_last_started_at = annotations.get(ANNOTATION_LAST_STARTED_AT)
+    last_started_at: float | None = None
+    if raw_last_started_at is not None:
+        try:
+            last_started_at = float(raw_last_started_at)
+        except ValueError:
+            last_started_at = None
+
+    return DedicatedWorkerLifecycleState(
+        created_at=created_at,
+        last_used_at=last_used_at,
+        status=status,
+        last_started_at=last_started_at,
+        startup_count=parse_annotation_int(annotations, ANNOTATION_STARTUP_COUNT),
+        failure_count=parse_annotation_int(annotations, ANNOTATION_FAILURE_COUNT),
+        failure_reason=annotations.get(ANNOTATION_FAILURE_REASON),
+    )
+
+
 def metadata_annotations(
     *,
     worker_key: str,
     state_subpath: str,
-    created_at: float,
-    last_used_at: float,
-    last_started_at: float | None,
-    startup_count: int,
-    failure_count: int,
-    failure_reason: str | None,
-    status: WorkerStatus,
+    lifecycle: DedicatedWorkerLifecycleState,
 ) -> dict[str, str]:
     """Build persisted worker lifecycle metadata stored on Deployments."""
     annotations = {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
-        ANNOTATION_CREATED_AT: str(created_at),
-        ANNOTATION_LAST_USED_AT: str(last_used_at),
-        ANNOTATION_STARTUP_COUNT: str(startup_count),
-        ANNOTATION_FAILURE_COUNT: str(failure_count),
-        ANNOTATION_WORKER_STATUS: status,
+        ANNOTATION_CREATED_AT: str(lifecycle.created_at),
+        ANNOTATION_LAST_USED_AT: str(lifecycle.last_used_at),
+        ANNOTATION_STARTUP_COUNT: str(lifecycle.startup_count),
+        ANNOTATION_FAILURE_COUNT: str(lifecycle.failure_count),
+        ANNOTATION_WORKER_STATUS: lifecycle.status,
     }
-    if last_started_at is not None:
-        annotations[ANNOTATION_LAST_STARTED_AT] = str(last_started_at)
-    if failure_reason:
-        annotations[ANNOTATION_FAILURE_REASON] = failure_reason
+    if lifecycle.last_started_at is not None:
+        annotations[ANNOTATION_LAST_STARTED_AT] = str(lifecycle.last_started_at)
+    if lifecycle.failure_reason:
+        annotations[ANNOTATION_FAILURE_REASON] = lifecycle.failure_reason
     return annotations
 
 
@@ -214,22 +247,40 @@ def _template_hash(template: dict[str, object]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
+def _runtime_namespace(*, config: _KubernetesWorkerBackendConfig, storage_root: Path) -> str:
+    payload = json.dumps(
+        {
+            "namespace": config.namespace,
+            "name_prefix": config.name_prefix,
+            "owner_deployment_name": config.owner_deployment_name or "",
+            "storage_pvc_name": config.storage_pvc_name,
+            "storage_subpath_prefix": config.storage_subpath_prefix,
+            "storage_root": str(storage_root.expanduser().resolve()),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _labels(*, extra_labels: dict[str, str], runtime_namespace: str, worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
         _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
         _LABEL_NAME: _LABEL_NAME_VALUE,
+        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
     }
     labels.update(extra_labels)
     labels[_LABEL_WORKER_ID] = worker_id
     return labels
 
 
-def _list_selector(*, extra_labels: dict[str, str]) -> str:
+def _list_selector(*, extra_labels: dict[str, str], runtime_namespace: str) -> str:
     selector = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
         _LABEL_MANAGED_BY: _LABEL_MANAGED_BY_VALUE,
         _LABEL_NAME: _LABEL_NAME_VALUE,
+        _LABEL_RUNTIME_NAMESPACE: runtime_namespace,
     }
     selector.update(extra_labels)
     return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
@@ -262,6 +313,7 @@ class KubernetesResourceManager:
         self._control_plane_node_name_loaded = False
         self._owner_reference: dict[str, object] | None = None
         self._owner_reference_loaded = False
+        self.runtime_namespace = _runtime_namespace(config=self.config, storage_root=self.storage_root)
 
     @property
     def _apps(self) -> _AppsApiProtocol:
@@ -285,7 +337,10 @@ class KubernetesResourceManager:
         """List managed worker Deployments in this namespace."""
         response = self._apps.list_namespaced_deployment(
             self.config.namespace,
-            label_selector=_list_selector(extra_labels=self.config.extra_labels),
+            label_selector=_list_selector(
+                extra_labels=self.config.extra_labels,
+                runtime_namespace=self.runtime_namespace,
+            ),
         )
         return list(response.items or [])
 
@@ -319,6 +374,8 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
     ) -> DeploymentApplyResult:
         """Create-or-patch one worker Deployment."""
+    ) -> DeploymentApplyResult:
+        """Create-or-patch one worker Deployment."""
         manifest = self._deployment_manifest(
             worker_key=worker_key,
             worker_id=worker_id,
@@ -342,6 +399,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
+        return DeploymentApplyResult(recreated=False)
         return DeploymentApplyResult(recreated=False)
 
     def patch_deployment(
@@ -487,7 +545,11 @@ class KubernetesResourceManager:
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
     def _service_manifest(self, worker_id: str) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -522,7 +584,11 @@ class KubernetesResourceManager:
         replicas: int,
         private_agent_names: frozenset[str] | None = None,
     ) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        worker_labels = _labels(
+            extra_labels=self.config.extra_labels,
+            runtime_namespace=self.runtime_namespace,
+            worker_id=worker_id,
+        )
         startup_manifest_path, startup_manifest_hash = self._write_startup_manifest(
             worker_key=worker_key,
             dedicated_root=Path(f"{self.config.storage_mount_path}/{state_subpath}".rstrip("/")),
@@ -670,6 +736,7 @@ class KubernetesResourceManager:
         startup_runtime_paths = self._worker_runtime_paths(
             worker_key=worker_key,
             dedicated_root=dedicated_root,
+            local_dedicated_root=local_dedicated_root,
         )
         constants.write_startup_manifest(
             local_dedicated_root,
@@ -689,39 +756,20 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         dedicated_root: Path,
+        local_dedicated_root: Path,
     ) -> RuntimePaths:
-        config_path = (
-            Path(self.config.config_path)
-            if self.config.config_map_name is not None
-            else self.runtime_paths.config_path.expanduser().resolve()
-        )
-        process_env = dict(self.runtime_paths.process_env)
-        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        env_file_values = dict(self.runtime_paths.env_file_values)
-        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        process_env.update(
-            {
-                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
-                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
-                "MINDROOM_CONFIG_PATH": str(config_path),
-                "MINDROOM_STORAGE_PATH": str(dedicated_root),
-                _SHARED_STORAGE_ROOT_ENV: self.config.storage_mount_path,
-                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
-                _DEDICATED_WORKER_KEY_ENV: worker_key,
-                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
-            },
-        )
-        process_env.update(self.config.extra_env)
-        return constants.isolated_runtime_paths(
-            RuntimePaths(
-                config_path=config_path,
-                config_dir=config_path.parent,
-                env_path=config_path.parent / ".env",
-                storage_root=dedicated_root.resolve(),
-                process_env=MappingProxyType(process_env),
-                env_file_values=MappingProxyType(env_file_values),
-            ),
+        config_path = Path(self.config.config_path)
+        return build_dedicated_worker_runtime_paths(
+            runtime_paths=self.runtime_paths,
+            backend_name="Kubernetes",
+            worker_key=worker_key,
+            config_path=config_path,
+            dedicated_root=dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+            worker_port=self.config.worker_port,
+            shared_storage_root=self.config.storage_mount_path,
+            extra_env=self.config.extra_env,
+            required_existing_storage_root=self.storage_root,
         )
 
     def _volume_mounts(
@@ -822,33 +870,20 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
     ) -> list[dict[str, object]]:
         mounted_storage_root = Path(self.config.storage_mount_path)
-        if resolved_worker_key_scope(worker_key) == "user_agent" and private_agent_names is None:
-            msg = f"user_agent workers require explicit private-agent visibility: {worker_key}"
-            raise WorkerBackendError(msg)
-        effective_private_agent_names = private_agent_names or frozenset()
-        visible_state_roots = visible_state_roots_for_worker_key(
-            mounted_storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        local_visible_state_roots = visible_state_roots_for_worker_key(
-            self.storage_root,
-            worker_key,
-            private_agent_names=effective_private_agent_names,
-        )
-        if not visible_state_roots or len(visible_state_roots) != len(local_visible_state_roots):
-            msg = f"Unsupported worker key for scoped storage mounts: {worker_key}"
-            raise WorkerBackendError(msg)
-        for local_state_root in local_visible_state_roots:
-            local_state_root.mkdir(parents=True, exist_ok=True)
-
         mounts: list[dict[str, object]] = [
             {
                 "name": "worker-storage",
-                "mountPath": str(state_root),
-                "subPath": str(state_root.relative_to(mounted_storage_root)),
+                "mountPath": str(planned_root.worker_visible_path),
+                "subPath": str(planned_root.worker_visible_path.relative_to(mounted_storage_root)),
             }
-            for state_root in visible_state_roots
+            for planned_root in plan_scoped_visible_state_roots(
+                worker_key=worker_key,
+                local_shared_storage_root=self.storage_root,
+                worker_visible_shared_storage_root=mounted_storage_root,
+                private_agent_names=private_agent_names,
+                allow_unknown_worker_key=False,
+                resolved_agent_policies=resolved_agent_policies_from_runtime_config(self.runtime_paths),
+            )
         ]
         mounts.append(
             {
@@ -857,8 +892,9 @@ class KubernetesResourceManager:
                 "subPath": state_subpath,
             },
         )
-        mount_paths = [str(mount["mountPath"]) for mount in mounts]
-        if len(mount_paths) != len(set(mount_paths)):
-            msg = f"Duplicate Kubernetes mountPath generated for worker key: {worker_key}"
-            raise WorkerBackendError(msg)
+        validate_unique_worker_visible_paths(
+            (str(mount["mountPath"]) for mount in mounts),
+            worker_key=worker_key,
+            duplicate_label="Kubernetes mountPath",
+        )
         return mounts
