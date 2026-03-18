@@ -425,9 +425,9 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
     services = ["mindroom"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
-        services.extend(["postgres", "redis", "synapse"])
+        services.extend(["postgres", "redis", "synapse", "wellknown"])
     elif instance.matrix_type == MatrixType.TUWUNEL:
-        services.append("tuwunel")
+        services.extend(["tuwunel", "wellknown"])
 
     if instance.auth_type == AuthType.AUTHELIA:
         services.append("authelia")
