@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.constants import RuntimePaths, resolve_config_relative_path
+from mindroom.constants import RuntimePaths, config_relative_path
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -30,6 +30,64 @@ class _EffectiveAgentWorkspace:
     template_dir: Path | None
     context_files: tuple[str, ...]
     file_memory_path: str | None
+
+
+def validate_local_copy_source_path(
+    source_path: Path,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve one existing local copy-source path and reject symlink traversal."""
+    lexical_source_path = source_path.expanduser()
+    absolute_source_path = (
+        lexical_source_path if lexical_source_path.is_absolute() else (Path.cwd() / lexical_source_path)
+    )
+    current = Path(absolute_source_path.anchor) if absolute_source_path.anchor else Path()
+    for part in absolute_source_path.parts[1:] if absolute_source_path.anchor else absolute_source_path.parts:
+        current = current / part
+        if current.is_symlink():
+            msg = f"{field_name} must not contain symlinks: {current}"
+            raise ValueError(msg)
+    resolved_source_path = absolute_source_path.resolve()
+    if not resolved_source_path.exists():
+        msg = f"{field_name} does not exist: {resolved_source_path}"
+        raise ValueError(msg)
+    return resolved_source_path
+
+
+def iter_local_copy_source_entries(source_dir: Path) -> list[tuple[Path, Path]]:
+    """Return copy-source entries in deterministic order without following symlinks."""
+    entries: list[tuple[Path, Path]] = []
+
+    def _walk(current_dir: Path) -> None:
+        for source_path in sorted(current_dir.iterdir()):
+            relative_path = source_path.relative_to(source_dir)
+            entries.append((source_path, relative_path))
+            if source_path.is_dir() and not source_path.is_symlink():
+                _walk(source_path)
+
+    _walk(source_dir)
+    return entries
+
+
+def validate_local_copy_source_dir(
+    source_dir: Path,
+    *,
+    field_name: str,
+) -> Path:
+    """Resolve one local copy-source directory and reject symlinked content."""
+    resolved_source_dir = validate_local_copy_source_path(
+        source_dir,
+        field_name=field_name,
+    )
+    if not resolved_source_dir.is_dir():
+        msg = f"{field_name} does not exist: {resolved_source_dir}"
+        raise ValueError(msg)
+    for source_path, _ in iter_local_copy_source_entries(resolved_source_dir):
+        if source_path.is_symlink():
+            msg = f"{field_name} must not contain symlinks: {source_path}"
+            raise ValueError(msg)
+    return resolved_source_dir
 
 
 def resolve_relative_path_within_root(
@@ -73,30 +131,15 @@ def resolve_workspace_relative_path(
 
 def validate_workspace_template_dir(template_dir: Path) -> Path:
     """Resolve one workspace template directory and ensure it exists."""
-    resolved_template_dir = template_dir.expanduser().resolve()
-    if not resolved_template_dir.is_dir():
-        msg = f"Workspace template directory does not exist: {resolved_template_dir}"
-        raise ValueError(msg)
-    for source_path, _ in _iter_workspace_template_entries(resolved_template_dir):
-        if source_path.is_symlink():
-            msg = f"Workspace template directory must not contain symlinks: {source_path}"
-            raise ValueError(msg)
-    return resolved_template_dir
+    return validate_local_copy_source_dir(
+        template_dir,
+        field_name="Workspace template directory",
+    )
 
 
 def _iter_workspace_template_entries(template_dir: Path) -> list[tuple[Path, Path]]:
     """Return template entries in deterministic order without following symlinks."""
-    entries: list[tuple[Path, Path]] = []
-
-    def _walk(current_dir: Path) -> None:
-        for source_path in sorted(current_dir.iterdir()):
-            relative_path = source_path.relative_to(template_dir)
-            entries.append((source_path, relative_path))
-            if source_path.is_dir() and not source_path.is_symlink():
-                _walk(source_path)
-
-    _walk(template_dir)
-    return entries
+    return iter_local_copy_source_entries(template_dir)
 
 
 def _copy_workspace_template(
@@ -159,7 +202,7 @@ def _effective_workspace(
     return _EffectiveAgentWorkspace(
         root_path=_private_root_name(agent_name, config),
         template_dir=(
-            resolve_config_relative_path(private_config.template_dir, runtime_paths)
+            config_relative_path(private_config.template_dir, runtime_paths)
             if private_config.template_dir is not None
             else None
         ),

@@ -11,11 +11,18 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
 
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, runtime_paths_with_storage_root
+from mindroom.constants import (
+    RuntimePaths,
+    resolve_primary_runtime_paths,
+    runtime_env_path,
+    runtime_paths_with_storage_root,
+    serialize_public_runtime_paths,
+)
 from mindroom.credentials import (
     SHARED_CREDENTIALS_PATH_ENV,
     CredentialsManager,
@@ -90,6 +97,7 @@ _READY_POLL_INTERVAL_SECONDS = 1.0
 
 _TOKEN_ENV_NAME = "MINDROOM_SANDBOX_PROXY_TOKEN"  # noqa: S105
 _RUNNER_PORT_ENV_NAME = "MINDROOM_SANDBOX_RUNNER_PORT"
+_STARTUP_RUNTIME_PATHS_ENV = "MINDROOM_RUNTIME_PATHS_JSON"
 _DEDICATED_WORKER_KEY_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY"
 _DEDICATED_WORKER_ROOT_ENV = "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT"
 _SHARED_STORAGE_ROOT_ENV = "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT"
@@ -565,6 +573,12 @@ class DockerWorkerBackend:
         if projection is not None and not projection.ready:
             return False
 
+        if not self._container_env_matches(
+            container,
+            expected_env=self._container_env(metadata.worker_key, paths=paths),
+        ):
+            return False
+
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
@@ -609,7 +623,7 @@ class DockerWorkerBackend:
                 command=["/app/run-sandbox-runner.sh"],
                 name=metadata.container_name,
                 detach=True,
-                environment=self._container_env(metadata.worker_key),
+                environment=self._container_env(metadata.worker_key, paths=paths),
                 volumes=self._container_volumes(
                     paths,
                     worker_key=metadata.worker_key,
@@ -687,11 +701,22 @@ class DockerWorkerBackend:
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, container, now=now, paths=paths)
 
-    def _container_env(self, worker_key: str) -> dict[str, str]:
+    def _container_env(self, worker_key: str, *, paths: LocalWorkerStatePaths) -> dict[str, str]:
+        dedicated_root = Path(self.config.storage_mount_path)
+        startup_runtime_paths = self._worker_runtime_paths(
+            worker_key=worker_key,
+            dedicated_root=dedicated_root,
+            local_dedicated_root=paths.root,
+        )
         env = {
             "MINDROOM_SANDBOX_RUNNER_MODE": "true",
             "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
             _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
+            _STARTUP_RUNTIME_PATHS_ENV: json.dumps(
+                serialize_public_runtime_paths(startup_runtime_paths),
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
             "MINDROOM_STORAGE_PATH": self.config.storage_mount_path,
             _SHARED_STORAGE_ROOT_ENV: _CONTAINER_SHARED_STORAGE_ROOT,
             SHARED_CREDENTIALS_PATH_ENV: f"{self.config.storage_mount_path}/.shared_credentials",
@@ -704,6 +729,99 @@ class DockerWorkerBackend:
             env["MINDROOM_CONFIG_PATH"] = self.config.config_path
         env.update(self.config.extra_env)
         return env
+
+    def _container_env_matches(
+        self,
+        container: _DockerContainer | None,
+        *,
+        expected_env: dict[str, str],
+    ) -> bool:
+        if container is None:
+            return False
+        attrs = getattr(container, "attrs", {})
+        config = attrs.get("Config", {}) if isinstance(attrs, dict) else {}
+        raw_env = config.get("Env") if isinstance(config, dict) else None
+        if not isinstance(raw_env, list):
+            return False
+
+        actual_env: dict[str, str] = {}
+        for item in raw_env:
+            if not isinstance(item, str) or "=" not in item:
+                continue
+            name, value = item.split("=", 1)
+            actual_env[name] = value
+        return all(actual_env.get(name) == value for name, value in expected_env.items())
+
+    def _worker_google_application_credentials_path(
+        self,
+        dedicated_root: Path,
+        *,
+        local_dedicated_root: Path,
+    ) -> str | None:
+        """Return a worker-visible ADC file path, copying the source into worker state when needed."""
+        raw_value = self._runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS")
+        if raw_value is None or not raw_value.strip():
+            return None
+
+        source_path = runtime_env_path(self._runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        if source_path is None or not source_path.is_file():
+            return None
+
+        runtime_dir = local_dedicated_root / ".runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        target_path = runtime_dir / source_path.name
+        if source_path.resolve() != target_path.resolve():
+            shutil.copyfile(source_path, target_path)
+            target_path.chmod(0o600)
+        return str(dedicated_root / ".runtime" / source_path.name)
+
+    def _worker_runtime_config_path(self) -> Path:
+        configured_container_path = Path(self.config.config_path)
+        if self.config.host_config_path is not None:
+            return configured_container_path
+        if configured_container_path != Path("/app/config-host/config.yaml"):
+            return configured_container_path
+        return self._runtime_paths.config_path.expanduser().resolve()
+
+    def _worker_runtime_paths(
+        self,
+        *,
+        worker_key: str,
+        dedicated_root: Path,
+        local_dedicated_root: Path,
+    ) -> RuntimePaths:
+        config_path = self._worker_runtime_config_path()
+        process_env = dict(self._runtime_paths.process_env)
+        process_env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        env_file_values = dict(self._runtime_paths.env_file_values)
+        env_file_values.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        if google_application_credentials := self._worker_google_application_credentials_path(
+            dedicated_root,
+            local_dedicated_root=local_dedicated_root,
+        ):
+            process_env["GOOGLE_APPLICATION_CREDENTIALS"] = google_application_credentials
+        process_env.update(
+            {
+                "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+                "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess",
+                _RUNNER_PORT_ENV_NAME: str(self.config.worker_port),
+                "MINDROOM_CONFIG_PATH": str(config_path),
+                "MINDROOM_STORAGE_PATH": str(dedicated_root),
+                _SHARED_STORAGE_ROOT_ENV: _CONTAINER_SHARED_STORAGE_ROOT,
+                SHARED_CREDENTIALS_PATH_ENV: f"{dedicated_root}/.shared_credentials",
+                _DEDICATED_WORKER_KEY_ENV: worker_key,
+                _DEDICATED_WORKER_ROOT_ENV: str(dedicated_root),
+            },
+        )
+        process_env.update(self.config.extra_env)
+        return RuntimePaths(
+            config_path=config_path,
+            config_dir=config_path.parent,
+            env_path=config_path.parent / ".env",
+            storage_root=dedicated_root.resolve(),
+            process_env=MappingProxyType(process_env),
+            env_file_values=MappingProxyType(env_file_values),
+        )
 
     def _container_volumes(
         self,

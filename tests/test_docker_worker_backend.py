@@ -14,7 +14,12 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths, resolve_runtime_paths
+from mindroom.constants import (
+    RuntimePaths,
+    deserialize_runtime_paths,
+    resolve_primary_runtime_paths,
+    resolve_runtime_paths,
+)
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -476,13 +481,14 @@ def _backend(
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
+    host_config_path: Path | None = None,
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, bool]]]:
     config = _DockerWorkerBackendConfig(
         image="ghcr.io/mindroom-ai/mindroom:latest",
         worker_port=8766,
         storage_mount_path="/app/worker",
         config_path="/app/config-host/config.yaml",
-        host_config_path=tmp_path / "config.yaml",
+        host_config_path=tmp_path / "config.yaml" if host_config_path is None else host_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
@@ -492,6 +498,8 @@ def _backend(
         extra_env={"EXTRA_ENV": "present"},
         extra_labels={"mindroom.ai/tenant": "test"},
     )
+    assert config.host_config_path is not None
+    config.host_config_path.parent.mkdir(parents=True, exist_ok=True)
     config.host_config_path.write_text(config_text, encoding="utf-8")
     fake_client = _FakeDockerClient()
     fake_client.images.by_name[config.image] = _FakeImage("sha256:image-v1")
@@ -742,6 +750,71 @@ models:
     ).read_text(encoding="utf-8") == "# Runtime Context\n"
 
 
+def test_docker_backend_rejects_symlinked_projected_directory_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected directory assets must fail closed instead of dereferencing symlinked children."""
+    knowledge_root = tmp_path / "knowledge_docs"
+    knowledge_root.mkdir()
+    (knowledge_root / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    secret_path = tmp_path / ".env"
+    secret_path.write_text("TOP_SECRET=shh\n", encoding="utf-8")
+    (knowledge_root / "leak.env").symlink_to(secret_path)
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    knowledge_bases: [docs]
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    with pytest.raises(WorkerBackendError, match="Docker worker asset must not contain symlinks"):
+        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+
+def test_docker_backend_rejects_symlinked_projected_file_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Projected file assets must reject symlink roots instead of copying their targets."""
+    secret_path = tmp_path / "secret.md"
+    secret_path.write_text("secret\n", encoding="utf-8")
+    (tmp_path / "context.md").symlink_to(secret_path)
+    backend, _fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="""
+agents:
+  code:
+    display_name: Code
+    role: Test
+    model: default
+    context_files:
+      - ./context.md
+models:
+  default:
+    provider: openai
+    id: test-model
+""".lstrip(),
+    )
+
+    with pytest.raises(WorkerBackendError, match="Docker worker asset must not contain symlinks"):
+        backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+
 def test_docker_backend_syncs_shared_credentials_from_runtime_storage_root(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -802,6 +875,74 @@ def test_docker_backend_syncs_shared_credentials_from_runtime_shared_path(
     backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
 
     assert synced_shared_paths == [shared_credentials_path]
+
+
+def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated Docker workers should receive the committed public startup runtime only."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_text = "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n"
+    config_path.write_text(config_text, encoding="utf-8")
+    credentials_path = tmp_path / "google-credentials.json"
+    credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    runtime_storage = (tmp_path / "runtime-storage").resolve()
+    (config_dir / ".env").write_text(
+        (
+            "MINDROOM_NAMESPACE=alpha1234\n"
+            "MATRIX_HOMESERVER=http://dotenv-hs\n"
+            "MATRIX_SERVER_NAME=alpha.example\n"
+            "BROWSER_EXECUTABLE_PATH=/usr/bin/chromium\n"
+            f"GOOGLE_APPLICATION_CREDENTIALS={credentials_path}\n"
+            "GOOGLE_CLOUD_PROJECT=demo-project\n"
+            "GOOGLE_CLOUD_LOCATION=us-central1\n"
+            "ANTHROPIC_API_KEY=sk-secret\n"
+        ),
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=runtime_storage,
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+            "MINDROOM_LOCAL_CLIENT_SECRET": "client-secret",
+        },
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        runtime_paths=runtime_paths,
+        storage_path=runtime_storage,
+        host_config_path=config_path,
+    )
+
+    backend.ensure_worker(WorkerSpec("worker-a"), now=10.0)
+
+    run_call = fake_client.containers.run_calls[0]
+    env = run_call["environment"]
+    assert isinstance(env, dict)
+    committed_runtime = deserialize_runtime_paths(json.loads(env["MINDROOM_RUNTIME_PATHS_JSON"]))
+    local_credentials_path = worker_root_path(runtime_storage, "worker-a") / ".runtime" / credentials_path.name
+
+    assert env["MINDROOM_CONFIG_PATH"] == "/app/config-host/config.yaml"
+    assert committed_runtime.config_path == Path("/app/config-host/config.yaml")
+    assert committed_runtime.env_value("MINDROOM_NAMESPACE") == "alpha1234"
+    assert committed_runtime.env_value("MATRIX_HOMESERVER") == "http://dotenv-hs"
+    assert committed_runtime.env_value("MATRIX_SERVER_NAME") == "alpha.example"
+    assert committed_runtime.env_value("BROWSER_EXECUTABLE_PATH") == "/usr/bin/chromium"
+    assert (
+        committed_runtime.env_value("GOOGLE_APPLICATION_CREDENTIALS") == "/app/worker/.runtime/google-credentials.json"
+    )
+    assert committed_runtime.env_value("GOOGLE_CLOUD_PROJECT") == "demo-project"
+    assert committed_runtime.env_value("GOOGLE_CLOUD_LOCATION") == "us-central1"
+    assert committed_runtime.env_value("ANTHROPIC_API_KEY") is None
+    assert committed_runtime.env_value("MINDROOM_SANDBOX_PROXY_TOKEN") is None
+    assert committed_runtime.env_value("MINDROOM_LOCAL_CLIENT_SECRET") is None
+    assert local_credentials_path.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
 def test_docker_backend_redacts_projected_config_secrets_and_support_state(

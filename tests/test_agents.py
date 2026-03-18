@@ -1687,6 +1687,24 @@ def test_bind_runtime_paths_rejects_private_template_dir_with_symlinked_content(
         _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
+def test_bind_runtime_paths_rejects_private_template_dir_when_template_root_is_symlink(tmp_path: Path) -> None:
+    """Private templates must reject symlinked template roots before dereferencing them."""
+    real_template_dir = tmp_path / "real_template"
+    real_template_dir.mkdir(parents=True, exist_ok=True)
+    (real_template_dir / "README.md").write_text("template\n", encoding="utf-8")
+    (tmp_path / "mind_template").symlink_to(real_template_dir, target_is_directory=True)
+
+    config = _test_config()
+    config.agents["general"].private = AgentPrivateConfig(
+        per="user",
+        root="mind_data",
+        template_dir="./mind_template",
+    )
+
+    with pytest.raises(ValueError, match=re.escape("invalid private.template_dir")):
+        _bind_runtime_paths(config, _runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
+
+
 def test_copy_workspace_template_rejects_destination_symlink_escape(tmp_path: Path) -> None:
     """Template backfill must refuse to write through symlinked workspace subdirectories."""
     template_dir = tmp_path / "template"

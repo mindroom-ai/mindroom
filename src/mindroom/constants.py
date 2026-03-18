@@ -467,19 +467,27 @@ def encryption_keys_dir(runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / "encryption_keys"
 
 
-def resolve_config_relative_path(
+def config_relative_path(
     raw_path: str | Path,
     runtime_paths: RuntimePaths,
 ) -> Path:
-    """Resolve a configured path, treating relative values as config-directory-relative.
+    """Return one configured path relative to the runtime config directory without resolving symlinks.
 
     Config-relative paths may use `${MINDROOM_STORAGE_PATH}` or
     `${MINDROOM_CONFIG_PATH}` placeholders only.
     """
     unresolved = Path(_expand_runtime_path_vars(os.fspath(raw_path), runtime_paths)).expanduser()
     if unresolved.is_absolute():
-        return unresolved.resolve()
-    return (runtime_paths.config_dir / unresolved).resolve()
+        return unresolved
+    return runtime_paths.config_dir / unresolved
+
+
+def resolve_config_relative_path(
+    raw_path: str | Path,
+    runtime_paths: RuntimePaths,
+) -> Path:
+    """Resolve a configured path, treating relative values as config-directory-relative."""
+    return config_relative_path(raw_path, runtime_paths).resolve()
 
 
 def _docker_container_enabled(runtime_paths: RuntimePaths) -> bool:

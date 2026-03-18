@@ -16,8 +16,13 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom.agent_policy import ResolvedAgentPolicy, build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.constants import resolve_config_relative_path
+from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workspaces import (
+    iter_local_copy_source_entries,
+    validate_local_copy_source_dir,
+    validate_local_copy_source_path,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -149,37 +154,42 @@ def _file_state_fingerprint(path: Path) -> str:
 
 def _directory_state_fingerprint(path: Path) -> str:
     state_entries: list[str] = []
-    for asset_path in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
-        relative_path = asset_path.relative_to(path).as_posix()
+    for asset_path, relative_path in iter_local_copy_source_entries(path):
         stat = asset_path.stat()
         kind = "dir" if asset_path.is_dir() else "file"
         size = 0 if asset_path.is_dir() else stat.st_size
-        state_entries.append(f"{kind}:{relative_path}:{size}:{stat.st_mtime_ns}")
+        state_entries.append(f"{kind}:{relative_path.as_posix()}:{size}:{stat.st_mtime_ns}")
     return hashlib.sha256("\0".join(state_entries).encode("utf-8")).hexdigest()
 
 
+def _validated_asset_host_path(host_path: Path) -> Path:
+    try:
+        return validate_local_copy_source_path(
+            host_path,
+            field_name="Docker worker asset",
+        )
+    except ValueError as exc:
+        raise WorkerBackendError(str(exc)) from exc
+
+
 def _path_state_fingerprint(host_path: Path) -> str:
-    resolved_host_path = host_path.expanduser().resolve()
+    resolved_host_path = _validated_asset_host_path(host_path)
     if resolved_host_path.is_dir():
         return f"dir:{_directory_state_fingerprint(resolved_host_path)}"
     return _file_state_fingerprint(resolved_host_path)
 
 
 def _compute_path_contents_hash(host_path: Path) -> str:
-    resolved_host_path = host_path.expanduser().resolve()
+    resolved_host_path = _validated_asset_host_path(host_path)
     hasher = hashlib.sha256()
     try:
         if resolved_host_path.is_dir():
-            for asset_path in sorted(
-                resolved_host_path.rglob("*"),
-                key=lambda path: path.relative_to(resolved_host_path).as_posix(),
-            ):
-                relative_path = asset_path.relative_to(resolved_host_path).as_posix()
+            for asset_path, relative_path in iter_local_copy_source_entries(resolved_host_path):
                 if asset_path.is_dir():
-                    hasher.update(f"dir:{relative_path}\0".encode())
+                    hasher.update(f"dir:{relative_path.as_posix()}\0".encode())
                     continue
 
-                hasher.update(f"file:{relative_path}\0".encode())
+                hasher.update(f"file:{relative_path.as_posix()}\0".encode())
                 with asset_path.open("rb") as f:
                     while True:
                         chunk = f.read(1024 * 1024)
@@ -385,11 +395,27 @@ class DockerProjectionManager:
             for asset in projection.assets:
                 placeholder_path = temp_root.joinpath(*asset.relative_path.parts)
                 if asset.is_directory:
-                    placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(asset.host_path, placeholder_path)
+                    placeholder_path.mkdir(parents=True, exist_ok=True)
+                    resolved_asset_dir = validate_local_copy_source_dir(
+                        asset.host_path,
+                        field_name="Docker worker asset",
+                    )
+                    for source_path, relative_path in iter_local_copy_source_entries(resolved_asset_dir):
+                        destination_path = placeholder_path.joinpath(*relative_path.parts)
+                        if source_path.is_dir():
+                            destination_path.mkdir(parents=True, exist_ok=True)
+                            continue
+                        destination_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source_path, destination_path)
                     continue
                 placeholder_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(asset.host_path, placeholder_path)
+                shutil.copy2(
+                    validate_local_copy_source_path(
+                        asset.host_path,
+                        field_name="Docker worker asset",
+                    ),
+                    placeholder_path,
+                )
             (temp_root / _PROJECTION_READY_FILENAME).write_text("ready\n", encoding="utf-8")
             temp_root.replace(projection.root)
         except Exception:
@@ -626,7 +652,7 @@ class DockerProjectionManager:
                 runtime_paths=self._runtime_paths,
             ):
                 continue
-            host_path = resolve_config_relative_path(raw_plugin, self._runtime_paths)
+            host_path = config_relative_path(raw_plugin, self._runtime_paths)
             plugins[index] = self._projected_path_value(
                 host_path,
                 PurePosixPath(
@@ -661,7 +687,7 @@ class DockerProjectionManager:
             raw_path = knowledge_base.get("path")
             if not isinstance(raw_path, str) or not raw_path.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_path, self._runtime_paths)
+            host_path = config_relative_path(raw_path, self._runtime_paths)
             knowledge_base["path"] = self._projected_path_value(
                 host_path,
                 PurePosixPath(_PROJECTED_ASSETS_DIRNAME, "knowledge_bases", _safe_projection_name(base_id)),
@@ -722,7 +748,7 @@ class DockerProjectionManager:
         for index, raw_context_file in enumerate(context_files):
             if not isinstance(raw_context_file, str) or not raw_context_file.strip():
                 continue
-            host_path = resolve_config_relative_path(raw_context_file, self._runtime_paths)
+            host_path = config_relative_path(raw_context_file, self._runtime_paths)
             context_files[index] = self._projected_path_value(
                 host_path,
                 agent_dir
@@ -814,7 +840,9 @@ class DockerProjectionManager:
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
     ) -> PurePosixPath:
-        resolved_host_path = host_path.expanduser().resolve()
+        resolved_host_path = (
+            _validated_asset_host_path(host_path) if host_path.exists() else host_path.expanduser().resolve()
+        )
         existing_relative_path = asset_paths_by_host.get(resolved_host_path)
         if existing_relative_path is not None:
             return existing_relative_path
