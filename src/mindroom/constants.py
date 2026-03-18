@@ -389,15 +389,26 @@ def execution_runtime_env_values(runtime_paths: RuntimePaths) -> Mapping[str, st
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
+def runtime_env_source_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
+    """Return one runtime env var as a lexical filesystem path without resolving symlinks."""
+    raw_value = runtime_paths.env_value(name)
+    if raw_value is None or not raw_value.strip():
+        return None
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = runtime_paths.config_dir / path
+    return path
+
+
 def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     """Resolve one runtime env var as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
-    raw_value = runtime_paths.env_value(name)
-    if raw_value is None or not raw_value.strip():
+    source_path = runtime_env_source_path(runtime_paths, name)
+    if source_path is None:
         return None
-    return _resolve_runtime_relative_path(raw_value, base_dir=runtime_paths.config_dir)
+    return source_path.resolve()
 
 
 def runtime_env_flag(

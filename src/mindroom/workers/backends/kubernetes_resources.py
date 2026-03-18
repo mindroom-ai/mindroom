@@ -17,6 +17,7 @@ from mindroom.constants import RuntimePaths, serialize_public_runtime_paths
 from mindroom.credentials import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, visible_state_roots_for_worker_key
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workspaces import validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -650,17 +651,26 @@ class KubernetesResourceManager:
         if not self.storage_root.exists():
             return None
 
-        source_path = constants.runtime_env_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        if source_path is None or not source_path.is_file():
+        source_path = constants.runtime_env_source_path(self.runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
+            return None
+        try:
+            resolved_source_path = validate_local_copy_source_path(
+                source_path,
+                field_name="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS",
+            )
+        except ValueError as exc:
+            raise WorkerBackendError(str(exc)) from exc
+        if not resolved_source_path.is_file():
             return None
 
         runtime_dir = local_dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / source_path.name
-        if source_path.resolve() != target_path.resolve():
-            shutil.copyfile(source_path, target_path)
+        target_path = runtime_dir / resolved_source_path.name
+        if resolved_source_path.resolve() != target_path.resolve():
+            shutil.copyfile(resolved_source_path, target_path)
             target_path.chmod(0o600)
-        return str(dedicated_root / ".runtime" / source_path.name)
+        return str(dedicated_root / ".runtime" / resolved_source_path.name)
 
     def _worker_runtime_paths(
         self,

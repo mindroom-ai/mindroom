@@ -452,6 +452,33 @@ def test_kubernetes_backend_maps_adc_path_through_local_storage_root_when_mount_
     assert local_adc_copy.read_text(encoding="utf-8") == '{"type":"service_account"}\n'
 
 
+def test_kubernetes_backend_rejects_symlinked_google_application_credentials_path(tmp_path: Path) -> None:
+    """Explicit ADC handoff should reject symlinked host paths for consistency with other worker copies."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-5.4\nagents: {}\nrouter:\n  model: default\n",
+        encoding="utf-8",
+    )
+    real_credentials_path = tmp_path / "real-adc.json"
+    real_credentials_path.write_text('{"type":"service_account"}\n', encoding="utf-8")
+    symlinked_credentials_path = tmp_path / "adc-link.json"
+    symlinked_credentials_path.symlink_to(real_credentials_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "local-shared-storage",
+        process_env={"GOOGLE_APPLICATION_CREDENTIALS": str(symlinked_credentials_path)},
+    )
+    backend, _apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    with pytest.raises(
+        WorkerBackendError,
+        match="Kubernetes worker GOOGLE_APPLICATION_CREDENTIALS must not contain symlinks",
+    ):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+
 def test_kubernetes_backend_preserves_primary_config_path_without_configmap(tmp_path: Path) -> None:
     """Dedicated worker payloads should keep the primary runtime config path when no ConfigMap is mounted."""
     config_path = tmp_path / "workspace-config.yaml"

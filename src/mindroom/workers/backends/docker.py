@@ -19,7 +19,7 @@ import httpx
 from mindroom.constants import (
     RuntimePaths,
     resolve_primary_runtime_paths,
-    runtime_env_path,
+    runtime_env_source_path,
     runtime_paths_with_storage_root,
     serialize_public_runtime_paths,
 )
@@ -56,6 +56,7 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
+from mindroom.workspaces import validate_local_copy_source_path
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -763,17 +764,26 @@ class DockerWorkerBackend:
         if raw_value is None or not raw_value.strip():
             return None
 
-        source_path = runtime_env_path(self._runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-        if source_path is None or not source_path.is_file():
+        source_path = runtime_env_source_path(self._runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
+        if source_path is None or (not source_path.exists() and not source_path.is_symlink()):
+            return None
+        try:
+            resolved_source_path = validate_local_copy_source_path(
+                source_path,
+                field_name="Docker worker GOOGLE_APPLICATION_CREDENTIALS",
+            )
+        except ValueError as exc:
+            raise WorkerBackendError(str(exc)) from exc
+        if not resolved_source_path.is_file():
             return None
 
         runtime_dir = local_dedicated_root / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        target_path = runtime_dir / source_path.name
-        if source_path.resolve() != target_path.resolve():
-            shutil.copyfile(source_path, target_path)
+        target_path = runtime_dir / resolved_source_path.name
+        if resolved_source_path.resolve() != target_path.resolve():
+            shutil.copyfile(resolved_source_path, target_path)
             target_path.chmod(0o600)
-        return str(dedicated_root / ".runtime" / source_path.name)
+        return str(dedicated_root / ".runtime" / resolved_source_path.name)
 
     def _worker_runtime_config_path(self) -> Path:
         configured_container_path = Path(self.config.config_path)
