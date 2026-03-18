@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.agent_policy import (
+    ResolvedAgentPolicy,
+    build_agent_policy_seeds,
+    resolve_agent_policy_from_data,
+    resolve_private_knowledge_base_agent,
+)
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
@@ -31,10 +37,15 @@ class _ResolvedAgentExecution:
     """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
 
     agent_name: str
-    is_private: bool
+    policy: ResolvedAgentPolicy
     execution_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
+
+    @property
+    def is_private(self) -> bool:
+        """Return whether the resolved execution uses a private agent definition."""
+        return self.policy.is_private
 
 
 @dataclass(frozen=True)
@@ -42,7 +53,7 @@ class ResolvedAgentRuntime:
     """Resolved runtime state for one `(agent_name, execution_identity)` materialization."""
 
     agent_name: str
-    is_private: bool
+    policy: ResolvedAgentPolicy
     execution_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
@@ -50,6 +61,11 @@ class ResolvedAgentRuntime:
     workspace: ResolvedAgentWorkspace | None
     tool_base_dir: Path | None
     file_memory_root: Path | None
+
+    @property
+    def is_private(self) -> bool:
+        """Return whether the resolved runtime uses a private agent definition."""
+        return self.policy.is_private
 
 
 @dataclass(frozen=True)
@@ -130,15 +146,19 @@ def resolve_agent_execution(
     execution_identity: ToolExecutionIdentity | None,
 ) -> _ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
-    agent_config = config.get_agent(agent_name)
-    execution_scope = config.get_agent_execution_scope(agent_name)
-    is_private = agent_config.private is not None
+    policy = resolve_agent_policy_from_data(
+        agent_name,
+        config.get_agent(agent_name),
+        default_worker_scope=config.defaults.worker_scope,
+        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    )
+    execution_scope = policy.effective_execution_scope
     resolved_worker_execution = resolve_worker_execution_scope(
         execution_scope,
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    if is_private:
+    if policy.is_private:
         if resolved_worker_execution.execution_identity is None:
             msg = f"Private agent '{agent_name}' requires an active execution identity to resolve requester-local state"
             raise ValueError(msg)
@@ -147,7 +167,7 @@ def resolve_agent_execution(
             raise ValueError(msg)
     return _ResolvedAgentExecution(
         agent_name=agent_name,
-        is_private=is_private,
+        policy=policy,
         execution_scope=execution_scope,
         execution_identity=resolved_worker_execution.execution_identity,
         worker_key=resolved_worker_execution.worker_key,
@@ -168,7 +188,7 @@ def resolve_agent_runtime(
         config,
         execution_identity=execution_identity,
     )
-    if resolved_execution.is_private:
+    if resolved_execution.policy.request_scoped_workspace_enabled:
         worker_key = resolved_execution.worker_key
         if worker_key is None:
             msg = f"Private agent '{agent_name}' could not resolve a worker key"
@@ -189,14 +209,14 @@ def resolve_agent_runtime(
         config,
         runtime_paths=runtime_paths,
         state_storage_path=state_root,
-        use_state_storage_path=resolved_execution.is_private,
+        use_state_storage_path=resolved_execution.policy.request_scoped_workspace_enabled,
         create=create,
     )
     tool_base_dir = workspace.root if workspace is not None else None
     file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
         agent_name=agent_name,
-        is_private=resolved_execution.is_private,
+        policy=resolved_execution.policy,
         execution_scope=resolved_execution.execution_scope,
         execution_identity=resolved_execution.execution_identity,
         worker_key=resolved_execution.worker_key,
@@ -222,7 +242,14 @@ def resolve_knowledge_binding(
         file_watch_enabled=base_config.watch,
         has_git_sync=base_config.git is not None,
     )
-    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
+    effective_agent_name = resolve_private_knowledge_base_agent(
+        base_id,
+        build_agent_policy_seeds(
+            config.agents,
+            default_worker_scope=config.defaults.worker_scope,
+        ),
+        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+    )
     if effective_agent_name is None:
         knowledge_path = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
         return ResolvedKnowledgeBinding(
@@ -245,7 +272,6 @@ def resolve_knowledge_binding(
         msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
         raise ValueError(msg)
 
-    uses_isolating_worker_scope = agent_runtime.execution_scope not in {None, "shared"}
     return ResolvedKnowledgeBinding(
         base_id=base_id,
         storage_root=agent_runtime.state_root,
@@ -254,7 +280,11 @@ def resolve_knowledge_binding(
             base_config.path,
             field_name=f"knowledge base '{base_id}' path",
         ),
-        request_scoped=uses_isolating_worker_scope,
-        start_background_watchers=start_watchers and refresh_enabled and not uses_isolating_worker_scope,
-        incremental_sync_on_access=refresh_enabled and (uses_isolating_worker_scope or not start_watchers),
+        request_scoped=agent_runtime.policy.request_scoped_knowledge_enabled,
+        start_background_watchers=(
+            start_watchers and refresh_enabled and not agent_runtime.policy.request_scoped_knowledge_enabled
+        ),
+        incremental_sync_on_access=(
+            refresh_enabled and (agent_runtime.policy.request_scoped_knowledge_enabled or not start_watchers)
+        ),
     )

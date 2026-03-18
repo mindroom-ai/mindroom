@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import nio
 import pytest
+import uvicorn
 from agno.knowledge.document import Document
 from agno.knowledge.knowledge import Knowledge
 from agno.media import Image
@@ -55,6 +57,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.orchestrator import (
     MultiAgentOrchestrator,
     _run_auxiliary_task_forever,
+    _SignalAwareUvicornServer,
     main,
 )
 from mindroom.runtime_state import get_runtime_state, reset_runtime_state, set_runtime_ready
@@ -685,8 +688,14 @@ class TestAgentBot:
             watched_paths.append(path)
             config_watcher_ran.set()
 
-        async def _run_auxiliary(task_name: str, operation: Callable[[], Awaitable[None]]) -> None:
+        async def _run_auxiliary(
+            task_name: str,
+            operation: Callable[[], Awaitable[None]],
+            *,
+            should_restart: Callable[[], bool] | None = None,
+        ) -> None:
             del task_name
+            del should_restart
             await operation()
 
         async def _start() -> None:
@@ -4406,6 +4415,62 @@ class TestMultiAgentOrchestrator:
             "Auxiliary task crashed; restarting",
             task_name="test task",
         )
+
+    @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_exits_cleanly_when_shutdown_requested(self) -> None:
+        """Shutdown should suppress restart logging for clean auxiliary exits."""
+        shutdown_requested = False
+        calls = 0
+
+        async def _operation() -> None:
+            nonlocal calls, shutdown_requested
+            calls += 1
+            shutdown_requested = True
+
+        with patch("mindroom.orchestrator.logger.warning") as mock_warning:
+            await _run_auxiliary_task_forever(
+                "test task",
+                _operation,
+                should_restart=lambda: not shutdown_requested,
+            )
+
+        assert calls == 1
+        mock_warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_auxiliary_task_forever_suppresses_crash_log_when_shutdown_requested(self) -> None:
+        """Shutdown should suppress crash logging for auxiliary teardown errors."""
+        shutdown_requested = False
+        calls = 0
+
+        async def _operation() -> None:
+            nonlocal calls, shutdown_requested
+            calls += 1
+            shutdown_requested = True
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        with patch("mindroom.orchestrator.logger.exception") as mock_exception:
+            await _run_auxiliary_task_forever(
+                "test task",
+                _operation,
+                should_restart=lambda: not shutdown_requested,
+            )
+
+        assert calls == 1
+        mock_exception.assert_not_called()
+
+    def test_signal_aware_uvicorn_server_marks_shutdown_requested_on_signal(self) -> None:
+        """Uvicorn signal handling should surface shutdown intent before serve() returns."""
+        shutdown_requested = asyncio.Event()
+        config = uvicorn.Config(app=lambda _scope, _receive, _send: None)
+        server = _SignalAwareUvicornServer(config, shutdown_requested)
+
+        with patch.object(uvicorn.Server, "handle_exit") as mock_handle_exit:
+            server.handle_exit(signal.SIGINT, None)
+
+        assert shutdown_requested.is_set()
+        mock_handle_exit.assert_called_once_with(signal.SIGINT, None)
 
     @pytest.mark.asyncio
     async def test_run_auxiliary_task_forever_resets_backoff_after_healthy_run(self) -> None:

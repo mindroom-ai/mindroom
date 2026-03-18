@@ -50,6 +50,8 @@ uv run mindroom config init --minimal --provider openai --force --path "$tmp/con
 ```
 
 Patch the generated config so it can run locally without private credentials and without restrictive room auth.
+When you are targeting the local OpenAI-compatible server on `http://localhost:9292/v1`, start with `gpt-oss-low:20b`.
+That is the suggested local chat model for this skill because it has been verified to work with MindRoom's `developer` messages in this repo.
 
 Minimum changes:
 
@@ -93,6 +95,10 @@ export OPENAI_API_KEY=sk-test
 export UV_PYTHON=3.13
 ```
 
+`MINDROOM_NAMESPACE` must match `^[a-z0-9]{4,32}$`.
+Use lowercase letters and digits only.
+Do not use underscores or hyphens.
+
 In practice, it is often cleaner to write a temporary `"$tmp/.env"` and `source` it so the live run and later `curl` commands use the same values.
 
 Example:
@@ -126,6 +132,10 @@ Health check:
 ```bash
 curl -s http://localhost:9876/api/health
 ```
+
+If you point the isolated run at a local OpenAI-compatible server, verify the chosen chat model can handle MindRoom's message roles before trusting the chat smoke test.
+Some local llama.cpp or llama-swap templates reject `developer` messages and will fail both topic generation and agent replies with an error like `Only user, assistant and tool roles are supported, got developer`.
+The repo's documented local path suggests `gpt-oss-low:20b` because it has been live-tested successfully here.
 
 ## Create a Disposable Matrix Account
 
@@ -192,6 +202,9 @@ uv run --python 3.13 matty send "Lobby" \
   "Hello @mindroom_assistant:localhost please reply with pong." \
   -u "$username" -p "$password"
 ```
+
+`matty send` does not currently support `--format json`.
+Use the plain send command, then confirm the result with `matty messages --format json` and `matty threads --format json`.
 
 Read recent room messages:
 

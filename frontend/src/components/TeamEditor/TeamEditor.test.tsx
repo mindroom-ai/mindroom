@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { TeamEditor } from './TeamEditor';
 import { useConfigStore } from '@/store/configStore';
-import { Team, Agent, Config, TeamEligibilityByAgent } from '@/types/config';
+import { Team, Agent, AgentPoliciesByAgent, Config } from '@/types/config';
 
 // Mock the store
 vi.mock('@/store/configStore');
@@ -79,13 +79,68 @@ describe('TeamEditor', () => {
   const mockUpdateTeam = vi.fn();
   const mockDeleteTeam = vi.fn();
   const mockSaveConfig = vi.fn();
-  const mockRefreshTeamEligibility = vi.fn().mockResolvedValue(undefined);
-  const mockTeamEligibilityByAgent: TeamEligibilityByAgent = {
-    code: null,
-    shell: null,
-    research: null,
-    leader: "Delegates to private agent 'mind', so it cannot participate in teams yet.",
-    mind: 'Private agents cannot participate in teams yet.',
+  const mockAgentPoliciesByAgent: AgentPoliciesByAgent = {
+    code: {
+      agent_name: 'code',
+      is_private: false,
+      effective_execution_scope: null,
+      scope_label: 'unscoped',
+      scope_source: 'unscoped',
+      dashboard_credentials_supported: true,
+      team_eligibility_reason: null,
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: false,
+      request_scoped_knowledge_enabled: false,
+    },
+    shell: {
+      agent_name: 'shell',
+      is_private: false,
+      effective_execution_scope: null,
+      scope_label: 'unscoped',
+      scope_source: 'unscoped',
+      dashboard_credentials_supported: true,
+      team_eligibility_reason: null,
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: false,
+      request_scoped_knowledge_enabled: false,
+    },
+    research: {
+      agent_name: 'research',
+      is_private: false,
+      effective_execution_scope: null,
+      scope_label: 'unscoped',
+      scope_source: 'unscoped',
+      dashboard_credentials_supported: true,
+      team_eligibility_reason: null,
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: false,
+      request_scoped_knowledge_enabled: false,
+    },
+    leader: {
+      agent_name: 'leader',
+      is_private: false,
+      effective_execution_scope: null,
+      scope_label: 'unscoped',
+      scope_source: 'unscoped',
+      dashboard_credentials_supported: true,
+      team_eligibility_reason:
+        "Delegates to private agent 'mind', so it cannot participate in teams yet.",
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: false,
+      request_scoped_knowledge_enabled: false,
+    },
+    mind: {
+      agent_name: 'mind',
+      is_private: true,
+      effective_execution_scope: 'user',
+      scope_label: 'private.per=user',
+      scope_source: 'private.per',
+      dashboard_credentials_supported: false,
+      team_eligibility_reason: 'Private agents cannot participate in teams yet.',
+      private_knowledge_base_id: null,
+      request_scoped_workspace_enabled: true,
+      request_scoped_knowledge_enabled: false,
+    },
   };
 
   beforeEach(() => {
@@ -112,8 +167,7 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
-      refreshTeamEligibility: mockRefreshTeamEligibility,
-      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
       config: mockConfig,
       isDirty: false,
       diagnostics: [],
@@ -137,8 +191,7 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
-      refreshTeamEligibility: mockRefreshTeamEligibility,
-      teamEligibilityByAgent: {},
+      agentPoliciesByAgent: {},
       config: mockConfig,
       isDirty: false,
       diagnostics: [],
@@ -221,6 +274,44 @@ describe('TeamEditor', () => {
     expect(leaderCheckbox).toBeDisabled();
     expect(
       screen.getByText("Delegates to private agent 'mind', so it cannot participate in teams yet.")
+    ).toBeInTheDocument();
+  });
+
+  it('disables agents when policy preview is unavailable', () => {
+    (useConfigStore as any).mockReturnValue({
+      teams: [mockTeam],
+      agents: mockAgents,
+      rooms: [
+        {
+          id: 'dev',
+          display_name: 'Dev',
+          description: 'Development room',
+          agents: ['code', 'shell'],
+        },
+      ],
+      selectedTeamId: 'dev_team',
+      updateTeam: mockUpdateTeam,
+      deleteTeam: mockDeleteTeam,
+      saveConfig: mockSaveConfig,
+      agentPoliciesByAgent: {
+        code: mockAgentPoliciesByAgent.code,
+        shell: mockAgentPoliciesByAgent.shell,
+        leader: mockAgentPoliciesByAgent.leader,
+        mind: mockAgentPoliciesByAgent.mind,
+      },
+      config: mockConfig,
+      isDirty: false,
+      diagnostics: [],
+    });
+
+    render(<TeamEditor />);
+
+    const researchCheckbox = screen.getByRole('checkbox', { name: /Research Agent/i });
+    expect(researchCheckbox).toBeDisabled();
+    expect(
+      screen.getByText(
+        'Agent policy preview is unavailable. Save or refresh to validate team eligibility.'
+      )
     ).toBeInTheDocument();
   });
 
@@ -352,8 +443,7 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
-      refreshTeamEligibility: mockRefreshTeamEligibility,
-      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
       config: mockConfig,
       isDirty: true,
       diagnostics: [],
@@ -394,8 +484,7 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
-      refreshTeamEligibility: mockRefreshTeamEligibility,
-      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
       config: mockConfig,
       isDirty: true,
       diagnostics: [],
@@ -423,8 +512,7 @@ describe('TeamEditor', () => {
       updateTeam: mockUpdateTeam,
       deleteTeam: mockDeleteTeam,
       saveConfig: mockSaveConfig,
-      refreshTeamEligibility: mockRefreshTeamEligibility,
-      teamEligibilityByAgent: mockTeamEligibilityByAgent,
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
       config: mockConfig,
       isDirty: true,
       diagnostics: [

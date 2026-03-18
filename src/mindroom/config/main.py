@@ -5,12 +5,21 @@ from __future__ import annotations
 import re
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 import yaml
 from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
-from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig
+from mindroom.agent_policy import (
+    build_agent_policy_seeds,
+    get_agent_delegation_closure,
+    get_private_team_targets,
+    get_unsupported_team_agents,
+    resolve_agent_policy_from_data,
+    resolve_private_knowledge_base_agent,
+    unsupported_team_agent_message,
+)
+from mindroom.config.agent import AgentConfig, CultureConfig, TeamConfig  # noqa: TC001
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.matrix import MatrixRoomAccessConfig, MatrixSpaceConfig, MindRoomUserConfig
@@ -35,8 +44,6 @@ from mindroom.tool_system.worker_routing import unsupported_shared_only_integrat
 from mindroom.workspaces import validate_workspace_template_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.matrix.identity import MatrixID
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -124,164 +131,6 @@ def _normalized_config_data(data: object) -> object:
     normalized_data = cast("dict[str, object]", data.copy())
     _normalize_optional_config_sections(normalized_data)
     return normalized_data
-
-
-def _agent_delegation_targets(agent_data: AgentConfig | Mapping[str, Any] | None) -> tuple[str, ...]:
-    if agent_data is None:
-        return ()
-    if isinstance(agent_data, AgentConfig):
-        return tuple(agent_data.delegate_to)
-    raw_delegate_to = agent_data.get("delegate_to")
-    if not isinstance(raw_delegate_to, list | tuple):
-        return ()
-    return tuple(target for target in raw_delegate_to if isinstance(target, str))
-
-
-def _agent_is_private(agent_data: AgentConfig | Mapping[str, Any] | None) -> bool:
-    if agent_data is None:
-        return False
-    if isinstance(agent_data, AgentConfig):
-        return agent_data.private is not None
-    return agent_data.get("private") is not None
-
-
-def _get_agent_delegation_closure_for_agents(
-    agent_name: str,
-    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
-    *,
-    closures: dict[str, frozenset[str]] | None = None,
-    visiting: frozenset[str] = frozenset(),
-) -> frozenset[str]:
-    """Return one agent plus all agents reachable through transitive delegation."""
-    if closures is None:
-        closures = {}
-    if agent_name in closures:
-        return closures[agent_name]
-    if agent_name in visiting:
-        return frozenset()
-
-    agent_data = agents.get(agent_name)
-    if agent_data is None or agent_name == ROUTER_AGENT_NAME:
-        result = frozenset({agent_name})
-        closures[agent_name] = result
-        return result
-
-    reachable = {agent_name}
-    next_visiting = visiting | {agent_name}
-    for target_name in _agent_delegation_targets(agent_data):
-        reachable.update(
-            _get_agent_delegation_closure_for_agents(
-                target_name,
-                agents,
-                closures=closures,
-                visiting=next_visiting,
-            ),
-        )
-
-    result = frozenset(reachable)
-    closures[agent_name] = result
-    return result
-
-
-def _get_private_team_targets_for_agents(
-    agent_name: str,
-    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
-    *,
-    closures: dict[str, frozenset[str]] | None = None,
-) -> tuple[str, ...]:
-    """Return private agents reachable from one team member, including itself."""
-    closure_cache = closures if closures is not None else {}
-    return tuple(
-        sorted(
-            target_name
-            for target_name in _get_agent_delegation_closure_for_agents(
-                agent_name,
-                agents,
-                closures=closure_cache,
-            )
-            if _agent_is_private(agents.get(target_name))
-        ),
-    )
-
-
-def _get_unsupported_team_agents_for_agents(
-    agent_names: list[str],
-    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
-    *,
-    closures: dict[str, frozenset[str]] | None = None,
-) -> dict[str, tuple[str, ...] | None]:
-    """Return unsupported team members keyed by agent name."""
-    closure_cache = closures if closures is not None else {}
-    unsupported_agents: dict[str, tuple[str, ...] | None] = {}
-    for agent_name in agent_names:
-        if agent_name not in agents:
-            unsupported_agents[agent_name] = None
-            continue
-        private_targets = _get_private_team_targets_for_agents(agent_name, agents, closures=closure_cache)
-        if private_targets:
-            unsupported_agents[agent_name] = private_targets
-    return unsupported_agents
-
-
-def _team_agent_eligibility_reason(
-    agent_name: str,
-    *,
-    private_targets: tuple[str, ...] | None,
-) -> str | None:
-    """Return the concise editor-facing team-eligibility reason for one agent."""
-    if private_targets is None:
-        return f"Unknown agent '{agent_name}'."
-    if not private_targets:
-        return None
-    if agent_name in private_targets:
-        return "Private agents cannot participate in teams yet."
-    if len(private_targets) == 1:
-        return f"Delegates to private agent '{private_targets[0]}', so it cannot participate in teams yet."
-    return (
-        "Delegates to private agents "
-        f"{', '.join(repr(target) for target in private_targets)}, so it cannot participate in teams yet."
-    )
-
-
-def _format_unsupported_team_agent_message(
-    agent_name: str,
-    *,
-    prefix: str,
-    private_targets: tuple[str, ...] | None,
-) -> str:
-    """Return the user-facing error for one unsupported team member."""
-    if private_targets is None:
-        return f"{prefix} references unknown agent '{agent_name}'"
-    if agent_name in private_targets:
-        return f"{prefix} includes private agent '{agent_name}'; private agents cannot participate in teams yet"
-    if len(private_targets) == 1:
-        return (
-            f"{prefix} includes agent '{agent_name}' which reaches private agent "
-            f"'{private_targets[0]}' via delegation; private agents cannot participate in teams yet"
-        )
-    return (
-        f"{prefix} includes agent '{agent_name}' which reaches private agents "
-        f"{', '.join(repr(target) for target in private_targets)} via delegation; "
-        "private agents cannot participate in teams yet"
-    )
-
-
-def team_eligibility_reasons_for_agents(
-    agents: Mapping[str, AgentConfig | Mapping[str, Any]],
-) -> dict[str, str | None]:
-    """Return editor-facing team-eligibility reasons for all configured agents."""
-    closure_cache: dict[str, frozenset[str]] = {}
-    return {
-        agent_name: _team_agent_eligibility_reason(
-            agent_name,
-            private_targets=_get_private_team_targets_for_agents(
-                agent_name,
-                agents,
-                closures=closure_cache,
-            ),
-        )
-        for agent_name in agents
-    }
 
 
 def _relative_paths_overlap(left: Path, right: Path) -> bool:
@@ -778,12 +627,13 @@ class Config(BaseModel):
         Shared agents derive it from `worker_scope` (or defaults), while private agents
         derive the same runtime concept from `private.per`.
         """
-        agent_config = self.get_agent(agent_name)
-        if agent_config.private is not None:
-            return agent_config.private.per
-        if agent_config.worker_scope is not None:
-            return agent_config.worker_scope
-        return self.defaults.worker_scope
+        policy = resolve_agent_policy_from_data(
+            agent_name,
+            self.get_agent(agent_name),
+            default_worker_scope=self.defaults.worker_scope,
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        )
+        return policy.effective_execution_scope
 
     def get_agent_scope_label(self, agent_name: str) -> str:
         """Return the user-facing authored scope label for one agent.
@@ -792,34 +642,34 @@ class Config(BaseModel):
         one derived execution scope, but user-facing messages should still distinguish
         authored `worker_scope=...` from private `private.per=...`.
         """
-        agent_config = self.get_agent(agent_name)
-        if agent_config.private is not None:
-            return f"private.per={agent_config.private.per}"
-        execution_scope = self.get_agent_execution_scope(agent_name)
-        if execution_scope is None:
-            return "unscoped"
-        return f"worker_scope={execution_scope}"
+        policy = resolve_agent_policy_from_data(
+            agent_name,
+            self.get_agent(agent_name),
+            default_worker_scope=self.defaults.worker_scope,
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        )
+        return policy.scope_label
 
     def get_agent_private_knowledge_base_id(self, agent_name: str) -> str | None:
         """Return the synthetic knowledge base ID for one agent's private knowledge."""
-        agent_config = self.get_agent(agent_name)
-        if agent_config.private is None:
-            return None
-        private_knowledge = agent_config.private.knowledge
-        if private_knowledge is None or not private_knowledge.enabled or private_knowledge.path is None:
-            return None
-        return f"{self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{agent_name}"
+        policy = resolve_agent_policy_from_data(
+            agent_name,
+            self.get_agent(agent_name),
+            default_worker_scope=self.defaults.worker_scope,
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        )
+        return policy.private_knowledge_base_id
 
     def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
         """Return the owning agent for a synthetic private knowledge base ID."""
-        if not base_id.startswith(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX):
-            return None
-        agent_name = base_id.removeprefix(self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-        if agent_name not in self.agents:
-            return None
-        if self.get_agent_private_knowledge_base_id(agent_name) != base_id:
-            return None
-        return agent_name
+        return resolve_private_knowledge_base_agent(
+            base_id,
+            build_agent_policy_seeds(
+                self.agents,
+                default_worker_scope=self.defaults.worker_scope,
+            ),
+            private_knowledge_base_id_prefix=self.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
+        )
 
     def get_agent_knowledge_base_ids(self, agent_name: str) -> list[str]:
         """Return shared and private knowledge base IDs assigned to one agent."""
@@ -898,9 +748,12 @@ class Config(BaseModel):
         visiting: frozenset[str] = frozenset(),
     ) -> frozenset[str]:
         """Return one agent plus all agents reachable through transitive delegation."""
-        return _get_agent_delegation_closure_for_agents(
+        return get_agent_delegation_closure(
             agent_name,
-            self.agents,
+            build_agent_policy_seeds(
+                self.agents,
+                default_worker_scope=self.defaults.worker_scope,
+            ),
             closures=closures,
             visiting=visiting,
         )
@@ -912,7 +765,14 @@ class Config(BaseModel):
         closures: dict[str, frozenset[str]] | None = None,
     ) -> tuple[str, ...]:
         """Return private agents reachable from one team member, including itself."""
-        return _get_private_team_targets_for_agents(agent_name, self.agents, closures=closures)
+        return get_private_team_targets(
+            agent_name,
+            build_agent_policy_seeds(
+                self.agents,
+                default_worker_scope=self.defaults.worker_scope,
+            ),
+            closures=closures,
+        )
 
     def get_unsupported_team_agents(
         self,
@@ -926,7 +786,14 @@ class Config(BaseModel):
         Supported known agents are omitted.
         Private or transitively private members map to their reachable private targets.
         """
-        return _get_unsupported_team_agents_for_agents(agent_names, self.agents, closures=closures)
+        return get_unsupported_team_agents(
+            agent_names,
+            build_agent_policy_seeds(
+                self.agents,
+                default_worker_scope=self.defaults.worker_scope,
+            ),
+            closures=closures,
+        )
 
     @staticmethod
     def unsupported_team_agent_message(
@@ -936,7 +803,7 @@ class Config(BaseModel):
         private_targets: tuple[str, ...] | None,
     ) -> str:
         """Return the user-facing error for one unsupported team member."""
-        return _format_unsupported_team_agent_message(
+        return unsupported_team_agent_message(
             agent_name,
             prefix=prefix,
             private_targets=private_targets,

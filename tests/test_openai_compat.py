@@ -135,6 +135,32 @@ def test_load_config_requires_runtime_paths() -> None:
         openai_compat._load_config(request)
 
 
+def test_openai_incompatible_agents_is_order_independent_for_cycles() -> None:
+    """Cyclic delegation should not change which /v1 agents are rejected."""
+    config = Config(
+        agents={
+            "a": AgentConfig(
+                display_name="A",
+                role="Private agent",
+                rooms=[],
+                private={"per": "user"},
+                delegate_to=["b"],
+            ),
+            "b": AgentConfig(
+                display_name="B",
+                role="Delegating agent",
+                rooms=[],
+                delegate_to=["a"],
+            ),
+        },
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+
+    assert openai_compat._openai_incompatible_agents(["a", "b"], config) == ["a", "b"]
+    assert openai_compat._openai_incompatible_agents(["b", "a"], config) == ["b", "a"]
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/models
 # ---------------------------------------------------------------------------
