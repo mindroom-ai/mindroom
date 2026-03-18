@@ -167,9 +167,12 @@ Expected outcome: The agent responds with plain room messages, stores room-level
 - [ ] `MSG-012` Configure `room_thread_modes` so one room uses `room` mode and another uses `thread` mode for the same agent.
 Expected outcome: The effective response mode follows the room-specific override and router handoff respects the target agent’s effective mode in each room.
 
+- [ ] `MSG-013` Continue a thread where one agent has already been responding and then explicitly mention a different eligible agent.
+Expected outcome: The newly mentioned agent takes over the turn, the previous agent stays silent, and the handoff does not create duplicate or competing replies.
+
 ## 5. Streaming, Presence, Typing, Stop, And Large Messages
 
-Source anchors: `src/mindroom/streaming.py`, `src/mindroom/matrix/presence.py`, `src/mindroom/matrix/typing.py`, `src/mindroom/stop.py`, `src/mindroom/matrix/large_messages.py`, `src/mindroom/tool_system/events.py`.
+Source anchors: `src/mindroom/streaming.py`, `src/mindroom/matrix/presence.py`, `src/mindroom/matrix/typing.py`, `src/mindroom/stop.py`, `src/mindroom/matrix/large_messages.py`, `src/mindroom/tool_system/events.py`, `src/mindroom/bot.py`.
 
 - [ ] `STR-001` Trigger a response large enough to stream progressively.
 Expected outcome: The agent emits progressive message edits instead of waiting for one final message.
@@ -194,6 +197,9 @@ Expected outcome: The runtime sends a normal non-streaming response path and doe
 
 - [ ] `STR-008` Disable `defaults.show_stop_button` and then disable `show_tool_calls` for one agent.
 Expected outcome: Stop-button reactions are suppressed when configured off and inline tool traces plus tool metadata are omitted when tool-call visibility is disabled.
+
+- [ ] `STR-009` React with `🛑` when no tracked run is active, from an agent account, and from a user who lacks reply permission.
+Expected outcome: Only authorized human reactions on actively tracked runs cancel work, while all other stop reactions are ignored or fall through to normal reaction handling without corrupting room state.
 
 ## 6. Teams And Multi-Agent Collaboration
 
@@ -316,6 +322,12 @@ Expected outcome: Explicit command intent can normalize to `!help` or `!skill`, 
 - [ ] `MEDIA-011` Speak or inject unavailable agent mentions while voice normalization runs in a room with limited available entities.
 Expected outcome: Unavailable configured entities lose their `@` mention marker while available room-scoped entities keep valid mentions and dispatch correctly.
 
+- [ ] `MEDIA-012` Send a voice message that becomes a normalized command or threaded follow-up and then inspect later follow-up or attachment-aware handling.
+Expected outcome: The synthetic voice-derived message preserves original sender identity, thread context, attachment IDs, and raw-audio fallback metadata so router handling and later follow-ups can recover the correct audio context.
+
+- [ ] `MEDIA-013` Repeat a voice flow that emits visible router echo, retry the same event, hand off to the final responder, and repeat with reply permissions denied.
+Expected outcome: Router echo is emitted at most once per voice event, reused across retries or handoff when appropriate, and fully suppressed when reply permissions deny the sender.
+
 ## 10. Memory, Knowledge, Workspaces, Private Roots, And Cultures
 
 Source anchors: `src/mindroom/agents.py`, `src/mindroom/memory/`, `src/mindroom/memory/auto_flush.py`, `src/mindroom/memory/config.py`, `src/mindroom/workspaces.py`, `src/mindroom/knowledge/manager.py`, `src/mindroom/knowledge/utils.py`, `src/mindroom/api/knowledge.py`.
@@ -367,6 +379,9 @@ Expected outcome: Both modes keep learning enabled, but agentic mode follows the
 
 - [ ] `MEM-016` Configure Mem0 with a local `sentence_transformers` embedder once with optional dependency auto-install enabled and once with it disabled or unavailable.
 Expected outcome: The runtime auto-installs required local embedder dependencies when allowed and otherwise fails clearly instead of silently degrading memory setup.
+
+- [ ] `MEM-017` Enable auto-flush for a private agent across multiple requester scopes and then change that agent back to a shared configuration.
+Expected outcome: Dirty-session reprioritization and later flushes stay isolated to the original requester scope, stale private entries are purged when the agent stops being private, and persisted execution identity is reused for later writes.
 
 ## 11. Skills, Plugins, Tools, Workers, And Runtime Context
 
@@ -424,6 +439,12 @@ Expected outcome: Schedule APIs and command flows update the same underlying sta
 - [ ] `SCH-006` Restart the runtime after one-time and recurring schedules have been created.
 Expected outcome: Scheduled tasks restore from persisted state, expired one-time tasks are skipped, and valid future tasks continue to execute.
 
+- [ ] `SCH-007` Edit an existing schedule and compare the before and after task metadata, including an attempted `once` to `cron` or `cron` to `once` type change.
+Expected outcome: Valid edits preserve the existing task ID and original thread targeting, while illegal schedule-type changes fail clearly without mutating the stored task.
+
+- [ ] `SCH-008` Stop and restart the runtime while scheduled tasks exist and inspect both router and non-router entities afterward.
+Expected outcome: The router is the only entity that restores persisted schedules after restart, and router shutdown cancels its in-memory scheduled tasks before exit.
+
 ## 13. OpenAI-Compatible API
 
 Source anchors: `src/mindroom/api/openai_compat.py`, `src/mindroom/api/main.py`, `src/mindroom/teams.py`.
@@ -460,6 +481,9 @@ Expected outcome: The LibreChat header preserves continuity when `X-Session-Id` 
 
 - [ ] `OAI-011` Send `/v1/chat/completions` requests that include multimodal `messages[].content` and accepted OpenAI fields such as `response_format`, `tools`, and `tool_choice`.
 Expected outcome: Text parts of multimodal content are used as the prompt, non-text parts are ignored by the current implementation, and accepted-but-unsupported OpenAI fields do not change runtime behavior or crash the request.
+
+- [ ] `OAI-012` Send repeated streaming and non-streaming requests to the `auto` model after routing resolves a specific responder.
+Expected outcome: Session continuity, streamed identity, and later turns all bind to the resolved agent name rather than the literal `auto` model label.
 
 ## 14. Bundled Dashboard And Runtime API
 
@@ -518,6 +542,15 @@ Expected outcome: Catalog filters, provider connect flows, setup gating, and sco
 
 - [ ] `UI-018` Use the Skills tab to create, edit, save, switch, and delete skills.
 Expected outcome: Skill origin labeling, kebab-case name validation, unsaved-change prompts, and editable-versus-read-only behavior all work correctly.
+
+- [ ] `UI-019` Put the Agents and Teams editors into draft states where policy preview cannot be derived or a member becomes team-ineligible.
+Expected outcome: Scoped tool previews fail closed when policy derivation is unavailable and team member pickers show explicit eligibility reasons instead of leaving blocked members selectable.
+
+- [ ] `UI-020` Use the External Rooms tab and trigger a bulk leave where at least one room succeeds and another fails.
+Expected outcome: Mixed-success feedback reports both the rooms that were left and the rooms that failed instead of collapsing partial failure into a generic success or error state.
+
+- [ ] `UI-021` Use the Tools or Integrations tab while switching between `shared`, `user`, and `user_agent` execution scopes during load.
+Expected outcome: Shared-only integrations and dashboard-managed credential controls are marked unsupported for non-shared scopes, stale in-flight scope requests do not bleed status across selections, and unsaved draft scope overrides are treated as non-authoritative.
 
 ## 15. SaaS Platform
 
@@ -616,6 +649,12 @@ Expected outcome: OAuth client credentials are written to the active runtime env
 
 - [ ] `INT-010` Exercise Home Assistant via both OAuth and long-lived-token setup, then call `/api/homeassistant/entities` and `/api/homeassistant/service`.
 Expected outcome: Both connection modes persist usable credentials, entity listing reflects the live instance, and service calls succeed or fail clearly against the actual Home Assistant runtime.
+
+- [ ] `INT-011` Compare one OAuth-backed integration under `shared`, `user`, and `user_agent` execution scopes, including an unsaved draft scope override in the dashboard.
+Expected outcome: Shared-only integrations remain visible but unsupported outside shared scope, dashboard credential status becomes non-authoritative for unsaved draft scope overrides, and connect flows reject isolating scopes the runtime does not support.
+
+- [ ] `INT-012` Exercise Google or Home Assistant OAuth callbacks after changing user or target service context, then retry credential writes with stale or mismatched dashboard state.
+Expected outcome: OAuth callback state stays bound to the original user and service, stale or mismatched callback attempts are rejected, and persisted credential writes only apply to the committed supported scope.
 
 ## 17. Suggested Parallel Execution Split
 
