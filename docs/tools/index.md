@@ -37,15 +37,21 @@ defaults:
 
 Tools are organized by category:
 
-- **Development** - File operations, shell, Docker, GitHub, Jira, Python, Airflow, code execution sandboxes (E2B, Daytona, or MindRoom's built-in [container sandbox proxy](../deployment/sandbox-proxy.md)), Claude Agent SDK
-- **Research** - Web search (DuckDuckGo, Tavily, Exa, SerpAPI), academic papers (arXiv, PubMed), Wikipedia, Hacker News, web scraping (Firecrawl, Crawl4AI, Jina)
-- **Communication** - Slack, Discord, Telegram, Twilio, WhatsApp, Webex
-- **Email** - Gmail, AWS SES, Resend, generic SMTP
-- **Productivity** - Google Calendar, Todoist, Google Sheets, SQL, Pandas, CSV, DuckDB
-- **Social** - Reddit, X/Twitter, Zoom
-- **Entertainment** - YouTube, Giphy
+- **File & System** - File operations, shell, Docker, Python, SQL, databases (Postgres, Redshift, Neo4j, DuckDB), Pandas, CSV, coding, self-config, calculator, reasoning, file generation, visualization
+- **Web Search & Research** - DuckDuckGo, Google Search, Baidu, Tavily, Exa, SerpAPI, Serper, SearXNG, Linkup
+- **Web Scraping & Crawling** - Firecrawl, Crawl4AI, BrowserBase, AgentQL, Spider, ScrapeGraph, Apify, BrightData, Oxylabs, Jina, Website, Trafilatura, Newspaper4k, Web Browser Tools, Browser (OpenClaw)
+- **AI & ML APIs** - OpenAI, Gemini, Groq, Replicate, Fal, DALL-E, Cartesia, ElevenLabs, Desi Vocal, LumaLabs, ModelsLabs
+- **Knowledge & Research** - arXiv, Wikipedia, PubMed, Hacker News
+- **Communication & Social** - Matrix, Gmail, Slack, Discord, Telegram, WhatsApp, Twilio, Webex, Resend, Email (SMTP), X/Twitter, Reddit, Zoom
+- **Project Management** - GitHub, Bitbucket, Jira, Linear, ClickUp, Confluence, Notion, Trello, Todoist, Zendesk
+- **Calendar & Scheduling** - Google Calendar, Cal.com, Scheduler
+- **Data & Business** - Google Sheets, yFinance, OpenBB, Shopify, Financial Datasets API
+- **Location & Maps** - Google Maps, OpenWeather
+- **DevOps & Infrastructure** - AWS Lambda, AWS SES, Airflow, E2B, Daytona, Claude Agent, Composio, Google BigQuery, [container sandbox proxy](../deployment/sandbox-proxy.md)
 - **Smart Home** - Home Assistant
-- **Integrations** - Composio
+- **Media & Entertainment** - YouTube, Spotify, Giphy, MoviePy, Unsplash, Brandfetch
+- **Memory & Storage** - Memory, Mem0, Zep, Attachments
+- **Custom & Config** - Custom API, Config Manager, Subagents, Delegate
 
 ## Quick Examples
 

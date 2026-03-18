@@ -182,7 +182,7 @@ Common optional fields:
 - `docs_url`: Link to documentation
 - `managed_init_args`: Explicit MindRoom-managed constructor kwargs such as `runtime_paths` or `credentials_manager`
 
-If your toolkit constructor expects MindRoom-managed values like `runtime_paths`, `credentials_manager`, `worker_scope`, or `routing_agent_name`, declare them with `managed_init_args`.
+If your toolkit constructor expects MindRoom-managed values like `runtime_paths`, `credentials_manager`, or `worker_target`, declare them with `managed_init_args`.
 This applies to built-in tools under `src/mindroom/tools/` just as much as external plugins.
 MindRoom no longer inspects constructor parameter names and injects those values automatically.
 Undeclared managed constructor inputs will not be passed through.

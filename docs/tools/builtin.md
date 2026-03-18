@@ -25,6 +25,8 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-folder-cog: | `reasoning` | Step-by-step reasoning scratchpad for structured problem solving | - |
 | :lucide-folder-cog: | `file_generation` | Generate JSON, CSV, PDF, and text files from data | - |
 | :lucide-folder-cog: | `visualization` | Create bar, line, pie charts, scatter plots, and histograms | - |
+| :lucide-folder-cog: | `coding` | Advanced code-oriented file operations (precise edits, grep, and discovery) | `base_dir` (optional) |
+| :lucide-folder-cog: | `self_config` | Allow an agent to read and modify its own configuration | - |
 | :lucide-folder-cog: | `sleep` | Pause execution | - |
 
 ## Web Search & Research
@@ -55,10 +57,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-globe: | `brightdata` | Proxy and scraping | `api_key` |
 | :lucide-globe: | `oxylabs` | Web scraping proxy | `api_key` |
 | :lucide-globe: | `jina` | Web content reading and search | `api_key` (optional) |
-| :lucide-globe: | `website` | Simple web fetching | - |
+| :lucide-globe: | `website` | Web scraping and content extraction from websites | - |
 | :lucide-globe: | `trafilatura` | Web content and metadata extraction | - |
 | :lucide-globe: | `newspaper4k` | Article extraction | - |
-| :lucide-globe: | `web_browser_tools` | Browser automation | - |
+| :lucide-globe: | `browser` | OpenClaw-style browser control (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act) | `output_dir` (optional) |
+| :lucide-globe: | `web_browser_tools` | Open URLs in web browser tabs or windows | - |
 
 ## AI & ML APIs
 
@@ -94,12 +97,12 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-message-square: | `slack` | Send messages and manage channels | `token` |
 | :lucide-message-square: | `discord` | Interact with Discord channels and servers | `bot_token` |
 | :lucide-message-square: | `telegram` | Send messages via Telegram bot | `token`, `chat_id` |
-| :lucide-message-square: | `whatsapp` | WhatsApp Business API messaging | `access_token`, `phone_number_id` |
+| :lucide-message-square: | `whatsapp` | WhatsApp Business API messaging | `access_token`, `phone_number_id`, `version` (optional), `recipient_waid` (optional), `async_mode` (optional) |
 | :lucide-message-square: | `twilio` | SMS and voice | `account_sid`, `auth_token` |
-| :lucide-message-square: | `webex` | Webex Teams messaging | `access_token` |
+| :lucide-message-square: | `webex` | Webex Teams messaging | `access_token`, `enable_send_message` (optional), `enable_list_rooms` (optional) |
 | :lucide-message-square: | `resend` | Transactional email | `api_key` |
 | :lucide-message-square: | `email` | Generic SMTP email | SMTP config |
-| :lucide-message-square: | `x` | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth credentials |
+| :lucide-message-square: | `x` | Post tweets, send DMs, and search X/Twitter | `bearer_token` or OAuth (`consumer_key`, `consumer_secret`, `access_token`, `access_token_secret`); optional: `include_post_metrics`, `wait_on_rate_limit` |
 | :lucide-message-square: | `reddit` | Reddit browsing and interaction | `client_id`, `client_secret` |
 | :lucide-message-square: | `zoom` | Video conferencing and meetings | `account_id`, `client_id`, `client_secret` |
 
@@ -114,9 +117,9 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-kanban: | `clickup` | ClickUp task, space, and list management | `api_key`, `master_space_id` |
 | :lucide-kanban: | `confluence` | Retrieve, create, and update wiki pages | `url`, `username`, `password` or `api_key` |
 | :lucide-kanban: | `notion` | Create, update, and search pages in Notion databases | `api_key`, `database_id` |
-| :lucide-kanban: | `trello` | Trello boards | `api_key`, `token` |
+| :lucide-kanban: | `trello` | Trello boards | `api_key`, `api_secret`, `token` |
 | :lucide-kanban: | `todoist` | Todoist task management | `api_token` |
-| :lucide-kanban: | `zendesk` | Search help center articles | `username`, `password`, `company_name` |
+| :lucide-kanban: | `zendesk` | Search help center articles | `username`, `password`, `company_name`, `enable_search_zendesk` (optional) |
 
 ## Calendar & Scheduling
 
@@ -189,9 +192,11 @@ MindRoom includes 100+ built-in tool integrations organized by category.
 | :lucide-sliders-horizontal: | `custom_api` | Custom API calls | Varies |
 | :lucide-sliders-horizontal: | `config_manager` | MindRoom configuration management | - |
 | :lucide-workflow: | `subagents` | Spawn and communicate with sub-agent sessions | - |
+| :lucide-workflow: | `delegate` | Delegate tasks to other configured agents | - |
 
 Tool presets are config-only macros, not runtime tools.
 For OpenClaw workspace portability, `openclaw_compat` expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, `matrix_message`, and `attachments`.
+`attachments` is not directly in the preset — it is implied by `matrix_message` via the `IMPLIED_TOOLS` mapping.
 
 ## Claude Agent Sessions
 
