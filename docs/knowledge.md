@@ -275,6 +275,7 @@ memory:
     config:
       model: text-embedding-3-small
       host: null             # For self-hosted (Ollama)
+      dimensions: null       # Optional: embedding dimension override (e.g., 256)
 ```
 
 | Provider | Model Example | Notes |

@@ -154,6 +154,7 @@ defaults:
   show_tool_calls: true            # Default: true (show tool call details inline in responses)
   worker_tools: null               # Default: null (tool names to route through workers; null = use MindRoom's default routing policy, [] = disable)
   worker_scope: null               # Default: null (no runtime reuse; set shared/user/user_agent to enable)
+  allow_self_config: false         # Default: false (allow agents to modify their own config via a tool)
 
 # defaults.tools are appended to each agent's tools list with duplicates removed.
 # Set agents.<name>.include_default_tools: false to opt out a specific agent.
@@ -167,6 +168,7 @@ memory:
       model: text-embedding-3-small  # Default embedding model
       api_key: null                # Optional: From env var
       host: null                   # Optional: For self-hosted
+      dimensions: null             # Optional: Embedding dimension override (e.g., 256)
   llm:                             # Optional: LLM for memory operations
     provider: ollama
     config: {}
@@ -233,6 +235,11 @@ bot_accounts:
 # Plugin paths (optional)
 plugins: []
 
+# Matrix Space grouping (optional)
+matrix_space:
+  enabled: true                    # Default: true (create a root Matrix Space for managed rooms)
+  name: MindRoom                   # Default: "MindRoom" (display name for the root Space)
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 ```
@@ -254,6 +261,7 @@ timezone: America/Los_Angeles      # Default: UTC
 - [Knowledge Bases](../knowledge.md) - Configure file-backed knowledge bases
 - [Voice](../voice.md) - Configure speech-to-text voice processing
 - [Authorization](../authorization.md) - Configure user and room access control
+- [Matrix Space](../matrix-space.md) - Configure the root Matrix Space for managed rooms
 - [Skills](../skills.md) - Skill format, gating, and allowlists
 - [Plugins](../plugins.md) - Plugin manifest and tool/skill loading
 
