@@ -475,6 +475,8 @@ async def test_team_stream_retries_without_inline_media_on_streamed_run_error() 
 
 
 class _DirectTeamAgentBot:
+    running = True
+
     def __init__(self, agent_name: str, config: Config) -> None:
         self._agent_name = agent_name
         self._config = config
